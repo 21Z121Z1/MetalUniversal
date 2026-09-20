@@ -181,9 +181,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         commandBufferMeasurementWindow = MetalGpuTimingRecorder.measurementWindowId();
         commandBufferMeasurementFrame = MetalGpuTimingRecorder.measurementFrameId();
-        return commandBuffer = device.commandQueue.makeCommandBuffer(
+        commandBuffer = device.commandQueue.makeCommandBuffer(
                 device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
         );
+        MetalGpuTimingRecorder.bindEncoderCountIdentity(commandBuffer.nativeHandle(),
+                commandBufferMeasurementWindow, commandBufferMeasurementFrame, currentSubmitIndex);
+        return commandBuffer;
     }
 
     MTLBlitCommandEncoder blitCommandEncoder() {

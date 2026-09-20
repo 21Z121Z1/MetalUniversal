@@ -765,7 +765,7 @@ private final class Metal4MainQueuePilot {
         nextSlot = (nextSlot + 1) % slots.count
         slot.allocator.reset()
         slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
-        guard let encoder = slot.commandBuffer.makeComputeCommandEncoder() else {
+        guard let encoder = encoderCountMakeComputeUntracked(slot.commandBuffer) else {
             slot.commandBuffer.endCommandBuffer()
             return false
         }
@@ -777,7 +777,7 @@ private final class Metal4MainQueuePilot {
             destinationOffset: 0,
             size: Self.validationByteCount
         )
-        encoder.endEncoding()
+        encoderCountEndUntracked(encoder)
         slot.commandBuffer.endCommandBuffer()
         let completed = DispatchSemaphore(value: 0)
         var succeeded = false
@@ -1134,6 +1134,10 @@ private final class Metal4MainQueueContext {
         if let drawable = lease.presentDrawable {
             queue.waitForDrawable(drawable)
         }
+        // Seal identity/count state immediately before the actual MTL4
+        // submission.  Completion callbacks must not participate in this
+        // diagnostic boundary.
+        encoderCountSeal(commandBuffer as AnyObject)
         queue.commit([commandBuffer], options: options)
         for (event, value) in lease.postCommitSignals {
             queue.signalEvent(event, value: value)
@@ -1265,6 +1269,18 @@ private func metal3CommandBuffer(_ pointer: UnsafeMutableRawPointer) -> MTLComma
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLCommandBuffer
 }
 
+// Encoder-count binding receives the Java-visible lease on Metal 4, while
+// rows must identify the actual command buffer carried by that lease.  Keep
+// this bridge next to the existing pointer decoders so the ledger cannot
+// accidentally key a lease wrapper and then count a different object at
+// submit time.  Metal 3 uses the command-buffer pointer directly.
+func encoderCountBindingObject(for pointer: UnsafeMutableRawPointer) -> (AnyObject, Int64)? {
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+        return (lease.commandBuffer as AnyObject, 4)
+    }
+    return (Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue(), 3)
+}
+
 private func commandBufferPointer(_ commandBuffer: MTLCommandBuffer) -> UnsafeMutableRawPointer {
     UnsafeMutableRawPointer(Unmanaged.passUnretained(commandBuffer).toOpaque())
 }
@@ -1281,7 +1297,7 @@ private func encodeMetal4Compute<T>(
     afterStages: MTLStages = [.vertex, .fragment, .dispatch, .blit],
     producerBarrierBeforeStages: MTLStages = []
 ) -> Bool {
-    guard let encoder = lease.commandBuffer.makeComputeCommandEncoder(),
+    guard let encoder = encoderCountMakeCompute(lease.commandBuffer),
           let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(
               uniforms,
               at: lease.slotIndex,
@@ -1318,7 +1334,7 @@ private func encodeMetal4Compute<T>(
             visibilityOptions: .device
         )
     }
-    encoder.endEncoding()
+    encoderCountEnd(encoder)
     NativeState.metal4AuxiliaryComputeEncodeCount &+= 1
     return true
 }
@@ -1559,7 +1575,7 @@ final class Metal4PresentPath {
         // MTL4RenderPassDescriptor carries no attachment size implicitly.
         descriptor.renderTargetWidth = destination.width
         descriptor.renderTargetHeight = destination.height
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = encoderCountMakeRenderUntracked(commandBuffer, descriptor: descriptor) else {
             return false
         }
         encoder.label = label
@@ -1576,7 +1592,7 @@ final class Metal4PresentPath {
             zfar: 1.0
         ))
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEndUntracked(encoder)
         return true
     }
 
@@ -1596,7 +1612,7 @@ final class Metal4PresentPath {
         descriptor.colorAttachments[0].storeAction = .store
         descriptor.renderTargetWidth = destination.width
         descriptor.renderTargetHeight = destination.height
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = encoderCountMakeRenderUntracked(commandBuffer, descriptor: descriptor) else {
             return false
         }
         encoder.label = label
@@ -1625,7 +1641,7 @@ final class Metal4PresentPath {
             zfar: 1.0
         ))
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEndUntracked(encoder)
         return true
     }
 
@@ -2478,7 +2494,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.depthAttachment.texture = destinationDepth
         pass.depthAttachment.loadAction = .dontCare
         pass.depthAttachment.storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: pass) else {
             return false
         }
         encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample"
@@ -2497,7 +2513,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             zfar: 1.0
         ))
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return true
     }
 
@@ -2520,7 +2536,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.depthAttachment.storeAction = .store
         pass.renderTargetWidth = destinationMotion.width
         pass.renderTargetHeight = destinationMotion.height
-        guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: pass) else {
             return false
         }
         encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample (Metal 4)"
@@ -2542,7 +2558,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             znear: 0, zfar: 1
         ))
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return true
     }
 
@@ -2676,7 +2692,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }()
         if let lease = metal4Lease {
             guard #available(macOS 26.0, *),
-                  let copies = lease.commandBuffer.makeComputeCommandEncoder() else {
+                  let copies = encoderCountMakeCompute(lease.commandBuffer) else {
                 completeFrame()
                 return 0
             }
@@ -2694,7 +2710,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 copies.copy(sourceTexture: depth, destinationTexture: depthBuffers[index])
                 copies.copy(sourceTexture: motion, destinationTexture: motionBuffers[index])
             }
-            copies.endEncoding()
+            encoderCountEnd(copies)
             if resampleInputs && !encodeResampledFrameGenerationInputsMetal4(
                 lease: lease,
                 sourceDepth: depth, sourceMotion: motion,
@@ -2707,7 +2723,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             NativeState.metal4FrameGenerationInputCount &+= 1
         } else {
             let commandBuffer = metal3CommandBuffer(commandBufferPointer)
-            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            guard let blit = encoderCountMakeBlit(commandBuffer) else {
                 completeFrame()
                 return 0
             }
@@ -2788,7 +2804,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         } else if let globalFence {
             blit.updateFence(globalFence)
             }
-            blit.endEncoding()
+            encoderCountEnd(blit)
             if resampleInputs && !encodeResampledFrameGenerationInputs(
                 commandBuffer: commandBuffer,
                 sourceDepth: depth,
@@ -2928,7 +2944,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         descriptor.colorAttachments[0].texture = destination
         descriptor.colorAttachments[0].loadAction = loadAction
         descriptor.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: descriptor) else {
             return false
         }
         encoder.label = label
@@ -2944,7 +2960,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentSamplerState(copySampler, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return true
     }
 
@@ -2959,7 +2975,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         descriptor.colorAttachments[0].texture = destination
         descriptor.colorAttachments[0].loadAction = .dontCare
         descriptor.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: descriptor) else {
             return false
         }
         encoder.label = label
@@ -2976,7 +2992,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         encoder.setFragmentTexture(ui, index: 1)
         encoder.setFragmentSamplerState(copySampler, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return true
     }
 
@@ -3192,6 +3208,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.deltaTime = work.deltaTime
             frameInterpolator.isDepthReversed = true
             frameInterpolator.shouldResetHistory = work.shouldResetHistory
+            encoderCountUnsupported(commandBuffer as AnyObject)
             frameInterpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -3334,6 +3351,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.deltaTime = work.deltaTime
             interpolator.isDepthReversed = true
             interpolator.shouldResetHistory = work.shouldResetHistory
+            encoderCountUnsupported(commandBuffer as AnyObject)
             interpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -5709,7 +5727,7 @@ private func metal3MetalFxApplyCutoutReactive(
                   cutoutCoverageTexture.pixelFormat == .r8Unorm,
                   reactiveTexture.pixelFormat == .r8Unorm,
                   let pipeline = ensureCutoutReactivePipeline(commandBuffer.device),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                  let encoder = encoderCountMakeCompute(commandBuffer) else {
                 logMetalFxFailureOnce(
                     "cutout-reactive",
                     "invalid CUTOUT coverage resources or missing dilation pipeline"
@@ -5763,7 +5781,7 @@ private func metal3MetalFxApplyCutoutReactive(
             if let fence {
                 encoder.updateFence(fence)
             }
-            encoder.endEncoding()
+            encoderCountEnd(encoder)
             return 1
         }
     }
@@ -5874,7 +5892,7 @@ private func metal3MetalFxEncodeHandOverlay(
               objectValidityTexture.pixelFormat == .r8Unorm,
               reactiveTexture.pixelFormat == .r8Unorm,
               let pipeline = ensureHandOverlayPipeline(commandBuffer.device),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+              let encoder = encoderCountMakeCompute(commandBuffer) else {
             logMetalFxFailureOnce(
                 "hand-overlay",
                 "invalid hand overlay resources or missing pipeline"
@@ -5919,7 +5937,7 @@ private func metal3MetalFxEncodeHandOverlay(
         if let fence {
             encoder.updateFence(fence)
         }
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return 1
     }
     #else
@@ -6044,7 +6062,7 @@ private func metal3MetalFxClearMotionInputs(
                   objectValidityTexture.width == Int(inputWidth),
                   objectValidityTexture.height == Int(inputHeight),
                   let pipelines = ensureMotionV2Pipelines(commandBuffer.device),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                  let encoder = encoderCountMakeCompute(commandBuffer) else {
                 logMetalFxFailureOnce("motion-clear", "invalid object motion resources or missing v2 clear pipeline")
                 return 0
             }
@@ -6067,7 +6085,7 @@ private func metal3MetalFxClearMotionInputs(
             if let fence {
                 encoder.updateFence(fence)
             }
-            encoder.endEncoding()
+            encoderCountEnd(encoder)
             return 1
         }
     }
@@ -6136,7 +6154,7 @@ private func metal3MetalFxMarkTransparency(
         return autoreleasepool {
             guard inputWidth > 0, inputHeight > 0,
                   let pipeline = ensureTransparencyMaskPipeline(device),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                  let encoder = encoderCountMakeCompute(commandBuffer) else {
                 logMetalFxFailureOnce("transparency-mask-encode", "could not create transparency mask pipeline or encoder")
                 return 0
             }
@@ -6174,7 +6192,7 @@ private func metal3MetalFxMarkTransparency(
                 MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
                 threadsPerThreadgroup: MTLSize(width: threadWidth, height: threadHeight, depth: 1)
             )
-            encoder.endEncoding()
+            encoderCountEnd(encoder)
             return 1
         }
     }
@@ -6336,7 +6354,8 @@ private func metal3MetalFxEncode(
                 scaler.inputContentHeight = Int(inputHeight)
                 scaler.fence = fence
                 commandBuffer.pushDebugGroup("MetalFX Spatial Upscale")
-                scaler.encode(commandBuffer: commandBuffer)
+                encoderCountUnsupported(commandBuffer as AnyObject)
+            scaler.encode(commandBuffer: commandBuffer)
                 commandBuffer.popDebugGroup()
                 return 1
             }
@@ -6420,6 +6439,7 @@ public func metallumMetalFxEncodeEntry(
         scaler.inputContentHeight = Int(inputHeight)
         scaler.fence = fence
         lease.commandBuffer.pushDebugGroup("MetalFX Spatial Upscale (Metal 4)")
+        encoderCountUnsupported(lease.commandBuffer as AnyObject)
         scaler.encode(commandBuffer: lease.commandBuffer)
         lease.commandBuffer.popDebugGroup()
         MetalFxNativeHudMetrics.updateScaling(
@@ -6578,7 +6598,7 @@ private func metal4MetalFxEncodeV2(
         }
         NativeState.metalFxHistoryLock.unlock()
         guard let validationReactiveSnapshot,
-              let snapshotCopy = lease.commandBuffer.makeComputeCommandEncoder() else { return 0 }
+              let snapshotCopy = encoderCountMakeCompute(lease.commandBuffer) else { return 0 }
         snapshotCopy.label = "MetalFX Pre-Motion Reactive Validation Snapshot"
         snapshotCopy.barrier(
             afterQueueStages: .dispatch,
@@ -6586,7 +6606,7 @@ private func metal4MetalFxEncodeV2(
             visibilityOptions: .device
         )
         snapshotCopy.copy(sourceTexture: reactiveTexture, destinationTexture: validationReactiveSnapshot)
-        snapshotCopy.endEncoding()
+        encoderCountEnd(snapshotCopy)
     }
     if NativeState.legacyMotionPasses {
         var cameraUniforms = MotionUniforms(
@@ -6682,6 +6702,7 @@ private func metal4MetalFxEncodeV2(
     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
     scaler.fence = fence
     lease.commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2 (Metal 4)")
+    encoderCountUnsupported(lease.commandBuffer as AnyObject)
     scaler.encode(commandBuffer: lease.commandBuffer)
     lease.commandBuffer.popDebugGroup()
     MetalFxNativeHudMetrics.updateScaling(
@@ -6694,7 +6715,7 @@ private func metal4MetalFxEncodeV2(
     )
 
     if let validationReactiveSnapshot {
-        guard let snapshotRestore = lease.commandBuffer.makeComputeCommandEncoder() else { return 0 }
+        guard let snapshotRestore = encoderCountMakeCompute(lease.commandBuffer) else { return 0 }
         snapshotRestore.label = "MetalFX Pre-Motion Reactive Validation Restore"
         snapshotRestore.barrier(
             afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
@@ -6702,10 +6723,10 @@ private func metal4MetalFxEncodeV2(
             visibilityOptions: .device
         )
         snapshotRestore.copy(sourceTexture: validationReactiveSnapshot, destinationTexture: reactiveTexture)
-        snapshotRestore.endEncoding()
+        encoderCountEnd(snapshotRestore)
     }
 
-    guard let historyCopy = lease.commandBuffer.makeComputeCommandEncoder() else { return 0 }
+    guard let historyCopy = encoderCountMakeCompute(lease.commandBuffer) else { return 0 }
     historyCopy.label = "MetalFX Previous Depth Update (Metal 4)"
     historyCopy.barrier(
         afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
@@ -6713,7 +6734,7 @@ private func metal4MetalFxEncodeV2(
         visibilityOptions: .device
     )
     historyCopy.copy(sourceTexture: depthTexture, destinationTexture: previousDepthTexture)
-    historyCopy.endEncoding()
+    encoderCountEnd(historyCopy)
     lease.addCompletionHandler { error, _, _ in
         NativeState.metalFxHistoryLock.lock()
         if error == nil {
@@ -6882,7 +6903,7 @@ private func metal3MetalFxEncodeV2(
                 params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0)
             )
             if NativeState.legacyMotionPasses {
-                guard let cameraEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                guard let cameraEncoder = encoderCountMakeCompute(commandBuffer) else {
                     logMetalFxFailureOnce("motion-v2-camera-encoder", "could not create v2 camera compute encoder")
                     return 0
                 }
@@ -6922,9 +6943,9 @@ private func metal3MetalFxEncodeV2(
                 if let fence {
                     cameraEncoder.updateFence(fence)
                 }
-                cameraEncoder.endEncoding()
+                encoderCountEnd(cameraEncoder)
 
-                guard let mergeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                guard let mergeEncoder = encoderCountMakeCompute(commandBuffer) else {
                     logMetalFxFailureOnce("motion-v2-merge-encoder", "could not create v2 merge compute encoder")
                     return 0
                 }
@@ -6957,9 +6978,9 @@ private func metal3MetalFxEncodeV2(
                 if let fence {
                     mergeEncoder.updateFence(fence)
                 }
-                mergeEncoder.endEncoding()
+                encoderCountEnd(mergeEncoder)
             } else {
-                guard let fusedEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                guard let fusedEncoder = encoderCountMakeCompute(commandBuffer) else {
                     logMetalFxFailureOnce("motion-v2-fused-encoder", "could not create fused v2 motion encoder")
                     return 0
                 }
@@ -7026,7 +7047,7 @@ private func metal3MetalFxEncodeV2(
                 if let fence {
                     fusedEncoder.updateFence(fence)
                 }
-                fusedEncoder.endEncoding()
+                encoderCountEnd(fusedEncoder)
             }
 
             scaler.colorTexture = colorTexture
@@ -7046,10 +7067,11 @@ private func metal3MetalFxEncodeV2(
             }
             scaler.fence = fence
             commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2")
+            encoderCountUnsupported(commandBuffer as AnyObject)
             scaler.encode(commandBuffer: commandBuffer)
             commandBuffer.popDebugGroup()
 
-            guard let historyBlit = commandBuffer.makeBlitCommandEncoder() else {
+            guard let historyBlit = encoderCountMakeBlit(commandBuffer) else {
                 logMetalFxFailureOnce("motion-v2-history-copy", "could not create previous-depth history blit")
                 return 0
             }
@@ -7066,7 +7088,7 @@ private func metal3MetalFxEncodeV2(
                 sliceCount: 1,
                 levelCount: 1
             )
-            historyBlit.endEncoding()
+            encoderCountEnd(historyBlit)
             commandBuffer.addCompletedHandler { completed in
                 NativeState.metalFxHistoryLock.lock()
                 if completed.status == .completed {
@@ -7419,6 +7441,7 @@ public func metallum_metalfx_frame_interpolator_encode_offscreen(
             interpolator.isDepthReversed = depthReversed != 0
             interpolator.shouldResetHistory = reset != 0
             commandBuffer.pushDebugGroup("MetalFX Frame Interpolator Offscreen")
+            encoderCountUnsupported(commandBuffer as AnyObject)
             interpolator.encode(commandBuffer: commandBuffer)
             commandBuffer.popDebugGroup()
             return 1
@@ -7457,7 +7480,7 @@ private func metal3EncodeTextureCopy(
         descriptor.colorAttachments[0].texture = destinationTexture
         descriptor.colorAttachments[0].loadAction = .dontCare
         descriptor.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: descriptor) else {
             #if os(macOS) && canImport(MetalFX)
             logMetalFxFailureOnce(
                 "copy-encoder",
@@ -7478,7 +7501,7 @@ private func metal3EncodeTextureCopy(
         if let fence {
             encoder.updateFence(fence, after: .fragment)
         }
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return 1
     }
 }
@@ -7518,7 +7541,7 @@ public func metallumEncodeTextureCopyEntry(
         pass.colorAttachments[0].storeAction = .store
         pass.renderTargetWidth = destinationTexture.width
         pass.renderTargetHeight = destinationTexture.height
-        guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return 0 }
+        guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: pass) else { return 0 }
         encoder.label = "MetalFX Texture Copy (Metal 4)"
         encoder.barrier(
             afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
@@ -7536,7 +7559,7 @@ public func metallumEncodeTextureCopyEntry(
         arguments.setSamplerState(sampler.gpuResourceID, index: 0)
         encoder.setArgumentTable(arguments, stages: .fragment)
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         return 1
     }
     return metal3EncodeTextureCopy(
@@ -8541,6 +8564,7 @@ public func metallum_MTLCommandBuffer_commit(_ pointer: UnsafeMutableRawPointer)
     let commandBuffer = metal3CommandBuffer(pointer)
     finishGpuEncoderTimings(commandBuffer)
     residencyFlushBeforeSubmit()
+    encoderCountSeal(commandBuffer as AnyObject)
     commandBuffer.commit()
 }
 
@@ -8562,6 +8586,7 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ pointer: UnsafeMutableR
         semaphore.signal()
     }
     residencyFlushBeforeSubmit()
+    encoderCountSeal(commandBuffer as AnyObject)
     commandBuffer.commit()
 }
 
@@ -8665,7 +8690,7 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
     return autoreleasepool {
         let label = stringFromOptionalCString(labelPtr) ?? "blit"
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
-            guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
+            guard let encoder = encoderCountMakeBlitAsCompute(lease.commandBuffer) else { return nil }
             encoder.label = label
             // Upload/copy work may overwrite a mesh buffer that an earlier
             // submitted render encoder is still fetching. Metal 3's fence wait
@@ -8677,7 +8702,8 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
                 beforeStages: .blit,
                 visibilityOptions: .device
             )
-            return retainedPointer(Metal4MainBlitEncoderBridge(encoder))
+            let bridge = Metal4MainBlitEncoderBridge(encoder)
+            return retainedPointer(bridge)
         }
         let commandBuffer = metal3CommandBuffer(pointer)
         let timing = gpuEncoderTimingContext(commandBuffer)
@@ -8688,9 +8714,7 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
             attachment.startOfEncoderSampleIndex = indices.0
             attachment.endOfEncoderSampleIndex = indices.1
         }
-        guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
-            return nil
-        }
+        guard let encoder = encoderCountMakeBlit(commandBuffer, descriptor: descriptor) else { return nil }
         encoder.label = label
         metal4BarrierBlitAfterRender(encoder)
         return retainedPointer(encoder)
@@ -8700,15 +8724,15 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
 @_cdecl("metallum_MTLCommandEncoder_endEncoding")
 public func metallum_MTLCommandEncoder_endEncoding(_ pointer: UnsafeMutableRawPointer) {
     if #available(macOS 26.0, iOS 26.0, *), let render = metal4RenderBridge(pointer) {
-        render.encoder.endEncoding()
+        encoderCountEnd(render.encoder)
         return
     }
     if #available(macOS 26.0, iOS 26.0, *), let blit = metal4BlitBridge(pointer) {
-        blit.encoder.endEncoding()
+        encoderCountEnd(blit.encoder)
         return
     }
     let encoder = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLCommandEncoder
-    encoder.endEncoding()
+    encoderCountEnd(encoder)
 }
 
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer")
@@ -9283,8 +9307,8 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             }
             renderPass.renderTargetWidth = Int(viewportWidth)
             renderPass.renderTargetHeight = Int(viewportHeight)
-            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-                return nil
+            guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: renderPass) else {
+                    return nil
             }
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
@@ -9297,12 +9321,13 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
                 znear: 0.0, zfar: 1.0
             ))
             let tables = lease.owner.argumentTables(at: lease.slotIndex)
-            return retainedPointer(Metal4MainRenderEncoderBridge(
+            let bridge = Metal4MainRenderEncoderBridge(
                 encoder: encoder,
                 lease: lease,
                 vertexArguments: tables.0,
                 fragmentArguments: tables.1
-            ))
+            )
+            return retainedPointer(bridge)
         }
         let commandBuffer = metal3CommandBuffer(pointer)
         let depthFormat = depthTexture?.pixelFormat ?? .invalid
@@ -9332,7 +9357,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             }
         }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: renderPass) else {
             return nil
         }
         metal4BarrierRenderAfterUploadAndRender(encoder)
@@ -9420,8 +9445,8 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
             }
             renderPass.renderTargetWidth = Int(viewportWidth)
             renderPass.renderTargetHeight = Int(viewportHeight)
-            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-                return nil
+            guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: renderPass) else {
+                    return nil
             }
             encoder.label = label
             encoder.barrier(
@@ -9435,12 +9460,13 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
                 znear: 0.0, zfar: 1.0
             ))
             let tables = lease.owner.argumentTables(at: lease.slotIndex)
-            return retainedPointer(Metal4MainRenderEncoderBridge(
+            let bridge = Metal4MainRenderEncoderBridge(
                 encoder: encoder,
                 lease: lease,
                 vertexArguments: tables.0,
                 fragmentArguments: tables.1
-            ))
+            )
+            return retainedPointer(bridge)
         }
 
         let commandBuffer = metal3CommandBuffer(pointer)
@@ -9510,7 +9536,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
             attachment.endOfFragmentSampleIndex = indices.1
         }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: renderPass) else {
             return nil
         }
         encoder.label = label
@@ -9662,8 +9688,8 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
             }
             renderPass.renderTargetWidth = Int(viewportWidth)
             renderPass.renderTargetHeight = Int(viewportHeight)
-            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-                return nil
+            guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: renderPass) else {
+                    return nil
             }
             encoder.label = label
             encoder.barrier(
@@ -9677,12 +9703,13 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                 znear: 0.0, zfar: 1.0
             ))
             let tables = lease.owner.argumentTables(at: lease.slotIndex)
-            return retainedPointer(Metal4MainRenderEncoderBridge(
+            let bridge = Metal4MainRenderEncoderBridge(
                 encoder: encoder,
                 lease: lease,
                 vertexArguments: tables.0,
                 fragmentArguments: tables.1
-            ))
+            )
+            return retainedPointer(bridge)
         }
 
         let commandBuffer = metal3CommandBuffer(pointer)
@@ -9733,7 +9760,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
             attachment.endOfFragmentSampleIndex = indices.1
         }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: renderPass) else {
             return nil
         }
         encoder.label = label
@@ -11221,7 +11248,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
     let source = terrainVisibilityMslSource()
     guard let pipeline = terrainVisibilityScenePipeline(device: device, source: source),
           pipeline.maxTotalThreadsPerThreadgroup >= blockWidth,
-          let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+          let computeEncoder = encoderCountMakeCompute(bridge.lease.commandBuffer) else {
         return nil
     }
     computeEncoder.setArgumentTable(slot.arguments)
@@ -11235,7 +11262,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
         beforeQueueStages: [.vertex, .fragment, .dispatch],
         visibilityOptions: .device
     )
-    computeEncoder.endEncoding()
+    encoderCountEnd(computeEncoder)
 
     let owner = TerrainGpuVisibilityProbeOwner(
         leaseIdentity: ObjectIdentifier(bridge.lease),
@@ -11421,7 +11448,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         visibilityPipeline = pipeline
         compactionPipelines = nil
     }
-    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    guard let computeEncoder = encoderCountMakeCompute(bridge.lease.commandBuffer) else {
         return nil
     }
     let argumentDescriptor = MTL4ArgumentTableDescriptor()
@@ -11429,7 +11456,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     argumentDescriptor.initializeBindings = true
     argumentDescriptor.supportAttributeStrides = false
     guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     arguments.setAddress(candidateBuffer.gpuAddress, index: 0)
@@ -11503,7 +11530,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         beforeQueueStages: [.vertex, .fragment, .dispatch],
         visibilityOptions: .device
     )
-    computeEncoder.endEncoding()
+    encoderCountEnd(computeEncoder)
 
     let owner = TerrainGpuVisibilityProbeOwner(
         leaseIdentity: ObjectIdentifier(bridge.lease),
@@ -11720,7 +11747,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     ) else {
         return nil
     }
-    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    guard let computeEncoder = encoderCountMakeCompute(bridge.lease.commandBuffer) else {
         NSLog("[metallum] terrain GPU ICB could not create MTL4 compute encoder")
         return nil
     }
@@ -11730,7 +11757,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     argumentDescriptor.initializeBindings = true
     argumentDescriptor.supportAttributeStrides = false
     guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
@@ -11738,7 +11765,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
               length: argumentEncoder.encodedLength,
               options: .storageModeShared
           ) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
@@ -11765,7 +11792,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         beforeQueueStages: [.vertex, .fragment],
         visibilityOptions: .device
     )
-    computeEncoder.endEncoding()
+    encoderCountEnd(computeEncoder)
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
@@ -11876,7 +11903,7 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
         source: source,
         functionName: "metallum_terrain_gpu_encode_visible",
         variant: 1
-    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    ), let computeEncoder = encoderCountMakeCompute(bridge.lease.commandBuffer) else {
         return nil
     }
 
@@ -11885,14 +11912,14 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
     argumentDescriptor.initializeBindings = true
     argumentDescriptor.supportAttributeStrides = false
     guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
     guard let argumentBuffer = device.makeBuffer(
         length: argumentEncoder.encodedLength, options: .storageModeShared
     ) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
@@ -11928,7 +11955,7 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
         beforeQueueStages: [.vertex, .fragment],
         visibilityOptions: .device
     )
-    computeEncoder.endEncoding()
+    encoderCountEnd(computeEncoder)
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
@@ -12045,7 +12072,7 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
         source: source,
         functionName: "metallum_terrain_gpu_encode_fused_visible",
         variant: 2
-    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    ), let computeEncoder = encoderCountMakeCompute(bridge.lease.commandBuffer) else {
         return nil
     }
 
@@ -12054,14 +12081,14 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
     argumentDescriptor.initializeBindings = true
     argumentDescriptor.supportAttributeStrides = false
     guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
     guard let argumentBuffer = device.makeBuffer(
         length: argumentEncoder.encodedLength, options: .storageModeShared
     ) else {
-        computeEncoder.endEncoding()
+        encoderCountEnd(computeEncoder)
         return nil
     }
     argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
@@ -12091,7 +12118,7 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
         beforeQueueStages: [.vertex, .fragment],
         visibilityOptions: .device
     )
-    computeEncoder.endEncoding()
+    encoderCountEnd(computeEncoder)
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
@@ -12283,7 +12310,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             }
             renderPass.renderTargetWidth = textureWidth
             renderPass.renderTargetHeight = textureHeight
-            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: renderPass) else {
                 return
             }
             encoder.barrier(
@@ -12318,11 +12345,11 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
                     depthState: depthState,
                     clearDepth: clearDepth
                 ) else {
-                    encoder.endEncoding()
+                    encoderCountEnd(encoder)
                     return
                 }
             }
-            encoder.endEncoding()
+            encoderCountEnd(encoder)
             return
         }
 
@@ -12353,7 +12380,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             renderPass.stencilAttachment.storeAction = .dontCare
         }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: renderPass) else {
             return
         }
 
@@ -12367,7 +12394,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
                 let pipeline = ensureClearColorDepthPipeline(commandBuffer.device, colorTexture.pixelFormat, depthTexture.pixelFormat),
                 let depthState = ensureDepthStencilState(device: commandBuffer.device, compareOp: MTLCompareFunction.always, writeDepth: true)
             else {
-                encoder.endEncoding()
+                encoderCountEnd(encoder)
                 return
             }
             encodeClearDraw(
@@ -12386,7 +12413,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             encoder.updateFence(globalFence, after: .fragment)
         }
 
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
     }
 }
 
@@ -12544,7 +12571,7 @@ private func encodePresentTextureToDrawable(
             renderPass.colorAttachments[0].storeAction = .store
             renderPass.renderTargetWidth = drawable.texture.width
             renderPass.renderTargetHeight = drawable.texture.height
-            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            guard let encoder = encoderCountMakeRender(lease.commandBuffer, descriptor: renderPass) else {
                 return 0
             }
             encoder.barrier(
@@ -12566,13 +12593,13 @@ private func encodePresentTextureToDrawable(
             guard let sampler = requiresScaling
                     ? NativeState.presentLinearSampler
                     : NativeState.presentNearestSampler else {
-                encoder.endEncoding()
+                encoderCountEnd(encoder)
                 return 0
             }
             tables.1.setSamplerState(sampler.gpuResourceID, index: 0)
             encoder.setArgumentTable(tables.1, stages: MTLRenderStages.fragment)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-            encoder.endEncoding()
+            encoderCountEnd(encoder)
             lease.presentDrawable = drawable
             return 0
         }
@@ -12584,7 +12611,7 @@ private func encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].loadAction = .dontCare
         renderPass.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = encoderCountMakeRender(commandBuffer, descriptor: renderPass) else {
             return 0
         }
 
@@ -12624,7 +12651,7 @@ private func encodePresentTextureToDrawable(
         if let globalFence {
             encoder.updateFence(globalFence, after: .fragment)
         }
-        encoder.endEncoding()
+        encoderCountEnd(encoder)
         // Register before present so a fast callback cannot beat handler
         // installation. The Java owner receives the id and cancels it if the
         // command buffer is closed without a later commit.
@@ -12757,7 +12784,8 @@ public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
     _ commandBuffer: MTLCommandBuffer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(commandBuffer.makeComputeCommandEncoder())
+        let encoder = encoderCountMakeCompute(commandBuffer)
+        return retainedPointer(encoder)
     }
 }
 

@@ -18,6 +18,7 @@ python3 scripts/agent/verify_benchmark_profiles.py
 python3 scripts/agent/verify_metal4_main_hotpath.py \
   --output build/agent-evidence/metal4-main-hotpath.json
 python3 scripts/agent/verify_p1_performance_route.py
+python3 scripts/agent/verify_native_encoder_coverage.py
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
 python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
@@ -49,7 +50,7 @@ bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_matrix.sh
 bash -n scripts/agent/verify.sh
 
-./gradlew --no-daemon compileJava test \
+./gradlew --no-daemon compileJava gpuTimingRecorderRetentionTest test \
   -x buildMacNative \
   -x buildIOSNative \
   -x buildIOSSpvc \
@@ -70,6 +71,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
   --tests com.metallum.client.validation.FrameMeasurementWindowTest \
   --tests com.metallum.client.validation.GpuMeasurementWindowTest \
+  --tests com.metallum.client.validation.EncoderMeasurementWindowTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

@@ -107,6 +107,8 @@ tasks.test {
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
+	exclude "**/NativeEncoderCountsGpuTest.class"
+	exclude "**/MetalGpuTimingRecorderRetentionTest.class"
 	if (hostedCi) {
 		exclude "**/IrisMetalPostChainCompilationTest.class"
 		exclude "**/IrisMetalShadowPipelineTest.class"
@@ -276,6 +278,7 @@ tasks.register("buildMacNative", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift"
 	)
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
@@ -296,6 +299,7 @@ tasks.register("buildMacNative", Exec) {
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift"
 }
 
@@ -385,6 +389,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 	)
@@ -410,6 +415,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"-o", metal4PipelinePathBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 }
@@ -525,6 +531,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 	)
@@ -543,6 +550,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"-o", nativePresentationTelemetryStateTestBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 }
@@ -562,6 +570,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 	workingDir project.projectDir
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 	)
@@ -579,6 +588,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"-framework", "QuartzCore",
 		"-o", metalFrameGenerationPresentationValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 }
@@ -705,6 +715,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 	workingDir project.projectDir
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 	)
@@ -724,6 +735,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 		"-framework", "UniformTypeIdentifiers",
 		"-o", metalFxOffscreenValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 }
@@ -2649,6 +2661,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
 			"src/main/native/MetallumInterface.swift",
+			"src/main/native/EncoderCountLedger.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }
@@ -3043,6 +3056,38 @@ tasks.register("renderContractNativeTest") {
 	group = "verification"
 	description = "Runs render-contract GPU integration tests for both Metal 3 and Metal 4."
 	dependsOn "renderContractMetal3NativeTest", "renderContractMetal4NativeTest"
+}
+
+// Timing retention is tested in a separate JVM with recording enabled, without loading Metal.
+tasks.register("gpuTimingRecorderRetentionTest", Test) { task ->
+	task.group = "verification"
+	task.description = "Checks independent bounded timing retention for measured and ordinary submissions."
+	task.testClassesDirs = sourceSets.test.output.classesDirs
+	task.classpath = sourceSets.test.runtimeClasspath
+	task.useJUnitPlatform()
+	task.filter { includeTestsMatching "com.metallum.client.metal.render.MetalGpuTimingRecorderRetentionTest" }
+	task.systemProperty "metallum.validation.gpuTiming", "true"
+}
+
+// Separate JVMs prevent a Metal 4 main-queue context from contaminating the Metal 3 lane.
+[false, true].each { metal4 ->
+	tasks.register("nativeEncoderCountsMetal${metal4 ? 4 : 3}Test", Test) { task ->
+		task.group = "verification"
+		task.description = "Validates encoder lifecycle counts on the Metal ${metal4 ? 4 : 3} main queue."
+		task.onlyIf { hardwareMetalValidationAvailable() }
+		task.dependsOn tasks.named("buildMacNative"), tasks.named("testClasses")
+		task.testClassesDirs = sourceSets.test.output.classesDirs
+		task.classpath = sourceSets.test.runtimeClasspath
+		task.useJUnitPlatform()
+		task.filter { includeTestsMatching "com.metallum.client.metal.render.NativeEncoderCountsGpuTest" }
+		task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+		task.systemProperty "metallum.test.encoderCountsMetal4", metal4.toString()
+		task.systemProperty "metallum.opt.metal4", metal4.toString()
+		task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+		task.environment "MTL_DEBUG_LAYER", metalApiValidation
+		task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
+		task.testLogging { showStandardStreams = true }
+	}
 }
 
 tasks.register("renderContractSyntheticValidation", JavaExec) {

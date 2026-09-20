@@ -207,16 +207,45 @@ existing asynchronous submission behavior.
 command buffer is created. GPU frame service time is the sum of command-buffer
 durations for that frame, not end-to-end GPU latency or CPU time. Missing frames,
 duplicate submissions, failed submissions, or recorder truncation invalidate the
-GPU window. Matching sample counts alone are insufficient; normalization checks
+GPU window. Positive-window samples have an independent 65,536-record buffer;
+ordinary diagnostics keep their 16,384-record buffer and cannot trim a measured
+window. Matching sample counts alone are insufficient; normalization checks
 the explicit evidence. A CPU duration is render-loop wall time and can include
 waits; it is not thread CPU utilization.
 
 Native encoder timing records carry their captured window/frame IDs through GPU
 completion. Their observed counts still do not prove complete coverage: unsupported
 counter sampling, timestamp failures, bounded buffers, and Metal 4 encoder paths
-can omit records. Until coverage is proven, `nativeEncoderIdentityComplete=false`
-keeps that metric unavailable. Reports predating window identity remain diagnostic
-artifacts and cannot be reused for performance acceptance.
+can omit records. Encoder counts therefore use a separate `nativeEncoderLedger`,
+bound to the command buffer or Metal 4 lease before any encoder is created.
+Each row carries window/frame/submit identity, backend, attempted/created/ended
+counts, physical render/blit/compute kinds, failures and unsupported encodes.
+Metal 4 copies implemented with compute encoders count as compute. Counting an
+encoder object does not count its draw, dispatch or copy operations.
+
+The bounded ledger seals each submission before commit and is copied after the
+measurement drain. Its native ABI uses eight signed 64-bit metadata words and
+thirteen signed 64-bit words per row; `NativeEncoderCounts` documents the layout.
+Collection starts only for an explicit measurement window and defaults off.
+`reset(0)` disables and clears; capacities 1..65,536 enable and clear. Invalid
+capacities fail without changing state. Submission identities are unique within
+a window even if the physical command-buffer object is reused.
+Capacity overflow invalidates evidence without changing rendering or submission.
+
+The independent normalizer requires every measured GPU submission and frame to
+match exactly, no drops/invalid/active entries, and attempted=created=ended=sum of
+physical kinds. It recomputes per-frame counts and their nearest-rank median;
+averages cannot substitute for that median. `nativeEncoderIdentityComplete` can
+be true only after these lifecycle and identity checks. Timing samples may remain
+partial even when count coverage passes.
+
+Scope is `main-queue-native-encoders`, admitted only for the native MetalFX-off
+lane with structured proof that auxiliary work is eliminated. Opaque MetalFX
+internals, separate presentation queues, incomplete ledger rows, and old reports
+without the ledger remain unavailable. This metric does not claim process-wide
+GPU encoder coverage or resource-lifetime correctness. Run
+`nativeEncoderCountsMetal3Test` and `nativeEncoderCountsMetal4Test` for independent
+GPU lanes; ordinary JVM tests do not run these physical-device suites.
 
 ## 6. Candidate record
 

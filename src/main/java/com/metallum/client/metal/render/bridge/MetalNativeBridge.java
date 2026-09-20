@@ -818,6 +818,11 @@ public final class MetalNativeBridge {
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
+            encoderCountsReset = downcallWithoutCritical(lookup, "metallum_encoder_counts_reset", FunctionDescriptor.of(INT, INT));
+            encoderCountsBind = downcallWithoutCritical(lookup, "metallum_encoder_counts_bind",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG));
+            encoderCountsCopy = downcallWithoutCritical(lookup, "metallum_encoder_counts_copy",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS));
             setGpuEncoderTimingContext = downcall(
                     lookup,
                     "metallum_set_gpu_encoder_timing_context",
@@ -1228,6 +1233,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
+    private static final MethodHandle encoderCountsReset;
+    private static final MethodHandle encoderCountsBind;
+    private static final MethodHandle encoderCountsCopy;
     private static final MethodHandle setGpuEncoderTimingContext;
     private static final MethodHandle gpuEncoderTimingReset;
     private static final MethodHandle gpuEncoderTimingCount;
@@ -3731,6 +3739,46 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_gpu_encoder_timing_enabled", throwable);
+        }
+    }
+
+    public static void metallum_encoder_counts_reset(final int capacityRows) {
+        try {
+            if ((int) encoderCountsReset.invokeExact(capacityRows) != 1) {
+                throw new IllegalArgumentException("Invalid native encoder ledger capacity: " + capacityRows);
+            }
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_encoder_counts_reset", throwable);
+        }
+    }
+
+    /** Must precede every encoder factory for this command-buffer or Metal 4 lease. */
+    public static void metallum_encoder_counts_bind(final MemorySegment commandBuffer,
+            final long windowId, final long frameId, final long submitIndex) {
+        try {
+            if ((int) encoderCountsBind.invokeExact(commandBuffer, windowId, frameId, submitIndex) != 1) {
+                throw new IllegalStateException("Could not bind native encoder measurement identity");
+            }
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_encoder_counts_bind", throwable);
+        }
+    }
+
+    /** One coherent bulk copy after the caller drains the measured command buffers. */
+    public static com.metallum.client.metal.render.NativeEncoderCounts.Snapshot metallum_encoder_counts_snapshot() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment metadata = arena.allocate(8L * Long.BYTES, Long.BYTES);
+            int count = (int) encoderCountsCopy.invokeExact(MemorySegment.NULL, 0, metadata);
+            if (count < 0 || count > 65_536) throw new IllegalStateException("Invalid encoder row count: " + count);
+            // Allocate a non-null sentinel even for an empty ledger so the second call is a copy.
+            MemorySegment rows = arena.allocate(Math.max(1L, count * 13L) * Long.BYTES, Long.BYTES);
+            int copied = (int) encoderCountsCopy.invokeExact(rows, count, metadata);
+            if (copied != count) throw new IllegalStateException("Encoder ledger changed during snapshot");
+            long[] header = metadata.toArray(LONG);
+            long[] data = rows.asSlice(0, count * 13L * Long.BYTES).toArray(LONG);
+            return com.metallum.client.metal.render.NativeEncoderCounts.decode(header, data);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_encoder_counts_copy", throwable);
         }
     }
 

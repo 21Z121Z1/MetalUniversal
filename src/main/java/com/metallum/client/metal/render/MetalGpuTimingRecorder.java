@@ -13,11 +13,12 @@ public final class MetalGpuTimingRecorder {
             || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry");
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
-    // Formal acceptance samples at least 120 seconds. Retain enough completed
-    // command-buffer timings for the whole window instead of silently keeping
-    // only the last ~2,048 frames.
+    // Ordinary diagnostics stay bounded at the existing capacity. A formal window
+    // commonly submits two buffers per frame: 120s * 120fps * 2 exceeds 16,384.
+    // Match its explicit count ledger capacity; overflow still fails identity checks.
     private static final int CAPACITY = 16_384;
     private static final List<Sample> SAMPLES = new ArrayList<>();
+    private static final List<Sample> MEASUREMENT_SAMPLES = new ArrayList<>();
     private static final List<CpuPassSample> CPU_PASS_SAMPLES = new ArrayList<>();
     private static long renderEncoderFactoryCalls;
     private static long renderEncoderCacheHits;
@@ -57,22 +58,26 @@ public final class MetalGpuTimingRecorder {
             return;
         }
         synchronized (MetalGpuTimingRecorder.class) {
-            SAMPLES.add(new Sample(submitIndex, windowId, frameId, start, end));
+            List<Sample> samples = windowId > 0L ? MEASUREMENT_SAMPLES : SAMPLES;
+            samples.add(new Sample(submitIndex, windowId, frameId, start, end));
             latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
-            if (SAMPLES.size() > CAPACITY) {
-                SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
+            int capacity = windowId > 0L ? NativeEncoderCounts.MAX_ROWS : CAPACITY;
+            if (samples.size() > capacity) {
+                samples.subList(0, samples.size() - capacity).clear();
             }
         }
     }
 
     public static synchronized void reset() {
         SAMPLES.clear();
+        MEASUREMENT_SAMPLES.clear();
         CPU_PASS_SAMPLES.clear();
         renderEncoderFactoryCalls = 0L;
         renderEncoderCacheHits = 0L;
         latestGpuNanos = 0L;
         measurementWindowId = 0L;
         measurementFrameId = -1L;
+        if (ENABLED) MetalNativeBridge.metallum_encoder_counts_reset(0);
         if (PASS_TIMING_ENABLED) {
             MetalNativeBridge.metallum_gpu_encoder_timing_reset();
             MetalNativeBridge.metallum_set_gpu_encoder_timing_context(0L, -1L);
@@ -83,12 +88,14 @@ public final class MetalGpuTimingRecorder {
     public static synchronized void beginMeasurementWindow(final long windowId) {
         requireWindowId(windowId);
         SAMPLES.clear();
+        MEASUREMENT_SAMPLES.clear();
         CPU_PASS_SAMPLES.clear();
         renderEncoderFactoryCalls = 0L;
         renderEncoderCacheHits = 0L;
         latestGpuNanos = 0L;
         measurementWindowId = windowId;
         measurementFrameId = -1L;
+        if (ENABLED) MetalNativeBridge.metallum_encoder_counts_reset(NativeEncoderCounts.MAX_ROWS);
         if (PASS_TIMING_ENABLED) {
             MetalNativeBridge.metallum_gpu_encoder_timing_reset();
             MetalNativeBridge.metallum_set_gpu_encoder_timing_context(windowId, -1L);
@@ -128,6 +135,20 @@ public final class MetalGpuTimingRecorder {
         return measurementFrameId;
     }
 
+    static void bindEncoderCountIdentity(java.lang.foreign.MemorySegment commandBuffer,
+                                         long windowId, long frameId, long submitIndex) {
+        if (ENABLED && windowId > 0 && frameId >= 0) {
+            MetalNativeBridge.metallum_encoder_counts_bind(commandBuffer, windowId, frameId, submitIndex);
+        }
+    }
+
+    public static NativeEncoderCounts.Snapshot encoderCountSnapshot() {
+        if (!ENABLED) {
+            return NativeEncoderCounts.decode(new long[]{1, 0, 0, 0, 0, 0, 0, 0}, new long[0]);
+        }
+        return MetalNativeBridge.metallum_encoder_counts_snapshot();
+    }
+
     /**
      * Drains submitted work outside a measurement interval. The encoder implementation owns the
      * exact in-flight wait and returns the next submit index, so this helper cannot accidentally
@@ -142,13 +163,14 @@ public final class MetalGpuTimingRecorder {
     }
 
     public static synchronized List<Sample> snapshot() {
-        return List.copyOf(SAMPLES);
+        return java.util.stream.Stream.concat(SAMPLES.stream(), MEASUREMENT_SAMPLES.stream())
+                .sorted(java.util.Comparator.comparingLong(Sample::submitIndex)).toList();
     }
 
     /** Returns only Java-side command-buffer samples captured for one measurement window. */
     public static synchronized List<Sample> snapshot(final long windowId) {
         requireWindowId(windowId);
-        return SAMPLES.stream()
+        return MEASUREMENT_SAMPLES.stream()
                 .filter(sample -> sample.windowId() == windowId)
                 .toList();
     }
@@ -228,7 +250,7 @@ public final class MetalGpuTimingRecorder {
                         sampleWindowId,
                         sampleFrameId,
                         label,
-                        kind == 1 ? "blit" : "render",
+                        switch (kind) { case 0 -> "render"; case 1 -> "blit"; case 2 -> "compute"; default -> "unknown"; },
                         milliseconds
                 ));
             }

@@ -27,6 +27,7 @@ final class NativeEncoderCountsGpuTest {
     private static final int WIDTH = 1;
     private static final int HEIGHT = 1;
     private static final int PIXEL_BYTES = 4;
+    private static final int READBACK_ROW_BYTES = 256;
     private static final long WINDOW = 0x4e4154495645434cL;
     private static final boolean METAL4 = Boolean.parseBoolean(
             System.getProperty("metallum.test.encoderCountsMetal4", "false")
@@ -80,7 +81,7 @@ final class NativeEncoderCountsGpuTest {
                 "real render attachment creation failed");
         readback = MetalNativeBridge.metallum_create_buffer(
                 device,
-                PIXEL_BYTES,
+                READBACK_ROW_BYTES,
                 MTLResourceOptions.of(MTLStorageMode.Shared, MTLHazardTrackingMode.Default)
         );
         assertFalse(MetalNativeBridge.isNullHandle(readback),
@@ -89,21 +90,27 @@ final class NativeEncoderCountsGpuTest {
 
     @AfterEach
     void closeStandaloneMetalFixture() {
-        if (!MetalNativeBridge.isNullHandle(readback)) {
-            MetalNativeBridge.metallum_release_object(readback);
-            readback = MemorySegment.NULL;
-        }
-        if (!MetalNativeBridge.isNullHandle(texture)) {
-            MetalNativeBridge.metallum_release_object(texture);
-            texture = MemorySegment.NULL;
-        }
-        if (!MetalNativeBridge.isNullHandle(queue)) {
-            MetalNativeBridge.metallum_release_object(queue);
-            queue = MemorySegment.NULL;
-        }
-        if (!MetalNativeBridge.isNullHandle(device)) {
-            MetalNativeBridge.metallum_release_object(device);
-            device = MemorySegment.NULL;
+        try {
+            // Do not let a subsequent fixture's native allocations be observed
+            // as part of a failed test's measurement window.
+            MetalNativeBridge.metallum_encoder_counts_reset(0);
+        } finally {
+            if (!MetalNativeBridge.isNullHandle(readback)) {
+                MetalNativeBridge.metallum_release_object(readback);
+                readback = MemorySegment.NULL;
+            }
+            if (!MetalNativeBridge.isNullHandle(texture)) {
+                MetalNativeBridge.metallum_release_object(texture);
+                texture = MemorySegment.NULL;
+            }
+            if (!MetalNativeBridge.isNullHandle(queue)) {
+                MetalNativeBridge.metallum_release_object(queue);
+                queue = MemorySegment.NULL;
+            }
+            if (!MetalNativeBridge.isNullHandle(device)) {
+                MetalNativeBridge.metallum_release_object(device);
+                device = MemorySegment.NULL;
+            }
         }
     }
 
@@ -120,15 +127,19 @@ final class NativeEncoderCountsGpuTest {
         assertEquals(0L, snapshot.droppedRows(), snapshot.toString());
         assertEquals(0L, snapshot.invalidEvents(), snapshot.toString());
         assertEquals(submitCount, snapshot.rowCount(), snapshot.toString());
+        assertEquals(0L, snapshot.activeCommandBuffers(), snapshot.toString());
+        assertEquals(0L, snapshot.activeEncoders(), snapshot.toString());
         Set<Long> submitIds = new HashSet<>();
         for (NativeEncoderCounts.Sample row : snapshot.rows()) {
+            assertEquals(WINDOW, row.windowId(), row.toString());
+            assertEquals(row.submitIndex() + 10L, row.frameId(), row.toString());
             submitIds.add(row.submitIndex());
             assertEquals(row.created(), row.ended(), row.toString());
             assertEquals(3L, row.attempted(), row.toString());
             assertEquals(3L, row.created(), row.toString());
             assertEquals(1L, row.renderCreated(), row.toString());
-            assertEquals(1L, row.blitCreated(), row.toString());
-            assertEquals(1L, row.computeCreated(), row.toString());
+            assertEquals(METAL4 ? 0L : 1L, row.blitCreated(), row.toString());
+            assertEquals(METAL4 ? 2L : 1L, row.computeCreated(), row.toString());
             assertEquals(METAL4 ? 4L : 3L, row.backend(), row.toString());
         }
         assertEquals(submitCount, submitIds.size(), snapshot.toString());
@@ -160,9 +171,49 @@ final class NativeEncoderCountsGpuTest {
 
         NativeEncoderCounts.Snapshot snapshot = MetalNativeBridge.metallum_encoder_counts_snapshot();
         assertEquals(1L, snapshot.rowCount(), snapshot.toString());
+        assertEquals(0L, snapshot.activeCommandBuffers(), snapshot.toString());
+        assertEquals(0L, snapshot.activeEncoders(), snapshot.toString());
         assertTrue(snapshot.invalidEvents() > 0L, snapshot.toString());
         assertEquals(3L, snapshot.rows().getFirst().created(), snapshot.toString());
         assertEquals(3L, snapshot.rows().getFirst().ended(), snapshot.toString());
+    }
+
+    @Test
+    void duplicateWindowSubmitAcrossPhysicalBuffersKeepsOriginalRow() {
+        MetalNativeBridge.metallum_encoder_counts_reset(NativeEncoderCounts.MAX_ROWS);
+        MemorySegment first = newCommandBuffer(88L);
+        try {
+            bind(first, WINDOW, 300L, 9L);
+            encodeRenderBlit(first);
+            commitAndWait(first);
+            assertRedPixel(readbackBytes(), "first physical command buffer did not complete");
+        } finally {
+            release(first);
+        }
+
+        MemorySegment duplicate = newCommandBuffer(89L);
+        try {
+            assertThrows(IllegalStateException.class,
+                    () -> bind(duplicate, WINDOW, 301L, 9L),
+                    "same window/submit identity must reject a different frame");
+            // Submit real work on the rejected lease to verify accounting failure
+            // preserves rendering and returns the Metal 4 slot before teardown.
+            encodeRenderBlit(duplicate);
+            commitAndWait(duplicate);
+            assertRedPixel(readbackBytes(), "rejected duplicate changed GPU execution/readback");
+        } finally {
+            release(duplicate);
+        }
+
+        NativeEncoderCounts.Snapshot snapshot = MetalNativeBridge.metallum_encoder_counts_snapshot();
+        assertEquals(1L, snapshot.rowCount(), snapshot.toString());
+        assertEquals(0L, snapshot.activeCommandBuffers(), snapshot.toString());
+        assertEquals(0L, snapshot.activeEncoders(), snapshot.toString());
+        assertTrue(snapshot.invalidEvents() > 0L, snapshot.toString());
+        NativeEncoderCounts.Sample original = snapshot.rows().getFirst();
+        assertEquals(WINDOW, original.windowId(), original.toString());
+        assertEquals(300L, original.frameId(), original.toString());
+        assertEquals(9L, original.submitIndex(), original.toString());
     }
 
     @Test
@@ -174,6 +225,8 @@ final class NativeEncoderCountsGpuTest {
         NativeEncoderCounts.Snapshot snapshot = MetalNativeBridge.metallum_encoder_counts_snapshot();
         assertEquals(1L, snapshot.capacityRows(), snapshot.toString());
         assertEquals(1L, snapshot.rowCount(), snapshot.toString());
+        assertEquals(0L, snapshot.activeCommandBuffers(), snapshot.toString());
+        assertEquals(0L, snapshot.activeEncoders(), snapshot.toString());
         assertTrue(snapshot.droppedRows() > 0L || snapshot.invalidEvents() > 0L,
                 "capacity-one overflow must be explicit: " + snapshot);
     }
@@ -228,9 +281,11 @@ final class NativeEncoderCountsGpuTest {
         assertFalse(MetalNativeBridge.isNullHandle(render), "real render encoder creation failed");
         endAndRelease(render);
 
-        MemorySegment compute = MetalNativeBridge.MTLCommandBuffer_makeComputeCommandEncoder(commandBuffer);
-        assertFalse(MetalNativeBridge.isNullHandle(compute), "real compute encoder creation failed");
-        endAndRelease(compute);
+        if (!METAL4) {
+            MemorySegment compute = MetalNativeBridge.MTLCommandBuffer_makeComputeCommandEncoder(commandBuffer);
+            assertFalse(MetalNativeBridge.isNullHandle(compute), "real compute encoder creation failed");
+            endAndRelease(compute);
+        }
 
         MemorySegment blit = MetalNativeBridge.MTLCommandBuffer_makeBlitCommandEncoder(
                 commandBuffer, "encoder-counts-readback"
@@ -247,10 +302,22 @@ final class NativeEncoderCountsGpuTest {
                 0L,
                 WIDTH,
                 HEIGHT,
-                PIXEL_BYTES,
-                PIXEL_BYTES
+                READBACK_ROW_BYTES,
+                READBACK_ROW_BYTES
         );
         endAndRelease(blit);
+
+        if (METAL4) {
+            // The MTL4 bridge exposes this physical compute encoder through
+            // the blit factory. The generic compute factory only accepts an
+            // MTL3 command-buffer pointer and must not receive an MTL4 lease.
+            MemorySegment compute = MetalNativeBridge.MTLCommandBuffer_makeBlitCommandEncoder(
+                    commandBuffer, "encoder-counts-compute"
+            );
+            assertFalse(MetalNativeBridge.isNullHandle(compute),
+                    "real Metal 4 compute encoder creation failed");
+            endAndRelease(compute);
+        }
     }
 
     private void commitAndWait(final MemorySegment commandBuffer) {

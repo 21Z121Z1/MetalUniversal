@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 2
+SIGNED_INT64_MAX = (1 << 63) - 1
+NATIVE_ENCODER_MAX_ROWS = 65_536
 
 
 def finite_number(value: Any) -> float | None:
@@ -26,10 +28,19 @@ def finite_number(value: Any) -> float | None:
 
 
 def strict_integer(value: Any) -> int | None:
-    """Return JSON integers only; booleans and numeric strings are not counts."""
+    """Return signed Java/native Int64 JSON integers only."""
     if isinstance(value, bool) or not isinstance(value, int):
         return None
+    if value < -(1 << 63) or value > SIGNED_INT64_MAX:
+        return None
     return value
+
+
+def checked_nonnegative_add(left: int, right: int) -> int | None:
+    """Match Java Math.addExact for non-negative signed-Int64 counters."""
+    if left < 0 or right < 0 or left > SIGNED_INT64_MAX - right:
+        return None
+    return left + right
 
 
 def validate_measurement_window(
@@ -165,6 +176,281 @@ def validate_gpu_submission_samples(
     return ordered_times[math.ceil(len(ordered_times) * 0.5) - 1], []
 
 
+NATIVE_ENCODER_LEDGER_SCHEMA_VERSION = 1
+NATIVE_ENCODER_LEDGER_SCOPE = "main-queue-native-encoders"
+_NATIVE_ENCODER_KINDS = ("renderCreated", "blitCreated", "computeCreated")
+
+
+def validate_native_encoder_ledger(
+    report: dict[str, Any],
+    measurement_window: dict[str, Any] | None,
+    measured_frames: int,
+    measured_gpu_command_buffers: int,
+) -> tuple[float | None, list[str]]:
+    """Validate frame-bound native encoder counts independently of timestamps.
+
+    The ledger is deliberately stricter than the legacy timestamp-only report:
+    one row must represent each main command-buffer/Metal 4 lease submission,
+    and all identity and lifecycle counters must be complete before counts are
+    admitted as a metric.
+    """
+    errors: list[str] = []
+    raw = report.get("nativeEncoderLedger")
+    if not isinstance(raw, dict):
+        return None, [
+            "nativeEncoderLedger is missing; timestamp-only reports cannot prove encoder coverage"
+        ]
+    if measurement_window is None:
+        return None, ["nativeEncoderLedger cannot be checked without measurementWindow"]
+
+    if report.get("mode") != "native-metalfx-off":
+        errors.append("native encoder ledger requires report.mode=native-metalfx-off")
+    off = report.get("metalFxOffDiagnostics")
+    if not isinstance(off, dict):
+        errors.append("metalFxOffDiagnostics is missing for native encoder ledger")
+    else:
+        if off.get("modeOff") is not True:
+            errors.append("metalFxOffDiagnostics.modeOff is not true")
+        if off.get("allWorkEliminated") is not True:
+            errors.append("metalFxOffDiagnostics.allWorkEliminated is not true")
+
+    schema = strict_integer(raw.get("schemaVersion"))
+    if schema != NATIVE_ENCODER_LEDGER_SCHEMA_VERSION:
+        errors.append("nativeEncoderLedger.schemaVersion must be 1")
+    if raw.get("enabled") is not True:
+        errors.append("nativeEncoderLedger.enabled is not true")
+    if raw.get("scope") != NATIVE_ENCODER_LEDGER_SCOPE:
+        errors.append(
+            "nativeEncoderLedger.scope must be main-queue-native-encoders"
+        )
+
+    capacity = strict_integer(raw.get("capacityRows"))
+    dropped = strict_integer(raw.get("droppedRows"))
+    invalid = strict_integer(raw.get("invalidEvents"))
+    active_command_buffers = strict_integer(raw.get("activeCommandBuffers"))
+    active_encoders = strict_integer(raw.get("activeEncoders"))
+    row_count = strict_integer(raw.get("rowCount"))
+    if capacity is None or not 1 <= capacity <= NATIVE_ENCODER_MAX_ROWS:
+        errors.append("nativeEncoderLedger.capacityRows must be an integer in 1..65536")
+    for name, value in (
+        ("droppedRows", dropped),
+        ("invalidEvents", invalid),
+        ("activeCommandBuffers", active_command_buffers),
+        ("activeEncoders", active_encoders),
+        ("rowCount", row_count),
+    ):
+        if value is None or value < 0:
+            errors.append(f"nativeEncoderLedger.{name} must be a non-negative JSON integer")
+    if dropped not in (None, 0):
+        errors.append("nativeEncoderLedger.droppedRows is non-zero")
+    if invalid not in (None, 0):
+        errors.append("nativeEncoderLedger.invalidEvents is non-zero")
+    if active_command_buffers not in (None, 0):
+        errors.append("nativeEncoderLedger.activeCommandBuffers is non-zero")
+    if active_encoders not in (None, 0):
+        errors.append("nativeEncoderLedger.activeEncoders is non-zero")
+
+    rows = raw.get("rows")
+    if not isinstance(rows, list):
+        errors.append("nativeEncoderLedger.rows is missing or is not an array")
+        return None, errors
+    if capacity is not None and len(rows) > capacity:
+        errors.append("nativeEncoderLedger.rows exceeds capacityRows")
+    if row_count is not None and row_count != len(rows):
+        errors.append(
+            f"nativeEncoderLedger.rowCount={row_count} does not equal rows={len(rows)}"
+        )
+
+    window_id = strict_integer(measurement_window.get("id"))
+    first_frame = strict_integer(measurement_window.get("startFrameInclusive"))
+    last_frame = strict_integer(measurement_window.get("endFrameExclusive"))
+    first_submit = strict_integer(measurement_window.get("firstSubmitIndexInclusive"))
+    last_submit = strict_integer(measurement_window.get("lastSubmitIndexExclusive"))
+    row_ids: list[tuple[int, int, int]] = []
+    frame_totals: dict[int, int] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            errors.append(f"nativeEncoderLedger.rows[{index}] is not an object")
+            continue
+        row_window = strict_integer(row.get("windowId"))
+        frame_id = strict_integer(row.get("frameId"))
+        submit_id = strict_integer(row.get("submitIndex"))
+        backend = strict_integer(row.get("backend"))
+        if row_window is None or row_window != window_id:
+            errors.append(f"nativeEncoderLedger.rows[{index}].windowId does not match measurementWindow.id")
+        if frame_id is None:
+            errors.append(f"nativeEncoderLedger.rows[{index}].frameId is invalid")
+        if submit_id is None:
+            errors.append(f"nativeEncoderLedger.rows[{index}].submitIndex is invalid")
+        if backend not in (3, 4):
+            errors.append(f"nativeEncoderLedger.rows[{index}].backend must be 3 or 4")
+        if row_window is not None and frame_id is not None and submit_id is not None:
+            row_ids.append((row_window, frame_id, submit_id))
+
+        counts: dict[str, int] = {}
+        for field in (
+            "attempted", "created", "ended", *_NATIVE_ENCODER_KINDS,
+            "createFailures", "unsupportedEncodes", "invalidEvents",
+        ):
+            value = strict_integer(row.get(field))
+            counts[field] = value if value is not None else -1
+            if value is None or value < 0:
+                errors.append(
+                    f"nativeEncoderLedger.rows[{index}].{field} must be a non-negative JSON integer"
+                )
+        if counts["createFailures"] != 0:
+            errors.append(f"nativeEncoderLedger.rows[{index}].createFailures is non-zero")
+        if counts["unsupportedEncodes"] != 0:
+            errors.append(f"nativeEncoderLedger.rows[{index}].unsupportedEncodes is non-zero")
+        if counts["invalidEvents"] != 0:
+            errors.append(f"nativeEncoderLedger.rows[{index}].invalidEvents is non-zero")
+        if counts["attempted"] >= 0 and counts["created"] >= 0 and counts["attempted"] != counts["created"]:
+            errors.append(f"nativeEncoderLedger.rows[{index}] attempted does not equal created")
+        if counts["created"] >= 0 and counts["ended"] >= 0 and counts["created"] != counts["ended"]:
+            errors.append(f"nativeEncoderLedger.rows[{index}] created does not equal ended")
+        if all(counts[field] >= 0 for field in _NATIVE_ENCODER_KINDS):
+            kind_total = 0
+            kind_overflow = False
+            for field in _NATIVE_ENCODER_KINDS:
+                next_total = checked_nonnegative_add(kind_total, counts[field])
+                if next_total is None:
+                    kind_overflow = True
+                    errors.append(f"nativeEncoderLedger.rows[{index}] encoder-kind total overflows signed Int64")
+                    break
+                kind_total = next_total
+            if not kind_overflow and counts["created"] >= 0 and kind_total != counts["created"]:
+                errors.append(
+                    f"nativeEncoderLedger.rows[{index}] created does not equal the three encoder-kind totals"
+                )
+            if not kind_overflow and frame_id is not None:
+                previous = frame_totals.get(frame_id, 0)
+                next_total = checked_nonnegative_add(previous, counts["created"])
+                if next_total is None:
+                    errors.append(
+                        f"nativeEncoderLedger frame {frame_id} total overflows signed Int64"
+                    )
+                else:
+                    frame_totals[frame_id] = next_total
+
+    if len(row_ids) != len(set(row_ids)):
+        errors.append("nativeEncoderLedger contains duplicate window/frame/submit identities")
+    if len(rows) != measured_gpu_command_buffers:
+        errors.append(
+            f"nativeEncoderLedger rows={len(rows)} does not equal measuredGpuCommandBuffers={measured_gpu_command_buffers}"
+        )
+    if first_submit is not None and last_submit is not None:
+        actual_submit_ids = sorted({submit_id for _, _, submit_id in row_ids})
+        expected_count = last_submit - first_submit
+        if len(actual_submit_ids) != expected_count or any(
+            value != first_submit + index for index, value in enumerate(actual_submit_ids)
+        ):
+            errors.append("nativeEncoderLedger submitIndex set does not cover the declared submit window")
+
+    gpu_raw = report.get("gpuSubmissionSamples")
+    gpu_ids: set[tuple[int, int, int]] = set()
+    if isinstance(gpu_raw, list):
+        for index, sample in enumerate(gpu_raw):
+            if isinstance(sample, dict):
+                sample_window = strict_integer(sample.get("windowId"))
+                sample_frame = strict_integer(sample.get("frameId"))
+                sample_submit = strict_integer(sample.get("submitIndex"))
+                if sample_window is not None and sample_frame is not None and sample_submit is not None:
+                    gpu_ids.add((sample_window, sample_frame, sample_submit))
+                else:
+                    errors.append(f"gpuSubmissionSamples[{index}] lacks a valid encoder identity")
+            else:
+                errors.append(f"gpuSubmissionSamples[{index}] is not an object")
+        if len(gpu_raw) != measured_gpu_command_buffers:
+            errors.append(
+                f"gpuSubmissionSamples count={len(gpu_raw)} does not equal measuredGpuCommandBuffers={measured_gpu_command_buffers}"
+            )
+        if len(gpu_ids) != len(gpu_raw):
+            errors.append("gpuSubmissionSamples contains duplicate or incomplete encoder identities")
+    else:
+        errors.append("gpuSubmissionSamples is missing or is not an array")
+    if set(row_ids) != gpu_ids:
+        errors.append("nativeEncoderLedger identities do not exactly match gpuSubmissionSamples")
+
+    if first_frame is not None and last_frame is not None:
+        actual_frame_ids = sorted(frame_totals)
+        expected_count = last_frame - first_frame
+        if len(actual_frame_ids) != expected_count or any(
+            value != first_frame + index for index, value in enumerate(actual_frame_ids)
+        ):
+            errors.append("nativeEncoderLedger frameId set does not cover the declared frame window")
+    if len(frame_totals) != measured_frames:
+        errors.append(
+            f"nativeEncoderLedger unique frames={len(frame_totals)} does not equal measuredFrameIntervals={measured_frames}"
+        )
+
+    summary = report.get("nativeEncoderCountsPerMeasuredFrame")
+    if not isinstance(summary, dict):
+        errors.append("nativeEncoderCountsPerMeasuredFrame is missing or is not an object")
+        return None, errors
+    if summary.get("complete") is not True:
+        errors.append("nativeEncoderCountsPerMeasuredFrame.complete is not true")
+    if summary.get("status") != "complete-main-queue-native-encoders":
+        errors.append(
+            "nativeEncoderCountsPerMeasuredFrame.status is not complete-main-queue-native-encoders"
+        )
+    summary_frames = strict_integer(summary.get("measuredFrames"))
+    if summary_frames != measured_frames:
+        errors.append("nativeEncoderCountsPerMeasuredFrame.measuredFrames does not equal measuredFrameIntervals")
+    frame_render = frame_blit = frame_compute = 0
+    aggregate_overflow = False
+    for row in rows:
+        if isinstance(row, dict):
+            for field in ("renderCreated", "blitCreated", "computeCreated"):
+                value = strict_integer(row.get(field))
+                if value is None:
+                    continue
+                if field == "renderCreated":
+                    next_total = checked_nonnegative_add(frame_render, value)
+                elif field == "blitCreated":
+                    next_total = checked_nonnegative_add(frame_blit, value)
+                else:
+                    next_total = checked_nonnegative_add(frame_compute, value)
+                if next_total is None:
+                    aggregate_overflow = True
+                    errors.append(f"nativeEncoderLedger {field} aggregate overflows signed Int64")
+                elif field == "renderCreated":
+                    frame_render = next_total
+                elif field == "blitCreated":
+                    frame_blit = next_total
+                else:
+                    frame_compute = next_total
+    if aggregate_overflow:
+        frame_render = frame_blit = frame_compute = -1
+    for field, expected in (
+        ("renderTotal", frame_render),
+        ("blitTotal", frame_blit),
+        ("computeTotal", frame_compute),
+    ):
+        actual = strict_integer(summary.get(field))
+        if actual != expected:
+            errors.append(f"{field}={actual} does not match ledger total={expected}")
+    for field, total in (
+        ("renderPerFrame", frame_render),
+        ("blitPerFrame", frame_blit),
+        ("computePerFrame", frame_compute),
+    ):
+        actual = finite_number(summary.get(field))
+        expected = total / measured_frames if measured_frames > 0 else None
+        if actual is None or expected is None or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9):
+            errors.append(f"{field} does not match the ledger mean")
+    per_frame_totals = [frame_totals[frame_id] for frame_id in sorted(frame_totals)]
+    recomputed_p50 = (
+        sorted(per_frame_totals)[math.ceil(len(per_frame_totals) * 0.5) - 1]
+        if per_frame_totals else None
+    )
+    reported_p50 = finite_number(summary.get("p50PerFrame"))
+    if recomputed_p50 is None or reported_p50 is None or not math.isclose(
+        reported_p50, recomputed_p50, rel_tol=1e-9, abs_tol=1e-9
+    ):
+        errors.append("p50PerFrame does not match the nearest-rank ledger median")
+    return recomputed_p50, errors
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -258,6 +544,12 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         gpu_frames,
         gpu_submission_count,
     )
+    native_encoder_p50, native_encoder_errors = validate_native_encoder_ledger(
+        report,
+        measurement_window,
+        measured_frames,
+        gpu_submission_count,
+    )
     reported_gpu_p50 = finite_number(report.get("gpuP50Milliseconds"))
     gpu_numeric_matches = (
         gpu_submission_p50 is not None
@@ -278,11 +570,9 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         and encoder_identity_complete
         and completed_frames == measured_frames
         and encoder_frames == completed_frames
+        and not native_encoder_errors
     )
     unavailable = report.get("unavailableMetrics", {}) if isinstance(report.get("unavailableMetrics"), dict) else {}
-    render_per_frame = finite_number(encoders.get("renderPerFrame"))
-    blit_per_frame = finite_number(encoders.get("blitPerFrame"))
-    encoder_total = None if render_per_frame is None and blit_per_frame is None else (render_per_frame or 0.0) + (blit_per_frame or 0.0)
 
     metrics = {
         "fps_median": metric(report.get("sourceFpsFromP50"), "FPS", "higher", measured_frames),
@@ -307,12 +597,12 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             ),
         ),
         "native_encoder_count_per_frame_median": metric(
-            encoder_total if encoder_window_matches else None,
+            native_encoder_p50 if encoder_window_matches else None,
             "encoders/frame", "lower", encoder_frames,
             None if encoder_window_matches else (
                 f"encoder sample window mismatch: encoder frames={encoder_frames}, "
                 f"measured frames={measured_frames}, completed frames={completed_frames}; "
-                "native encoder identity is required"
+                "native encoder ledger identity and summary validation are required"
             ),
         ),
         "render_pass_store_load_bytes_estimate_median": metric(
@@ -352,6 +642,7 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "reported gpuP50Milliseconds does not match gpuSubmissionSamples"
         )
     identity_errors.extend(f"GPU sample evidence: {error}" for error in gpu_sample_errors)
+    identity_errors.extend(f"Native encoder ledger evidence: {error}" for error in native_encoder_errors)
     if measured_frames > 0 and not encoder_window_matches:
         identity_errors.append(
             f"native encoder evidence is not identity-complete for measurement window={completed_frames}"
@@ -405,6 +696,7 @@ def self_test() -> None:
         trial = Path(temp)
         (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
         report = {
+            "mode": "native-metalfx-off",
             "measuredFrameIntervals": 300,
             "measuredGpuFrames": 300,
             "measuredGpuCommandBuffers": 300,
@@ -422,7 +714,48 @@ def self_test() -> None:
             "gpuP50Milliseconds": 20.0,
             "frameTimeStutterCount": 2,
             "cpuRenderEncodeFrameMilliseconds": {"samples": 300, "p50Milliseconds": 24.0},
-            "nativeEncoderCountsPerMeasuredFrame": {"measuredFrames": 300, "renderPerFrame": 6.0, "blitPerFrame": 2.0},
+            "nativeEncoderCountsPerMeasuredFrame": {
+                "status": "complete-main-queue-native-encoders",
+                "complete": True,
+                "measuredFrames": 300,
+                "renderTotal": 1800,
+                "blitTotal": 600,
+                "computeTotal": 0,
+                "renderPerFrame": 6.0,
+                "blitPerFrame": 2.0,
+                "computePerFrame": 0.0,
+                "p50PerFrame": 8.0,
+            },
+            "nativeEncoderLedger": {
+                "schemaVersion": 1,
+                "enabled": True,
+                "capacityRows": 300,
+                "droppedRows": 0,
+                "invalidEvents": 0,
+                "activeCommandBuffers": 0,
+                "activeEncoders": 0,
+                "rowCount": 300,
+                "scope": NATIVE_ENCODER_LEDGER_SCOPE,
+                "rows": [
+                    {
+                        "windowId": 1,
+                        "frameId": 40 + index,
+                        "submitIndex": 100 + index,
+                        "backend": 3 if index % 2 == 0 else 4,
+                        "attempted": 8,
+                        "created": 8,
+                        "ended": 8,
+                        "renderCreated": 6,
+                        "blitCreated": 2,
+                        "computeCreated": 0,
+                        "createFailures": 0,
+                        "unsupportedEncodes": 0,
+                        "invalidEvents": 0,
+                    }
+                    for index in range(300)
+                ],
+            },
+            "metalFxOffDiagnostics": {"modeOff": True, "allWorkEliminated": True},
             "measurementWindow": {
                 "id": 1,
                 "startFrameInclusive": 40,

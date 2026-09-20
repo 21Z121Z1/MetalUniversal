@@ -720,6 +720,10 @@ public final class MetalValidationClient implements ClientModInitializer {
                 && offDiagnostics.fastPathFrames() >= BASELINE_MEASURED_FRAMES);
         boolean readbackValidated = NATIVE_DIRECT_FRAME_GENERATION
                 || (readbackDiagnostics.completed() && readbackDiagnostics.passed());
+        var encoderLedger = MetalGpuTimingRecorder.encoderCountSnapshot();
+        var encoderWindow = EncoderMeasurementWindow.summarize(encoderLedger, gpuSamples,
+                BASELINE_WINDOW_ID, baselineWindow.firstFrame(), baselineWindow.endFrame(),
+                baselineFirstSubmitIndex, endSubmitIndex, !NATIVE_DIRECT_FRAME_GENERATION && offWorkEliminated);
         boolean stable60 = baselineFrameIntervalsMillis.size() >= BASELINE_MEASURED_FRAMES
                 && gpuWindow.complete()
                 && frameP95 <= 18.5
@@ -747,7 +751,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             measurementWindow.addProperty("firstSubmitIndexInclusive", baselineFirstSubmitIndex);
             measurementWindow.addProperty("lastSubmitIndexExclusive", endSubmitIndex);
             measurementWindow.addProperty("gpuSubmissionIdentityComplete", gpuWindow.complete());
-            measurementWindow.addProperty("nativeEncoderIdentityComplete", false);
+            measurementWindow.addProperty("nativeEncoderIdentityComplete", encoderWindow.complete());
             measurementWindow.addProperty("gpuMetric", "sum of main-queue command-buffer service time per frame");
             report.add("measurementWindow", measurementWindow);
             report.add("gpuSubmissionSamples", new GsonBuilder().create().toJsonTree(gpuSamples));
@@ -809,7 +813,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                     MetalGpuTimingRecorder.gpuEncoderSnapshot(BASELINE_WINDOW_ID);
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             report.add("nativeEncoderTimingSamples", new GsonBuilder().create().toJsonTree(gpuEncoderSamples));
-            addNativeEncoderCounts(report, gpuEncoderSamples, baselineFrameIntervalsMillis.size());
+            report.add("nativeEncoderLedger", new GsonBuilder().create().toJsonTree(encoderLedger));
+            addNativeEncoderCounts(report, encoderWindow, baselineFrameIntervalsMillis.size());
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
             report.add(
                     "metalfxMotionTelemetry",
@@ -822,9 +827,10 @@ public final class MetalValidationClient implements ClientModInitializer {
                     )
             );
             JsonObject unavailable = new JsonObject();
-            unavailable.addProperty("nativeEncoderCountPerFrame",
-                    "unavailable — window-tagged timing records do not yet prove complete encoder coverage; "
-                            + "counter sample failures, capacity limits and Metal 4 encoders can be absent");
+            if (!encoderWindow.complete()) {
+                unavailable.addProperty("nativeEncoderCountPerFrame", "unavailable — " + encoderWindow.status());
+                unavailable.addProperty("nativeComputeEncoderCountPerFrame", "unavailable — " + encoderWindow.status());
+            }
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
                     "unavailable — current native bridge does not expose per-attachment load/store byte accounting"
@@ -836,10 +842,6 @@ public final class MetalValidationClient implements ClientModInitializer {
             unavailable.addProperty(
                     "peakResidentMemoryBytes",
                     "unavailable — validation does not sample process or Metal resident memory"
-            );
-            unavailable.addProperty(
-                    "nativeComputeEncoderCountPerFrame",
-                    "unavailable — the current timing ABI exports render and blit kinds only"
             );
             unavailable.addProperty(
                     "javaToNativeFfmCallCount",
@@ -934,20 +936,20 @@ public final class MetalValidationClient implements ClientModInitializer {
 
     private static void addNativeEncoderCounts(
             final JsonObject report,
-            final List<MetalGpuTimingRecorder.GpuEncoderSample> samples,
+            final EncoderMeasurementWindow.Summary summary,
             final int measuredFrames
     ) {
-        long render = samples.stream().filter(sample -> "render".equals(sample.kind())).count();
-        long blit = samples.stream().filter(sample -> "blit".equals(sample.kind())).count();
         JsonObject counts = new JsonObject();
-        counts.addProperty("status", "observed-timing-records-only");
-        counts.addProperty("complete", false);
+        counts.addProperty("status", summary.status());
+        counts.addProperty("complete", summary.complete());
         counts.addProperty("measuredFrames", measuredFrames);
-        counts.addProperty("renderTotal", render);
-        counts.addProperty("blitTotal", blit);
-        counts.addProperty("renderPerFrame", measuredFrames > 0 ? (double) render / measuredFrames : 0.0);
-        counts.addProperty("blitPerFrame", measuredFrames > 0 ? (double) blit / measuredFrames : 0.0);
-        counts.addProperty("computePerFrame", "unavailable");
+        counts.addProperty("renderTotal", summary.renderTotal());
+        counts.addProperty("blitTotal", summary.blitTotal());
+        counts.addProperty("computeTotal", summary.computeTotal());
+        counts.addProperty("renderPerFrame", measuredFrames > 0 ? (double) summary.renderTotal() / measuredFrames : 0.0);
+        counts.addProperty("blitPerFrame", measuredFrames > 0 ? (double) summary.blitTotal() / measuredFrames : 0.0);
+        counts.addProperty("computePerFrame", measuredFrames > 0 ? (double) summary.computeTotal() / measuredFrames : 0.0);
+        counts.addProperty("p50PerFrame", summary.p50PerFrame());
         report.add("nativeEncoderCountsPerMeasuredFrame", counts);
     }
 
