@@ -276,5 +276,7 @@ final class BackendFrameComparisonClientTest {
                 .getDeclaredMethod("irisClassPresent");
         irisPresent.setAccessible(true);
         assertFalse((Boolean) irisPresent.invoke(null));
+        assertEquals(List.of("null", "null", "null"),
+                List.of(BackendFrameComparisonClient.irisTimingJsonValues()));
     }
 }

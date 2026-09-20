@@ -1502,6 +1502,7 @@ public final class BackendFrameComparisonClient {
             final int byteCount,
             final String backend
         ) {
+        String[] irisTiming = irisTimingJsonValues();
         Minecraft minecraft = Minecraft.getInstance();
         String observedOverworldClock = minecraft.level == null
                 ? "null"
@@ -1614,9 +1615,9 @@ public final class BackendFrameComparisonClient {
                         + "  \"sceneStartEntityStateSha256\": \"%s\",\n"
                         + "  \"renderEntityCount\": %d,\n"
                         + "  \"renderEntityStateSha256\": \"%s\",\n"
-                        + "  \"irisFrameCounter\": %d,\n"
-                        + "  \"irisFrameTime\": %.9g,\n"
-                        + "  \"irisFrameTimeCounter\": %.9g,\n"
+                        + "  \"irisFrameCounter\": %s,\n"
+                        + "  \"irisFrameTime\": %s,\n"
+                        + "  \"irisFrameTimeCounter\": %s,\n"
                         + "  \"fixedIrisFrameMillis\": %s,\n"
                         + "  \"fixedCamera\": %s,\n"
                         + "  \"observedPlayer\": %s\n"
@@ -1676,9 +1677,9 @@ public final class BackendFrameComparisonClient {
                 jsonEscape(sceneStartEntitySha),
                 scene.entityCount(),
                 scene.entitySha256(),
-                SystemTimeUniforms.COUNTER.getAsInt(),
-                SystemTimeUniforms.TIMER.getLastFrameTime(),
-                SystemTimeUniforms.TIMER.getFrameTimeCounter(),
+                irisTiming[0],
+                irisTiming[1],
+                irisTiming[2],
                 FIXED_IRIS_FRAME_MILLIS < 0L
                         ? "null"
                         : Long.toString(FIXED_IRIS_FRAME_MILLIS),
@@ -2281,6 +2282,17 @@ public final class BackendFrameComparisonClient {
 
     private static boolean irisClassPresent() {
         return IRIS_PRESENT;
+    }
+
+    static String[] irisTimingJsonValues() {
+        if (!irisClassPresent()) {
+            return new String[] {"null", "null", "null"};
+        }
+        return new String[] {
+                Integer.toString(SystemTimeUniforms.COUNTER.getAsInt()),
+                String.format(Locale.ROOT, "%.9g", SystemTimeUniforms.TIMER.getLastFrameTime()),
+                String.format(Locale.ROOT, "%.9g", SystemTimeUniforms.TIMER.getFrameTimeCounter())
+        };
     }
 
     private static boolean discoverIrisClasses() {
