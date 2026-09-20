@@ -278,6 +278,12 @@ jobs:
               "render origin remains stable field": re.search(
                   r"final\s+BlockPos\.MutableBlockPos\s+renderOrigin\s*=", dispatcher
               ),
+              "task cancellation flag remains AtomicBoolean": re.search(
+                  r"AtomicBoolean\s+isCancelled\s*=\s*new\s+AtomicBoolean", dispatcher
+              ),
+              "task completion flag remains AtomicBoolean": re.search(
+                  r"AtomicBoolean\s+isCompleted\s*=\s*new\s+AtomicBoolean", dispatcher
+              ),
               "task render origin returns section-owned object": re.search(
                   r"public\s+BlockPos\s+getRenderOrigin\s*\(\)\s*\{\s*return\s+RenderSection\.this\.renderOrigin\s*;",
                   dispatcher,
