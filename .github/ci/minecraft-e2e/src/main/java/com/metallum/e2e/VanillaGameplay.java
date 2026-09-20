@@ -102,7 +102,9 @@ final class VanillaGameplay {
             input.pressKey(options -> options.keyInventory);
             context.waitFor(client -> client.gui.screen() == null);
             world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
-            input.lookAt(0, 75);
+            // Aim beyond the player's collision box; a near-vertical placement
+            // targets the block occupied by the player and Vanilla rejects it.
+            input.lookAt(0, 45);
             context.waitTicks(10);
             BlockPos target = context.computeOnClient(client -> {
                 require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
