@@ -18,6 +18,10 @@ import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
+import net.minecraft.client.renderer.chunk.SectionMesh;
+import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
@@ -37,6 +41,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -333,6 +338,15 @@ public final class BackendFrameComparisonClient {
                     sample.entitySha256()
             );
         }
+        if (stopRequested && pendingCaptures == 0 && AUTO_STOP) {
+            boolean lifecyclePassed = (RESIZE_REQUEST == null || resizeCompleted)
+                    && (SHADER_TOGGLE_REQUEST == null
+                    || shaderEnableCompleted)
+                    && dimensionLifecyclePassed();
+            writeSession(failedCaptures == 0 && lifecyclePassed ? "passed" : "failed", null);
+            minecraft.stop();
+            return;
+        }
         long frameStartNanos = System.nanoTime();
         if (previousFrameStartNanos != 0L) {
             double intervalMilliseconds = (frameStartNanos - previousFrameStartNanos) / 1_000_000.0;
@@ -358,14 +372,6 @@ public final class BackendFrameComparisonClient {
         } else {
             applyScheduledDimensionSwitch(minecraft);
             observeDimensionSwitch(minecraft);
-        }
-        if (stopRequested && pendingCaptures == 0 && AUTO_STOP) {
-            boolean lifecyclePassed = (RESIZE_REQUEST == null || resizeCompleted)
-                    && (SHADER_TOGGLE_REQUEST == null
-                    || shaderEnableCompleted)
-                    && dimensionLifecyclePassed();
-            writeSession(failedCaptures == 0 && lifecyclePassed ? "passed" : "failed", null);
-            minecraft.stop();
         }
     }
 
@@ -1471,6 +1477,172 @@ public final class BackendFrameComparisonClient {
                 entities.states(),
                 StandardCharsets.UTF_8
         );
+        writeTerrainWorkload(directory, stem, frame, backend);
+    }
+
+    private static void writeTerrainWorkload(
+            final Path directory,
+            final String stem,
+            final int frame,
+            final String backend
+    ) throws IOException {
+        TerrainWorkloadSnapshot snapshot;
+        try {
+            snapshot = terrainWorkloadSnapshot(Minecraft.getInstance());
+        } catch (RuntimeException exception) {
+            snapshot = TerrainWorkloadSnapshot.unavailable(
+                    "sampling-failed: " + exception.getClass().getSimpleName()
+                            + (exception.getMessage() == null ? "" : ": " + exception.getMessage())
+            );
+        }
+        Files.writeString(
+                directory.resolve(stem + "-terrain-workload.json"),
+                terrainWorkloadJson(frame, backend, snapshot),
+                StandardCharsets.UTF_8
+        );
+        Files.writeString(
+                directory.resolve(stem + "-terrain-workload.txt"),
+                terrainWorkloadText(frame, backend, snapshot),
+                StandardCharsets.UTF_8
+        );
+    }
+
+    private static TerrainWorkloadSnapshot terrainWorkloadSnapshot(final Minecraft minecraft) {
+        int sodiumVisible = sodiumVisibleChunkCount();
+        if (sodiumVisible >= 0) {
+            return TerrainWorkloadSnapshot.unavailable(
+                    "sodium-active: vanilla LevelRenderer.visibleSections is not the draw authority"
+            );
+        }
+        if (minecraft == null || minecraft.levelRenderer == null) {
+            return TerrainWorkloadSnapshot.unavailable("vanilla-level-renderer-unavailable");
+        }
+        LevelRenderer renderer = minecraft.levelRenderer;
+        int visibleSectionCount = renderer.visibleSections().size();
+        int nonemptySectionCount = 0;
+        List<TerrainWorkloadSection> sections = new ArrayList<>();
+        for (SectionRenderDispatcher.RenderSection section : renderer.visibleSections()) {
+            SectionMesh mesh = section.getSectionMesh();
+            if (mesh == null || !mesh.hasRenderableLayers()) {
+                continue;
+            }
+            nonemptySectionCount++;
+            List<TerrainWorkloadLayer> layers = new ArrayList<>();
+            for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
+                SectionMesh.SectionDraw draw = mesh.getSectionDraw(layer);
+                if (draw == null) {
+                    continue;
+                }
+                layers.add(new TerrainWorkloadLayer(
+                        layer.label(),
+                        draw.indexCount(),
+                        draw.indexType() == null ? null : draw.indexType().name(),
+                        draw.hasCustomIndexBuffer()
+                ));
+            }
+            sections.add(new TerrainWorkloadSection(section.getSectionNode(), layers));
+        }
+        sections.sort(Comparator.comparingLong(TerrainWorkloadSection::sectionNode));
+        return new TerrainWorkloadSnapshot(
+                "complete",
+                "",
+                visibleSectionCount,
+                nonemptySectionCount,
+                visibleSectionCount - nonemptySectionCount,
+                terrainWorkloadSemanticHash(sections),
+                List.copyOf(sections)
+        );
+    }
+
+    static String terrainWorkloadSemanticHash(final List<TerrainWorkloadSection> sections) {
+        List<TerrainWorkloadSection> sortedSections = new ArrayList<>(sections);
+        sortedSections.sort(Comparator.comparingLong(TerrainWorkloadSection::sectionNode));
+        List<String> canonical = new ArrayList<>();
+        for (TerrainWorkloadSection section : sortedSections) {
+            canonical.add("sectionNode=" + section.sectionNode());
+            List<TerrainWorkloadLayer> sortedLayers = new ArrayList<>(section.layers());
+            sortedLayers.sort(Comparator.comparing(TerrainWorkloadLayer::layer));
+            for (TerrainWorkloadLayer layer : sortedLayers) {
+                canonical.add(
+                        "layer=" + layer.layer()
+                                + "|indexCount=" + layer.indexCount()
+                                + "|indexType=" + String.valueOf(layer.indexType())
+                                + "|customIndex=" + layer.customIndex()
+                );
+            }
+        }
+        return sha256(canonical);
+    }
+
+    private static String terrainWorkloadJson(
+            final int frame,
+            final String backend,
+            final TerrainWorkloadSnapshot snapshot
+    ) {
+        StringBuilder json = new StringBuilder("{\n")
+                .append("  \"schema\": 1,\n")
+                .append("  \"frame\": ").append(frame).append(",\n")
+                .append("  \"backend\": \"").append(jsonEscape(backend)).append("\",\n")
+                .append("  \"source\": \"vanilla-LevelRenderer.visibleSections\",\n")
+                .append("  \"boundary\": \"visible nonempty mesh metadata; not actual submitted draw list or vertex-content identity\",\n")
+                .append("  \"status\": \"").append(jsonEscape(snapshot.status())).append("\",\n")
+                .append("  \"reason\": ").append(jsonStringOrNull(
+                        snapshot.reason().isEmpty() ? null : snapshot.reason()
+                )).append(",\n")
+                .append("  \"visibleSectionCount\": ").append(snapshot.visibleSectionCount()).append(",\n")
+                .append("  \"nonemptySectionCount\": ").append(snapshot.nonemptySectionCount()).append(",\n")
+                .append("  \"emptySectionCount\": ").append(snapshot.emptySectionCount()).append(",\n")
+                .append("  \"semanticHash\": ").append(jsonStringOrNull(snapshot.semanticHash())).append(",\n")
+                .append("  \"sections\": [\n");
+        for (int index = 0; index < snapshot.sections().size(); index++) {
+            TerrainWorkloadSection section = snapshot.sections().get(index);
+            json.append("    {\"sectionNode\": ").append(section.sectionNode())
+                    .append(", \"layers\": [");
+            for (int layerIndex = 0; layerIndex < section.layers().size(); layerIndex++) {
+                TerrainWorkloadLayer layer = section.layers().get(layerIndex);
+                json.append("{\"layer\": \"").append(jsonEscape(layer.layer()))
+                        .append("\", \"indexCount\": ").append(layer.indexCount())
+                        .append(", \"indexType\": ").append(jsonStringOrNull(layer.indexType()))
+                        .append(", \"customIndex\": ").append(layer.customIndex()).append("}");
+                if (layerIndex + 1 < section.layers().size()) {
+                    json.append(", ");
+                }
+            }
+            json.append("]}");
+            if (index + 1 < snapshot.sections().size()) {
+                json.append(',');
+            }
+            json.append('\n');
+        }
+        return json.append("  ]\n}\n").toString();
+    }
+
+    private static String terrainWorkloadText(
+            final int frame,
+            final String backend,
+            final TerrainWorkloadSnapshot snapshot
+    ) {
+        StringBuilder text = new StringBuilder()
+                .append("frame=").append(frame).append('\n')
+                .append("backend=").append(backend).append('\n')
+                .append("source=vanilla-LevelRenderer.visibleSections\n")
+                .append("boundary=visible nonempty mesh metadata; not actual submitted draw list or vertex-content identity\n")
+                .append("status=").append(snapshot.status()).append('\n')
+                .append("reason=").append(snapshot.reason()).append('\n')
+                .append("visibleSectionCount=").append(snapshot.visibleSectionCount()).append('\n')
+                .append("nonemptySectionCount=").append(snapshot.nonemptySectionCount()).append('\n')
+                .append("emptySectionCount=").append(snapshot.emptySectionCount()).append('\n')
+                .append("semanticHash=").append(snapshot.semanticHash()).append('\n');
+        for (TerrainWorkloadSection section : snapshot.sections()) {
+            text.append("sectionNode=").append(section.sectionNode()).append('\n');
+            for (TerrainWorkloadLayer layer : section.layers()) {
+                text.append("  layer=").append(layer.layer())
+                        .append(" indexCount=").append(layer.indexCount())
+                        .append(" indexType=").append(layer.indexType())
+                        .append(" customIndex=").append(layer.customIndex()).append('\n');
+            }
+        }
+        return text.toString();
     }
 
     private static void writePng(final Path path, final byte[] bytes, final int width, final int height)
@@ -1884,6 +2056,11 @@ public final class BackendFrameComparisonClient {
                         + "  \"deviceBackend\": \"" + jsonEscape(observedBackend) + "\",\n"
                         + "  \"sampleBoundary\": \"stable-scene-ready; startup and readback excluded\",\n"
                         + "  \"frameIntervalsMilliseconds\": " + scalarSummary(FRAME_INTERVALS_MILLISECONDS) + ",\n"
+                        + "  \"frameIntervalTotalMilliseconds\": "
+                        + numberOrNull(frameIntervalTotalMilliseconds(FRAME_INTERVALS_MILLISECONDS)) + ",\n"
+                        + "  \"sourceFpsFromFrameIntervalTotal\": "
+                        + numberOrNull(frameIntervalFpsFromTotal(FRAME_INTERVALS_MILLISECONDS)) + ",\n"
+                        + "  \"sourceFpsFromFrameIntervalTotalDefinition\": \"interval count * 1000 / summed interval milliseconds; distinct from P50 interval FPS\",\n"
                         + "  \"sourceFpsFromFrameIntervalP50\": "
                         + numberOrNull(FRAME_INTERVALS_MILLISECONDS.isEmpty()
                         ? 0.0 : 1_000.0 / percentile(FRAME_INTERVALS_MILLISECONDS, 0.50)) + ",\n"
@@ -1912,6 +2089,22 @@ public final class BackendFrameComparisonClient {
                         + "}\n",
                 StandardCharsets.UTF_8
         );
+    }
+
+    static double frameIntervalTotalMilliseconds(final List<Double> intervals) {
+        return intervals.stream()
+                .filter(value -> value != null && Double.isFinite(value) && value > 0.0)
+                .mapToDouble(Double::doubleValue)
+                .sum();
+    }
+
+    static double frameIntervalFpsFromTotal(final List<Double> intervals) {
+        double totalMilliseconds = frameIntervalTotalMilliseconds(intervals);
+        return totalMilliseconds > 0.0
+                ? intervals.stream()
+                .filter(value -> value != null && Double.isFinite(value) && value > 0.0)
+                .count() * 1_000.0 / totalMilliseconds
+                : 0.0;
     }
 
     private static String scalarSummary(final List<Double> values) {
@@ -2478,5 +2671,45 @@ public final class BackendFrameComparisonClient {
             String pipelineClass,
             int metalGeneration
     ) {
+    }
+
+    record TerrainWorkloadLayer(
+            String layer,
+            int indexCount,
+            String indexType,
+            boolean customIndex
+    ) {
+    }
+
+    record TerrainWorkloadSection(long sectionNode, List<TerrainWorkloadLayer> layers) {
+        TerrainWorkloadSection {
+            layers = List.copyOf(layers);
+        }
+    }
+
+    record TerrainWorkloadSnapshot(
+            String status,
+            String reason,
+            int visibleSectionCount,
+            int nonemptySectionCount,
+            int emptySectionCount,
+            String semanticHash,
+            List<TerrainWorkloadSection> sections
+    ) {
+        TerrainWorkloadSnapshot {
+            sections = List.copyOf(sections);
+        }
+
+        static TerrainWorkloadSnapshot unavailable(final String reason) {
+            return new TerrainWorkloadSnapshot(
+                    "unavailable",
+                    reason,
+                    -1,
+                    -1,
+                    -1,
+                    null,
+                    List.of()
+            );
+        }
     }
 }

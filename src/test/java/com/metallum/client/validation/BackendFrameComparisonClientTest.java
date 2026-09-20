@@ -279,4 +279,58 @@ final class BackendFrameComparisonClientTest {
         assertEquals(List.of("null", "null", "null"),
                 List.of(BackendFrameComparisonClient.irisTimingJsonValues()));
     }
+
+    @Test
+    void terrainWorkloadHashIsOrderIndependentButDrawSensitive() {
+        BackendFrameComparisonClient.TerrainWorkloadSection first =
+                new BackendFrameComparisonClient.TerrainWorkloadSection(
+                        12L,
+                        List.of(new BackendFrameComparisonClient.TerrainWorkloadLayer(
+                                "solid", 36, "SHORT", false
+                        ))
+                );
+        BackendFrameComparisonClient.TerrainWorkloadSection second =
+                new BackendFrameComparisonClient.TerrainWorkloadSection(
+                        4L,
+                        List.of(new BackendFrameComparisonClient.TerrainWorkloadLayer(
+                                "translucent", 18, "INT", true
+                        ))
+                );
+
+        String original = BackendFrameComparisonClient.terrainWorkloadSemanticHash(
+                List.of(first, second)
+        );
+        String reordered = BackendFrameComparisonClient.terrainWorkloadSemanticHash(
+                List.of(second, first)
+        );
+        String changedDraw = BackendFrameComparisonClient.terrainWorkloadSemanticHash(
+                List.of(
+                        first,
+                        new BackendFrameComparisonClient.TerrainWorkloadSection(
+                                4L,
+                                List.of(new BackendFrameComparisonClient.TerrainWorkloadLayer(
+                                        "translucent", 19, "INT", true
+                                ))
+                        )
+                )
+        );
+
+        assertEquals(original, reordered);
+        assertFalse(original.equals(changedDraw));
+    }
+
+    @Test
+    void totalFrameIntervalFpsUsesAllIntervalsAndDiffersFromP50Definition() {
+        List<Double> intervals = List.of(10.0, 20.0, 100.0);
+
+        assertEquals(130.0, BackendFrameComparisonClient.frameIntervalTotalMilliseconds(intervals));
+        assertEquals(3_000.0 / 130.0,
+                BackendFrameComparisonClient.frameIntervalFpsFromTotal(intervals),
+                1.0e-9);
+        assertEquals(50.0, 1_000.0 / 20.0);
+        assertFalse(
+                Math.abs(BackendFrameComparisonClient.frameIntervalFpsFromTotal(intervals) - 50.0)
+                        < 1.0e-9
+        );
+    }
 }
