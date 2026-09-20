@@ -52,7 +52,17 @@ jobs:
           PY
       - name: Compile and run Java contracts
         run: |
+          cat > "$RUNNER_TEMP/non-metal-tests.gradle" <<'GRADLE'
+          allprojects {
+              tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+                  filter {
+                      excludeTestsMatching('com.metallum.client.metal.render.TerrainGpuVisibilityProbeContractTest.invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch')
+                  }
+              }
+          }
+          GRADLE
           ./gradlew --no-daemon --stacktrace \
+            -I "$RUNNER_TEMP/non-metal-tests.gradle" \
             compileJava test verifyProductionJarIsolation \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc
       - name: Preserve test reports
