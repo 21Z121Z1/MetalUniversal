@@ -5,6 +5,7 @@ import com.metallum.client.terrain.VanillaTerrainAdmissionTelemetry;
 import java.util.List;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.client.renderer.chunk.SectionTaskDynamicQueue;
+import net.minecraft.core.SectionPos;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -40,10 +41,11 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
             new BoundedTerrainTaskAdmission.TaskOps<>() {
                 @Override
                 public Object ownerIdentity(final SectionRenderDispatcher.RenderSection.SectionTask task) {
-                    // RenderSection owns one final MutableBlockPos instance for its lifetime. Its
-                    // coordinates can change when the section is recycled, but object identity is
-                    // stable and is all the admission layer uses.
-                    return task.getRenderOrigin();
+                    // Freeze the section coordinate at admission time. RenderSection itself is a
+                    // recycled view-area slot and its MutableBlockPos changes when the camera moves;
+                    // using that mutable object's identity would transfer fairness debt across
+                    // unrelated sections.
+                    return SectionPos.asLong(task.getRenderOrigin());
                 }
 
                 @Override
