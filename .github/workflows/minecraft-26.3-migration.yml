@@ -6,6 +6,7 @@ on:
       - agent/minecraft-26.3-renderpearl-migration-20260916
       - agent/mc26.3-p0b-terrain-observability-20260920
       - agent/mc26.3-t1a-vanilla-admission-20260920
+      - agent/mc26.3-t1b-generation-publication-20260920
   workflow_dispatch:
 
 permissions:
@@ -328,6 +329,59 @@ jobs:
           print("T1a vanilla queue source contract: PASS")
           PY
 
+      - name: Verify T1b publication source contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/.minecraft-reference/26.3/sources"
+          python3 - "$root" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          root = Path(sys.argv[1])
+          extractor = (root / "net/minecraft/client/renderer/extract/LevelExtractor.java").read_text()
+          dispatcher = (root / "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java").read_text()
+
+          checks = {
+              "dirty mutation remains explicit": "setSectionDirty(final int sectionX" in extractor,
+              "world transition remains explicit": "void setLevel(" in extractor,
+              "full geometry invalidation remains explicit": "void allChanged(" in extractor,
+              "setSectionMesh has exactly two vanilla callers": dispatcher.count("setSectionMesh(") == 3,
+              "compile task remains a private nested task": "private class CompileTask extends SectionRenderDispatcher.RenderSection.SectionTask" in dispatcher,
+              "compile task still checks cancellation before compiler": bool(re.search(
+                  r"doTask[\s\S]{0,900}isCancelled\.get\(\)[\s\S]{0,1500}sectionCompiler[\s\S]{0,120}\.compile\(",
+                  dispatcher,
+              )),
+          }
+
+          check_start = dispatcher.find("private void checkSectionMesh")
+          vertex_callback = dispatcher.find("private void vertexBufferUploadCallback", check_start)
+          check_body = dispatcher[check_start:vertex_callback] if check_start >= 0 and vertex_callback > check_start else ""
+          checks["callback publication releases returned old mesh"] = (
+              "SectionMesh oldMesh = this.setSectionMesh(compiledSectionMesh);" in check_body
+              and "this.releaseSectionMesh(oldMesh);" in check_body
+          )
+
+          compile_start = dispatcher.find("private class CompileTask")
+          resort_start = dispatcher.find("private class ResortTransparencyTask", compile_start)
+          compile_body = dispatcher[compile_start:resort_start] if compile_start >= 0 and resort_start > compile_start else ""
+          checks["direct empty publication releases returned old mesh"] = (
+              "results.renderedLayers.isEmpty()" in compile_body
+              and "SectionMesh oldMesh = RenderSection.this.setSectionMesh(" in compile_body
+              and "RenderSection.this.releaseSectionMesh(oldMesh);" in compile_body
+          )
+          checks["staging loop checks cancellation"] = bool(re.search(
+              r"while\s*\(!success\)[\s\S]{0,500}isCancelled\.get\(\)",
+              compile_body,
+          ))
+
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("T1b publication contract drift: " + "; ".join(failed))
+          print("T1b publication source contract: PASS")
+          PY
+
       - name: Compile Java migration surface
         shell: bash
         run: |
@@ -354,6 +408,7 @@ jobs:
             --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
             --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
             --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
+            --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \
             --tests com.metallum.client.terrain.VanillaTerrainAdmissionTelemetryTest \
             --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
             --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
