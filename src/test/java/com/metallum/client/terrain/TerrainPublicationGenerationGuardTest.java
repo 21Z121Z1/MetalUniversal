@@ -34,6 +34,11 @@ final class TerrainPublicationGenerationGuardTest {
         assertTrue(stale.cancelled);
         assertEquals(1L, f.guard.snapshot().cancelledObsoleteTasks());
         assertFalse(f.guard.enterTask(stale));
+        assertTrue(f.guard.snapshot().active());
+        assertEquals(
+                TerrainPublicationGenerationGuard.FailOpenReason.NONE,
+                f.guard.snapshot().failOpenReason()
+        );
 
         Task current = new Task();
         f.guard.registerTask(current, 9L);

@@ -158,6 +158,11 @@ public final class TerrainPublicationGenerationGuard<T> {
             }
             token = taskTokens.get(task);
             if (token == null) {
+                // Cancelled tasks are a known terminal state even if their bounded identity
+                // entry has already been pruned. Failing open here would let obsolete work run.
+                if (taskOps.isCancelled(task)) {
+                    return false;
+                }
                 failOpenLocked(FailOpenReason.UNKNOWN_TASK);
                 return true;
             }
