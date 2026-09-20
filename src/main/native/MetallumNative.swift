@@ -727,11 +727,11 @@ private final class Metal4MainQueuePilot {
             commandBuffer.label = "Metallum Main Queue Pilot Buffer \(index)"
             slots.append(Slot(commandBuffer: commandBuffer, allocator: allocator))
         }
-        guard let sourceBuffer = device.makeBuffer(
+        guard let sourceBuffer = device.makeTrackedBuffer(
                   length: Self.validationByteCount,
                   options: .storageModeShared
               ),
-              let destinationBuffer = device.makeBuffer(
+              let destinationBuffer = device.makeTrackedBuffer(
                   length: Self.validationByteCount,
                   options: .storageModeShared
               ) else {
@@ -992,7 +992,7 @@ private final class Metal4MainQueueContext {
               let vertexArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
               let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
               let computeArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
-              let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
+              let uniformBuffer = device.makeTrackedBuffer(length: 65_536, options: .storageModeShared) else {
             return nil
         }
             uniformBuffer.label = "Metallum Uniforms \(index) (Metal 4)"
@@ -2192,7 +2192,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         )
         descriptor.storageMode = .private
         descriptor.usage = usage
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = device.makeTrackedTexture(descriptor: descriptor) else {
             return nil
         }
         texture.label = label
@@ -6529,7 +6529,7 @@ private func metal4MetalFxEncodeV2(
         )
         descriptor.storageMode = .private
         descriptor.usage = [.shaderRead]
-        guard let created = device.makeTexture(descriptor: descriptor) else {
+        guard let created = device.makeTrackedTexture(descriptor: descriptor) else {
             NativeState.metalFxHistoryLock.unlock()
             return 0
         }
@@ -6590,7 +6590,7 @@ private func metal4MetalFxEncodeV2(
             )
             descriptor.storageMode = .private
             descriptor.usage = [.shaderRead, .shaderWrite]
-            if let created = device.makeTexture(descriptor: descriptor) {
+            if let created = device.makeTrackedTexture(descriptor: descriptor) {
                 created.label = "MetalFX Pre-Motion Reactive Validation Snapshot"
                 residencyTrackCreated(created)
                 NativeState.metalFxValidationReactiveTextures[key] = created
@@ -6829,7 +6829,7 @@ private func metal3MetalFxEncodeV2(
                 )
                 previousDepthDescriptor.storageMode = .private
                 previousDepthDescriptor.usage = [.shaderRead]
-                guard let createdDepth = device.makeTexture(descriptor: previousDepthDescriptor) else {
+                guard let createdDepth = device.makeTrackedTexture(descriptor: previousDepthDescriptor) else {
                     NativeState.metalFxHistoryLock.unlock()
                     logMetalFxFailureOnce("motion-v2-previous-depth", "could not allocate previous depth history")
                     return 0
@@ -8982,7 +8982,7 @@ public func metallum_create_buffer(
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         guard length > 0 else { return nil }
-        guard let buffer = device.makeBuffer(length: length, options: options) else {
+        guard let buffer = device.makeTrackedBuffer(length: length, options: options) else {
             return nil
         }
         residencyTrackCreated(buffer)
@@ -9028,7 +9028,7 @@ public func metallum_create_texture_2d(
         descriptor.usage = usage
         descriptor.storageMode = storageMode
         descriptor.hazardTrackingMode = .untracked
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = device.makeTrackedTexture(descriptor: descriptor) else {
             return nil
         }
         texture.label = stringFromOptionalCString(labelPtr)
@@ -9082,7 +9082,7 @@ public func metallum_create_texture(
         descriptor.usage = usage
         descriptor.storageMode = storageMode
         descriptor.hazardTrackingMode = .untracked
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = device.makeTrackedTexture(descriptor: descriptor) else {
             return nil
         }
         texture.label = stringFromOptionalCString(labelPtr)
@@ -10755,21 +10755,21 @@ private final class TerrainGpuVisibilitySceneOwner {
             groupCount: Int,
             slotIndex: Int
         ) {
-            guard let frameBuffer = device.makeBuffer(length: 96, options: .storageModeShared),
-                  let visibilityBuffer = device.makeBuffer(
+            guard let frameBuffer = device.makeTrackedBuffer(length: 96, options: .storageModeShared),
+                  let visibilityBuffer = device.makeTrackedBuffer(
                     length: wordCount * MemoryLayout<UInt32>.stride, options: .storageModeShared
                   ),
-                  let countersBuffer = device.makeBuffer(
+                  let countersBuffer = device.makeTrackedBuffer(
                     length: 2 * MemoryLayout<UInt32>.stride, options: .storageModeShared
                   ),
-                  let prefixLocalBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let blockSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let blockOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let groupSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let groupOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let compactedIndicesBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let compactedCountBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-                  let paramsBuffer = device.makeBuffer(length: 12, options: .storageModeShared) else {
+                  let prefixLocalBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let blockSumsBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let blockOffsetsBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let groupSumsBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let groupOffsetsBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let compactedIndicesBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let compactedCountBuffer = device.makeTrackedBuffer(length: 4, options: .storageModeShared),
+                  let paramsBuffer = device.makeTrackedBuffer(length: 12, options: .storageModeShared) else {
                 return nil
             }
             let descriptor = MTL4ArgumentTableDescriptor()
@@ -11192,7 +11192,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityScene(
             return nil
         }
     }
-    guard let buffer = device.makeBuffer(
+    guard let buffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCandidates),
         length: count * 48,
         options: .storageModeShared
@@ -11359,42 +11359,42 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
           count <= Int.max / MemoryLayout<UInt32>.stride,
           blockCount <= Int.max / MemoryLayout<UInt32>.stride,
           groupCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
-    guard let candidateBuffer = device.makeBuffer(
+    guard let candidateBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCandidates),
         length: candidateBytes,
         options: .storageModeShared
-    ), let matrixBuffer = device.makeBuffer(
+    ), let matrixBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedMatrix),
         length: 16 * MemoryLayout<Float>.stride,
         options: .storageModeShared
-    ), let visibilityBuffer = device.makeBuffer(
+    ), let visibilityBuffer = device.makeTrackedBuffer(
         length: wordCount * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let countersBuffer = device.makeBuffer(
+    ), let countersBuffer = device.makeTrackedBuffer(
         length: 2 * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let prefixLocalBuffer = device.makeBuffer(
+    ), let prefixLocalBuffer = device.makeTrackedBuffer(
         length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let blockSumsBuffer = device.makeBuffer(
+    ), let blockSumsBuffer = device.makeTrackedBuffer(
         length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let blockOffsetsBuffer = device.makeBuffer(
+    ), let blockOffsetsBuffer = device.makeTrackedBuffer(
         length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let groupSumsBuffer = device.makeBuffer(
+    ), let groupSumsBuffer = device.makeTrackedBuffer(
         length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let groupOffsetsBuffer = device.makeBuffer(
+    ), let groupOffsetsBuffer = device.makeTrackedBuffer(
         length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let compactedIndicesBuffer = device.makeBuffer(
+    ), let compactedIndicesBuffer = device.makeTrackedBuffer(
         length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let compactedCountBuffer = device.makeBuffer(
+    ), let compactedCountBuffer = device.makeTrackedBuffer(
         length: MemoryLayout<UInt32>.stride,
         options: .storageModeShared
-    ), let paramsBuffer = device.makeBuffer(
+    ), let paramsBuffer = device.makeTrackedBuffer(
         length: 3 * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ) else {
@@ -11603,7 +11603,7 @@ public func metallum_MTLDevice_createTerrainIndexedIcb(
     descriptor.inheritTriangleFillMode = true
 
     let indexBytes = indexType == .uint16 ? 2 : 4
-    guard let commandBuffer = device.makeIndirectCommandBuffer(
+    guard let commandBuffer = device.makeTrackedIndirectCommandBuffer(
         descriptor: descriptor,
         maxCommandCount: commandCount,
         options: .storageModeShared
@@ -11710,7 +11710,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     }
 
     let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
-    guard let packedBuffer = device.makeBuffer(
+    guard let packedBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCommands),
         length: recordBytes,
         options: .storageModeShared
@@ -11730,7 +11730,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     descriptor.inheritCullMode = true
     descriptor.inheritFrontFacingWinding = true
     descriptor.inheritTriangleFillMode = true
-    guard let commandBuffer = device.makeIndirectCommandBuffer(
+    guard let commandBuffer = device.makeTrackedIndirectCommandBuffer(
         descriptor: descriptor,
         maxCommandCount: commandCount,
         options: .storageModeShared
@@ -11762,7 +11762,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
-    guard let argumentBuffer = device.makeBuffer(
+    guard let argumentBuffer = device.makeTrackedBuffer(
               length: argumentEncoder.encodedLength,
               options: .storageModeShared
           ) else {
@@ -11875,9 +11875,9 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
 
     let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
     let mappingBytes = commandCount * MemoryLayout<Int32>.stride
-    guard let packedBuffer = device.makeBuffer(
+    guard let packedBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
-    ), let mappingBuffer = device.makeBuffer(
+    ), let mappingBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
     ) else {
         return nil
@@ -11895,7 +11895,7 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
     descriptor.inheritCullMode = true
     descriptor.inheritFrontFacingWinding = true
     descriptor.inheritTriangleFillMode = true
-    guard let commandBuffer = device.makeIndirectCommandBuffer(
+    guard let commandBuffer = device.makeTrackedIndirectCommandBuffer(
         descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
     ), let computePipeline = terrainGpuComputePipeline(
         device: device,
@@ -11917,7 +11917,7 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
-    guard let argumentBuffer = device.makeBuffer(
+    guard let argumentBuffer = device.makeTrackedBuffer(
         length: argumentEncoder.encodedLength, options: .storageModeShared
     ) else {
         encoderCountEnd(computeEncoder)
@@ -12044,9 +12044,9 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
     slot.frameBuffer.contents().copyMemory(from: UnsafeRawPointer(packedFrame), byteCount: 96)
     let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
     let mappingBytes = commandCount * MemoryLayout<Int32>.stride
-    guard let packedBuffer = device.makeBuffer(
+    guard let packedBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
-    ), let mappingBuffer = device.makeBuffer(
+    ), let mappingBuffer = device.makeTrackedBuffer(
         bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
     ) else {
         return nil
@@ -12064,7 +12064,7 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
     descriptor.inheritCullMode = true
     descriptor.inheritFrontFacingWinding = true
     descriptor.inheritTriangleFillMode = true
-    guard let commandBuffer = device.makeIndirectCommandBuffer(
+    guard let commandBuffer = device.makeTrackedIndirectCommandBuffer(
         descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
     ), let computePipeline = terrainGpuComputePipeline(
         device: device,
@@ -12086,7 +12086,7 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
         return nil
     }
     let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
-    guard let argumentBuffer = device.makeBuffer(
+    guard let argumentBuffer = device.makeTrackedBuffer(
         length: argumentEncoder.encodedLength, options: .storageModeShared
     ) else {
         encoderCountEnd(computeEncoder)
@@ -13542,7 +13542,7 @@ final class Metal4BumpAllocator {
 
     @discardableResult
     private func appendChunk() -> Bool {
-        guard let buffer = device.makeBuffer(length: chunkCapacity, options: [.storageModeShared]) else {
+        guard let buffer = device.makeTrackedBuffer(length: chunkCapacity, options: [.storageModeShared]) else {
             return false
         }
         buffer.label = "\(label)-chunk\(chunks.count)"

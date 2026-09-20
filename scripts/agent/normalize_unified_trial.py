@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from estimate_attachment_actions import estimate_attachment_actions
+from verify_resource_allocations import validate_renderer_owned_allocations
 
 SCHEMA_VERSION = 2
 SIGNED_INT64_MAX = (1 << 63) - 1
@@ -808,6 +809,7 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         report, measurement_window
     )
     attachment_estimate, attachment_errors = estimate_attachment_actions(report)
+    resource_allocations, resource_allocation_errors = validate_renderer_owned_allocations(report)
     reported_gpu_p50 = finite_number(report.get("gpuP50Milliseconds"))
     gpu_numeric_matches = (
         gpu_submission_p50 is not None
@@ -958,6 +960,7 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
     identity_errors.extend(f"GPU sample evidence: {error}" for error in gpu_sample_errors)
     identity_errors.extend(f"Native encoder ledger evidence: {error}" for error in native_encoder_errors)
     identity_errors.extend(f"Attachment action evidence: {error}" for error in attachment_errors)
+    identity_errors.extend(f"Owned resource allocation evidence: {error}" for error in resource_allocation_errors)
     if process_memory_errors:
         identity_errors.extend(
             f"Process memory evidence: {error}" for error in process_memory_errors
@@ -1006,6 +1009,8 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "process_memory_errors": process_memory_errors,
             "attachment_action_estimate": attachment_estimate,
             "attachment_action_errors": attachment_errors,
+            "renderer_owned_allocations": resource_allocations,
+            "renderer_owned_allocation_errors": resource_allocation_errors,
             "process_memory_definition": process_memory_definition,
             "process_memory": {
                 "present": "processMemory" in report,

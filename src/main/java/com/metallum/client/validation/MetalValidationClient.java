@@ -710,8 +710,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         baselineReported = true;
         long endSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
         var processMemory = baselineMemory.finish(BASELINE_WINDOW_ID, baselineWindow.endFrame());
+        com.metallum.client.metal.render.NativeResourceAllocations.Snapshot resourceAllocations;
         com.metallum.client.metal.render.NativeAttachmentActions.Snapshot attachmentActions;
         try {
+            resourceAllocations = "1".equals(System.getenv("METALLUM_RESOURCE_ALLOCATION_TRACE"))
+                    ? MetalNativeBridge.metallum_resource_allocations_snapshot() : null;
             attachmentActions = ATTACHMENT_ACTIONS
                     ? MetalNativeBridge.metallum_attachment_actions_snapshot() : null;
         } finally {
@@ -838,6 +841,13 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             report.add("nativeEncoderTimingSamples", new GsonBuilder().create().toJsonTree(gpuEncoderSamples));
             report.add("processMemory", new GsonBuilder().create().toJsonTree(processMemory));
+            if (resourceAllocations != null) {
+                var allocationJson = new GsonBuilder().create().toJsonTree(resourceAllocations).getAsJsonObject();
+                allocationJson.addProperty("snapshotWindowId", BASELINE_WINDOW_ID);
+                allocationJson.addProperty("snapshotEndFrameExclusive", baselineWindow.endFrame());
+                allocationJson.addProperty("snapshotPhase", "after-final-gpu-drain");
+                report.add("rendererOwnedAllocations", allocationJson);
+            }
             report.add("nativeEncoderLedger", new GsonBuilder().create().toJsonTree(encoderLedger));
             if (attachmentActions != null) {
                 report.add("nativeAttachmentLedger", new GsonBuilder().create().toJsonTree(attachmentActions));

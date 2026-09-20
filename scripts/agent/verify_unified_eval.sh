@@ -23,6 +23,9 @@ python3 scripts/agent/verify_native_attachment_coverage.py --self-test
 python3 scripts/agent/verify_native_attachment_coverage.py
 python3 scripts/agent/verify_native_attachment_facts.py --self-test
 python3 scripts/agent/test_estimate_attachment_actions.py
+python3 scripts/agent/verify_resource_allocations.py --self-test
+python3 scripts/agent/verify_resource_allocation_coverage.py --self-test
+python3 scripts/agent/verify_resource_allocation_coverage.py
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
 python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
@@ -79,6 +82,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.EncoderMeasurementWindowTest \
   --tests com.metallum.client.validation.ProcessMemoryMeasurementTest \
   --tests com.metallum.client.metal.render.NativeAttachmentActionsTest \
+  --tests com.metallum.client.metal.render.NativeResourceAllocationsTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

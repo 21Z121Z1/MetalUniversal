@@ -283,6 +283,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift"
 	)
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
@@ -306,6 +307,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift"
 }
 
@@ -398,6 +400,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 	)
@@ -426,6 +429,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 }
@@ -544,6 +548,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 	)
@@ -565,6 +570,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 }
@@ -587,6 +593,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 	)
@@ -607,6 +614,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 }
@@ -736,6 +744,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 	)
@@ -758,6 +767,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 		"src/main/native/EncoderCountLedger.swift",
 		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
+		"src/main/native/ResourceAllocationLedger.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 }
@@ -2686,6 +2696,7 @@ tasks.register("buildIOSNative", Exec) {
 			"src/main/native/EncoderCountLedger.swift",
 			"src/main/native/AttachmentActionLedger.swift",
 			"src/main/native/ProcessMemorySampler.swift",
+			"src/main/native/ResourceAllocationLedger.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }
@@ -3441,4 +3452,21 @@ tasks.named("renderContractSyntheticValidation").configure {
 }
 tasks.named("renderContractCase").configure {
 	finalizedBy("renderContractPostRunCleanup")
+}
+
+// Startup-only resource tracking must also prove the disabled path in a fresh JVM.
+[false, true].each { enabled ->
+    tasks.register("nativeResourceAllocations${enabled ? 'Enabled' : 'Disabled'}Test", Test) { task ->
+        task.group = "verification"
+        task.onlyIf { hardwareMetalValidationAvailable() }
+        task.dependsOn tasks.named("buildMacNative"), tasks.named("testClasses")
+        task.testClassesDirs = sourceSets.test.output.classesDirs
+        task.classpath = sourceSets.test.runtimeClasspath
+        task.useJUnitPlatform()
+        task.filter { includeTestsMatching "com.metallum.client.metal.render.NativeResourceAllocationsGpuTest" }
+        task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+        task.environment "METALLUM_RESOURCE_ALLOCATION_TRACE", enabled ? "1" : "0"
+        task.environment "MTL_DEBUG_LAYER", metalApiValidation
+        task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
+    }
 }

@@ -820,6 +820,8 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
             processMemorySample = downcallWithoutCritical(lookup, "metallum_process_memory_sample",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT));
+            resourceAllocationsCopy = downcallWithoutCritical(lookup, "metallum_resource_allocations_copy",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS, INT));
             encoderCountsReset = downcallWithoutCritical(lookup, "metallum_encoder_counts_reset", FunctionDescriptor.of(INT, INT));
             attachmentActionsReset = downcallWithoutCritical(lookup, "metallum_attachment_actions_reset", FunctionDescriptor.of(INT, INT));
             attachmentActionsCopy = downcallWithoutCritical(lookup, "metallum_attachment_actions_copy",
@@ -1239,6 +1241,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
     private static final MethodHandle processMemorySample;
+    private static final MethodHandle resourceAllocationsCopy;
     private static final MethodHandle encoderCountsReset;
     private static final MethodHandle attachmentActionsReset;
     private static final MethodHandle attachmentActionsCopy;
@@ -3747,6 +3750,24 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_gpu_encoder_timing_enabled", throwable);
+        }
+    }
+
+    /** One bounded copy avoids a sizing/copy race while worker threads allocate. */
+    public static com.metallum.client.metal.render.NativeResourceAllocations.Snapshot metallum_resource_allocations_snapshot() {
+        final int capacity = com.metallum.client.metal.render.NativeResourceAllocations.MAX_ROWS;
+        final int width = com.metallum.client.metal.render.NativeResourceAllocations.ROW_WORDS;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment header = arena.allocate(8L * Long.BYTES, Long.BYTES);
+            MemorySegment rows = arena.allocate((long) capacity * width * Long.BYTES, Long.BYTES);
+            int count = (int) resourceAllocationsCopy.invokeExact(rows, capacity, header, 8);
+            if (count < 0 || count > capacity || header.getAtIndex(LONG, 7) != count) {
+                throw new IllegalStateException("Invalid resource snapshot row count: " + count);
+            }
+            return com.metallum.client.metal.render.NativeResourceAllocations.decode(
+                    header.toArray(LONG), rows.asSlice(0, (long) count * width * Long.BYTES).toArray(LONG));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_resource_allocations_copy", throwable);
         }
     }
 

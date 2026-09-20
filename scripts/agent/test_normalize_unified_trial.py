@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import normalize_unified_trial as normalizer  # noqa: E402
 from verify_native_attachment_facts import ATTACHMENT_FIELDS  # noqa: E402
+from verify_resource_allocations import _fixture as allocation_fixture  # noqa: E402
 
 
 def write_trial(report: dict) -> Path:
@@ -175,6 +176,20 @@ def with_attachment_facts(report: dict) -> dict:
 
 
 class MeasurementWindowTests(unittest.TestCase):
+    def test_owned_allocation_snapshot_does_not_fill_residency_metric(self) -> None:
+        report = valid_report()
+        allocation = allocation_fixture()["rendererOwnedAllocations"]
+        allocation.update(snapshotWindowId=4, snapshotEndFrameExclusive=43)
+        report["rendererOwnedAllocations"] = allocation
+        result = normalizer.normalize(write_trial(report))
+        self.assertTrue(result["complete"], result["identity_errors"])
+        self.assertIsNotNone(result["source_summary"]["renderer_owned_allocations"])
+        self.assertFalse(result["metrics"]["resident_render_resource_bytes"]["available"])
+        allocation["totalAllocatedBytes"] += 1
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["source_summary"]["renderer_owned_allocation_errors"])
+
     def test_attachment_action_metric_is_recomputed_per_frame(self) -> None:
         result = normalizer.normalize(write_trial(with_attachment_facts(valid_report())))
         self.assertTrue(result["complete"], result["identity_errors"])

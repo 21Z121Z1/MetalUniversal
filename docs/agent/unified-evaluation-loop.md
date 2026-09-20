@@ -358,6 +358,12 @@ bandwidth measurements; capture observer overhead remains a performance-admissio
 limit. Unsupported or incomplete facts reject the estimate, and absent opt-in
 facts leave the metric unavailable.
 
+The optional [module-owned allocation snapshot](resource-allocation-snapshot.md)
+observes weak-live native resources after final GPU drain. Its allocated-size
+total is deliberately separate from the still-unavailable complete renderer
+residency/peak metric. It requires a process-start environment opt-in and an
+independent row-sum/identity checker.
+
 `processMemory` samples the current client process with public Mach
 `task_info(TASK_VM_INFO)` at each measured frame's beginning and end, plus once
 following the final GPU drain. The expected trace has exactly `2 * frames + 1`
