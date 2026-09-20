@@ -109,15 +109,17 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
         }
 
         admission.recordCompactedVanillaTasks(metallum$compactTerminalVanillaTasks());
-        int available = Math.max(0, admission.queueCapacity() - tasks.size());
-        if (available == 0) {
+        if (!tasks.isEmpty()) {
+            // Do not continuously refill a partially drained batch: vanilla's nearest-distance
+            // selection could then starve one old far task indefinitely. Refill only at the cohort
+            // boundary, while preserving vanilla's own ordering inside each admitted batch.
             return;
         }
 
         BoundedTerrainTaskAdmission.DrainResult<SectionRenderDispatcher.RenderSection.SectionTask> ready =
-                admission.drain(available, System.nanoTime());
+                admission.drain(admission.queueCapacity(), System.nanoTime());
         // Direct insertion is intentional: poll() already runs under the queue monitor and vanilla
-        // immediately applies its own distance + recompile-quota choice across these tasks.
+        // immediately applies its own distance + recompile-quota choice across this bounded batch.
         tasks.addAll(ready.tasks());
         VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
     }
