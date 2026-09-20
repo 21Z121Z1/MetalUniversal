@@ -58,7 +58,9 @@ def verify(report, expected_head, require_packaged=False):
                 "invalid producer labels")
         calls, exclusive = 0, 0
         for symbol, counter in frame["abi"].items():
-            require(symbol.startswith("metallum_"), "unknown ABI symbol")
+            # The existing native ABI also exports legacy MTL* fence symbols.
+            # A name is an observed symbol, not a semantic classification/allowlist.
+            require(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", symbol) is not None, "invalid ABI symbol")
             calls += integer(counter["calls"], 1)
             inclusive = integer(counter["inclusiveNs"])
             own_time = integer(counter["exclusiveNs"])
@@ -113,6 +115,12 @@ def self_test():
                                         "completed": True, "success": True, "gpuServiceNs": 80,
                                         "gpuUnavailableReason": ""}]}]}
     assert verify(fixture, head, True)["cpuFrameNs"]["p99"] == 100
+    legacy = copy.deepcopy(fixture)
+    legacy["frames"][0]["abi"]["MTLRenderCommandEncoder_waitForFence"] = legacy["frames"][0]["abi"].pop("metallum_draw")
+    assert verify(legacy, head)["renderThreadAbiCrossings"]["p50"] == 2
+    unavailable = copy.deepcopy(fixture)
+    unavailable["frames"][0]["commandBuffers"][0].update(gpuServiceNs=None, gpuUnavailableReason="gpu-timestamp-unavailable")
+    assert verify(unavailable, head)["commandBufferGpuServiceNs"]["samples"] == 0
     mutations = [
         lambda x: x["identity"]["build"].update(sourceSha="e" * 40),
         lambda x: x["identity"]["build"].update(dirty=True),

@@ -92,7 +92,7 @@ public final class FrameEvidenceRuntime {
             report.addProperty("validationStatus", validationStatus);
             report.addProperty("shutdownDrained", true);
             Files.createDirectories(output.toAbsolutePath().getParent());
-            Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n");
+            Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(report) + "\n");
         } catch (IOException exception) {
             Metallum.LOGGER.error("Could not export frame evidence to {}", output, exception);
         }
