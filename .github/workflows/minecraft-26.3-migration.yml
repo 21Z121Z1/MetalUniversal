@@ -290,6 +290,28 @@ jobs:
               ),
           }
 
+          schedule_start = dispatcher.find("private void schedule(")
+          clear_start = dispatcher.find("public void clearCompileQueue", schedule_start)
+          schedule_body = dispatcher[schedule_start:clear_start] if schedule_start >= 0 and clear_start > schedule_start else ""
+          checks["schedule enqueues before waking executor"] = (
+              "this.queue.add(task);" in schedule_body
+              and "this.executor.execute(this::runTask);" in schedule_body
+              and schedule_body.index("this.queue.add(task);")
+                  < schedule_body.index("this.executor.execute(this::runTask);")
+          )
+
+          run_start = dispatcher.find("private void runTask()")
+          camera_start = dispatcher.find("public void setCameraPosition", run_start)
+          run_body = dispatcher[run_start:camera_start] if run_start >= 0 and camera_start > run_start else ""
+          checks["completed worker keeps queue progress alive"] = (
+              "this.queue.poll(this.cameraPosition.get())" in run_body
+              and "this.executor.execute(this::runTask);" in run_body
+          )
+          checks["vanilla poll removes cancelled tasks"] = bool(re.search(
+              r"if\s*\(task\.isCancelled\.get\(\)\)\s*\{\s*iterator\.remove\(\)",
+              queue,
+          ))
+
           create_start = dispatcher.find("createCompileTask")
           compile_async = dispatcher.find("public void compileAsync", create_start)
           create_body = dispatcher[create_start:compile_async] if create_start >= 0 and compile_async > create_start else ""
