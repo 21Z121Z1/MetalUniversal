@@ -180,6 +180,8 @@ jobs:
               "SectionCompiler.java",
               "SectionTaskDynamicQueue.java",
               "ChunkSectionsToRender.java",
+              "SectionUpdateTracker.java",
+              "ClientLevel.java",
           ]
           needles = (
               "compileSections",
@@ -196,6 +198,12 @@ jobs:
               "MAX_RECOMPILE_QUOTA",
               "poll(",
               "resetLevelRenderData",
+              "class SectionUpdateTracker",
+              "setSectionDirty",
+              "setSectionDirtyWithNeighbors",
+              "queueLightUpdate",
+              "pollLightUpdates",
+              "onLightUpdate",
           )
 
           for name in target_names:
