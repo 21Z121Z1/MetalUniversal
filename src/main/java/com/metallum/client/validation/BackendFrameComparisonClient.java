@@ -1533,6 +1533,14 @@ public final class BackendFrameComparisonClient {
                         minecraft.player.getXRot()
                 );
         IrisRuntimeReceipt iris = irisRuntimeReceipt();
+        var levelState = minecraft.gameRenderer.gameRenderState().levelRenderState;
+        var cameraState = levelState.cameraRenderState;
+        String terrainInputs = new Gson().toJson(java.util.Map.of(
+                "fog", cameraState.fogData,
+                "projection", cameraState.projectionMatrix.get(new float[16]),
+                "viewRotation", cameraState.viewRotationMatrix.get(new float[16]),
+                "gameTime", levelState.gameTime,
+                "worldPartialTicks", levelState.worldPartialTicks));
         return String.format(
                 Locale.ROOT,
                 "{\n"
@@ -1574,6 +1582,7 @@ public final class BackendFrameComparisonClient {
                         + "  \"freezeSimulationRequested\": %s,\n"
                         + "  \"fixedLightmapBlockFactor\": %s,\n"
                         + "  \"lightmapInputs\": %s,\n"
+                        + "  \"terrainInputs\": %s,\n"
                         + "  \"integratedServerScenarioConfigured\": %s,\n"
                         + "  \"serverSimulationFrozen\": %s,\n"
                         + "  \"clientSimulationFrozen\": %s,\n"
@@ -1641,6 +1650,7 @@ public final class BackendFrameComparisonClient {
                 FREEZE_SIMULATION,
                 FREEZE_SIMULATION ? "1.4" : "null",
                 new Gson().toJson(minecraft.gameRenderer.gameRenderState().lightmapRenderState),
+                terrainInputs,
                 integratedServerConfigured,
                 serverSimulationFrozen,
                 clientSimulationFrozen,
