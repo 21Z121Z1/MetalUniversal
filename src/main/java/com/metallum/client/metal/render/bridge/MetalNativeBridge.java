@@ -831,9 +831,9 @@ public final class MetalNativeBridge {
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
             commandBufferPresentationId = optionalDowncall(lookup, "metallum_command_buffer_presentation_id_v1",
-                    FunctionDescriptor.of(LONG, ADDRESS));
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             presentationCopyEvidence = optionalDowncall(lookup, "metallum_presentation_copy_evidence_v1",
-                    FunctionDescriptor.of(INT, ADDRESS, ADDRESS, INT));
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
             frameEvidenceEnable = optionalDowncall(lookup, "metallum_frame_evidence_enable", FunctionDescriptor.ofVoid(INT));
             commandBufferEncodingCounters = optionalDowncall(lookup, "metallum_command_buffer_encoding_counters_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
