@@ -55,6 +55,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     private final List<ResourceBinding> resources;
     private final Map<String, ResourceBinding> resourcesByName;
+    private final ResourceBinding[] resourcesByIndex;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
     private final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs;
@@ -120,6 +121,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         int maxBindingIndex = -1;
         long resourceMask = 0L;
         for (ResourceBinding binding : resources) {
+            if (binding.bindingIndex() < 0) {
+                throw new IllegalStateException("Pipeline " + info.getLocation() + " has negative binding index " + binding.bindingIndex());
+            }
             maxBindingIndex = Math.max(maxBindingIndex, binding.bindingIndex());
             resourceMask |= 1L << binding.bindingIndex();
         }
@@ -127,6 +131,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             throw new IllegalStateException("Pipeline " + info.getLocation() + " has binding index " + maxBindingIndex + ", limit is " + (Long.SIZE - 1));
         }
         this.allResourceMask = resourceMask;
+        this.resourcesByIndex = new ResourceBinding[maxBindingIndex + 1];
+        for (ResourceBinding binding : resources) {
+            // Preserve the old first-match rule when stages share a binding slot.
+            if (this.resourcesByIndex[binding.bindingIndex()] == null) {
+                this.resourcesByIndex[binding.bindingIndex()] = binding;
+            }
+        }
 
         this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(resources);
         this.cullMode = info.isCull() ? MTLCullMode.Back : MTLCullMode.None;
@@ -549,12 +560,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     @Nullable
     ResourceBinding resource(final int bindingIndex) {
-        for (ResourceBinding resource : this.resources) {
-            if (resource.bindingIndex() == bindingIndex) {
-                return resource;
-            }
-        }
-        return null;
+        return bindingIndex < 0 || bindingIndex >= this.resourcesByIndex.length
+                ? null : this.resourcesByIndex[bindingIndex];
     }
 
     boolean usesStableTerrainSampler(final ResourceBinding binding) {

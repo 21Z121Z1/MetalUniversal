@@ -8,6 +8,7 @@ import java.lang.foreign.ValueLayout;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 final class MetalRenderStatePacketTest {
     private static final MemorySegment ENCODER = MemorySegment.ofAddress(0x1000L);
@@ -81,5 +82,26 @@ final class MetalRenderStatePacketTest {
                 IllegalStateException.class,
                 () -> packet.appendPipeline(ENCODER, MemorySegment.ofAddress(0x2000L))
         );
+    }
+
+    @Test
+    void reusedScratchHasExclusiveLeaseAndResetsThePacket() {
+        MetalRenderStatePacket first = MetalRenderStatePacket.acquireReusable();
+        long address = first.storageForTest().address();
+        first.appendPipeline(ENCODER, MemorySegment.ofAddress(0x2000L));
+        first.close();
+        try (MetalRenderStatePacket next = MetalRenderStatePacket.acquireReusable();
+             MetalRenderStatePacket concurrent = MetalRenderStatePacket.acquireReusable()) {
+            assertEquals(address, next.storageForTest().address());
+            assertNotEquals(address, concurrent.storageForTest().address());
+            assertEquals(0, next.entryCount());
+            assertEquals(MetalRenderStatePacket.HEADER_SIZE,
+                    next.storageForTest().get(ValueLayout.JAVA_INT, 8L));
+            assertEquals(0, next.storageForTest().get(ValueLayout.JAVA_INT, 12L));
+            assertThrows(IllegalStateException.class,
+                    () -> first.appendPipeline(ENCODER, MemorySegment.ofAddress(0x3000L)));
+            assertTrue(next.appendPipeline(ENCODER, MemorySegment.ofAddress(0x4000L)));
+            assertEquals(0, concurrent.entryCount());
+        }
     }
 }

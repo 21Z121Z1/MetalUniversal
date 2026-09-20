@@ -254,6 +254,29 @@ interaction results and phase timestamps. High-frequency hot-path counters and b
 readbacks stay off during this route. The output directory must be new; saves and
 previous recordings are preserved.
 
+The native-max route uses the main display's physical pixel dimensions (not its
+HiDPI logical desktop dimensions), fullscreen, Vanilla's Fabulous preset and the
+26.3 maximum render distance of 32. Vsync is off and the FPS option is Unlimited.
+The report records every quality option and rejects changed settings, reduced
+framebuffer/render-target dimensions, effective view distance below 32, throttling
+or timestamp overflow. A test-only hook counts source `GpuSurface.present` calls
+and frame intervals. These are source submissions, not monitor refresh or generated
+frames. Phase boundaries include source counts for a streaming-only breakdown.
+
+`--reuse-encoder-state` enables the candidate CPU state-shadow and packet-scratch
+reuse. Each live encoder exclusively owns its state; both ordinary and retained
+native-handle closure invalidate/release it. GPU objects and resources are not
+pooled by this change. The production default remains off pending paired evidence.
+Pipeline binding indices use an immutable lookup built at pipeline creation.
+
+The initial JFR flight profile identified state-shadow arrays and indexed-binding
+list iterators as allocation hot spots. Reusing stable objects follows Apple's
+[persistent objects guidance](https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/PersistentObjects.html).
+JFR allocation sample weights are estimates; compare measured GC/frame tails as
+well as allocations. The 16-chunk development recordings are not performance
+baselines for this 32-chunk, native-resolution route. Xcode export can take several
+minutes after capture stops; the launcher allows it to finish saving.
+
 Use the trace to choose a concrete optimization, then compare that candidate under
 the same workload. A completed route proves only its reported actions; it does not
 replace image correctness, paired performance trials or GPU validation. Xcode's

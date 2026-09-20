@@ -13,10 +13,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );
 
-    private final MetalRenderStateShadow stateShadow = STATE_SHADOW_ENABLED
-            ? new MetalRenderStateShadow()
+    private @Nullable MetalRenderStateShadow stateShadow = STATE_SHADOW_ENABLED
+            ? MetalRenderStateShadow.acquire()
             : null;
-    private final @Nullable MetalRenderStatePacket statePacket =
+    private @Nullable MetalRenderStatePacket statePacket =
             MetalRenderStatePacket.createIfAvailable();
 
     MTLRenderCommandEncoder(final MemorySegment handle) {
@@ -515,9 +515,28 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
         try {
             super.endEncoding();
         } finally {
-            if (this.statePacket != null) {
-                this.statePacket.close();
-            }
+            releaseCpuState();
+        }
+    }
+
+    @Override
+    public MemorySegment endEncodingRetainingHandle() {
+        if (!MetalNativeBridge.isNullHandle(this.handle)) flushState(this.handle);
+        try {
+            return super.endEncodingRetainingHandle();
+        } finally {
+            releaseCpuState();
+        }
+    }
+
+    private void releaseCpuState() {
+        if (this.statePacket != null) {
+            this.statePacket.close();
+            this.statePacket = null;
+        }
+        if (this.stateShadow != null) {
+            this.stateShadow.recycle();
+            this.stateShadow = null;
         }
     }
 

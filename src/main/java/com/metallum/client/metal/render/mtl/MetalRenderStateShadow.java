@@ -12,6 +12,23 @@ import java.lang.foreign.MemorySegment;
  * both individual stage shadows.</p>
  */
 final class MetalRenderStateShadow {
+    private static final boolean REUSE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    // At most one idle CPU shadow per encoding thread; concurrent encoders never share it.
+    private static final ThreadLocal<MetalRenderStateShadow> IDLE = new ThreadLocal<>();
+
+    static MetalRenderStateShadow acquire() {
+        MetalRenderStateShadow shadow = REUSE ? IDLE.get() : null;
+        if (shadow == null) return new MetalRenderStateShadow();
+        IDLE.set(null);
+        return shadow;
+    }
+
+    void recycle() {
+        if (!REUSE) return;
+        invalidateAll();
+        if (IDLE.get() == null) IDLE.set(this);
+    }
+
     enum BufferUpdate {
         SKIP,
         OFFSET_ONLY,

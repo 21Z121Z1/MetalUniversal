@@ -66,6 +66,7 @@ tasks.named('processResources') {
             def manifest = new File(destinationDir, 'fabric.mod.json')
             def json = new groovy.json.JsonSlurper().parse(manifest)
             json.entrypoints.'fabric-client-gametest' = ['com.metallum.e2e.MetalUniversalClientGameTest']
+            json.mixins = ['metaluniversal-gameplay.mixins.json']
             manifest.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json)) + '\n'
         }
     }
@@ -109,6 +110,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (gameplay) {
+        jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${providers.gradleProperty('reuseEncoderState').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")
+        jvmArgs.add("-Dmetallum.ci.nativeHeight=${providers.gradleProperty('nativeHeight').get()}")
         jvmArgs.add("-XX:StartFlightRecording=filename=${new File(evidenceDirectory, 'gameplay.jfr').absolutePath},settings=profile,dumponexit=true,maxsize=256m")
     }
 

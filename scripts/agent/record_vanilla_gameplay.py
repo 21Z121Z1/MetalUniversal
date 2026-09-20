@@ -8,6 +8,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -21,6 +22,8 @@ def main():
     parser.add_argument("--jar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--template", default="Game Performance")
+    parser.add_argument("--reuse-encoder-state", action="store_true",
+                        help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
@@ -30,10 +33,21 @@ def main():
         identity = json.loads(archive.read("metallum-build-identity.json"))
     if identity["dirty"]:
         raise RuntimeError("Build the committed source before recording a production artifact")
+    displays = json.loads(subprocess.check_output(
+        ["system_profiler", "SPDisplaysDataType", "-json"], text=True))
+    main_display = next(display for gpu in displays["SPDisplaysDataType"]
+                        for display in gpu.get("spdisplays_ndrvs", [])
+                        if display.get("spdisplays_main") == "spdisplays_yes")
+    native_size = re.search(r"(\d+)\s*x\s*(\d+)", main_display["_spdisplays_pixels"])
+    if native_size is None:
+        raise RuntimeError("Cannot establish the physical display resolution")
+    width, height = map(int, native_size.groups())
     command = [str(root / "gradlew"), "--no-daemon", "-p", str(root / ".github/ci/minecraft-e2e"),
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true", "-PwaitForProfiler=true",
                "-Pp1Metal4Lane=candidate",
+               f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
+               f"-PnativeWidth={width}", f"-PnativeHeight={height}",
                f"-PevidenceDir={output}", "runProductionClientGameTest"]
     recording = None
     # Xcode 27 supplies a Darwin notification when all instruments are recording.
@@ -46,6 +60,7 @@ def main():
     changed = ctypes.c_int()
     notify.notify_check(token, ctypes.byref(changed))
     receipt = {"source": identity, "clientCommand": command, "template": args.template,
+               "display": main_display,
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}
     with (output / "client.log").open("w") as log, (output / "instruments.log").open("w") as trace_log:
         client = subprocess.Popen(command, cwd=root, stdout=log, stderr=subprocess.STDOUT,
@@ -87,7 +102,7 @@ def main():
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
             if recording.poll() is None:
                 recording.send_signal(signal.SIGINT)
-            receipt["traceExitCode"] = recording.wait(timeout=60)
+            receipt["traceExitCode"] = recording.wait(timeout=600)
             receipt["clientExitCode"] = client.wait(timeout=180)
             if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
                 raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
@@ -100,7 +115,7 @@ def main():
             if recording is not None and recording.poll() is None:
                 recording.send_signal(signal.SIGINT)
                 try:
-                    recording.wait(timeout=60)
+                    recording.wait(timeout=600)
                 except subprocess.TimeoutExpired:
                     recording.terminate()
             if client.poll() is None:

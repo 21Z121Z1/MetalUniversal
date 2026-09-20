@@ -39,6 +39,8 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
     );
+    private static final boolean REUSE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    private static final ThreadLocal<MemorySegment> IDLE_STORAGE = new ThreadLocal<>();
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
             16,
@@ -50,7 +52,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
             16
     );
 
-    private final Arena arena;
+    private final @Nullable Arena arena;
     private final MemorySegment storage;
     private int entryCount;
     private boolean active = true;
@@ -60,7 +62,27 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (!ENABLED || !MetalRenderStatePacketBridge.available()) {
             return null;
         }
-        return new MetalRenderStatePacket(CAPACITY);
+        if (!REUSE) return new MetalRenderStatePacket(CAPACITY);
+        return acquireReusable();
+    }
+
+    static MetalRenderStatePacket acquireReusable() {
+        MemorySegment storage = IDLE_STORAGE.get();
+        IDLE_STORAGE.set(null);
+        if (storage == null) {
+            // Native packet decoding is synchronous. Only CPU scratch storage
+            // is reused; no GPU-visible resource or native encoder is pooled.
+            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE, Long.BYTES);
+        }
+        return new MetalRenderStatePacket(storage);
+    }
+
+    private MetalRenderStatePacket(MemorySegment storage) {
+        this.arena = null;
+        this.storage = storage;
+        this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
+        this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
+        resetHeader();
     }
 
     MetalRenderStatePacket(final int capacity) {
@@ -381,6 +403,10 @@ final class MetalRenderStatePacket implements AutoCloseable {
             return;
         }
         this.closed = true;
-        this.arena.close();
+        if (this.arena != null) {
+            this.arena.close();
+        } else if (IDLE_STORAGE.get() == null) {
+            IDLE_STORAGE.set(this.storage);
+        }
     }
 }

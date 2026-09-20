@@ -7,6 +7,8 @@ import java.lang.foreign.MemorySegment;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 
 final class MetalRenderStateShadowTest {
     private static final MemorySegment BUFFER_A = MemorySegment.ofAddress(0x1000L);
@@ -14,6 +16,30 @@ final class MetalRenderStateShadowTest {
     private static final MemorySegment TEXTURE_A = MemorySegment.ofAddress(0x3000L);
     private static final MemorySegment TEXTURE_B = MemorySegment.ofAddress(0x4000L);
     private static final MemorySegment SAMPLER_A = MemorySegment.ofAddress(0x5000L);
+
+    @Test
+    void recycledEncoderStateIsEmptyAndNeverSharedWithAnActiveEncoder() {
+        MetalRenderStateShadow first = MetalRenderStateShadow.acquire();
+        first.setPipeline(BUFFER_A);
+        first.recordBuffer(BUFFER_A, 64, 0, 3);
+        first.setTextureAndSampler(TEXTURE_A, SAMPLER_A, 0, 3);
+        first.setScissor(0, 0, 100, 100);
+        first.recycle();
+        MetalRenderStateShadow next = MetalRenderStateShadow.acquire();
+        MetalRenderStateShadow concurrent = MetalRenderStateShadow.acquire();
+        try {
+            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) assertSame(first, next);
+            else assertNotSame(first, next);
+            assertNotSame(next, concurrent);
+            assertTrue(next.setPipeline(BUFFER_A));
+            assertEquals(MetalRenderStateShadow.BufferUpdate.FULL_BIND, next.classifyBuffer(BUFFER_A, 64, 0, 3));
+            assertTrue(next.setTextureAndSampler(TEXTURE_A, SAMPLER_A, 0, 3));
+            assertTrue(next.setScissor(0, 0, 100, 100));
+        } finally {
+            next.recycle();
+            concurrent.recycle();
+        }
+    }
 
     @Test
     void combinedStageBindSeedsIndividualStageState() {

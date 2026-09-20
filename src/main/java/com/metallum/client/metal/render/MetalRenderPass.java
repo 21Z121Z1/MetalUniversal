@@ -40,7 +40,6 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
@@ -216,10 +215,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         if (textureView != null && sampler != null) {
             validateTextureBinding(device, textureView, sampler, name);
             commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
-            TextureViewAndSampler next = new TextureViewAndSampler(textureView, sampler);
-            TextureViewAndSampler previous = samplers.put(name, next);
+            TextureViewAndSampler previous = samplers.get(name);
             markDescriptorDirty(name);
-            if (!Objects.equals(previous, next)) {
+            if (previous == null || previous.view() != textureView || previous.sampler() != sampler) {
+                samplers.put(name, new TextureViewAndSampler(textureView, sampler));
                 terrainBindingChanged();
             }
         } else if (textureView == null && sampler == null) {
