@@ -28,7 +28,7 @@ public final class MetalPresentationEvidenceGameTest implements FabricClientGame
         });
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            singleplayer.getClientLevel().waitForChunksRender();
+            singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(30);
 
             MetalPresentationTelemetry.Snapshot snapshot = context.computeOnClient(client -> {
