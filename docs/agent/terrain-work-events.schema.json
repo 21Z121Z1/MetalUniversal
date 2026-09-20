@@ -16,7 +16,12 @@
     "events"
   ],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {
+      "enum": [
+        1,
+        2
+      ]
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -28,47 +33,134 @@
         "clock"
       ],
       "properties": {
-        "sourceSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "minecraftVersion": {"const": "26.3"},
-        "trialId": {"type": "string", "minLength": 1, "maxLength": 160},
-        "worldEpoch": {"$ref": "#/$defs/u64"},
-        "clock": {"const": "System.nanoTime"}
+        "sourceSha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "minecraftVersion": {
+          "const": "26.3"
+        },
+        "trialId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "worldEpoch": {
+          "$ref": "#/$defs/u64"
+        },
+        "clock": {
+          "const": "System.nanoTime"
+        }
       }
     },
     "status": {
       "type": "string",
-      "enum": ["complete", "failed", "environment-blocked"]
+      "enum": [
+        "complete",
+        "failed",
+        "environment-blocked"
+      ]
     },
-    "observationStartNanos": {"$ref": "#/$defs/u64"},
-    "observationEndNanos": {"$ref": "#/$defs/u64"},
-    "droppedEvents": {"type": "integer", "minimum": 0},
-    "overflowed": {"type": "boolean"},
-    "failureReason": {"type": ["string", "null"], "minLength": 1},
+    "observationStartNanos": {
+      "$ref": "#/$defs/u64"
+    },
+    "observationEndNanos": {
+      "$ref": "#/$defs/u64"
+    },
+    "droppedEvents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "overflowed": {
+      "type": "boolean"
+    },
+    "failureReason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
     "events": {
       "type": "array",
-      "items": {"$ref": "#/$defs/event"}
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "lossScope": {
+      "type": "string",
+      "const": "observation"
     }
   },
   "allOf": [
     {
       "if": {
-        "properties": {"status": {"const": "complete"}},
-        "required": ["status"]
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "status"
+        ]
       },
       "then": {
-        "properties": {"failureReason": {"type": "null"}}
+        "properties": {
+          "failureReason": {
+            "type": "null"
+          }
+        }
       }
     },
     {
       "if": {
         "properties": {
-          "status": {"enum": ["failed", "environment-blocked"]}
+          "status": {
+            "enum": [
+              "failed",
+              "environment-blocked"
+            ]
+          }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
-          "failureReason": {"type": "string", "minLength": 1}
+          "failureReason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 2
+          }
+        },
+        "required": [
+          "schemaVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "lossScope"
+        ],
+        "properties": {
+          "lossScope": {
+            "const": "observation"
+          },
+          "events": {
+            "items": {
+              "required": [
+                "workId"
+              ]
+            }
+          }
         }
       }
     }
@@ -93,11 +185,21 @@
         "materialGeneration"
       ],
       "properties": {
-        "worldEpoch": {"$ref": "#/$defs/u64"},
-        "sectionId": {"$ref": "#/$defs/i64"},
-        "geometryRevision": {"$ref": "#/$defs/u64"},
-        "lightingRevision": {"$ref": "#/$defs/u64"},
-        "materialGeneration": {"$ref": "#/$defs/u64"}
+        "worldEpoch": {
+          "$ref": "#/$defs/u64"
+        },
+        "sectionId": {
+          "$ref": "#/$defs/i64"
+        },
+        "geometryRevision": {
+          "$ref": "#/$defs/u64"
+        },
+        "lightingRevision": {
+          "$ref": "#/$defs/u64"
+        },
+        "materialGeneration": {
+          "$ref": "#/$defs/u64"
+        }
       }
     },
     "event": {
@@ -115,8 +217,13 @@
         "meshGeneration"
       ],
       "properties": {
-        "sequence": {"type": "integer", "minimum": 0},
-        "key": {"$ref": "#/$defs/workKey"},
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key": {
+          "$ref": "#/$defs/workKey"
+        },
         "stage": {
           "type": "string",
           "enum": [
@@ -131,12 +238,22 @@
             "FIRST_VALID_DRAW",
             "GPU_COMPLETED",
             "CANCELLED",
-            "RETIRED"
+            "RETIRED",
+            "DRAW_NOT_REQUIRED"
           ]
         },
-        "monotonicNanos": {"$ref": "#/$defs/u64"},
-        "bytes": {"type": "integer", "minimum": 0},
-        "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+        "monotonicNanos": {
+          "$ref": "#/$defs/u64"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
         "domain": {
           "type": "string",
           "minLength": 1,
@@ -144,33 +261,68 @@
           "pattern": "^[A-Za-z0-9._/-]+$"
         },
         "frameIndex": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "meshGeneration": {
           "anyOf": [
-            {"$ref": "#/$defs/u64"},
-            {"type": "null"}
+            {
+              "$ref": "#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
           ]
+        },
+        "workId": {
+          "$ref": "#/$defs/u64"
         }
       },
       "allOf": [
         {
           "if": {
-            "properties": {"stage": {"enum": ["PUBLISHED", "FIRST_VALID_DRAW"]}},
-            "required": ["stage"]
+            "properties": {
+              "stage": {
+                "enum": [
+                  "PUBLISHED",
+                  "FIRST_VALID_DRAW",
+                  "DRAW_NOT_REQUIRED"
+                ]
+              }
+            },
+            "required": [
+              "stage"
+            ]
           },
           "then": {
-            "properties": {"meshGeneration": {"$ref": "#/$defs/u64"}}
+            "properties": {
+              "meshGeneration": {
+                "$ref": "#/$defs/u64"
+              }
+            }
           }
         },
         {
           "if": {
-            "properties": {"stage": {"const": "FIRST_VALID_DRAW"}},
-            "required": ["stage"]
+            "properties": {
+              "stage": {
+                "const": "FIRST_VALID_DRAW"
+              }
+            },
+            "required": [
+              "stage"
+            ]
           },
           "then": {
-            "properties": {"frameIndex": {"type": "integer", "minimum": 0}}
+            "properties": {
+              "frameIndex": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
           }
         }
       ]
