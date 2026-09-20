@@ -19,6 +19,7 @@ import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.caffeinemc.mods.sodium.client.util.FlawlessFrames;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -238,6 +239,9 @@ public final class BackendFrameComparisonClient {
                 && !comparisonWorldOpenAttempted
                 && !WORLD_NAME.isEmpty()
                 && minecraft.isGameLoadFinished()
+                // Quick Play may already own the save lock while the integrated
+                // server is still loading. Only fall back from the title screen.
+                && minecraft.gui.screen() instanceof TitleScreen
                 && !minecraft.hasSingleplayerServer()) {
             comparisonWorldOpenAttempted = true;
             if (minecraft.getLevelSource().levelExists(WORLD_NAME)) {
