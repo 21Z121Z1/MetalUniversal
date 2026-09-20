@@ -1,6 +1,7 @@
 package com.metallum.e2e;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
 import com.google.gson.GsonBuilder;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -8,6 +9,11 @@ import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -53,9 +59,33 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         require(irisLoaded == !vanillaOnly, "Iris runtime presence disagrees with the requested lane");
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly);
 
-        try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
+        // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
+        try (TestSingleplayerContext singleplayer = context.worldBuilder()
+                .setUseConsistentSettings(false)
+                .adjustSettings(settings -> {
+                    settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
+                            .worldgenLoadContext().lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(WorldPresets.NORMAL)));
+                    settings.setName("MetalUniversal normal terrain");
+                    settings.setSeed("1");
+                    settings.setGenerateStructures(true);
+                }).create()) {
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
+            JsonObject worldEvidence = singleplayer.getServer().computeOnServer(server -> {
+                var level = server.overworld();
+                require(level.getChunkSource().getGenerator() instanceof NoiseBasedChunkGenerator,
+                        "Expected normal noise-based Overworld generation");
+                JsonObject world = new JsonObject();
+                world.addProperty("generator", level.getChunkSource().getGenerator().getClass().getSimpleName());
+                world.addProperty("seed", level.getSeed());
+                world.addProperty("saveDirectory", singleplayer.getWorldSave().getSaveDirectory().toString());
+                return world;
+            });
+            JsonArray waypoints = new JsonArray();
+            worldEvidence.add("waypoints", waypoints);
+            var start = context.computeOnClient(client -> client.player.blockPosition());
+            singleplayer.getServer().runCommand("gamemode spectator @a");
+            singleplayer.getServer().runCommand("time set noon");
 
             String backend = context.computeOnClient(
                     client -> RenderSystem.getDevice().getDeviceInfo().backendName()
@@ -78,6 +108,22 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
             List<CaptureSample> samples = new ArrayList<>();
             for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
+                // Move beyond the spawn region, allowing ordinary generation and chunk upload.
+                int x = start.getX() + (int) (frameId - 1) * 96;
+                int z = start.getZ() + (int) (frameId - 1) * 48;
+                int y = singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20);
+                singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+                context.waitFor(client -> client.player != null
+                        && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
+                context.waitTicks(10);
+                singleplayer.getConnection().waitForChunksRender();
+                JsonObject waypoint = new JsonObject();
+                waypoint.addProperty("frameId", frameId);
+                waypoint.addProperty("x", x);
+                waypoint.addProperty("y", y);
+                waypoint.addProperty("z", z);
+                waypoints.add(waypoint);
                 RenderContractSnapshot before = renderContractSnapshot();
                 beginRenderContractFrame(frameId);
                 try {
@@ -131,7 +177,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     canonicalMetalFramebuffer.toAbsolutePath().normalize(),
                     contractSnapshot,
                     samples.size(),
-                    selected
+                    selected,
+                    worldEvidence
             );
 
             require(contractSnapshot.completedCaptures() == METAL_CAPTURE_SAMPLES,
@@ -427,7 +474,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             Path metalFramebuffer,
             RenderContractSnapshot contractSnapshot,
             int sampledFrames,
-            CaptureSample selected
+            CaptureSample selected,
+            JsonObject worldEvidence
     ) {
         String json = """
                 {
@@ -482,7 +530,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         );
 
         try {
-            Files.writeString(path, json, StandardCharsets.UTF_8);
+            JsonObject report = JsonParser.parseString(json).getAsJsonObject();
+            report.add("world", worldEvidence);
+            Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n", StandardCharsets.UTF_8);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write runtime evidence " + path, exception);
         }

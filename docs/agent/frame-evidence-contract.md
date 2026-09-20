@@ -73,6 +73,12 @@ commit, then run the actual JAR with Fabric's test driver. It creates disposable
 under the test project's `build/` directory and exercises readback controls, world
 rendering, ordinary presentation and resource reload:
 
+The main world scene explicitly uses the normal Overworld preset, seed `1`, with
+structures enabled. Its eight captures follow a roughly 750-block route beyond
+spawn so ordinary terrain generation and chunk uploads are exercised. The runtime
+report records the actual generator, seed, save path and capture waypoints. Small
+readback controls retain their isolated fixtures; they are not terrain coverage.
+
 ```bash
 ./gradlew --no-daemon jar -x buildIOSNative -x buildIOSSpvc
 ./gradlew --no-daemon -p .github/ci/minecraft-e2e \
