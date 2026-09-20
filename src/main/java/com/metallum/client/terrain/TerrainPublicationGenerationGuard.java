@@ -143,6 +143,9 @@ public final class TerrainPublicationGenerationGuard<T> {
      */
     public boolean enterTask(final T task) {
         Objects.requireNonNull(task, "task");
+        // A previous task that terminated exceptionally must never donate its token to later work
+        // on the same worker thread. Normal exits also clear this slot.
+        activeTask.remove();
         final WorkToken<T> token;
         final boolean current;
         synchronized (this) {
