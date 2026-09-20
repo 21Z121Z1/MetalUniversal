@@ -52,6 +52,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
         }
+        if (mixinClassName.contains(".mixin.terrain.")) {
+            FabricLoader loader = FabricLoader.getInstance();
+            return this.isDefaultGraphicsApi
+                    && Boolean.getBoolean("metallum.terrain.vanillaWorkEvents")
+                    && !loader.isModLoaded("sodium")
+                    && !loader.isModLoaded("iris");
+        }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
