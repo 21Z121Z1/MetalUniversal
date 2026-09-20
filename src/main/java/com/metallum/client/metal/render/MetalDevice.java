@@ -870,11 +870,13 @@ final class MetalDevice implements GpuDeviceBackend {
                 // RenderPearl validates interleaved records with int arithmetic
                 // (drawCount * 3 for indexed commands), so advertise the largest
                 // count that cannot overflow that validation before the backend
-                // sees the buffer. Indirect drawing remains intentionally
-                // unsupported; do not advertise multiDrawIndirect without its
-                // prerequisite drawIndirect capability.
+                // sees the buffer. Both ordinary indirect entry points consume
+                // GPU argument records in the existing Metal 3/4 native loop.
+                // Keep these feature bits aligned with the nonzero indirect
+                // limit: Vanilla 26.3 selects terrain indirect drawing from
+                // that limit plus nonZeroFirstInstance, before frontend checks.
                 new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, Integer.MAX_VALUE / 3, ColorTargetState.MAX_COLOR_TARGETS, Integer.MAX_VALUE),
-                new DeviceFeatures(false, false, true, true, false, false, true, true),
+                new DeviceFeatures(false, false, true, true, true, true, true, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false, false, false),
                 type

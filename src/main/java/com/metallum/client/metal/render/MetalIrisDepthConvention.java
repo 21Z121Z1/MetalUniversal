@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.pipeline.CompareOp;
+import net.fabricmc.loader.api.FabricLoader;
 import net.irisshaders.iris.Iris;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
@@ -46,6 +47,11 @@ public final class MetalIrisDepthConvention {
      * optional method and failing before a render pass is created.
      */
     private static boolean packInUseQuick() {
+        // RenderPearl uses these depth helpers on the common Vanilla path too.
+        // An absent adapter must never be linked, even with a stale opt-in flag.
+        if (!FabricLoader.getInstance().isModLoaded("iris")) {
+            return false;
+        }
         try {
             return (boolean) Iris.class.getMethod("isPackInUseQuick").invoke(null);
         } catch (ReflectiveOperationException | RuntimeException ignored) {

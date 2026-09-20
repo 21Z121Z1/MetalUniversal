@@ -16,6 +16,9 @@ import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
+import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -106,6 +109,92 @@ final class MetalMrtBackendIntegrationTest {
     void oneAndTwoAttachmentReadback() {
         runRgbaAttachmentCount(1);
         runRgbaAttachmentCount(2);
+    }
+
+    @Test
+    void renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance() {
+        String name = "vanilla_indirect";
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) flat out int instance;
+                void main() {
+                    vec2 positions[9] = vec2[](
+                        vec2(0), vec2(0), vec2(0),
+                        vec2(-1, -1), vec2(1, -1), vec2(1, 1),
+                        vec2(-1, -1), vec2(1, 1), vec2(-1, 1)
+                    );
+                    instance = gl_InstanceIndex;
+                    vec2 p = positions[gl_VertexIndex];
+                    gl_Position = vec4(p.x * 0.5 + (instance == 2 ? -0.5 : 0.5), p.y, 0, 1);
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) flat in int instance;
+                layout(location=0) out vec4 color;
+                void main() {
+                    color = instance == 2 ? vec4(0, 1, 0, 1)
+                          : instance == 5 ? vec4(1, 0, 0, 1) : vec4(0, 0, 1, 1);
+                }
+                """);
+        ColorTargetState target = new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                ColorTargetState.WRITE_ALL);
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false).withColorTargetState(0, target).build();
+        // Exercise RenderPearl's actual feature/argument validation, not just a
+        // direct backend call that could hide contradictory capability flags.
+        FrontendRenderPipeline frontendPipeline = new FrontendRenderPipeline(name,
+                device.getOrCompilePipeline(pipeline), pipeline.getVertexFormatBindings(),
+                new Object2IntOpenHashMap<>(), List.of(), List.of(target), false, 0);
+        FrontendCommandEncoder frontend = new FrontendCommandEncoder(null, device, encoder);
+        ByteBuffer indices = ByteBuffer.allocateDirect(7 * Short.BYTES).order(ByteOrder.nativeOrder());
+        indices.putShort((short) 999);
+        for (int index = 7; index <= 12; index++) indices.putShort((short) index);
+        indices.flip();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (MetalGpuTextureView view = new MetalGpuTextureView(textures.get(0), 0, 1);
+             MetalGpuBuffer indexBuffer = (MetalGpuBuffer) device.createBuffer(
+                     () -> "indirect indices", GpuBuffer.USAGE_INDEX, indices)) {
+            for (boolean indexed : List.of(true, false)) {
+                int stride = indexed ? 20 : 16;
+                int prefix = 16;
+                ByteBuffer args = ByteBuffer.allocateDirect(prefix + 2 * stride).order(ByteOrder.nativeOrder());
+                args.position(prefix);
+                for (int firstInstance : List.of(2, 5)) {
+                    args.putInt(6).putInt(1).putInt(indexed ? 1 : 3);
+                    if (indexed) args.putInt(-4);
+                    args.putInt(firstInstance);
+                }
+                args.flip();
+                try (GpuBuffer commands = device.createBuffer(
+                        () -> "indirect arguments", GpuBuffer.USAGE_INDIRECT_PARAMETERS, args)) {
+                    try (RenderPass pass = frontend.createRenderPass(() -> "RenderPearl indirect",
+                            view, Optional.of(new Vector4f(0)))) {
+                        pass.setPipeline(frontendPipeline);
+                        pass.setIndexBuffer(indexBuffer, IndexType.SHORT);
+                        if (indexed) pass.drawIndexedIndirect(commands.slice(prefix, 2L * stride), 2);
+                        else pass.drawIndirect(commands.slice(prefix, 2L * stride), 2);
+                    }
+                    frontend.submit();
+                    device.waitForSubmittedGpuWork();
+                    ByteBuffer pixels = readback(textures.get(0));
+                    for (int y = 0; y < HEIGHT; y++) {
+                        for (int x = 0; x < WIDTH; x++) {
+                            int pixel = (y * WIDTH + x) * 4;
+                            assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "indirect red");
+                            assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "indirect green");
+                            assertByteNear(pixels.get(pixel + 2), 0, "indirect blue");
+                        }
+                    }
+                }
+            }
+        } finally {
+            closeTextures(textures);
+        }
     }
 
     @Test

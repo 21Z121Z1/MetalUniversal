@@ -59,6 +59,25 @@ tasks.withType(Test).configureEach {
 	}
 }
 
+tasks.register("vanillaRenderPearlBoundaryTest", Test) {
+	group = "verification"
+	description = "Checks the common 26.3 backend with Sodium and Iris absent from the runtime classpath."
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	// Filter discovery itself: unrelated adapter test helper classes cannot link
+	// when their optional APIs are deliberately absent.
+	include "**/MetalRenderPearlBoundaryTest*.class"
+	useJUnitPlatform()
+	// Stale launch flags must not turn absent optional APIs into requirements.
+	systemProperty "metallum.iris.semantic", "true"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	doFirst {
+		if (!noOptionalRenderMods) {
+			throw new GradleException("Vanilla boundary check requires -Pmetallum.noOptionalMods=true")
+		}
+	}
+}
+
 java {
 	toolchain {
 		languageVersion = JavaLanguageVersion.of(25)

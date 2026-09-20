@@ -40,10 +40,33 @@ performance report is unchanged; its samples are not silently upgraded to frame 
 Use a disposable **copy** of a test world. The existing validation driver changes its
 test scene. All output remains under ignored `build/` paths. For example:
 
-The canonical `15ea1ef5` Vanilla-without-adapters launch currently has an independent
-Iris class-loading failure in `MetalFxManager.beginFrameInternal`. It reproduces with
-this observer off. Keep that lane failed until adapter isolation is repaired; do not
-substitute a run with Iris installed and label it Vanilla-only.
+The current implementation and validation scope is **Minecraft 26.3 RenderPearl
+Vanilla without Sodium or Iris**. Iris adaptation is outside this work. Existing
+adapter sources do not establish current compatibility or require further adapter work.
+
+The `15ea1ef5` baseline failed before world rendering: common frame/depth helpers
+linked absent Iris classes, then contradictory indirect capability flags rejected
+Vanilla terrain draws. Common adapter entry points now check mod presence, and the
+device advertises the ordinary indirect draws already implemented by both native
+Metal paths. Missing bindings still fail with their own resource error.
+
+The isolated Java check deliberately removes both optional mods and enables a stale
+Iris opt-in flag. The GPU regression goes through the real RenderPearl frontend and
+reads back indexed/non-indexed batches with nonzero argument offsets, first index,
+negative vertex offset and nonzero first instance on Metal 3 and Metal 4:
+
+```bash
+./gradlew --no-daemon -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
+  -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+./gradlew --no-daemon renderContractMetal3NativeTest renderContractMetal4NativeTest \
+  --tests '*renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance' \
+  -x buildIOSNative -x buildIOSSpvc
+```
+
+The migration CI also runs the isolated Java check. It is not GPU or game acceptance.
+Require the real-client report's mod list to omit Sodium/Iris, its main readback to
+pass, and its terrain lifecycle report to pass the independent oracle. A nonzero
+readback proves image production, not full Minecraft pixel parity or performance.
 
 ```bash
 ./gradlew --no-daemon minecraftNativeFullscreenBaseline \

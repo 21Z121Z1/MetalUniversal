@@ -23,6 +23,7 @@ import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.SharedConstants;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.NonNull;
@@ -468,7 +469,8 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         TerrainSceneSnapshot.ResourceSlice indexState = indexBuffer == null
                 ? TerrainSceneSnapshot.ResourceSlice.empty()
                 : terrainResourceSlice(indexBuffer, 0L, indexBuffer.size(), 0);
-        long irisGeneration = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        long irisGeneration = FabricLoader.getInstance().isModLoaded("iris")
+                ? IrisMetalPipelineOverrides.activeGenerationForDiagnostics() : 0L;
         TerrainSceneSnapshot.StateView candidate = new TerrainSceneSnapshot.StateView(
                 compiledPipeline,
                 Math.max(1L, Math.max(terrainPipelineGeneration, irisGeneration)),
@@ -1491,7 +1493,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     ) {
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
             TextureViewAndSampler textureBinding = samplers.get(binding.name());
-            if (textureBinding == null) {
+            if (textureBinding == null && FabricLoader.getInstance().isModLoaded("iris")) {
                 // An Iris terrain override declares the pack's samplers on top
                 // of the ones sodium binds; the registry supplies the remainder.
                 // Returns null for every non-override pipeline, so a genuine
@@ -1522,7 +1524,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE) {
             GpuTextureView view = storageImages.get(binding.name());
-            if (view == null) {
+            if (view == null && FabricLoader.getInstance().isModLoaded("iris")) {
                 view = IrisMetalPipelineOverrides.fallbackStorageImage(
                         device, compiledPipeline, binding.name()
                 );
@@ -1544,7 +1546,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             int logicalBinding = MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name());
             uniformSlice = storageBuffers.get(logicalBinding);
         }
-        if (uniformSlice == null) {
+        if (uniformSlice == null && FabricLoader.getInstance().isModLoaded("iris")) {
             // The pack's uniform block (see fallbackTexture above for the
             // rationale); null for every non-override pipeline.
             uniformSlice = IrisMetalPipelineOverrides.fallbackUniformForDraw(

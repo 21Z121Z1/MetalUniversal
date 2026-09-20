@@ -18,6 +18,7 @@ import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelTargetBundle;
@@ -1202,6 +1203,14 @@ public final class MetalFxManager {
                 ? height : MetalFxConfig.scaledDimension(height, config.scale);
     }
 
+    // The common frame loop runs with MetalFX off and without any optional mods.
+    // Do not initialize the Iris adapter (whose signatures link Iris/Sodium types)
+    // merely to establish that Vanilla has no shader-pack override.
+    static boolean sourceShaderMotionSemanticsProven() {
+        return !FabricLoader.getInstance().isModLoaded("iris")
+                || IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven();
+    }
+
     private void beginFrameInternal() {
         reloadConfigIfRequested();
         // A receipt transaction belongs to one source frame only.  A frame that
@@ -1211,8 +1220,7 @@ public final class MetalFxManager {
         frameSynthesisReceipts.discardFrame();
         sourceFrameStamp = null;
         sourceFrameStampInvalidated = false;
-        irisMotionSemanticsUnprovenThisFrame =
-                !IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven();
+        irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();
         pistonExactCandidates.clear();
         transparencyPhase = false;
         MetalFxMotionTelemetry.beginFrame();
@@ -4648,7 +4656,7 @@ public final class MetalFxManager {
             return null;
         }
         if (irisMotionSemanticsUnprovenThisFrame
-                || !IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven()) {
+                || !sourceShaderMotionSemanticsProven()) {
             irisMotionSemanticsUnprovenThisFrame = true;
             if (telemetryCandidate) {
                 MetalFxMotionTelemetry.recordSourceFrame(

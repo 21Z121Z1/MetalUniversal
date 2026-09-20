@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.renderpearl.api.pipeline.CompareOp;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -8,8 +9,10 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.lwjgl.system.MemoryUtil.memAlloc;
 import static org.lwjgl.system.MemoryUtil.memFree;
@@ -55,6 +58,13 @@ final class MetalRenderPearlBoundaryTest {
                 Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer", false, loader));
         assertThrows(ClassNotFoundException.class, () ->
                 Class.forName("net.irisshaders.iris.mixinterface.GpuTextureInterface", false, loader));
+        assertTrue(assertDoesNotThrow(MetalFxManager::sourceShaderMotionSemanticsProven),
+                "Vanilla frame admission must not initialize an absent Iris adapter");
+        assertFalse(assertDoesNotThrow(MetalIrisDepthConvention::enabledForMetalBackend));
+        assertEquals(0.0, assertDoesNotThrow(() -> MetalIrisDepthConvention.hardwareClear(0.0)));
+        assertEquals(CompareOp.GREATER_THAN, assertDoesNotThrow(() ->
+                MetalIrisDepthConvention.hardwareCompare(CompareOp.GREATER_THAN)));
+        assertEquals(-1.0F, assertDoesNotThrow(() -> MetalIrisDepthConvention.hardwareDepthBias(-1.0F)));
 
         for (String className : List.of(
                 "com.metallum.client.metal.render.MetalBackend",

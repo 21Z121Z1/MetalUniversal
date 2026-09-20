@@ -50,6 +50,11 @@ jobs:
           if '1.26.3' not in supported and '26.3' not in supported:
               raise SystemExit(f'fabric.mod.json does not target Minecraft 26.3: {supported!r}')
           PY
+      - name: Verify Vanilla RenderPearl without optional render mods
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
       - name: Compile and run Java contracts
         run: |
           ./gradlew --no-daemon --stacktrace \
