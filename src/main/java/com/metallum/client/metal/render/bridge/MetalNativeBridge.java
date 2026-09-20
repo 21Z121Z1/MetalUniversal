@@ -465,14 +465,6 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitives",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
-            multiDrawIndexedInterleaved = optionalDowncall(lookup,
-                    "metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, INT, INT, INT));
-            multiDrawPrimitives = optionalDowncall(lookup,
-                    "metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, INT, INT, INT, INT));
             MTLRenderCommandEncoderMultiDrawIndexed = downcall(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_multiDrawIndexed",
@@ -1153,9 +1145,6 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitives;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitives;
     private static final MethodHandle MTLRenderCommandEncoderMultiDrawIndexed;
-    @Nullable private static final MethodHandle multiDrawIndexedInterleaved;
-    @Nullable private static final MethodHandle multiDrawPrimitives;
-    private static final boolean DIRECT_MULTI_DRAW_BATCH = Boolean.getBoolean("metallum.opt.directMultiDrawBatch");
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
     @Nullable
@@ -2821,32 +2810,6 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_drawIndexedPrimitives", throwable);
-        }
-    }
-
-    public static boolean directMultiDrawBatchAvailable() {
-        return DIRECT_MULTI_DRAW_BATCH && multiDrawIndexedInterleaved != null && multiDrawPrimitives != null;
-    }
-
-    public static void multiDrawIndexedInterleaved(MemorySegment encoder, long primitiveType, long indexType,
-                                                   MemorySegment indexBuffer, MemorySegment records,
-                                                   int count, int instances, int firstInstance) {
-        try {
-            multiDrawIndexedInterleaved.invokeExact(segment(encoder), primitiveType, indexType,
-                    segment(indexBuffer), records, count, instances, firstInstance);
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1", throwable);
-        }
-    }
-
-    public static void multiDrawPrimitives(MemorySegment encoder, long primitiveType,
-                                           MemorySegment firstVertices, MemorySegment vertexCounts,
-                                           int stride, int count, int instances, int firstInstance) {
-        try {
-            multiDrawPrimitives.invokeExact(segment(encoder), primitiveType, firstVertices, vertexCounts,
-                    stride, count, instances, firstInstance);
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1", throwable);
         }
     }
 

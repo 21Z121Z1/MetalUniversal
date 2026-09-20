@@ -139,18 +139,6 @@ final class MetalMrtBackendIntegrationTest {
 
     @Test
     void renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance() {
-        checkRenderPearlDrawParameters(false);
-    }
-
-    @Test
-    void renderPearlDirectBatchesPreserveOffsetsAndFirstInstance() {
-        if (Boolean.getBoolean("metallum.opt.directMultiDrawBatch")) {
-            assertTrue(MetalNativeBridge.directMultiDrawBatchAvailable(), "requested batch ABI must be active");
-        }
-        checkRenderPearlDrawParameters(true);
-    }
-
-    private void checkRenderPearlDrawParameters(boolean direct) {
         String name = "vanilla_indirect";
         vertexShaders.put(name, """
                 #version 450
@@ -214,20 +202,7 @@ final class MetalMrtBackendIntegrationTest {
                             view, Optional.of(new Vector4f(0)))) {
                         pass.setPipeline(frontendPipeline);
                         pass.setIndexBuffer(indexBuffer, IndexType.SHORT);
-                        if (direct) {
-                            // Nonzero NIO position, two triangles with distinct first offsets,
-                            // signed base vertex, and an empty record between real draws.
-                            var records = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()).asIntBuffer();
-                            records.position(2);
-                            if (indexed) records.put(new int[]{1, 3, -4, 0, 0, 0, 4, 3, -4});
-                            else records.put(new int[]{3, 3, 0, 0, 6, 3});
-                            records.flip().position(2);
-                            for (int firstInstance : List.of(2, 5)) {
-                                if (indexed) pass.multiDrawIndexed(records, 1, firstInstance, 3);
-                                else pass.multiDraw(records, 1, firstInstance, 3);
-                            }
-                            assertEquals(2, records.position(), "native transport must not consume producer records");
-                        } else if (indexed) pass.drawIndexedIndirect(commands.slice(prefix, 2L * stride), 2);
+                        if (indexed) pass.drawIndexedIndirect(commands.slice(prefix, 2L * stride), 2);
                         else pass.drawIndirect(commands.slice(prefix, 2L * stride), 2);
                     }
                     frontend.submit();

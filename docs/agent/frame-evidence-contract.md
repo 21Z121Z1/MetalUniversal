@@ -191,11 +191,6 @@ P1 transport batching remains conditional on the resulting ABI evidence.
 
 ## Submission transport
 
-`-Dmetallum.opt.directMultiDrawBatch=true` opts into synchronous native submission of
-RenderPearl's existing direct multi-draw records. It preserves order, buffer position,
-first index, signed base vertex and first instance. Direct native-order buffers are
-borrowed only for the call; heap/other-order buffers and triangle fans retain their
-existing Java lowering. The default remains off pending controlled performance evidence.
 The existing separate indexed multi-draw now flushes pending render state before encoding.
 
 ICB eligibility is cached with the final PSO for each attachment signature. Ineligible

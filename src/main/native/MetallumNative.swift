@@ -10069,49 +10069,6 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
     encodingCounters(encoder)?.directDraws += 1
 }
 
-// Synchronous CPU command records: borrowed for this call only. RenderPearl's
-// interleaved indexed layout is three Int32s: firstIndex, indexCount, baseVertex.
-@_cdecl("metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1")
-public func metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1(
-    _ pointer: UnsafeMutableRawPointer, _ primitiveType: MTLPrimitiveType,
-    _ indexType: MTLIndexType, _ indexBuffer: MTLBuffer,
-    _ records: UnsafePointer<Int32>, _ drawCount: Int32,
-    _ instanceCount: Int32, _ baseInstance: Int32
-) {
-    guard drawCount > 0, instanceCount > 0 else { return }
-    let indexBytes = indexType == .uint16 ? 2 : 4
-    for i in 0..<Int(drawCount) {
-        let base = i * 3
-        let count = Int(records[base + 1])
-        if count > 0 {
-            metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
-                pointer, primitiveType, count, indexType, indexBuffer,
-                Int(records[base]) * indexBytes, Int(instanceCount),
-                Int(records[base + 2]), Int(baseInstance))
-        }
-    }
-}
-
-// Stride is in Int32 elements; 2 consumes interleaved first/count records and
-// 1 consumes separate arrays. Order and instance semantics are unchanged.
-@_cdecl("metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1")
-public func metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1(
-    _ pointer: UnsafeMutableRawPointer, _ primitiveType: MTLPrimitiveType,
-    _ firstVertices: UnsafePointer<Int32>, _ vertexCounts: UnsafePointer<Int32>,
-    _ stride: Int32, _ drawCount: Int32, _ instanceCount: Int32, _ baseInstance: Int32
-) {
-    guard drawCount > 0, instanceCount > 0, stride == 1 || stride == 2 else { return }
-    for i in 0..<Int(drawCount) {
-        let index = i * Int(stride)
-        let count = Int(vertexCounts[index])
-        if count > 0 {
-            metallum_MTLRenderCommandEncoder_drawPrimitives(
-                pointer, primitiveType, Int(firstVertices[index]), count,
-                Int(instanceCount), Int(baseInstance))
-        }
-    }
-}
-
 @_cdecl("metallum_MTLRenderCommandEncoder_multiDrawIndexed")
 public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     _ pointer: UnsafeMutableRawPointer,
