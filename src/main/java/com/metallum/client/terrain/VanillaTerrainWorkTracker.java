@@ -17,6 +17,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * publication and draw-authority hooks adapt into this state machine; the state machine never
  * reaches back into game objects to infer policy. Unknown or missing identities therefore produce
  * no event instead of a guessed event.</p>
+ *
+ * <p>Lifecycle mutation and evidence admission share this tracker's monitor. This makes checking
+ * revisions and recording publication atomic with dirty/reset/world transitions, including empty
+ * results published by workers. No game callbacks, GPU waits or file I/O run under this lock.</p>
  */
 public final class VanillaTerrainWorkTracker {
     public enum DirtyKind {
@@ -74,7 +78,7 @@ public final class VanillaTerrainWorkTracker {
      * Marks a real render-input mutation. Callers choose the narrowest kind they can prove.
      * Unknown mutation sources must conservatively use GEOMETRY_AND_LIGHTING.
      */
-    public void markDirty(final long sectionId, final DirtyKind kind) {
+    public synchronized void markDirty(final long sectionId, final DirtyKind kind) {
         Objects.requireNonNull(kind, "kind");
         SectionRevision revision = sectionRevisions.computeIfAbsent(
                 sectionId,
@@ -96,7 +100,7 @@ public final class VanillaTerrainWorkTracker {
      * @param regionIdentity exact immutable snapshot identity; compared by object identity
      * @param queued true for async dispatcher work, false for synchronous near-player work
      */
-    public void beginWork(
+    public synchronized void beginWork(
             final long sectionId,
             final Object regionIdentity,
             final boolean queued,
@@ -118,6 +122,9 @@ public final class VanillaTerrainWorkTracker {
         WorkContext previous = latestBySection.put(sectionId, context);
         if (previous != null && previous != context && !previous.isTerminal()) {
             previous.cancel(recorder, nowNanos, "superseded-before-build");
+            if (previous.isTerminal()) {
+                removeContextMappings(previous);
+            }
         }
         synchronized (regionContexts) {
             WorkContext displaced = regionContexts.put(regionIdentity, context);
@@ -139,13 +146,13 @@ public final class VanillaTerrainWorkTracker {
      * Claims a previously admitted snapshot on the worker actually compiling it.
      * Returns false when the region is unknown/stale; callers must not synthesize a key.
      */
-    public boolean beginBuild(final Object regionIdentity, final long nowNanos) {
+    public synchronized boolean beginBuild(final Object regionIdentity, final long nowNanos) {
         Objects.requireNonNull(regionIdentity, "regionIdentity");
         final WorkContext context;
         synchronized (regionContexts) {
             context = regionContexts.remove(regionIdentity);
         }
-        if (context == null || context.isTerminal()) {
+        if (!admitCurrentWork(context, nowNanos)) {
             activeBuild.remove();
             return false;
         }
@@ -156,7 +163,7 @@ public final class VanillaTerrainWorkTracker {
         return true;
     }
 
-    public void endBuild(final long nowNanos) {
+    public synchronized void endBuild(final long nowNanos) {
         WorkContext context = activeBuild.get();
         if (context == null || context.isTerminal()) {
             return;
@@ -173,18 +180,20 @@ public final class VanillaTerrainWorkTracker {
      * The thread-local remains until staging or direct publication consumes it, which is needed
      * for EMPTY publication where Minecraft substitutes a shared sentinel for the constructed mesh.
      */
-    public void bindConstructedMesh(final Object meshIdentity) {
+    public synchronized void bindConstructedMesh(final Object meshIdentity) {
         Objects.requireNonNull(meshIdentity, "meshIdentity");
         WorkContext context = activeBuild.get();
         if (context == null || context.isTerminal()) {
             return;
         }
         synchronized (meshContexts) {
-            meshContexts.put(meshIdentity, context);
+            // An upload callback may run while another build context is active on this thread.
+            // It must never steal an already associated mesh from its original work item.
+            meshContexts.putIfAbsent(meshIdentity, context);
         }
     }
 
-    public void uploadQueued(
+    public synchronized void uploadQueued(
             final Object meshIdentity,
             final long bytes,
             final String reason,
@@ -205,7 +214,7 @@ public final class VanillaTerrainWorkTracker {
      * The current vanilla upload callback runs after uploader.copyTo has been encoded. This is
      * GPU_ENCODED only; it intentionally does not claim GPU completion or dependency readiness.
      */
-    public void gpuEncoded(
+    public synchronized void gpuEncoded(
             final Object meshIdentity,
             final long bytes,
             final String reason,
@@ -223,24 +232,28 @@ public final class VanillaTerrainWorkTracker {
     /**
      * Records the exact generation made visible by RenderSection.setSectionMesh.
      *
-     * <p>For non-empty meshes the constructed mesh identity is authoritative. For the shared EMPTY
-     * sentinel the active build context is authoritative; if neither is available the event is
-     * rejected rather than attributed to the latest section work by guesswork.</p>
+     * <p>The constructed mesh identity is authoritative. Shared EMPTY sentinels must use
+     * {@link #publishEmpty(long, long, String)} explicitly; an unknown mesh is not an empty mesh.</p>
      */
-    public DrawToken publish(
+    public synchronized DrawToken publish(
             final long sectionId,
             final Object meshIdentity,
             final long nowNanos,
             final String reason
     ) {
-        WorkContext context = contextForMesh(meshIdentity);
-        if (context == null) {
-            WorkContext active = activeBuild.get();
-            if (active != null && active.key.sectionId() == sectionId) {
-                context = active;
-            }
-        }
-        if (context == null || context.isTerminal()) {
+        return publishContext(sectionId, contextForMesh(meshIdentity), nowNanos, reason);
+    }
+
+    /** Only the vanilla hook that recognizes CompiledSectionMesh.EMPTY may use this boundary. */
+    public synchronized DrawToken publishEmpty(final long sectionId, final long nowNanos, final String reason) {
+        return publishContext(sectionId, activeBuild.get(), nowNanos, reason);
+    }
+
+    private DrawToken publishContext(
+            final long sectionId, final WorkContext context, final long nowNanos, final String reason
+    ) {
+        if (context == null || context.key.sectionId() != sectionId
+                || !admitCurrentWork(context, nowNanos) || !context.buildEnded.get()) {
             return null;
         }
         long generation = context.publish(nextMeshGeneration, recorder, nowNanos, reason);
@@ -251,13 +264,13 @@ public final class VanillaTerrainWorkTracker {
         return new DrawToken(context.key, generation);
     }
 
-    public DrawToken drawTokenForMesh(final Object meshIdentity) {
+    public synchronized DrawToken drawTokenForMesh(final Object meshIdentity) {
         WorkContext context = contextForMesh(meshIdentity);
         if (context == null) {
             return null;
         }
         long generation = context.meshGeneration.get();
-        return generation < 0L || context.cancelled.get()
+        return generation < 0L || context.isTerminal() || !hasCurrentRevision(context)
                 ? null
                 : new DrawToken(context.key, generation);
     }
@@ -266,12 +279,12 @@ public final class VanillaTerrainWorkTracker {
      * Reports actual draw authority. Repeated passes/layers are coalesced to the first draw for
      * this exact published mesh generation.
      */
-    public void firstValidDraw(final DrawToken token, final long frameIndex, final long nowNanos) {
+    public synchronized void firstValidDraw(final DrawToken token, final long frameIndex, final long nowNanos) {
         if (token == null || frameIndex < 0L) {
             return;
         }
         WorkContext context = latestContextForToken(token);
-        if (context == null || context.cancelled.get()) {
+        if (context == null || context.isTerminal() || !hasCurrentRevision(context)) {
             return;
         }
         if (context.firstDraw.compareAndSet(false, true)) {
@@ -280,41 +293,40 @@ public final class VanillaTerrainWorkTracker {
         }
     }
 
-    public void retireMesh(final Object meshIdentity, final long nowNanos, final String reason) {
+    public synchronized void retireMesh(final Object meshIdentity, final long nowNanos, final String reason) {
         WorkContext context = contextForMesh(meshIdentity);
         if (context == null) {
             return;
         }
-        context.retire(recorder, nowNanos, reason);
-        synchronized (meshContexts) {
-            meshContexts.remove(meshIdentity);
-        }
-        latestBySection.remove(context.key.sectionId(), context);
-        clearActiveBuildIfMatches(context);
+        terminateContext(context, nowNanos, reason);
     }
 
     /**
      * Cancels not-yet-published work, or retires a published mesh, at a real section reset.
      */
-    public void invalidateSection(final long sectionId, final long nowNanos, final String reason) {
-        WorkContext context = latestBySection.remove(sectionId);
-        if (context == null) {
-            return;
+    public synchronized void invalidateSection(final long sectionId, final long nowNanos, final String reason) {
+        // A replacement build can coexist with an older published mesh still used for drawing.
+        // Reset invalidates both owners, not only the most recently admitted work item.
+        java.util.Set<WorkContext> contexts = Collections.newSetFromMap(new IdentityHashMap<>());
+        WorkContext latest = latestBySection.get(sectionId);
+        if (latest != null) {
+            contexts.add(latest);
         }
-        if (context.meshGeneration.get() >= 0L) {
-            context.retire(recorder, nowNanos, reason);
-        } else {
-            context.cancel(recorder, nowNanos, reason);
+        for (WorkContext context : meshContexts.values()) {
+            if (context.key.sectionId() == sectionId) {
+                contexts.add(context);
+            }
         }
-        removeContextMappings(context);
-        clearActiveBuildIfMatches(context);
+        for (WorkContext context : contexts) {
+            terminateContext(context, nowNanos, reason);
+        }
     }
 
     /**
      * Full compiled-geometry invalidation generation. This may advance more often than a resource
      * pack reload, but never less often than the caller-observed invalidation point.
      */
-    public long advanceMaterialGeneration() {
+    public synchronized long advanceMaterialGeneration() {
         return materialGeneration.updateAndGet(VanillaTerrainWorkTracker::incrementGeneration);
     }
 
@@ -322,7 +334,7 @@ public final class VanillaTerrainWorkTracker {
      * Switches world epoch and invalidates every outstanding context. Call only at the exact
      * LevelExtractor world transition hook, not on camera/view changes.
      */
-    public long advanceWorldEpoch(final long nowNanos) {
+    public synchronized long advanceWorldEpoch(final long nowNanos) {
         List<WorkContext> contexts = new ArrayList<>();
         contexts.addAll(latestBySection.values());
         synchronized (regionContexts) {
@@ -353,7 +365,7 @@ public final class VanillaTerrainWorkTracker {
         return worldEpoch.updateAndGet(VanillaTerrainWorkTracker::incrementGeneration);
     }
 
-    public TerrainWorkEventRecorder.Snapshot snapshot() {
+    public synchronized TerrainWorkEventRecorder.Snapshot snapshot() {
         return recorder.snapshot();
     }
 
@@ -364,6 +376,42 @@ public final class VanillaTerrainWorkTracker {
         synchronized (meshContexts) {
             return meshContexts.get(meshIdentity);
         }
+    }
+
+    private boolean hasCurrentRevision(final WorkContext context) {
+        TerrainWorkEventRecorder.WorkKey key = context.key;
+        SectionRevision revision = sectionRevisions.get(key.sectionId());
+        return key.worldEpoch() == worldEpoch.get()
+                && key.materialGeneration() == materialGeneration.get()
+                && revision != null
+                && key.geometryRevision() == revision.geometry.get()
+                && key.lightingRevision() == revision.lighting.get();
+    }
+
+    private boolean admitCurrentWork(final WorkContext context, final long nowNanos) {
+        if (context == null || context.isTerminal()) {
+            return false;
+        }
+        if (!hasCurrentRevision(context)) {
+            if (context.meshGeneration.get() < 0L) {
+                terminateContext(context, nowNanos, "stale-work-revision");
+            }
+            // Published geometry may still be drawn by vanilla until replacement. Keep its
+            // ownership for the real release hook, but never label a stale draw as first-valid.
+            return false;
+        }
+        return true;
+    }
+
+    private void terminateContext(final WorkContext context, final long nowNanos, final String reason) {
+        if (context.meshGeneration.get() >= 0L) {
+            context.retire(recorder, nowNanos, reason);
+        } else {
+            context.cancel(recorder, nowNanos, reason);
+        }
+        latestBySection.remove(context.key.sectionId(), context);
+        removeContextMappings(context);
+        clearActiveBuildIfMatches(context);
     }
 
     private WorkContext latestContextForToken(final DrawToken token) {

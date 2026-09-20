@@ -92,15 +92,19 @@ abstract class RenderSectionTerrainWorkMixin {
             final SectionMesh mesh,
             final CallbackInfoReturnable<SectionMesh> cir
     ) {
-        if (mesh != CompiledSectionMesh.EMPTY && mesh != CompiledSectionMesh.UNCOMPILED) {
-            // Empty uses a shared sentinel, so it must remain bound to the active build context
-            // rather than acquiring an identity association that could leak across sections.
-            VanillaTerrainWorkTelemetry.bindConstructedMesh(mesh);
+        if (mesh == CompiledSectionMesh.EMPTY) {
+            VanillaTerrainWorkTelemetry.publishEmpty(metallum$self().getSectionNode(), "empty-mesh-published");
+            return;
         }
+        if (mesh == CompiledSectionMesh.UNCOMPILED) {
+            return;
+        }
+        // Block-entity-only results publish directly without a staging callback.
+        VanillaTerrainWorkTelemetry.bindConstructedMesh(mesh);
         VanillaTerrainWorkTelemetry.publish(
                 metallum$self().getSectionNode(),
                 mesh,
-                mesh == CompiledSectionMesh.EMPTY ? "empty-mesh-published" : "all-layers-ready"
+                "all-layers-ready"
         );
     }
 

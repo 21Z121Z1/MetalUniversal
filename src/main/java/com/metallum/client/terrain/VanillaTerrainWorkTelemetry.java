@@ -81,6 +81,10 @@ public final class VanillaTerrainWorkTelemetry {
         TRACKER.retireMesh(meshIdentity, System.nanoTime(), reason);
     }
 
+    public static VanillaTerrainWorkTracker.DrawToken publishEmpty(final long sectionId, final String reason) {
+        return TRACKER.publishEmpty(sectionId, System.nanoTime(), reason);
+    }
+
     public static void invalidateSection(final long sectionId, final String reason) {
         TRACKER.invalidateSection(sectionId, System.nanoTime(), reason);
     }
