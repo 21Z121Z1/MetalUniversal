@@ -18,7 +18,11 @@ public final class VanillaTerrainWorkTelemetry {
     public static final String ENABLE_PROPERTY = "metallum.terrain.vanillaWorkEvents";
 
     private static final VanillaTerrainWorkTracker TRACKER =
-            new VanillaTerrainWorkTracker(new TerrainWorkEventRecorder());
+            new VanillaTerrainWorkTracker(new TerrainWorkEventRecorder(
+                    Integer.getInteger(
+                            "metallum.terrain.eventCapacity",
+                            TerrainWorkEventRecorder.DEFAULT_CAPACITY
+                    )));
     private static final Object LEVEL_LOCK = new Object();
     private static final Map<Object, DrawBatchContext> DRAW_BATCHES =
             Collections.synchronizedMap(new WeakHashMap<>());
@@ -139,6 +143,22 @@ public final class VanillaTerrainWorkTelemetry {
 
     public static TerrainWorkEventRecorder.Snapshot snapshot() {
         return TRACKER.snapshot();
+    }
+
+    public static Map<Long, com.google.gson.JsonObject> reports(
+            final String sourceSha,
+            final String trialId,
+            final boolean completed,
+            final String failureReason
+    ) {
+        return TerrainWorkReport.create(
+                TRACKER.snapshot(),
+                sourceSha,
+                trialId,
+                TRACKER.worldEpoch(),
+                completed,
+                failureReason
+        );
     }
 
     static Map<Object, List<VanillaTerrainWorkTracker.DrawToken>> candidateMap() {
