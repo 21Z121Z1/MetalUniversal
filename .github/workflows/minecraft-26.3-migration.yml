@@ -7,6 +7,7 @@ on:
       - agent/mc26.3-p0b-terrain-observability-20260920
       - agent/mc26.3-t1a-vanilla-admission-20260920
       - agent/mc26.3-t1b-generation-publication-20260920
+      - agent/mc26.3-t3a-upload-contract-probe-20260920
   workflow_dispatch:
 
 permissions:
