@@ -65,6 +65,7 @@ final class BoundedTerrainTaskAdmissionTest {
                 BoundedTerrainTaskAdmission.FailOpenReason.LIVE_SLOT_CONFLICT,
                 f.admission.snapshot().failOpenReason()
         );
+        assertEquals(1L, f.admission.snapshot().liveSlotConflictFailOpenCount());
         assertFalse(f.admission.snapshot().active(), "fail-open must report mutation as inactive");
         assertEquals(BoundedTerrainTaskAdmission.Action.BASELINE, f.offer(new Task(new Object(), "compile"), 999, 30).action());
     }
@@ -87,6 +88,7 @@ final class BoundedTerrainTaskAdmissionTest {
                 BoundedTerrainTaskAdmission.FailOpenReason.DEFERRED_CAPACITY,
                 f.admission.snapshot().failOpenReason()
         );
+        assertEquals(1L, f.admission.snapshot().deferredCapacityFailOpenCount());
     }
 
     @Test
@@ -160,6 +162,7 @@ final class BoundedTerrainTaskAdmissionTest {
                 BoundedTerrainTaskAdmission.FailOpenReason.CANCELLED_COHORT_RECOVERY_BOUND,
                 f.admission.snapshot().failOpenReason()
         );
+        assertEquals(1L, f.admission.snapshot().cancelledCohortRecoveryFailOpenCount());
         assertFalse(f.admission.snapshot().active());
     }
 
@@ -173,6 +176,9 @@ final class BoundedTerrainTaskAdmissionTest {
 
         f.admission.clearDeferredAndReset();
         assertFalse(f.admission.snapshot().failOpen());
+        assertEquals(BoundedTerrainTaskAdmission.FailOpenReason.NONE, f.admission.snapshot().failOpenReason());
+        assertEquals(1L, f.admission.snapshot().deferredCapacityFailOpenCount(),
+                "clear resets the current epoch, not historical fallback counters");
         assertEquals(BoundedTerrainTaskAdmission.Action.DEFER,
                 f.offer(new Task(new Object(), "compile"), 1, 3).action());
     }
