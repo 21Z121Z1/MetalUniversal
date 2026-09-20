@@ -1297,8 +1297,10 @@ private func encodeMetal4Compute<T>(
     afterStages: MTLStages = [.vertex, .fragment, .dispatch, .blit],
     producerBarrierBeforeStages: MTLStages = []
 ) -> Bool {
-    guard let encoder = encoderCountMakeCompute(lease.commandBuffer),
-          let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(
+    guard let encoder = encoderCountMakeCompute(lease.commandBuffer) else { return false }
+    // Every successful factory must end even if uniform allocation fails.
+    defer { encoderCountEnd(encoder) }
+    guard let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(
               uniforms,
               at: lease.slotIndex,
               alignment: 256
@@ -1334,7 +1336,6 @@ private func encodeMetal4Compute<T>(
             visibilityOptions: .device
         )
     }
-    encoderCountEnd(encoder)
     NativeState.metal4AuxiliaryComputeEncodeCount &+= 1
     return true
 }
