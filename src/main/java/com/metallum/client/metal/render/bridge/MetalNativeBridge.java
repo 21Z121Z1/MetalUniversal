@@ -465,6 +465,14 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitives",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
+            multiDrawIndexedInterleaved = optionalDowncall(lookup,
+                    "metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, INT, INT, INT));
+            multiDrawPrimitives = optionalDowncall(lookup,
+                    "metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, INT, INT, INT, INT));
             MTLRenderCommandEncoderMultiDrawIndexed = downcall(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_multiDrawIndexed",
@@ -777,6 +785,9 @@ public final class MetalNativeBridge {
                     "metallum_MTLDevice_makeRenderPipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            renderPipelineSupportsIcb = optionalDowncall(lookup,
+                    "metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             configureLayer = downcall(lookup, "metallum_configure_layer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, DOUBLE, DOUBLE, INT));
             releaseObject = downcall(lookup, "metallum_release_object", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setTransferFence = downcall(lookup, "metallum_set_transfer_fence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
@@ -819,6 +830,10 @@ public final class MetalNativeBridge {
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
+            commandBufferPresentationId = optionalDowncall(lookup, "metallum_command_buffer_presentation_id_v1",
+                    FunctionDescriptor.of(LONG, ADDRESS));
+            presentationCopyEvidence = optionalDowncall(lookup, "metallum_presentation_copy_evidence_v1",
+                    FunctionDescriptor.of(INT, ADDRESS, ADDRESS, INT));
             frameEvidenceEnable = optionalDowncall(lookup, "metallum_frame_evidence_enable", FunctionDescriptor.ofVoid(INT));
             commandBufferEncodingCounters = optionalDowncall(lookup, "metallum_command_buffer_encoding_counters_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
@@ -1138,6 +1153,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitives;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitives;
     private static final MethodHandle MTLRenderCommandEncoderMultiDrawIndexed;
+    @Nullable private static final MethodHandle multiDrawIndexedInterleaved;
+    @Nullable private static final MethodHandle multiDrawPrimitives;
+    private static final boolean DIRECT_MULTI_DRAW_BATCH = Boolean.getBoolean("metallum.opt.directMultiDrawBatch");
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
     @Nullable
@@ -1193,6 +1211,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentBlendState;
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
+    @Nullable
+    private static final MethodHandle renderPipelineSupportsIcb;
     private static final MethodHandle setTransferFence;
     private static final MethodHandle configureLayer;
     private static final MethodHandle releaseObject;
@@ -1227,6 +1247,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
+    @Nullable
+    private static final MethodHandle commandBufferPresentationId;
+    @Nullable
+    private static final MethodHandle presentationCopyEvidence;
     @Nullable
     private static final MethodHandle frameEvidenceEnable;
     @Nullable
@@ -2800,6 +2824,32 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static boolean directMultiDrawBatchAvailable() {
+        return DIRECT_MULTI_DRAW_BATCH && multiDrawIndexedInterleaved != null && multiDrawPrimitives != null;
+    }
+
+    public static void multiDrawIndexedInterleaved(MemorySegment encoder, long primitiveType, long indexType,
+                                                   MemorySegment indexBuffer, MemorySegment records,
+                                                   int count, int instances, int firstInstance) {
+        try {
+            multiDrawIndexedInterleaved.invokeExact(segment(encoder), primitiveType, indexType,
+                    segment(indexBuffer), records, count, instances, firstInstance);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1", throwable);
+        }
+    }
+
+    public static void multiDrawPrimitives(MemorySegment encoder, long primitiveType,
+                                           MemorySegment firstVertices, MemorySegment vertexCounts,
+                                           int stride, int count, int instances, int firstInstance) {
+        try {
+            multiDrawPrimitives.invokeExact(segment(encoder), primitiveType, firstVertices, vertexCounts,
+                    stride, count, instances, firstInstance);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1", throwable);
+        }
+    }
+
     public static void MTLRenderCommandEncoder_multiDrawIndexed(
             final MemorySegment encoder,
             final long primitiveType,
@@ -3526,6 +3576,16 @@ public final class MetalNativeBridge {
         }
     }
 
+    /** Actual compiled-PSO capability; old natives conservatively use ordinary draws. */
+    public static boolean renderPipelineSupportsIcb(final MemorySegment pipeline) {
+        if (renderPipelineSupportsIcb == null || isNullHandle(pipeline)) return false;
+        try {
+            return (int) renderPipelineSupportsIcb.invokeExact(segment(pipeline)) == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers", throwable);
+        }
+    }
+
     public static MemorySegment metallum_MTLDevice_makeRenderPipelineState(
             final MemorySegment device,
             final MemorySegment descriptor
@@ -3733,6 +3793,30 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_gpu_encoder_timing_enabled", throwable);
+        }
+    }
+
+    public static long commandBufferPresentationId(MemorySegment commandBuffer) {
+        if (commandBufferPresentationId == null) return 0;
+        try {
+            return (long) commandBufferPresentationId.invokeExact(segment(commandBuffer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_command_buffer_presentation_id_v1", throwable);
+        }
+    }
+
+    /** Exact native IDs to CAMetalDrawable presentedTime seconds; negative values are explicit absence. */
+    public static double[] presentationEvidence(long[] identifiers) {
+        if (presentationCopyEvidence == null) return null;
+        if (identifiers.length == 0) return new double[0];
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment ids = arena.allocateFrom(ValueLayout.JAVA_LONG, identifiers);
+            MemorySegment output = arena.allocate((long) identifiers.length * Double.BYTES, Double.BYTES);
+            int copied = (int) presentationCopyEvidence.invokeExact(ids, output, identifiers.length);
+            if (copied != identifiers.length) throw new IllegalStateException("Invalid presentation evidence count: " + copied);
+            return output.toArray(ValueLayout.JAVA_DOUBLE);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_presentation_copy_evidence_v1", throwable);
         }
     }
 

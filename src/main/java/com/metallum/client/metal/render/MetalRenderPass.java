@@ -526,6 +526,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
     }
 
+    /** Resolve the exact attachment variant before any ICB-only packing or encoder break. */
+    boolean terrainIcbEligible() {
+        if (!device.terrainIcbEnabled() || compiledPipeline == null || !compiledPipeline.isValid()) return false;
+        return compiledPipeline.supportsIcb(depthAttachmentFormat(), stencilAttachmentFormat());
+    }
+
     /** Used by the no-trace lane before it emits the same one native call. */
     boolean terrainSnapshotAuthorized(final GpuBufferSlice commands, final int drawCount) {
         try {
@@ -553,6 +559,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
         final TerrainSceneSnapshot snapshot;
         try {
+            if (!terrainIcbEligible()) return false;
             snapshot = TerrainSubmissionScope.consumeSnapshot(
                     terrainSnapshotState(),
                     TerrainSceneSnapshot.ResourceSlice.ofGpuSlice(
@@ -833,15 +840,18 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        for (int i = 0; i < drawCount; i++) {
-            int base = drawParameters.position() + i * 3;
-            // RenderPearl exposes the Vulkan struct's native field offsets:
-            // firstIndex=0, indexCount=4, vertexOffset=8.
-            int firstIndex = drawParameters.get(base);
-            int indexCount = drawParameters.get(base + 1);
-            int baseVertex = drawParameters.get(base + 2);
-            if (indexCount > 0) {
-                drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+        if (!enc.tryMultiDrawIndexedInterleaved(primitiveTopology(), indexType, nativeIndexBuffer.nativeHandle(),
+                drawParameters, drawCount, instanceCount, firstInstance)) {
+            for (int i = 0; i < drawCount; i++) {
+                int base = drawParameters.position() + i * 3;
+                // RenderPearl exposes the Vulkan struct's native field offsets:
+                // firstIndex=0, indexCount=4, vertexOffset=8.
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount > 0) {
+                    drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+                }
             }
         }
         if (contractPassToken >= 0L) {
@@ -863,17 +873,14 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
-                enc.handle(),
-                primitiveType.value,
-                indexType.value,
+        enc.multiDrawIndexed(
+                primitiveType,
+                indexType,
                 nativeIndexBuffer.nativeHandle(),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(firstIndexOffsets)),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(indexCounts)),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(vertexOffsets)),
-                drawCount,
-                1L,
-                0L
+                drawCount
         );
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
@@ -906,7 +913,8 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         // Sodium's VKIndirectDrawBatch marks this lexical call as a terrain
         // pass.  The probe ends/reopens only that compatible encoder and keeps
         // the original indirect draw as the sole draw authority.
-        if (TerrainGpuVisibilityProbe.inTerrainDrawScope()) {
+        if (TerrainGpuVisibilityProbe.inTerrainDrawScope()
+                && (TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED || terrainIcbEligible())) {
             // drawIndexedIndirect may be the first native operation in this
             // pass. Create the compatible render encoder before the probe asks
             // the command encoder to retain it for the MTL4 transition.
@@ -1038,23 +1046,24 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        int position = drawParameters.position();
-        for (int draw = 0; draw < drawCount; draw++) {
-            int base = position + draw * 2;
-            // VkMultiDrawInfoEXT layout used by RenderPearl 26.3:
-            // firstVertex=0, vertexCount=4.
-            int firstVertex = drawParameters.get(base);
-            int vertexCount = drawParameters.get(base + 1);
-            if (vertexCount <= 0 || instanceCount <= 0) {
-                continue;
-            }
-            if (primitiveType == MTLPrimitiveType.TriangleFan) {
-                drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
-            } else {
-                enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
+        if (!enc.tryMultiDrawInterleaved(primitiveType, drawParameters, drawCount, instanceCount, firstInstance)) {
+            int position = drawParameters.position();
+            for (int draw = 0; draw < drawCount; draw++) {
+                int base = position + draw * 2;
+                // VkMultiDrawInfoEXT layout used by RenderPearl 26.3:
+                // firstVertex=0, vertexCount=4.
+                int firstVertex = drawParameters.get(base);
+                int vertexCount = drawParameters.get(base + 1);
+                if (vertexCount <= 0 || instanceCount <= 0) {
+                    continue;
+                }
+                if (primitiveType == MTLPrimitiveType.TriangleFan) {
+                    drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
+                } else {
+                    enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
+                }
             }
         }
-
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -1069,21 +1078,22 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        int firstPosition = firstVertices.position();
-        int countPosition = vertexCounts.position();
-        for (int draw = 0; draw < drawCount; draw++) {
-            int firstVertex = firstVertices.get(firstPosition + draw);
-            int vertexCount = vertexCounts.get(countPosition + draw);
-            if (vertexCount <= 0) {
-                continue;
-            }
-            if (primitiveType == MTLPrimitiveType.TriangleFan) {
-                drawTriangleFan(enc, firstVertex, vertexCount, 1, 0);
-            } else {
-                enc.drawPrimitives(primitiveType, firstVertex, vertexCount, 1, 0);
+        if (!enc.tryMultiDraw(primitiveType, firstVertices, vertexCounts, drawCount)) {
+            int firstPosition = firstVertices.position();
+            int countPosition = vertexCounts.position();
+            for (int draw = 0; draw < drawCount; draw++) {
+                int firstVertex = firstVertices.get(firstPosition + draw);
+                int vertexCount = vertexCounts.get(countPosition + draw);
+                if (vertexCount <= 0) {
+                    continue;
+                }
+                if (primitiveType == MTLPrimitiveType.TriangleFan) {
+                    drawTriangleFan(enc, firstVertex, vertexCount, 1, 0);
+                } else {
+                    enc.drawPrimitives(primitiveType, firstVertex, vertexCount, 1, 0);
+                }
             }
         }
-
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),

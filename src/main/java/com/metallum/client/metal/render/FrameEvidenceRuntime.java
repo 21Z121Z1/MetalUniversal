@@ -79,6 +79,7 @@ public final class FrameEvidenceRuntime {
     public static void completed(FrameEvidenceRecorder.Submission submission, boolean success, double start, double end,
                                  MemorySegment commandBuffer) {
         if (!ENABLED || submission == null) return;
+        RECORDER.nativePresentationId(submission, MetalNativeBridge.commandBufferPresentationId(commandBuffer));
         RECORDER.nativeEncoding(submission, MetalNativeBridge.commandBufferEncodingCounters(commandBuffer));
         RECORDER.completed(submission, success, start, end);
     }
@@ -97,6 +98,8 @@ public final class FrameEvidenceRuntime {
         Path output = Path.of(System.getProperty("metallum.frameEvidence.output",
                 System.getProperty("metallum.validation.output", "build/frame-evidence") + "/frame-evidence.json"));
         try {
+            long[] presentationIds = RECORDER.presentationIds();
+            RECORDER.presented(presentationIds, MetalNativeBridge.presentationEvidence(presentationIds));
             JsonObject report = RECORDER.snapshot(IDENTITY);
             report.addProperty("validationStatus", validationStatus);
             report.addProperty("shutdownDrained", true);

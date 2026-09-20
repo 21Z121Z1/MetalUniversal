@@ -88,6 +88,17 @@ def verify(report, expected_head, require_packaged=False):
                     seen_presentations.add(present_id)
                     reason = ""
                 require(submission["presentationIdUnavailableReason"] == reason, "contradictory presentation ID availability")
+            if "presentedTimeSeconds" in submission:
+                timestamp = submission["presentedTimeSeconds"]
+                reason = submission["presentedUnavailableReason"]
+                if timestamp is not None:
+                    require(type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp > 0,
+                            "invalid drawable presented timestamp")
+                    require(submission["presentationRequested"] is True and submission["nativePresentationId"] is not None,
+                            "presented timestamp has no native ticket")
+                    require(reason == "", "presented timestamp contradicts absence reason")
+                else:
+                    require(bool(reason), "missing presented timestamp needs an absence reason")
             require(all(submission[k] is True for k in ("submitted", "completed", "success")), "pending/failed command buffer")
             counters = submission.get("nativeEncoding")
             if counters is not None:

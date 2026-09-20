@@ -69,6 +69,31 @@ class FrameEvidenceRecorderTest {
         assertEquals(102, frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("nativePresentationId").getAsLong());
     }
 
+    @Test void presentationCallbacksJoinExactTicketsInsteadOfCompletionOrder() {
+        recorder.beginFrame(true);
+        var first = recorder.commandBuffer(8);
+        recorder.presentationRequested(first, 0); // Metal 4: assigned at native commit.
+        recorder.submitted(first);
+        recorder.nativePresentationId(first, 101);
+        recorder.completed(first, true, 1, 2);
+        recorder.endFrame();
+        recorder.beginFrame(true);
+        var second = recorder.commandBuffer(9);
+        recorder.presentationRequested(second, 102);
+        recorder.submitted(second);
+        recorder.completed(second, true, 2, 3);
+        recorder.endFrame();
+        recorder.presented(new long[]{102, 101}, new double[]{0, 10.5});
+        var firstRow = frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject();
+        var secondRow = frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject();
+        assertEquals(10.5, firstRow.get("presentedTimeSeconds").getAsDouble());
+        assertEquals("", firstRow.get("presentedUnavailableReason").getAsString());
+        assertTrue(secondRow.get("presentedTimeSeconds").isJsonNull());
+        assertEquals("presented-callback-pending", secondRow.get("presentedUnavailableReason").getAsString());
+        recorder.nativePresentationId(first, 999);
+        assertEquals("mismatched-native-presentation-id", frame(0).get("failure").getAsString());
+    }
+
     @Test void openFramesCrossFrameSubmissionAndDuplicateCompletionRemainVisible() {
         recorder.beginFrame(true);
         var submission = recorder.commandBuffer(0);

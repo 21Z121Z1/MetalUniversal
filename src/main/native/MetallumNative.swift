@@ -142,6 +142,7 @@ private enum NativeState {
     // parameter. Set at device init, cleared before the fence is released.
     static var transferFence: MTLFence?
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
+    static let depthStencilStateLock = NSLock()
     static var samplerStates: [SamplerKey: MTLSamplerState] = [:]
     // Disk-backed PSO cache: descriptors compiled through
     // metallum_MTLDevice_makeRenderPipelineState look up this archive first
@@ -450,8 +451,9 @@ private enum NativeState {
 /// Thread-independent state for ordinary CAMetalLayer presentation evidence.
 ///
 /// This deliberately excludes MetalFX frame-generation drawables.  The state
-/// accepts only finite, strictly increasing presented timestamps, so a zero or
-/// out-of-order WindowServer callback cannot replace the last useful interval.
+/// updates intervals only with finite, strictly increasing timestamps, so a zero
+/// or out-of-order callback cannot replace the last useful interval. Optional
+/// per-ticket evidence preserves valid timestamps independently of callback order.
 /// Pending IDs make a command-buffer failure and a later drawable callback
 /// idempotent without using a per-frame telemetry object.
 struct NativePresentationTelemetryState {
@@ -461,6 +463,10 @@ struct NativePresentationTelemetryState {
     private(set) var latestDrawableWaitNanos: Int64 = -1
     private(set) var framesInFlight: Int64 = 0
     private var lastPresentedTime: CFTimeInterval = 0.0
+    // First-N evidence, opt-in; never retains a drawable or command buffer.
+    // 0 pending, -1 cancelled/failed, -2 invalid timestamp, -3 not retained.
+    private var presentedEvidence: [UInt64: Double] = [:]
+    static let evidenceCapacity = 65_536
 
     init() {
         pendingPresentationIDs.reserveCapacity(8)
@@ -471,10 +477,13 @@ struct NativePresentationTelemetryState {
         latestDrawableWaitNanos = nanos
     }
 
-    mutating func schedulePresentation() -> UInt64 {
+    mutating func schedulePresentation(recordEvidence: Bool = false) -> UInt64 {
         let identifier = nextPresentationID
         nextPresentationID &+= 1
         pendingPresentationIDs.insert(identifier)
+        if recordEvidence && presentedEvidence.count < Self.evidenceCapacity {
+            presentedEvidence[identifier] = 0
+        }
         framesInFlight += 1
         return identifier
     }
@@ -483,6 +492,9 @@ struct NativePresentationTelemetryState {
     mutating func resolvePresentation(_ identifier: UInt64) -> Bool {
         guard pendingPresentationIDs.remove(identifier) != nil else { return false }
         framesInFlight = max(0, framesInFlight - 1)
+        if presentedEvidence[identifier] == 0 {
+            presentedEvidence[identifier] = -1
+        }
         return true
     }
 
@@ -490,14 +502,16 @@ struct NativePresentationTelemetryState {
         _ identifier: UInt64,
         presentedTime: CFTimeInterval
     ) {
-        guard pendingPresentationIDs.contains(identifier),
-              presentedTime.isFinite,
+        guard pendingPresentationIDs.contains(identifier) else { return }
+        guard presentedTime.isFinite,
               presentedTime > 0.0 else {
             // A callback with a zero timestamp still closes the pending
             // drawable, but it is not evidence of a display interval.
+            if presentedEvidence[identifier] != nil { presentedEvidence[identifier] = -2 }
             _ = resolvePresentation(identifier)
             return
         }
+        if presentedEvidence[identifier] != nil { presentedEvidence[identifier] = presentedTime }
         if lastPresentedTime > 0.0, presentedTime > lastPresentedTime {
             let interval = (presentedTime - lastPresentedTime) * 1_000_000_000.0
             if interval.isFinite,
@@ -510,6 +524,10 @@ struct NativePresentationTelemetryState {
             lastPresentedTime = presentedTime
         }
         _ = resolvePresentation(identifier)
+    }
+
+    func presentedTimeEvidence(_ identifier: UInt64) -> Double {
+        presentedEvidence[identifier] ?? -3
     }
 }
 
@@ -527,7 +545,7 @@ private final class NativePresentationTelemetry {
 
     func schedulePresentation(_ drawable: CAMetalDrawable) -> UInt64 {
         lock.lock()
-        let identifier = state.schedulePresentation()
+        let identifier = state.schedulePresentation(recordEvidence: NativeState.frameEvidenceEnabled)
         lock.unlock()
 
         drawable.addPresentedHandler { [weak self] drawable in
@@ -546,6 +564,15 @@ private final class NativePresentationTelemetry {
         lock.lock()
         _ = state.resolvePresentation(identifier)
         lock.unlock()
+    }
+
+    func copyPresentedEvidence(_ identifiers: UnsafePointer<Int64>, _ output: UnsafeMutablePointer<Double>, count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        for index in 0..<count {
+            output[index] = identifiers[index] > 0
+                ? state.presentedTimeEvidence(UInt64(identifiers[index])) : -3
+        }
     }
 
     func latestPresentIntervalNanos() -> Int64 {
@@ -576,6 +603,7 @@ private final class NativeCommandEncodingCounters {
     var blitEncoders: Int64 = 0
     var directDraws: Int64 = 0
     var indirectDraws: Int64 = 0
+    var presentationID: UInt64 = 0
 }
 
 private var nativeEncodingCountersKey: UInt8 = 0
@@ -595,6 +623,26 @@ private func recordRenderEncoder(_ encoder: MTLRenderCommandEncoder, commandBuff
 public func metallum_frame_evidence_enable(_ enabled: Int32) {
     // Configured once during bridge initialization, before command buffers exist.
     NativeState.frameEvidenceEnabled = enabled != 0
+}
+
+// Read after completion, before Java releases the owning command buffer/lease.
+// Metal 4 assigns its ID at commit; preserve it separately from lease cleanup.
+@_cdecl("metallum_command_buffer_presentation_id_v1")
+public func metallum_command_buffer_presentation_id_v1(_ pointer: UnsafeMutableRawPointer) -> Int64 {
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+        return Int64(lease.encodingCounters?.presentationID ?? 0)
+    }
+    return Int64(encodingCounters(metal3CommandBuffer(pointer))?.presentationID ?? 0)
+}
+
+// Synchronous borrowed arrays. No wait for WindowServer; pending stays pending.
+@_cdecl("metallum_presentation_copy_evidence_v1")
+public func metallum_presentation_copy_evidence_v1(
+    _ identifiers: UnsafePointer<Int64>?, _ output: UnsafeMutablePointer<Double>?, _ count: Int32
+) -> Int32 {
+    guard count >= 0, let identifiers, let output else { return -1 }
+    NativePresentationTelemetry.shared.copyPresentedEvidence(identifiers, output, count: Int(count))
+    return count
 }
 
 @_cdecl("metallum_command_buffer_encoding_counters_v1")
@@ -1139,6 +1187,7 @@ private final class Metal4MainQueueContext {
             // Metal 4 does not arrange the drawable present until this submit
             // path. Delay accounting until the lease is actually submitted.
             lease.presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+            lease.encodingCounters?.presentationID = lease.presentationTelemetryID ?? 0
         }
         let options = MTL4CommitOptions()
         let presentationTelemetryID = lease.presentationTelemetryID
@@ -7676,6 +7725,10 @@ public func metallum_metalfx_stop_frame_generation() {
 }
 
 private func ensureDepthStencilState(device: MTLDevice, compareOp: MTLCompareFunction, writeDepth: Bool) -> MTLDepthStencilState? {
+    // Pipeline preparation may run on RenderPearl's loading executor while a
+    // render-thread clear uses the same immutable state cache.
+    NativeState.depthStencilStateLock.lock()
+    defer { NativeState.depthStencilStateLock.unlock() }
     let key = DepthStencilKey(deviceAddress: objectAddress(device), compareOp: compareOp, writeDepth: writeDepth)
     if let cached = NativeState.depthStencilStates[key] {
         return cached
@@ -9850,6 +9903,12 @@ public func metallum_MTLRenderCommandEncoder_setCullMode(_ pointer: UnsafeMutabl
     encoder.setCullMode(cullMode)
 }
 
+@_cdecl("metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers")
+public func metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers(_ pipeline: MTLRenderPipelineState) -> Int32 {
+    // Borrowed PSO; query the final state after compiler fallback, not its descriptor.
+    return pipeline.supportIndirectCommandBuffers ? 1 : 0
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setTriangleFillMode")
 public func metallum_MTLRenderCommandEncoder_setTriangleFillMode(_ pointer: UnsafeMutableRawPointer, _ fillMode: MTLTriangleFillMode) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
@@ -10008,6 +10067,49 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
         baseInstance: baseInstance
     )
     encodingCounters(encoder)?.directDraws += 1
+}
+
+// Synchronous CPU command records: borrowed for this call only. RenderPearl's
+// interleaved indexed layout is three Int32s: firstIndex, indexCount, baseVertex.
+@_cdecl("metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1")
+public func metallum_MTLRenderCommandEncoder_multiDrawIndexedInterleaved_v1(
+    _ pointer: UnsafeMutableRawPointer, _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType, _ indexBuffer: MTLBuffer,
+    _ records: UnsafePointer<Int32>, _ drawCount: Int32,
+    _ instanceCount: Int32, _ baseInstance: Int32
+) {
+    guard drawCount > 0, instanceCount > 0 else { return }
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for i in 0..<Int(drawCount) {
+        let base = i * 3
+        let count = Int(records[base + 1])
+        if count > 0 {
+            metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+                pointer, primitiveType, count, indexType, indexBuffer,
+                Int(records[base]) * indexBytes, Int(instanceCount),
+                Int(records[base + 2]), Int(baseInstance))
+        }
+    }
+}
+
+// Stride is in Int32 elements; 2 consumes interleaved first/count records and
+// 1 consumes separate arrays. Order and instance semantics are unchanged.
+@_cdecl("metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1")
+public func metallum_MTLRenderCommandEncoder_multiDrawPrimitives_v1(
+    _ pointer: UnsafeMutableRawPointer, _ primitiveType: MTLPrimitiveType,
+    _ firstVertices: UnsafePointer<Int32>, _ vertexCounts: UnsafePointer<Int32>,
+    _ stride: Int32, _ drawCount: Int32, _ instanceCount: Int32, _ baseInstance: Int32
+) {
+    guard drawCount > 0, instanceCount > 0, stride == 1 || stride == 2 else { return }
+    for i in 0..<Int(drawCount) {
+        let index = i * Int(stride)
+        let count = Int(vertexCounts[index])
+        if count > 0 {
+            metallum_MTLRenderCommandEncoder_drawPrimitives(
+                pointer, primitiveType, Int(firstVertices[index]), count,
+                Int(instanceCount), Int(baseInstance))
+        }
+    }
 }
 
 @_cdecl("metallum_MTLRenderCommandEncoder_multiDrawIndexed")
@@ -12693,6 +12795,7 @@ private func encodePresentTextureToDrawable(
         // installation. The Java owner receives the id and cancels it if the
         // command buffer is closed without a later commit.
         let presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+        encodingCounters(commandBuffer)?.presentationID = presentationTelemetryID
         commandBuffer.addCompletedHandler { completedCommandBuffer in
             if completedCommandBuffer.error != nil {
                 NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)

@@ -15,7 +15,8 @@ existing ABI descriptors, resource ownership and presentation unchanged.
 | ABI count and inclusive/exclusive duration | All four central `MetalNativeBridge` downcall factories | Render-thread calls inside this frame only; worker/startup calls excluded; duration includes native waits/compilation |
 | Native encoding counts | Actual successful encoder creation and emitted direct/ordinary-indirect draw commands | Partial: main encoder bridges, clear helpers and ordinary presentation; excludes MetalFX and GPU-scene/ICB internal work |
 | GPU service time | Existing main command-buffer completion and GPU start/end timestamps | One row per submission; never renamed GPU frame critical-path time or present time |
-| Native presentation ticket | Existing ordinary-present encode return, attached to the owning command-buffer record before commit | Scheduling identity only, not a displayed frame; Metal 4 assigns its ticket at native commit and currently returns no encode-time ticket |
+| Native presentation ticket | Ordinary-present encode return or the same owning command buffer at completion | Metal 4 assigns its ticket at native commit; never joined by timestamp proximity |
+| Presented timestamp | Existing `CAMetalDrawable.addPresentedHandler`, keyed by that native ticket | Source frames only; `presentedTimeSeconds` is not GPU completion, input latency or generated FPS |
 | Producer entries | Vanilla completed layer submission, Sodium terrain setup, active Iris generation | Distinct facts; installed mods and producer entry do not prove an optimized draw executed |
 | Terrain latency | Existing generation-keyed `terrain-work-epoch-*.json` and oracle | No proximity or ordinal join with this observer; first encoded/drawn is not first presented |
 
@@ -26,6 +27,11 @@ identity is captured at creation and carried through submission and completion.
 present attempt. `nativePresentationId` is the existing native ticket when returned,
 otherwise null with a reason. A failed command buffer retains its scheduled ticket;
 neither the ticket nor GPU completion is an assertion that the image was displayed.
+`presentedTimeSeconds` is filled only by an actual finite, positive drawable callback.
+The native observer retains the first 65,536 presentation tickets when evidence is enabled,
+without retaining GPU objects. Cancelled, invalid, pending and unretained observations have
+separate absence reasons. Export queries callbacks already received after the existing GPU
+drain; it never waits for presentation. A late callback remains unavailable in that snapshot.
 Delayed/out-of-order completion cannot be assigned to the latest frame. Reused buffers
 crossing frame boundaries invalidate evidence. Existing `Metallum frame <submitIndex>`
 command labels allow inspection in GPU captures; they remain diagnostic labels.
@@ -37,7 +43,7 @@ Their CPU duration is inclusive; do not sum nested frame durations as elapsed ti
 
 Each frame retains drawable dimensions, render distance and the actual Metal main path.
 The report lists uncovered native-internal draw/encoder paths, effective PSO/binding changes,
-memory/copy metrics, worker costs and presentation evidence under `unavailable`.
+memory/copy metrics, worker costs and generated-frame evidence under `unavailable`.
 Do not infer those metrics from similarly named ABI calls. The existing aggregate
 performance report is unchanged; its samples are not silently upgraded to frame evidence.
 
@@ -182,3 +188,32 @@ adapter, followed by overhead measurement. Then connect native-internal counters
 present IDs at their real authority boundaries. Keep the existing terrain lifecycle
 oracle; extend it only when first-presented generation identity can actually be proven.
 P1 transport batching remains conditional on the resulting ABI evidence.
+
+## Submission transport
+
+`-Dmetallum.opt.directMultiDrawBatch=true` opts into synchronous native submission of
+RenderPearl's existing direct multi-draw records. It preserves order, buffer position,
+first index, signed base vertex and first instance. Direct native-order buffers are
+borrowed only for the call; heap/other-order buffers and triangle fans retain their
+existing Java lowering. The default remains off pending controlled performance evidence.
+The existing separate indexed multi-draw now flushes pending render state before encoding.
+
+ICB eligibility is cached with the final PSO for each attachment signature. Ineligible
+terrain avoids ICB-only snapshot copying and encoder transitions; explicitly requested
+diagnostic snapshots remain available. This does not introduce a Vanilla GPU scene or
+change the existing ordinary indirect terrain producer. Pipeline close is idempotent,
+invalidates cached variants, and prevents background prewarm from repopulating them.
+
+`-Dmetallum.opt.asyncPrecompile=true` also uses RenderPearl's existing loading
+executor for backend translation and native PSO preparation. `finishCompile` hands
+ownership to the frontend after checking the device/cache generation. Abandoned
+prepared pipelines are released on cache clear or device close; the default keeps
+the previous deferred compilation path. This does not make demand compilation
+asynchronous when the caller supplies an inline executor. Attachment variants
+resolve functions from their source key under the existing compile lock, so a
+function-cache clear cannot leave a borrowed handle in a still-live variant owner.
+
+Ordinary presentation samples the submitted `GpuTextureView`, including its base
+mip, rather than the underlying texture's level zero. Pre-present capture uses the
+same mip and dimensions. A subview does not inherit a full-texture MetalFX synthesis
+receipt and continues through ordinary source-frame presentation.

@@ -49,6 +49,19 @@ struct NativePresentationTelemetryStateTest {
         check(!state.resolvePresentation(encodeThenCloseID), "close cancellation is idempotent with a later callback")
         check(state.framesInFlight == 0, "failed/cancelled drawable cannot make count negative")
 
+        let observed = state.schedulePresentation(recordEvidence: true)
+        let cancelled = state.schedulePresentation(recordEvidence: true)
+        check(state.presentedTimeEvidence(observed) == 0, "scheduled does not mean presented")
+        _ = state.resolvePresentation(cancelled)
+        state.recordPresented(cancelled, presentedTime: 20)
+        check(state.presentedTimeEvidence(cancelled) == -1, "late callback cannot turn cancellation into presentation")
+        state.recordPresented(observed, presentedTime: 19)
+        check(state.presentedTimeEvidence(observed) == 19, "callback retains its exact native ticket")
+        check(state.presentedTimeEvidence(metal3ID) == -3, "disabled evidence is absent, not zero")
+        let invalidObserved = state.schedulePresentation(recordEvidence: true)
+        state.recordPresented(invalidObserved, presentedTime: .nan)
+        check(state.presentedTimeEvidence(invalidObserved) == -2, "non-finite callback is explicitly unavailable")
+
         print("NativePresentationTelemetryStateTest: PASS")
     }
 }

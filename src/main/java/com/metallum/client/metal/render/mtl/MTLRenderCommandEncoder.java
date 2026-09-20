@@ -6,6 +6,8 @@ import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 
 @Environment(EnvType.CLIENT)
 public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
@@ -325,6 +327,65 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
         if (this.stateShadow != null) {
             this.stateShadow.invalidateAll();
         }
+    }
+
+    public void multiDrawIndexed(MTLPrimitiveType primitiveType, MTLIndexType indexType,
+                                 MemorySegment indexBuffer, MemorySegment firstIndexOffsets,
+                                 MemorySegment indexCounts, MemorySegment vertexOffsets, int drawCount) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(encoder, primitiveType.value, indexType.value,
+                indexBuffer, firstIndexOffsets, indexCounts, vertexOffsets, drawCount, 1L, 0L);
+    }
+
+    public boolean tryMultiDrawIndexedInterleaved(MTLPrimitiveType primitiveType, MTLIndexType indexType,
+                                                  MemorySegment indexBuffer, IntBuffer records,
+                                                  int drawCount, int instanceCount, int firstInstance) {
+        if (!batchable(primitiveType, records)) return false;
+        if (drawCount <= 0 || instanceCount <= 0) return true;
+        requireDrawRecords(records, drawCount, 3);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.multiDrawIndexedInterleaved(encoder, primitiveType.value, indexType.value,
+                indexBuffer, MemorySegment.ofBuffer(records), drawCount, instanceCount, firstInstance);
+        return true;
+    }
+
+    public boolean tryMultiDrawInterleaved(MTLPrimitiveType primitiveType, IntBuffer records,
+                                          int drawCount, int instanceCount, int firstInstance) {
+        if (!batchable(primitiveType, records)) return false;
+        if (drawCount <= 0 || instanceCount <= 0) return true;
+        requireDrawRecords(records, drawCount, 2);
+        MemorySegment data = MemorySegment.ofBuffer(records);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.multiDrawPrimitives(encoder, primitiveType.value, data, data.asSlice(Integer.BYTES),
+                2, drawCount, instanceCount, firstInstance);
+        return true;
+    }
+
+    public boolean tryMultiDraw(MTLPrimitiveType primitiveType, IntBuffer firstVertices,
+                                IntBuffer vertexCounts, int drawCount) {
+        if (!batchable(primitiveType, firstVertices) || !batchable(primitiveType, vertexCounts)) return false;
+        if (drawCount <= 0) return true;
+        requireDrawRecords(firstVertices, drawCount, 1);
+        requireDrawRecords(vertexCounts, drawCount, 1);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.multiDrawPrimitives(encoder, primitiveType.value,
+                MemorySegment.ofBuffer(firstVertices), MemorySegment.ofBuffer(vertexCounts), 1, drawCount, 1, 0);
+        return true;
+    }
+
+    private static void requireDrawRecords(IntBuffer records, int drawCount, int stride) {
+        if ((long) drawCount * stride > records.remaining()) {
+            throw new IndexOutOfBoundsException("Multi-draw records shorter than drawCount");
+        }
+    }
+
+    private static boolean batchable(MTLPrimitiveType primitiveType, IntBuffer records) {
+        return MetalNativeBridge.directMultiDrawBatchAvailable() && primitiveType != MTLPrimitiveType.TriangleFan
+                && records.isDirect() && records.order() == ByteOrder.nativeOrder();
     }
 
     public void drawPrimitives(

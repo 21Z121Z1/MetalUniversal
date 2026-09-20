@@ -71,8 +71,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
     private final List<MTLPixelFormat> colorFormatsView;
-    private final Map<PipelineSignature, MemorySegment> pipelineStates;
-    private final MemorySegment withoutDepthPipeline;
+    private final Map<PipelineSignature, NativePipeline> pipelineStates;
+
+    private record NativePipeline(MemorySegment handle, boolean supportsIcb) {
+        static NativePipeline of(MemorySegment handle) {
+            try {
+                return new NativePipeline(handle, MetalNativeBridge.renderPipelineSupportsIcb(handle));
+            } catch (RuntimeException | Error failure) {
+                MetalNativeBridge.metallum_release_object(handle);
+                throw failure;
+            }
+        }
+    }
     // asyncPrewarm controls only proactive background creation. Every supported
     // attachment signature is buildable on first demand regardless of this flag;
     // the constructor intentionally compiles only the two startup signatures.
@@ -81,10 +91,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final RenderPipeline info;
     private final String validationPipelineId;
     private final List<String> validationShaderIds;
-    private final MemorySegment vertexFunction;
-    private final MemorySegment fragmentFunction;
+    // Keep source identity, not borrowed function handles from a cache that reload can clear.
+    private final String vertexMsl;
+    private final String fragmentMsl;
+    private final String vertexEntryPoint;
+    private final String fragmentEntryPoint;
     /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
-    private boolean closed;
+    private volatile boolean closed;
 
     private record PipelineSignature(List<MTLPixelFormat> colorFormats, MTLPixelFormat depthFormat,
                                      MTLPixelFormat stencilFormat, int sampleCount) {
@@ -226,14 +239,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                         + "\u0000metal4=" + device.metal4MainRendererEnabled()
         );
         this.lazyVariants = device.asyncPrewarmEnabled();
-        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
+        this.vertexMsl = vertexMsl;
+        this.fragmentMsl = fragmentMsl;
+        this.vertexEntryPoint = vertexEntryPoint;
+        this.fragmentEntryPoint = fragmentEntryPoint;
+        MemorySegment vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
+        MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
         // Compile only the signatures every session actually needs up front.
         // Other supported signatures are created on first real demand below;
         // this keeps unsupported or unused formats out of the Metal compiler.
         List<DepthStencilFormats> eagerFormats = eagerDepthStencilFormats();
-        Map<PipelineSignature, MemorySegment> states = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<PipelineSignature, NativePipeline> states = new java.util.concurrent.ConcurrentHashMap<>();
         try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(
                 info, this.firstAvailableVertexBufferSlot, this.genericVertexInputs, this.genericVertexBufferSlot
         )) {
@@ -241,20 +258,22 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 MemorySegment pipeline = createPipeline(
                         device,
                         info,
-                        this.vertexFunction,
-                        this.fragmentFunction,
+                        vertexFunction,
+                        fragmentFunction,
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
                         formats.stencilFormat()
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
-                    states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), pipeline);
+                    states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), NativePipeline.of(pipeline));
                 }
             }
+        } catch (RuntimeException | Error failure) {
+            for (NativePipeline state : states.values()) MetalNativeBridge.metallum_release_object(state.handle());
+            throw failure;
         }
         this.pipelineStates = states;
-        this.withoutDepthPipeline = states.get(this.signatureFor(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid));
         if (this.lazyVariants) {
             for (DepthStencilFormats formats : supportedDepthStencilFormats()) {
                 if (!eagerFormats.contains(formats)) {
@@ -353,13 +372,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
      * be built or this pipeline was already closed.
      */
     @Nullable
-    private MemorySegment buildVariantLocked(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+    private NativePipeline buildVariantLocked(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
         synchronized (MetalDevice.COMPILE_CHAIN_LOCK) {
             if (this.closed) {
                 return null;
             }
             PipelineSignature signature = this.signatureFor(depthFormat, stencilFormat);
-            MemorySegment existing = this.pipelineStates.get(signature);
+            NativePipeline existing = this.pipelineStates.get(signature);
             if (existing != null) {
                 return existing;
             }
@@ -373,8 +392,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 pipeline = createPipeline(
                         this.device,
                         this.info,
-                        this.vertexFunction,
-                        this.fragmentFunction,
+                        this.device.getOrCompileFunction(this.vertexMsl, this.vertexEntryPoint),
+                        this.device.getOrCompileFunction(this.fragmentMsl, this.fragmentEntryPoint),
                         vertexDescriptor,
                         this.colorFormats,
                         depthFormat,
@@ -384,8 +403,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             if (MetalNativeBridge.isNullHandle(pipeline)) {
                 return null;
             }
-            this.pipelineStates.put(signature, pipeline);
-            return pipeline;
+            NativePipeline compiled = NativePipeline.of(pipeline);
+            this.pipelineStates.put(signature, compiled);
+            return compiled;
         }
     }
 
@@ -506,7 +526,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     }
 
     public boolean isValid() {
-        return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);
+        return !this.closed && !this.pipelineStates.isEmpty();
     }
 
     @Override
@@ -567,6 +587,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        return nativePipeline(depthFormat, stencilFormat).handle();
+    }
+
+    boolean supportsIcb(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        return nativePipeline(depthFormat, stencilFormat).supportsIcb();
+    }
+
+    private NativePipeline nativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        if (this.closed) throw new IllegalStateException("Metal pipeline is closed");
         if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)
                 || (this.writesDepth && depthFormat == MTLPixelFormat.Invalid)) {
             throw new IllegalArgumentException(
@@ -574,14 +603,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                             + ", stencil=" + stencilFormat
             );
         }
-        MemorySegment pipeline = this.pipelineStates.get(this.signatureFor(depthFormat, stencilFormat));
+        NativePipeline pipeline = this.pipelineStates.get(this.signatureFor(depthFormat, stencilFormat));
         if (pipeline == null) {
             // First real use builds exactly the requested supported signature.
             // This is independent of async prewarm so normal production startup
             // never needs to compile every possible attachment combination.
             pipeline = this.buildVariantLocked(depthFormat, stencilFormat);
         }
-        if (pipeline == null || MetalNativeBridge.isNullHandle(pipeline)) {
+        if (pipeline == null || MetalNativeBridge.isNullHandle(pipeline.handle())) {
             throw new IllegalStateException("No cached Metal pipeline for attachment signature "
                     + this.signatureFor(depthFormat, stencilFormat));
         }
@@ -775,14 +804,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     @Override
     public void close() {
-        // Runs under MetalDevice.COMPILE_CHAIN_LOCK (clearPipelineCache);
-        // pending lazy-variant tasks observe the flag and abandon.
-        this.closed = true;
-        Set<MemorySegment> uniqueStates = new HashSet<>(this.pipelineStates.values());
-        for (MemorySegment state : uniqueStates) {
-            if (!MetalNativeBridge.isNullHandle(state)) {
-                MetalNativeBridge.metallum_release_object(state);
-            }
+        synchronized (MetalDevice.COMPILE_CHAIN_LOCK) {
+            if (this.closed) return;
+            this.closed = true;
+            Set<MemorySegment> uniqueStates = new HashSet<>();
+            for (NativePipeline state : this.pipelineStates.values()) uniqueStates.add(state.handle());
+            this.pipelineStates.clear();
+            for (MemorySegment state : uniqueStates) MetalNativeBridge.metallum_release_object(state);
         }
     }
 }

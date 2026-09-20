@@ -1037,13 +1037,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
         long frameId = RenderContractRuntime.currentFrameId();
         if (RenderContractRuntime.consumeFinalDrawableCapture(frameId)) {
-            scheduleFinalDrawableCapture(source, frameId);
+            scheduleFinalDrawableCapture(source, textureView.baseMipLevel(), frameId);
         }
     }
 
-    private void scheduleFinalDrawableCapture(final MetalGpuTexture source, final long frameId) {
-        int width = source.getWidth(0);
-        int height = source.getHeight(0);
+    private void scheduleFinalDrawableCapture(final MetalGpuTexture source, final int mipLevel, final long frameId) {
+        int width = source.getWidth(mipLevel);
+        int height = source.getHeight(mipLevel);
         int byteCount = Math.multiplyExact(Math.multiplyExact(width, height), source.pixelSize());
         CapturePoint point = new CapturePoint(frameId, "metallum/present", CapturePointKind.FINAL_DRAWABLE, -1);
         RenderContractRuntime.ReadbackRequest request = new RenderContractRuntime.ReadbackRequest(
@@ -1055,7 +1055,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 width,
                 height,
                 source.getDepthOrLayers(),
-                0,
+                mipLevel,
                 1,
                 source.usage(),
                 AttachmentSemantic.COLOR
@@ -1081,7 +1081,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         width,
                         height,
                         source.getDepthOrLayers(),
-                        0,
+                        mipLevel,
                         1,
                         source.usage(),
                         bytes,
@@ -1090,13 +1090,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             } finally {
                 buffer.close();
             }
-        }, 0);
+        }, mipLevel);
     }
 
     void presentTextureToDrawable(final MemorySegment layer, final GpuTextureView textureView) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
+        MemorySegment presentedTexture = ((MetalGpuTextureView) textureView).nativeHandle();
         recordPresentAndMaybeCapture(source, textureView);
-        MetalFxManager.FrameGenerationInput frameInput = MetalFxManager.frameGenerationInput(source);
+        // Frame synthesis owns complete source textures. A selected mip/view
+        // must use ordinary presentation rather than reuse a full-texture receipt.
+        MetalFxManager.FrameGenerationInput frameInput = presentedTexture.address() == source.nativeHandle().address()
+                ? MetalFxManager.frameGenerationInput(source) : null;
         if (frameInput != null) {
             flushPendingClear(source);
             flushPendingClear(frameInput.sceneColor());
@@ -1139,7 +1143,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
-        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);
+        commandBuffer.encodePresentTextureToDrawable(layer, presentedTexture, fence);
         FrameEvidenceRuntime.presentationRequested(frameEvidenceSubmission, commandBuffer.nativePresentationTelemetryId());
     }
 

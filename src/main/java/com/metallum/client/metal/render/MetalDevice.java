@@ -55,6 +55,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final MetalCommandEncoder commandEncoder;
     private final MetalGpuBuffer genericVertexAttributeBuffer;
     private final DeviceInfo deviceInfo;
+    private final boolean terrainIcbEnabled;
     public final MTLCommandQueue commandQueue;
     // ConcurrentHashMap gives identity semantics here only because
     // RenderPipeline never overrides equals/hashCode; RENDER_PIPELINE_IDENTITY_EQUALS
@@ -188,6 +189,9 @@ final class MetalDevice implements GpuDeviceBackend {
      * stale ShaderSource and must abandon instead of repopulating the map.
      */
     private volatile int pipelineCacheGeneration;
+    private volatile boolean closed;
+    /** Prepared native pipelines remain owned here until RenderPearl takes or cancels them. */
+    private final Set<PreparedPipeline> pendingPipelines = new HashSet<>();
     @Nullable
     private final ExecutorService prewarmExecutor;
     private static boolean renderPipelineUsesIdentityEquals() {
@@ -250,14 +254,11 @@ final class MetalDevice implements GpuDeviceBackend {
         boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRendererRequested);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
         // Terrain ICB requires both the Metal 4 capability and an active
-        // MTL4Compiler PSO path. Snapshot capture remains enabled when the
-        // opt-in is requested, but native execution will fail closed otherwise.
-        MetalNativeBridge.metallum_set_terrain_icb_enabled(
-                (TerrainSceneSnapshot.ICB_ENABLED
-                        || TerrainSceneSnapshot.GPU_ICB_ENABLED
-                        || VISIBLE_GPU_ICB_METAL4)
-                        && metal4Compiler ? 1 : 0
-        );
+        // MTL4Compiler PSO path. Final per-attachment PSO admission happens
+        // before ICB-only preparation; explicit diagnostic snapshots remain available.
+        this.terrainIcbEnabled = (TerrainSceneSnapshot.ICB_ENABLED
+                || TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4) && metal4Compiler;
+        MetalNativeBridge.metallum_set_terrain_icb_enabled(this.terrainIcbEnabled ? 1 : 0);
         MetalNativeBridge.metallum_set_terrain_gpu_encode_enabled(
                 (TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4)
                         && metal4Compiler ? 1 : 0
@@ -589,7 +590,54 @@ final class MetalDevice implements GpuDeviceBackend {
     public BackendRenderPipeline.Pending compilePipeline(
             final BackendRenderPipeline.CreateInfo pipelineCreateInfo
     ) {
-        return MetalCrossShaderCompiler.compilePending(this, pipelineCreateInfo);
+        synchronized (COMPILE_CHAIN_LOCK) {
+            if (this.closed) return BackendRenderPipeline.Pending.NULL;
+            int generation = this.pipelineCacheGeneration;
+            BackendRenderPipeline.Pending pending = MetalCrossShaderCompiler.compilePending(this, pipelineCreateInfo);
+            if (!asyncPrewarmEnabled()) {
+                return () -> {
+                    synchronized (COMPILE_CHAIN_LOCK) {
+                        return this.closed || generation != this.pipelineCacheGeneration ? null : pending.finishCompile();
+                    }
+                };
+            }
+            // RenderPearl invokes this on its caller-supplied loading executor.
+            // Do native work here, not on the reload/render executor's finishCompile.
+            PreparedPipeline prepared = new PreparedPipeline(pending.finishCompile(), generation);
+            this.pendingPipelines.add(prepared);
+            return prepared;
+        }
+    }
+
+    private final class PreparedPipeline implements BackendRenderPipeline.Pending {
+        private @Nullable BackendRenderPipeline pipeline;
+        private final int generation;
+        private boolean consumed;
+
+        PreparedPipeline(@Nullable BackendRenderPipeline pipeline, int generation) {
+            this.pipeline = pipeline;
+            this.generation = generation;
+        }
+
+        @Override
+        public @Nullable BackendRenderPipeline finishCompile() {
+            synchronized (COMPILE_CHAIN_LOCK) {
+                if (consumed) throw new IllegalStateException("Pending Metal pipeline already consumed");
+                consumed = true;
+                pendingPipelines.remove(this);
+                if (closed || generation != pipelineCacheGeneration) discard();
+                BackendRenderPipeline result = pipeline;
+                pipeline = null; // Ownership passes to the RenderPearl frontend.
+                return result;
+            }
+        }
+
+        void discard() {
+            if (pipeline != null) {
+                pipeline.close();
+                pipeline = null;
+            }
+        }
     }
 
     boolean useLabels() {
@@ -597,21 +645,23 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
+        if (this.closed) throw new IllegalStateException("Metal device is closed");
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
         if (effectiveSource == null) {
             throw new IllegalStateException("RenderPearl shader source is required to compile " + pipeline.getLocation());
         }
         MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
-        if (existing != null) {
+        if (existing != null && !existing.isClosed()) {
             return existing;
         }
         synchronized (COMPILE_CHAIN_LOCK) {
+            if (this.closed) throw new IllegalStateException("Metal device is closed");
             // Async prewarm callers may race on the same RenderPipeline. The
             // outer lookup is the fast path; this locked lookup prevents the
             // second waiter from recompiling and overwriting a native pipeline
             // that the first waiter just published.
             existing = this.compiledPipelines.get(pipeline);
-            if (existing != null) {
+            if (existing != null && !existing.isClosed()) {
                 return existing;
             }
             this.activeShaderSource = effectiveSource;
@@ -632,6 +682,10 @@ final class MetalDevice implements GpuDeviceBackend {
     /** True when the background prewarm thread exists (async precompile on). */
     boolean asyncPrewarmEnabled() {
         return this.prewarmExecutor != null;
+    }
+
+    boolean terrainIcbEnabled() {
+        return this.terrainIcbEnabled;
     }
 
     boolean metal4MainRendererEnabled() {
@@ -659,6 +713,8 @@ final class MetalDevice implements GpuDeviceBackend {
         this.stableTerrainSamplerLogged = false;
         synchronized (COMPILE_CHAIN_LOCK) {
             this.pipelineCacheGeneration++;
+            this.pendingPipelines.forEach(PreparedPipeline::discard);
+            this.pendingPipelines.clear();
             this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
             this.compiledPipelines.clear();
             this.frontendPipelines.clear();
@@ -685,6 +741,10 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        synchronized (COMPILE_CHAIN_LOCK) {
+            if (this.closed) return;
+            this.closed = true;
+        }
         if (current == this) {
             current = null;
         }
@@ -806,8 +866,9 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
+        if (this.closed) throw new IllegalStateException("Metal device is closed");
         MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
-        if (existing != null) {
+        if (existing != null && !existing.isClosed()) {
             return existing;
         }
         CompiledRenderPipeline compiled = precompilePipeline(pipeline, this.activeShaderSource);
@@ -819,7 +880,7 @@ final class MetalDevice implements GpuDeviceBackend {
 
     FrontendRenderPipeline getOrCompileFrontendPipeline(final RenderPipeline pipeline) {
         FrontendRenderPipeline existing = this.frontendPipelines.get(pipeline);
-        if (existing != null) {
+        if (existing != null && !existing.backendRenderPipeline().isClosed()) {
             return existing;
         }
         getOrCompilePipeline(pipeline);
@@ -831,10 +892,15 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MemorySegment getOrCompileFunction(final String msl, final String entryPoint) {
-        return this.functionCache.computeIfAbsent(
-                new MslFunctionKey(msl, entryPoint),
-                key -> MetalNativeBridge.metallum_create_shader_function(this.metalDeviceHandle, key.msl(), key.entryPoint())
-        );
+        if (this.closed) throw new IllegalStateException("Metal device is closed");
+        return this.functionCache.computeIfAbsent(new MslFunctionKey(msl, entryPoint), key -> {
+            MemorySegment function = MetalNativeBridge.metallum_create_shader_function(
+                    this.metalDeviceHandle, key.msl(), key.entryPoint());
+            if (MetalNativeBridge.isNullHandle(function)) {
+                throw new IllegalStateException("Metal failed to compile shader entry point " + key.entryPoint());
+            }
+            return function;
+        });
     }
 
     private record StableTerrainSamplerKey(

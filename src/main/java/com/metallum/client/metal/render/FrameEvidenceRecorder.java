@@ -96,6 +96,45 @@ public final class FrameEvidenceRecorder {
         submission.nativePresentationId = nativeId;
     }
 
+    /** Completion can supply the Metal 4 ID, which does not exist at encode time. */
+    public synchronized void nativePresentationId(Submission submission, long nativeId) {
+        if (submission == null || nativeId == 0) return;
+        if (nativeId < 0 || !submission.presentationRequested
+                || (submission.nativePresentationId > 0 && submission.nativePresentationId != nativeId)) {
+            submission.frame.failure = "mismatched-native-presentation-id";
+            return;
+        }
+        submission.nativePresentationId = nativeId;
+    }
+
+    public synchronized long[] presentationIds() {
+        return frames.stream().flatMap(frame -> frame.submissions.stream())
+                .mapToLong(submission -> submission.nativePresentationId).filter(id -> id > 0).distinct().toArray();
+    }
+
+    /** Export-time snapshot of callbacks already received; GPU drain is not a display wait. */
+    public synchronized void presented(long[] identifiers, double[] timestamps) {
+        if (timestamps == null) return; // Older native module; do not fabricate zero timestamps.
+        if (identifiers.length != timestamps.length) throw new IllegalArgumentException("Presentation evidence length mismatch");
+        Map<Long, Double> byId = new java.util.HashMap<>();
+        for (int index = 0; index < identifiers.length; index++) byId.put(identifiers[index], timestamps[index]);
+        for (Frame frame : frames) {
+            for (Submission submission : frame.submissions) {
+                Double timestamp = byId.get(submission.nativePresentationId);
+                if (timestamp == null) continue;
+                if (Double.isFinite(timestamp) && timestamp > 0) {
+                    submission.presentedTimeSeconds = timestamp;
+                    submission.presentedUnavailableReason = "";
+                } else {
+                    submission.presentedUnavailableReason = timestamp == 0 ? "presented-callback-pending"
+                            : timestamp == -1 ? "presentation-cancelled-or-failed"
+                            : timestamp == -2 ? "invalid-presented-timestamp"
+                            : timestamp == -3 ? "native-evidence-not-retained" : "invalid-native-evidence";
+                }
+            }
+        }
+    }
+
     public synchronized void completed(Submission submission, boolean success, double start, double end) {
         if (submission == null) return;
         if (submission.completed || !submission.submitted) submission.frame.failure = "invalid-completion";
@@ -200,6 +239,10 @@ public final class FrameEvidenceRecorder {
                         ? new JsonPrimitive(submission.nativePresentationId) : JsonNull.INSTANCE);
                 value.addProperty("presentationIdUnavailableReason", submission.nativePresentationId > 0 ? ""
                         : !submission.presentationRequested ? "no-presentation-request" : "native-present-id-not-returned");
+                value.add("presentedTimeSeconds", submission.presentedTimeSeconds > 0
+                        ? new JsonPrimitive(submission.presentedTimeSeconds) : JsonNull.INSTANCE);
+                value.addProperty("presentedUnavailableReason", !submission.presentationRequested ? "no-presentation-request"
+                        : submission.nativePresentationId <= 0 ? "native-present-id-unavailable" : submission.presentedUnavailableReason);
                 value.addProperty("submitted", submission.submitted);
                 value.addProperty("completed", submission.completed);
                 value.addProperty("success", submission.success);
@@ -233,8 +276,9 @@ public final class FrameEvidenceRecorder {
         unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports; no timestamp proximity join");
         unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
         unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
-        unavailable.addProperty("presentedTimeAndGeneratedFrames", "native presentation tickets identify scheduling; GPU completion does not prove display presentation");
-        unavailable.addProperty("metal4NativePresentationId", "Metal 4 assigns its native ticket at commit and does not return it through the encode ABI");
+        root.addProperty("presentationScope", "ordinary source frames only; exact native ID joined to CAMetalDrawable.presentedTime seconds; first 65536 native tickets retained when enabled; callbacks pending at export remain unavailable");
+        unavailable.addProperty("generatedFrames", "MetalFX frame-generation presentation uses a separate timeline");
+        unavailable.addProperty("inputToPhotonNs", "drawable presentedTime is not an input or scanout measurement");
         root.add("unavailable", unavailable);
         return root;
     }
@@ -280,6 +324,8 @@ public final class FrameEvidenceRecorder {
         private long[] nativeEncoding;
         private boolean presentationRequested;
         private long nativePresentationId;
+        private double presentedTimeSeconds;
+        private String presentedUnavailableReason = "native-evidence-unavailable";
         private Submission(Frame frame, long id, long nativeSubmitIndex) {
             this.frame = frame; this.id = id; this.nativeSubmitIndex = nativeSubmitIndex;
         }

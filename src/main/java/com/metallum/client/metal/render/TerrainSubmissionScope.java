@@ -63,6 +63,12 @@ public final class TerrainSubmissionScope implements AutoCloseable {
         if (scope == null || scope.snapshot != null || metalPass == null) {
             return;
         }
+        // Explicit diagnostic snapshots remain available independently of ICB.
+        // Otherwise reject before copying records or freezing per-draw metadata.
+        if (!TerrainSceneSnapshot.ENABLED && !TerrainSceneSnapshot.DRAW_METADATA_ENABLED
+                && !metalPass.terrainIcbEligible()) {
+            return;
+        }
         List<IrisMetalIndirectCommandStream.IndexedDraw> commands =
                 IrisMetalIndirectCommandStream.copyIndexedCommands(commandAddress, drawCount);
         if (commands.isEmpty()) {
