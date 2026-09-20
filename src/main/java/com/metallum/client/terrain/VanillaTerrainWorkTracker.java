@@ -44,14 +44,19 @@ public final class VanillaTerrainWorkTracker {
 
     private static final long INITIAL_REVISION = 1L;
     private static final long INITIAL_EPOCH = 1L;
+    private static final int DEFAULT_MAX_TRACKED_SECTIONS = 32768;
+    private static final int MAX_TRACKED_SECTIONS_LIMIT = 1 << 20;
 
     private final TerrainWorkEventRecorder recorder;
+    private final int maxTrackedSections;
     private final AtomicLong worldEpoch = new AtomicLong(INITIAL_EPOCH);
     private final AtomicLong materialGeneration = new AtomicLong(INITIAL_REVISION);
     private final AtomicLong nextMeshGeneration = new AtomicLong(INITIAL_REVISION);
     private final AtomicLong nextFrameIndex = new AtomicLong();
+    private final AtomicLong nextWorkId = new AtomicLong(INITIAL_REVISION);
     private final ConcurrentHashMap<Long, SectionRevision> sectionRevisions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, WorkContext> latestBySection = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, WorkContext> publishedBySection = new ConcurrentHashMap<>();
     private final Map<Object, WorkContext> regionContexts =
             Collections.synchronizedMap(new IdentityHashMap<>());
     private final Map<Object, WorkContext> meshContexts =
@@ -59,7 +64,15 @@ public final class VanillaTerrainWorkTracker {
     private final ThreadLocal<WorkContext> activeBuild = new ThreadLocal<>();
 
     public VanillaTerrainWorkTracker(final TerrainWorkEventRecorder recorder) {
+        this(recorder, DEFAULT_MAX_TRACKED_SECTIONS);
+    }
+
+    VanillaTerrainWorkTracker(final TerrainWorkEventRecorder recorder, final int maxTrackedSections) {
         this.recorder = Objects.requireNonNull(recorder, "recorder");
+        if (maxTrackedSections < 1 || maxTrackedSections > MAX_TRACKED_SECTIONS_LIMIT) {
+            throw new IllegalArgumentException("maxTrackedSections out of range: " + maxTrackedSections);
+        }
+        this.maxTrackedSections = maxTrackedSections;
     }
 
     public long worldEpoch() {
@@ -107,10 +120,17 @@ public final class VanillaTerrainWorkTracker {
             final long nowNanos
     ) {
         Objects.requireNonNull(regionIdentity, "regionIdentity");
-        SectionRevision revision = sectionRevisions.computeIfAbsent(
-                sectionId,
-                ignored -> new SectionRevision(INITIAL_REVISION, INITIAL_REVISION)
-        );
+        SectionRevision revision = sectionRevisions.get(sectionId);
+        if (revision == null) {
+            if (!admitSectionIdentity(sectionId)) {
+                recorder.markDropped();
+                return;
+            }
+            revision = sectionRevisions.computeIfAbsent(
+                    sectionId,
+                    ignored -> new SectionRevision(INITIAL_REVISION, INITIAL_REVISION)
+            );
+        }
         TerrainWorkEventRecorder.WorkKey key = new TerrainWorkEventRecorder.WorkKey(
                 worldEpoch.get(),
                 sectionId,
@@ -118,7 +138,10 @@ public final class VanillaTerrainWorkTracker {
                 revision.lighting.get(),
                 materialGeneration.get()
         );
-        WorkContext context = new WorkContext(key);
+        WorkContext context = new WorkContext(
+                key,
+                nextWorkId.getAndUpdate(VanillaTerrainWorkTracker::incrementGeneration)
+        );
         WorkContext previous = latestBySection.put(sectionId, context);
         if (previous != null && previous != context && !previous.isTerminal()) {
             previous.cancel(recorder, nowNanos, "superseded-before-build");
@@ -127,6 +150,11 @@ public final class VanillaTerrainWorkTracker {
             }
         }
         synchronized (regionContexts) {
+            if (!regionContexts.containsKey(regionIdentity) && regionContexts.size() >= maxTrackedSections) {
+                latestBySection.remove(sectionId, context);
+                recorder.markDropped();
+                return;
+            }
             WorkContext displaced = regionContexts.put(regionIdentity, context);
             if (displaced != null && displaced != context && !displaced.isTerminal()) {
                 displaced.cancel(recorder, nowNanos, "snapshot-identity-reused");
@@ -189,6 +217,10 @@ public final class VanillaTerrainWorkTracker {
         synchronized (meshContexts) {
             // An upload callback may run while another build context is active on this thread.
             // It must never steal an already associated mesh from its original work item.
+            if (!meshContexts.containsKey(meshIdentity) && meshContexts.size() >= maxTrackedSections) {
+                recorder.markDropped();
+                return;
+            }
             meshContexts.putIfAbsent(meshIdentity, context);
         }
     }
@@ -246,7 +278,23 @@ public final class VanillaTerrainWorkTracker {
 
     /** Only the vanilla hook that recognizes CompiledSectionMesh.EMPTY may use this boundary. */
     public synchronized DrawToken publishEmpty(final long sectionId, final long nowNanos, final String reason) {
-        return publishContext(sectionId, activeBuild.get(), nowNanos, reason);
+        WorkContext context = activeBuild.get();
+        DrawToken token = publishContext(sectionId, context, nowNanos, reason);
+        if (token != null && context != null) {
+            context.empty.set(true);
+            recorder.record(
+                    context.key,
+                    TerrainWorkEventRecorder.Stage.DRAW_NOT_REQUIRED,
+                    nowNanos,
+                    0L,
+                    "empty-mesh-no-draw",
+                    "main",
+                    TerrainWorkEventRecorder.NO_FRAME,
+                    token.meshGeneration(),
+                    context.workId
+            );
+        }
+        return token;
     }
 
     private DrawToken publishContext(
@@ -257,6 +305,12 @@ public final class VanillaTerrainWorkTracker {
             return null;
         }
         long generation = context.publish(nextMeshGeneration, recorder, nowNanos, reason);
+        if (generation >= 0L) {
+            WorkContext previousPublished = publishedBySection.put(sectionId, context);
+            if (previousPublished != null && previousPublished != context && previousPublished.empty.get()) {
+                terminateContext(previousPublished, nowNanos, "empty-result-replaced");
+            }
+        }
         clearActiveBuildIfMatches(context);
         if (generation < 0L) {
             return null;
@@ -312,6 +366,10 @@ public final class VanillaTerrainWorkTracker {
         if (latest != null) {
             contexts.add(latest);
         }
+        WorkContext published = publishedBySection.get(sectionId);
+        if (published != null) {
+            contexts.add(published);
+        }
         for (WorkContext context : meshContexts.values()) {
             if (context.key.sectionId() == sectionId) {
                 contexts.add(context);
@@ -337,6 +395,7 @@ public final class VanillaTerrainWorkTracker {
     public synchronized long advanceWorldEpoch(final long nowNanos) {
         List<WorkContext> contexts = new ArrayList<>();
         contexts.addAll(latestBySection.values());
+        contexts.addAll(publishedBySection.values());
         synchronized (regionContexts) {
             contexts.addAll(regionContexts.values());
         }
@@ -354,6 +413,7 @@ public final class VanillaTerrainWorkTracker {
             }
         }
         latestBySection.clear();
+        publishedBySection.clear();
         sectionRevisions.clear();
         synchronized (regionContexts) {
             regionContexts.clear();
@@ -376,6 +436,26 @@ public final class VanillaTerrainWorkTracker {
         synchronized (meshContexts) {
             return meshContexts.get(meshIdentity);
         }
+    }
+
+    private boolean admitSectionIdentity(final long sectionId) {
+        if (sectionRevisions.containsKey(sectionId) || sectionRevisions.size() < maxTrackedSections) {
+            return true;
+        }
+
+        // Keep observation bounded without perturbing vanilla scheduling. Evict only identities
+        // with no active work and no published result; otherwise fail the observation closed.
+        for (Long candidate : new ArrayList<>(sectionRevisions.keySet())) {
+            if (candidate == sectionId
+                    || latestBySection.containsKey(candidate)
+                    || publishedBySection.containsKey(candidate)) {
+                continue;
+            }
+            if (sectionRevisions.remove(candidate) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasCurrentRevision(final WorkContext context) {
@@ -410,6 +490,7 @@ public final class VanillaTerrainWorkTracker {
             context.cancel(recorder, nowNanos, reason);
         }
         latestBySection.remove(context.key.sectionId(), context);
+        publishedBySection.remove(context.key.sectionId(), context);
         removeContextMappings(context);
         clearActiveBuildIfMatches(context);
     }
@@ -464,7 +545,8 @@ public final class VanillaTerrainWorkTracker {
                 reason,
                 "main",
                 frameIndex,
-                meshGeneration
+                meshGeneration,
+                context.workId
         );
     }
 
@@ -487,15 +569,18 @@ public final class VanillaTerrainWorkTracker {
 
     private final class WorkContext {
         private final TerrainWorkEventRecorder.WorkKey key;
+        private final long workId;
         private final AtomicBoolean buildEnded = new AtomicBoolean();
         private final AtomicBoolean published = new AtomicBoolean();
         private final AtomicBoolean firstDraw = new AtomicBoolean();
         private final AtomicBoolean cancelled = new AtomicBoolean();
         private final AtomicBoolean retired = new AtomicBoolean();
+        private final AtomicBoolean empty = new AtomicBoolean();
         private final AtomicLong meshGeneration = new AtomicLong(TerrainWorkEventRecorder.NO_MESH_GENERATION);
 
-        private WorkContext(final TerrainWorkEventRecorder.WorkKey key) {
+        private WorkContext(final TerrainWorkEventRecorder.WorkKey key, final long workId) {
             this.key = key;
+            this.workId = workId;
         }
 
         private boolean isTerminal() {
@@ -522,7 +607,8 @@ public final class VanillaTerrainWorkTracker {
                         reason,
                         "main",
                         TerrainWorkEventRecorder.NO_FRAME,
-                        generation
+                        generation,
+                        workId
                 );
             }
             return meshGeneration.get();
@@ -545,7 +631,8 @@ public final class VanillaTerrainWorkTracker {
                         reason,
                         "main",
                         TerrainWorkEventRecorder.NO_FRAME,
-                        TerrainWorkEventRecorder.NO_MESH_GENERATION
+                        TerrainWorkEventRecorder.NO_MESH_GENERATION,
+                        workId
                 );
             }
         }
@@ -568,7 +655,8 @@ public final class VanillaTerrainWorkTracker {
                         reason,
                         "main",
                         TerrainWorkEventRecorder.NO_FRAME,
-                        generation
+                        generation,
+                        workId
                 );
             }
         }
