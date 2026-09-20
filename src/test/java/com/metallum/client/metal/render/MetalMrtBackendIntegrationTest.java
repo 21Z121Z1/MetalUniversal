@@ -302,6 +302,33 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void pendingFullClearPrecedesRegionalClear() {
+        int usage = TEXTURE_USAGE | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_DST;
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                     "regional color", usage, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                     "regional depth", usage, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
+            FrontendCommandEncoder frontend = new FrontendCommandEncoder(null, device, encoder);
+            frontend.clearColorAndDepthTextures(color, new Vector4f(0, 0, 1, 1), depth, 0.75);
+            frontend.clearColorAndDepthTextures(color, new Vector4f(1, 0, 0, 1), depth, 0.25,
+                    WIDTH / 4, 1, WIDTH / 2, HEIGHT - 2, 0);
+            frontend.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer colors = readback(color);
+            ByteBuffer depths = readback(depth);
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    boolean inside = x >= WIDTH / 4 && x < 3 * WIDTH / 4 && y >= 1 && y < HEIGHT - 1;
+                    int offset = (y * WIDTH + x) * 4;
+                    assertByteNear(colors.get(offset), inside ? 255 : 0, "regional red");
+                    assertByteNear(colors.get(offset + 2), inside ? 0 : 255, "preserved blue");
+                    assertEquals(inside ? 0.25F : 0.75F, depths.getFloat(offset), 0.0001F, "regional depth");
+                }
+            }
+        }
+    }
+
+    @Test
     void deferredColorStorePreservesReorderedSlotsAndPartialArea() {
         List<MetalGpuTexture> textures = createTextures(
                 List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM), "store reordered");

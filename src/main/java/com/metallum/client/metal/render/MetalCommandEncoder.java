@@ -1490,9 +1490,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             pendingDepthClears.put(depth, clearDepth);
             return;
         }
-        color.markContentsDirty();
-        depth.markContentsDirty();
         submitRenderPass();
+        // A partial clear preserves the outside region and must follow any
+        // earlier deferred full clear, rather than being overwritten by it.
+        flushPendingClearForWrite(color);
+        flushPendingClearForWrite(depth);
         endEncoder();
         commandBuffer().clearColorDepthTexturesRegion(
                 color.nativeHandle(),
