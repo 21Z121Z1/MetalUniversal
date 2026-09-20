@@ -13,6 +13,7 @@ import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import net.fabricmc.loader.api.FabricLoader;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
@@ -56,6 +57,8 @@ import java.util.UUID;
  * Metal.</p>
  */
 public final class BackendFrameComparisonClient {
+    private static final boolean IRIS_LOADED = FabricLoader.getInstance().isModLoaded("iris");
+    private static final boolean SODIUM_LOADED = FabricLoader.getInstance().isModLoaded("sodium");
     private static final boolean ENABLED = Boolean.getBoolean("metallum.backend.compare.enabled");
     private static final boolean AUTO_STOP = Boolean.parseBoolean(
             System.getProperty("metallum.backend.compare.auto-stop", "true")
@@ -433,7 +436,7 @@ public final class BackendFrameComparisonClient {
      * backend uploads pack uniforms.
      */
     public static void beforeLevelRender() {
-        if (!ENABLED || levelFrame < 0 || FIXED_IRIS_FRAME_MILLIS < 0L) {
+        if (!ENABLED || !IRIS_LOADED || levelFrame < 0 || FIXED_IRIS_FRAME_MILLIS < 0L) {
             return;
         }
         applyFixedIrisSystemTime(levelFrame, FIXED_IRIS_FRAME_MILLIS);
@@ -996,7 +999,7 @@ public final class BackendFrameComparisonClient {
     }
 
     private static void enableFlawlessFrames() {
-        if (flawlessFramesAttempted) {
+        if (!SODIUM_LOADED || flawlessFramesAttempted) {
             return;
         }
         flawlessFramesAttempted = true;
@@ -1028,14 +1031,18 @@ public final class BackendFrameComparisonClient {
     }
 
     private static SceneReadinessSample sceneReadinessSample(final Minecraft minecraft) {
-        SodiumWorldRenderer renderer = SodiumWorldRenderer.instanceNullable();
+        SodiumWorldRenderer renderer = SODIUM_LOADED ? SodiumWorldRenderer.instanceNullable() : null;
         EntityReceipt entities = entityReceipt(minecraft);
         return new SceneReadinessSample(
                 minecraft.level == null
                         ? 0
                         : minecraft.level.getChunkSource().getLoadedChunksCount(),
-                renderer == null ? 0 : renderer.getVisibleChunkCount(),
-                renderer != null && renderer.isTerrainRenderComplete(),
+                SODIUM_LOADED
+                        ? (renderer == null ? 0 : renderer.getVisibleChunkCount())
+                        : minecraft.levelRenderer.visibleSections().size(),
+                SODIUM_LOADED
+                        ? renderer != null && renderer.isTerrainRenderComplete()
+                        : minecraft.levelRenderer.hasRenderedAllSections(),
                 entities.count(),
                 entities.sha256()
         );
@@ -1047,6 +1054,9 @@ public final class BackendFrameComparisonClient {
      * backend startup and shader compilation time cannot become temporal input.
      */
     private static boolean resetIrisAtSceneStart() {
+        if (!IRIS_LOADED) {
+            return true;
+        }
         sceneStartIrisResetAttempted = true;
         // Iris deliberately remains dormant on the native Vulkan baseline;
         // its config singleton is not initialized in that mode. Reloading it
@@ -1544,9 +1554,9 @@ public final class BackendFrameComparisonClient {
                         + "  \"sceneStartEntityStateSha256\": \"%s\",\n"
                         + "  \"renderEntityCount\": %d,\n"
                         + "  \"renderEntityStateSha256\": \"%s\",\n"
-                        + "  \"irisFrameCounter\": %d,\n"
-                        + "  \"irisFrameTime\": %.9g,\n"
-                        + "  \"irisFrameTimeCounter\": %.9g,\n"
+                        + "  \"irisFrameCounter\": %s,\n"
+                        + "  \"irisFrameTime\": %s,\n"
+                        + "  \"irisFrameTimeCounter\": %s,\n"
                         + "  \"fixedIrisFrameMillis\": %s,\n"
                         + "  \"fixedCamera\": %s,\n"
                         + "  \"observedPlayer\": %s\n"
@@ -1606,10 +1616,10 @@ public final class BackendFrameComparisonClient {
                 jsonEscape(sceneStartEntitySha),
                 scene.entityCount(),
                 scene.entitySha256(),
-                SystemTimeUniforms.COUNTER.getAsInt(),
-                SystemTimeUniforms.TIMER.getLastFrameTime(),
-                SystemTimeUniforms.TIMER.getFrameTimeCounter(),
-                FIXED_IRIS_FRAME_MILLIS < 0L
+                IRIS_LOADED ? SystemTimeUniforms.COUNTER.getAsInt() : "null",
+                IRIS_LOADED ? SystemTimeUniforms.TIMER.getLastFrameTime() : "null",
+                IRIS_LOADED ? SystemTimeUniforms.TIMER.getFrameTimeCounter() : "null",
+                !IRIS_LOADED || FIXED_IRIS_FRAME_MILLIS < 0L
                         ? "null"
                         : Long.toString(FIXED_IRIS_FRAME_MILLIS),
                 fixedCamera,
@@ -1657,6 +1667,8 @@ public final class BackendFrameComparisonClient {
                                     + "  \"requestedPlayerUuid\": \"%s\",\n"
                                     + "  \"playerName\": \"%s\",\n"
                                     + "  \"playerUuid\": \"%s\",\n"
+                                    + "  \"irisLoaded\": %s,\n"
+                                    + "  \"sodiumLoaded\": %s,\n"
                                     + "  \"irisSemanticRequested\": %s,\n"
                                     + "  \"irisShadersEnabled\": %s,\n"
                                     + "  \"irisPackPresent\": %s,\n"
@@ -1714,6 +1726,8 @@ public final class BackendFrameComparisonClient {
                             jsonEscape(REQUESTED_PLAYER_UUID),
                             jsonEscape(actualPlayerName),
                             jsonEscape(actualPlayerUuid),
+                            IRIS_LOADED,
+                            SODIUM_LOADED,
                             Boolean.getBoolean("metallum.iris.semantic"),
                             iris.shadersEnabled(),
                             iris.packPresent(),
@@ -1746,7 +1760,7 @@ public final class BackendFrameComparisonClient {
                             FIXED_CLOCK_TICKS == Long.MIN_VALUE
                                     ? "null"
                                     : Long.toString(FIXED_CLOCK_TICKS),
-                            FIXED_IRIS_FRAME_MILLIS < 0L
+                            !IRIS_LOADED || FIXED_IRIS_FRAME_MILLIS < 0L
                                     ? "null"
                                     : Long.toString(FIXED_IRIS_FRAME_MILLIS),
                             FREEZE_SIMULATION,
@@ -2189,6 +2203,9 @@ public final class BackendFrameComparisonClient {
     }
 
     private static IrisRuntimeReceipt irisRuntimeReceipt() {
+        if (!IRIS_LOADED) {
+            return new IrisRuntimeReceipt(false, false, null, null, -1);
+        }
         var irisConfig = Iris.getIrisConfig();
         boolean shadersEnabled = irisConfig != null && irisConfig.areShadersEnabled();
         boolean packPresent = irisConfig != null && Iris.getCurrentPack().isPresent();

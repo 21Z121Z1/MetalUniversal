@@ -74,7 +74,8 @@ final class MetalRenderPearlBoundaryTest {
                 "com.metallum.client.metal.render.MetalRenderPass",
                 "com.metallum.client.metal.render.MetalCompiledRenderPipeline",
                 "com.metallum.client.metal.render.MetalCrossShaderCompiler",
-                "com.metallum.client.validation.MetalValidationClient"
+                "com.metallum.client.validation.MetalValidationClient",
+                "com.metallum.client.validation.BackendFrameComparisonClient"
         )) {
             Class<?> type = assertDoesNotThrow(() -> Class.forName(className, false, loader), className);
             assertDoesNotThrow(type::getDeclaredConstructors, className + " constructors");
