@@ -38,6 +38,37 @@ final class TerrainPublicationGenerationGuardTest {
     }
 
     @Test
+    void repeatedLayerBindingIsIdempotentAndDoesNotLosePublicationToken() {
+        TerrainPublicationGenerationGuard<Task> guard = new TerrainPublicationGenerationGuard<>(
+                new TerrainPublicationGenerationGuard.Config(true, 8, 8, 8),
+                OPS,
+                8
+        );
+        Task task = new Task();
+        Object mesh = new Object();
+
+        guard.registerTask(task, 8L);
+        assertTrue(guard.enterTask(task));
+        guard.bindMeshFromActiveTask(mesh);
+        guard.bindMeshFromActiveTask(mesh);
+        guard.bindMeshFromActiveTask(mesh);
+        guard.exitTask(task);
+
+        assertEquals(1L, guard.snapshot().boundMeshes());
+        assertEquals(
+                1L,
+                guard.snapshotEvidence().events().stream()
+                        .filter(event -> event.kind() == TerrainPublicationGenerationGuard.EventKind.MESH_BOUND)
+                        .count()
+        );
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
+                guard.publicationDecision(8L, mesh)
+        );
+        assertEquals(1L, guard.snapshot().allowedPublications());
+    }
+
+    @Test
     void dirtyCancelsQueuedTaskAndNewGenerationCanProceed() {
         Fixture f = new Fixture();
         Task stale = new Task();

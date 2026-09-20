@@ -318,16 +318,16 @@ public final class TerrainPublicationGenerationGuard<T> {
             if (previous == null) {
                 meshTokens.put(mesh, token);
                 boundMeshes = saturatedIncrement(boundMeshes);
+                recordEventLocked(
+                        EventKind.MESH_BOUND,
+                        traceSectionId(token.version().sectionId()),
+                        token.version(),
+                        currentContentVersionLocked(token.version().sectionId()),
+                        null,
+                        false,
+                        EventReason.NONE
+                );
             }
-            recordEventLocked(
-                    EventKind.MESH_BOUND,
-                    traceSectionId(token.version().sectionId()),
-                    token.version(),
-                    currentContentVersionLocked(token.version().sectionId()),
-                    null,
-                    false,
-                    EventReason.NONE
-            );
         }
     }
 
