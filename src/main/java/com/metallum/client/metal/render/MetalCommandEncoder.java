@@ -835,10 +835,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             MetalGpuTexture colorTex = (MetalGpuTexture) colorTexture.texture();
             Optional<Vector4fc> colorClear = colorAttachment.clearValue();
             Vector4fc pendingColor = pendingColorClears.get(colorTex);
-            if (pendingColor != null && isFullTextureView(colorTexture) && colorClear.isEmpty()) {
+            boolean coversPendingClear = isFullTextureView(colorTexture)
+                    && descriptor.renderArea().x() == 0 && descriptor.renderArea().y() == 0
+                    && descriptor.renderArea().width() == colorTexture.getWidth(0)
+                    && descriptor.renderArea().height() == colorTexture.getHeight(0);
+            if (pendingColor != null && coversPendingClear && colorClear.isEmpty()) {
                 pendingColorClears.remove(colorTex);
                 colorClear = Optional.of(pendingColor);
-            } else if (pendingColor != null && colorClear.isEmpty()) {
+            } else if (pendingColor != null && !coversPendingClear) {
                 flushPendingClear(colorTex);
             } else {
                 pendingColorClears.remove(colorTex);
@@ -868,10 +872,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             MetalGpuTexture metalDepth = (MetalGpuTexture) depthTexture.texture();
             Double pendingDepth = pendingDepthClears.get(metalDepth);
-            if (pendingDepth != null && isFullTextureView(depthTexture) && depthClear.isEmpty()) {
+            boolean coversPendingClear = isFullTextureView(depthTexture)
+                    && descriptor.renderArea().x() == 0 && descriptor.renderArea().y() == 0
+                    && descriptor.renderArea().width() == depthTexture.getWidth(0)
+                    && descriptor.renderArea().height() == depthTexture.getHeight(0);
+            if (pendingDepth != null && coversPendingClear && depthClear.isEmpty()) {
                 pendingDepthClears.remove(metalDepth);
                 depthClear = OptionalDouble.of(pendingDepth);
-            } else if (pendingDepth != null && depthClear.isEmpty()) {
+            } else if (pendingDepth != null && !coversPendingClear) {
                 flushPendingClear(metalDepth);
             } else {
                 pendingDepthClears.remove(metalDepth);
@@ -1481,15 +1489,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int regionHeight,
             final int mipLevel
     ) {
-        if (mipLevel != 0) {
-            throw new UnsupportedOperationException(
-                    "Metal regional color/depth clear currently supports mip level 0 only (got " + mipLevel + ")"
-            );
-        }
         MetalGpuTexture color = (MetalGpuTexture) colorTexture;
         MetalGpuTexture depth = (MetalGpuTexture) depthTexture;
+        if (mipLevel < 0 || mipLevel >= color.getMipLevels() || mipLevel >= depth.getMipLevels()) {
+            throw new IllegalArgumentException("Clear mip level out of range: " + mipLevel);
+        }
         Vector4fc clearColorCopy = new Vector4f(clearColor);
-        if (isFullTextureRegion(color, depth, regionX, regionY, regionWidth, regionHeight)) {
+        if (color.getMipLevels() == 1 && depth.getMipLevels() == 1
+                && isFullTextureRegion(color, depth, regionX, regionY, regionWidth, regionHeight)) {
             pendingColorClears.put(color, clearColorCopy);
             pendingDepthClears.put(depth, clearDepth);
             return;
@@ -1500,23 +1507,28 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClearForWrite(color);
         flushPendingClearForWrite(depth);
         endEncoder();
-        commandBuffer().clearColorDepthTexturesRegion(
-                color.nativeHandle(),
-                clearColorCopy.x(),
-                clearColorCopy.y(),
-                clearColorCopy.z(),
-                clearColorCopy.w(),
-                depth.nativeHandle(),
-                MetalIrisDepthConvention.hardwareClear(clearDepth),
-                regionX,
-                regionY,
-                regionWidth,
-                regionHeight,
-                fence
-        );
+        // Views select the requested mip without changing the native ABI. Closing
+        // them queues release through the same submitted-work lifetime as textures.
+        try (MetalGpuTextureView colorView = new MetalGpuTextureView(color, mipLevel, 1);
+             MetalGpuTextureView depthView = new MetalGpuTextureView(depth, mipLevel, 1)) {
+            commandBuffer().clearColorDepthTexturesRegion(
+                    colorView.nativeHandle(),
+                    clearColorCopy.x(),
+                    clearColorCopy.y(),
+                    clearColorCopy.z(),
+                    clearColorCopy.w(),
+                    depthView.nativeHandle(),
+                    MetalIrisDepthConvention.hardwareClear(clearDepth),
+                    regionX,
+                    regionY,
+                    regionWidth,
+                    regionHeight,
+                    fence
+            );
+        }
         if (RenderContractRuntime.enabled()) {
-            ResourceIdentity colorIdentity = contractResource(color, 0);
-            ResourceIdentity depthIdentity = contractResource(depth, 0);
+            ResourceIdentity colorIdentity = contractResource(color, mipLevel);
+            ResourceIdentity depthIdentity = contractResource(depth, mipLevel);
             RenderContractRuntime.recordTransfer(
                     PassType.RENDER,
                     "metallum/clear-region",
@@ -1975,34 +1987,37 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
 
-        endEncoder();
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
-                colorClear != null ? texture.nativeHandle() : null,
-                depthClear != null ? texture.nativeHandle() : null,
-                // Metal 4 carries the render-target dimensions explicitly.
-                // Metal 3 load-action clears historically ignored this
-                // viewport-sized hint and cleared the full attachment, but a
-                // 1x1 Metal 4 pass only initializes one pixel. Use the full
-                // resource extent so delayed clears remain deterministic when
-                // no later full-frame writer happens to mask the bug.
-                texture.getWidth(0), texture.getHeight(0),
-                colorClear != null ? 1 : 0,
-                colorClear != null ? colorClear.x() : 0.0F,
-                colorClear != null ? colorClear.y() : 0.0F,
-                colorClear != null ? colorClear.z() : 0.0F,
-                colorClear != null ? colorClear.w() : 0.0F,
-                depthClear != null ? 1 : 0,
-                depthClear != null ? MetalIrisDepthConvention.hardwareClear(depthClear) : 1.0
-        );
-        waitRenderFences(encoder);
-        encoderGeneration++;
-        currentEncoder = encoder;
+        // RenderPearl whole-texture clears include every mip. A render-pass
+        // attachment only addresses one mip, even when its view spans several.
+        for (int mip = 0; mip < texture.getMipLevels(); mip++) {
+            endEncoder();
+            try (MetalGpuTextureView view = texture.getMipLevels() == 1 ? null
+                    : new MetalGpuTextureView(texture, mip, 1)) {
+                MemorySegment handle = view == null ? texture.nativeHandle() : view.nativeHandle();
+                MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
+                        colorClear != null ? handle : null,
+                        depthClear != null ? handle : null,
+                        // Metal 4 needs the selected mip's full render-target extent.
+                        texture.getWidth(mip), texture.getHeight(mip),
+                        colorClear != null ? 1 : 0,
+                        colorClear != null ? colorClear.x() : 0.0F,
+                        colorClear != null ? colorClear.y() : 0.0F,
+                        colorClear != null ? colorClear.z() : 0.0F,
+                        colorClear != null ? colorClear.w() : 0.0F,
+                        depthClear != null ? 1 : 0,
+                        depthClear != null ? MetalIrisDepthConvention.hardwareClear(depthClear) : 1.0
+                );
+                waitRenderFences(encoder);
+                encoderGeneration++;
+                currentEncoder = encoder;
+            }
+        }
         texture.recordMaterializedClear(colorClear, depthClear);
     }
 
     private static boolean isFullTextureView(final GpuTextureView textureView) {
         return textureView.baseMipLevel() == 0
-                && textureView.mipLevels() >= textureView.texture().getMipLevels()
+                && textureView.texture().getMipLevels() == 1
                 && textureView.texture().getDepthOrLayers() == 1;
     }
 

@@ -82,6 +82,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             });
             JsonArray waypoints = new JsonArray();
             worldEvidence.add("waypoints", waypoints);
+            if (Boolean.getBoolean("metallum.ci.gameplay")) {
+                VanillaGameplay.run(context, singleplayer, evidenceDir, worldEvidence);
+                return;
+            }
             singleplayer.getServer().runCommand("gamemode spectator @a");
             singleplayer.getServer().runCommand("time set noon");
 

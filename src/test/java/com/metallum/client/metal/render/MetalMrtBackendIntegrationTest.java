@@ -364,6 +364,58 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void fullTextureClearIncludesAllMipsBeforeAnotherMipPass() {
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                "clear all mips", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 2);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                "clear all depth mips", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 2);
+             MetalGpuTextureView colorMip = new MetalGpuTextureView(color, 1, 1);
+             MetalGpuTextureView depthMip = new MetalGpuTextureView(depth, 1, 1)) {
+            encoder.clearColorAndDepthTextures(color, new Vector4f(0, 0, 1, 1), depth, 0.75);
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "replace only mip 1")
+                    .withColorAttachment(colorMip, Optional.of(new Vector4f(1, 0, 0, 1)))
+                    .withDepthAttachment(depthMip, java.util.OptionalDouble.of(0.25)).build());
+            encoder.submitRenderPass();
+            for (int mip = 0; mip < 2; mip++) {
+                ByteBuffer colors = readback(color, mip);
+                ByteBuffer depths = readback(depth, mip);
+                for (int offset = 0; offset < colors.remaining(); offset += 4) {
+                    assertByteNear(colors.get(offset + 2), mip == 0 ? 255 : 0, "other mip keeps full clear");
+                    assertEquals(mip == 0 ? 0.75F : 0.25F, depths.getFloat(offset), 0.0001F);
+                }
+            }
+            encoder.clearColorAndDepthTextures(color, new Vector4f(0, 1, 0, 1), depth, 0.5);
+            assertByteNear(readback(color, 1).get(1), 255, "standalone full clear reaches mip 1");
+            assertEquals(0.5F, readback(depth, 1).getFloat(0), 0.0001F);
+        }
+    }
+
+    @Test
+    void regionalClearSelectsMipAndPreservesOutsidePixels() {
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                "regional mip color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 2);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                "regional mip depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 2)) {
+            encoder.clearColorAndDepthTextures(color, new Vector4f(0, 0, 1, 1), depth, 0.75);
+            encoder.clearColorAndDepthTextures(color, new Vector4f(1, 0, 0, 1), depth, 0.25,
+                    1, 0, 3, 1, 1);
+            for (int mip = 0; mip < 2; mip++) {
+                ByteBuffer colors = readback(color, mip);
+                ByteBuffer depths = readback(depth, mip);
+                for (int y = 0; y < color.getHeight(mip); y++) {
+                    for (int x = 0; x < color.getWidth(mip); x++) {
+                        boolean inside = mip == 1 && y == 0 && x >= 1 && x < 4;
+                        int offset = (y * color.getWidth(mip) + x) * 4;
+                        assertByteNear(colors.get(offset), inside ? 255 : 0, "selected mip region");
+                        assertByteNear(colors.get(offset + 2), inside ? 0 : 255, "outside clear preserved");
+                        assertEquals(inside ? 0.25F : 0.75F, depths.getFloat(offset), 0.0001F);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void pendingFullClearPrecedesRegionalClear() {
         int usage = TEXTURE_USAGE | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_DST;
         try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(

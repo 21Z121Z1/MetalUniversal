@@ -29,6 +29,8 @@ def p1ProductionJarSha256 = providers.gradleProperty("p1ProductionJarSha256").or
 def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse("unrecorded").get().trim()
 def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
 def requireP1Metal4Evidence = p1Metal4Lane != "off"
+def gameplay = providers.gradleProperty('gameplay').orElse('false').get().toBoolean()
+def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -73,6 +75,8 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
 
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.ci.gameplay=${providers.gradleProperty('gameplay').orElse('false').get()}")
+    jvmArgs.add("-Dmetallum.ci.waitForProfiler=${providers.gradleProperty('waitForProfiler').orElse('false').get()}")
     jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.validation.sourceCommit=${expectedSourceSha}")
@@ -88,8 +92,11 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
     jvmArgs.add("-Dmetallum.metal.hud=false")
-    jvmArgs.add("-Dmetallum.hotpath.telemetry=true")
-    jvmArgs.add("-Dmetallum.presentation.telemetry=true")
+    jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
+    jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
+    if (gameplay) {
+        jvmArgs.add("-XX:StartFlightRecording=filename=${new File(evidenceDirectory, 'gameplay.jfr').absolutePath},settings=profile,dumponexit=true,maxsize=256m")
+    }
 
     if (requireP1Metal4Evidence) {
         // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
@@ -113,11 +120,11 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
         // Do not put this in JAVA_TOOL_OPTIONS: doing so changes the Gradle daemon's
         // JVM identity and prevents reuse of the daemon already started by root tasks.
-        jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
+        jvmArgs.add("-Dmetallum.opt.renderStatePacket=${gameplay}")
         jvmArgs.add("-Dmetallum.opt.residencySet=false")
     }
 
-    jvmArgs.add("-Dmetallum.ci.evidenceDir=${file("${buildDir}/evidence").absolutePath}")
+    jvmArgs.add("-Dmetallum.ci.evidenceDir=${evidenceDirectory.absolutePath}")
 
     // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
     // device; authoritative evidence is read from Metal textures, not scan-out.
