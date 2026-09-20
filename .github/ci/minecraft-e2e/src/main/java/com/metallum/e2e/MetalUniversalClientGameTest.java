@@ -11,7 +11,6 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
@@ -111,12 +110,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 // A fixed seed still has a randomized player spawn within the spawn radius.
                 int x = 160 + (int) (frameId - 1) * 96;
                 int z = 160 + (int) (frameId - 1) * 48;
-                int y = singleplayer.getServer().computeOnServer(server -> {
-                    // Level.getHeight returns the minimum height for an unloaded chunk.
-                    // Finish normal generation before choosing this route's camera altitude.
-                    server.overworld().getChunk(x >> 4, z >> 4);
-                    return server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20;
-                });
+                // Keep camera coordinates independent of spawn timing and vegetation heightmaps.
+                // Teleporting still exercises ordinary generation and uploads along the route.
+                int y = 128;
                 singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
                 if (frameId == 1) {
                     singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
