@@ -117,7 +117,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${providers.gradleProperty('reuseEncoderState').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")
         jvmArgs.add("-Dmetallum.ci.nativeHeight=${providers.gradleProperty('nativeHeight').get()}")
-        jvmArgs.add("-XX:StartFlightRecording=filename=${new File(evidenceDirectory, 'gameplay.jfr').absolutePath},settings=profile,dumponexit=true,maxsize=256m")
+        if (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()) {
+            jvmArgs.add("-XX:StartFlightRecording=filename=${new File(evidenceDirectory, 'gameplay.jfr').absolutePath},settings=profile,dumponexit=true,maxsize=256m")
+        }
     }
 
     if (requireP1Metal4Evidence) {

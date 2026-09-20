@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--jar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--template", default="Game Performance")
+    parser.add_argument("--metrics-only", action="store_true",
+                        help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
     args = parser.parse_args()
@@ -44,7 +46,9 @@ def main():
     width, height = map(int, native_size.groups())
     command = [str(root / "gradlew"), "--no-daemon", "-p", str(root / ".github/ci/minecraft-e2e"),
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
-               "-Pmetallum.noOptionalMods=true", "-Pgameplay=true", "-PwaitForProfiler=true",
+               "-Pmetallum.noOptionalMods=true", "-Pgameplay=true",
+               f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
+               f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
@@ -59,7 +63,8 @@ def main():
         raise RuntimeError("Cannot register Instruments recording notification")
     changed = ctypes.c_int()
     notify.notify_check(token, ctypes.byref(changed))
-    receipt = {"source": identity, "clientCommand": command, "template": args.template,
+    receipt = {"source": identity, "clientCommand": command, "template": None if args.metrics_only else args.template,
+               "profilingEnabled": not args.metrics_only,
                "display": main_display,
                "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}
@@ -77,23 +82,24 @@ def main():
                     raise TimeoutError("Client did not reach gameplay readiness within 10 minutes")
                 time.sleep(0.5)
             pid = json.loads(ready.read_text())["pid"]
-            trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
-                             "--attach", str(pid), "--output", str(output / "gameplay.trace"),
-                             "--time-limit", "120s", "--window", "120s", "--no-prompt",
-                             "--notify-tracing-started", notification]
-            receipt["traceCommand"] = trace_command
-            recording = subprocess.Popen(trace_command, stdout=trace_log, stderr=subprocess.STDOUT)
-            deadline = time.monotonic() + 45
-            while True:
-                notify.notify_check(token, ctypes.byref(changed))
-                if changed.value:
-                    break
-                if recording.poll() is not None:
-                    raise RuntimeError(f"Instruments could not start: {recording.returncode}; see instruments.log")
-                if time.monotonic() > deadline:
-                    raise TimeoutError("Instruments did not signal recording started")
-                time.sleep(0.2)
-            (output / "profiler-started").touch()
+            if not args.metrics_only:
+                trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
+                                 "--attach", str(pid), "--output", str(output / "gameplay.trace"),
+                                 "--time-limit", "120s", "--window", "120s", "--no-prompt",
+                                 "--notify-tracing-started", notification]
+                receipt["traceCommand"] = trace_command
+                recording = subprocess.Popen(trace_command, stdout=trace_log, stderr=subprocess.STDOUT)
+                deadline = time.monotonic() + 45
+                while True:
+                    notify.notify_check(token, ctypes.byref(changed))
+                    if changed.value:
+                        break
+                    if recording.poll() is not None:
+                        raise RuntimeError(f"Instruments could not start: {recording.returncode}; see instruments.log")
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("Instruments did not signal recording started")
+                    time.sleep(0.2)
+                (output / "profiler-started").touch()
             deadline = time.monotonic() + 300
             while not (output / "gameplay.json").exists():
                 if client.poll() is not None:
@@ -102,13 +108,14 @@ def main():
                     raise TimeoutError("Gameplay exceeded five minutes")
                 time.sleep(0.5)
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
-            if recording.poll() is None:
-                recording.send_signal(signal.SIGINT)
-            receipt["traceExitCode"] = recording.wait(timeout=600)
+            if recording is not None:
+                if recording.poll() is None:
+                    recording.send_signal(signal.SIGINT)
+                receipt["traceExitCode"] = recording.wait(timeout=600)
             receipt["clientExitCode"] = client.wait(timeout=180)
             if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
                 raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
-            if receipt["traceExitCode"] != 0:
+            if receipt.get("traceExitCode", 0) != 0:
                 raise RuntimeError("Instruments recording failed; see instruments.log")
         except BaseException as failure:
             receipt["failure"] = str(failure)
@@ -124,8 +131,9 @@ def main():
                 os.killpg(client.pid, signal.SIGTERM)
             notify.notify_cancel(token)
             (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    subprocess.run(["xcrun", "xctrace", "export", "--input", str(output / "gameplay.trace"),
-                    "--toc", "--output", str(output / "trace-toc.xml")], check=True)
+    if not args.metrics_only:
+        subprocess.run(["xcrun", "xctrace", "export", "--input", str(output / "gameplay.trace"),
+                        "--toc", "--output", str(output / "trace-toc.xml")], check=True)
     print(output / "recording.json")
 
 

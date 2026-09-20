@@ -281,6 +281,10 @@ JFR allocation sample weights are estimates; compare measured GC/frame tails as
 well as allocations. The 16-chunk development recordings are not performance
 baselines for this 32-chunk, native-resolution route. Xcode export can take several
 minutes after capture stops; the launcher allows it to finish saving.
+Use `--metrics-only` for timing trials after hotspot capture: it runs the same
+world, inputs and quality settings without Instruments or JFR overhead, retaining
+the bounded source-frame counter. Do not compare these FPS values directly to a
+profiled run or treat one trial as an accepted improvement.
 
 Use the trace to choose a concrete optimization, then compare that candidate under
 the same workload. A completed route proves only its reported actions; it does not
