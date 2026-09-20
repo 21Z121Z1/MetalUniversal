@@ -257,7 +257,7 @@ public final class BoundedTerrainTaskAdmission<T> {
     public Snapshot snapshot() {
         return new Snapshot(
                 config.requested(),
-                config.active(),
+                active(),
                 failOpen,
                 config.queueCapacity(),
                 config.deferredCapacity(),
@@ -277,10 +277,14 @@ public final class BoundedTerrainTaskAdmission<T> {
     private OfferResult<T> failOpen() {
         failOpen = true;
         failOpenCount = saturatedIncrement(failOpenCount);
-        List<T> tasks = deferred.values().stream()
-                .map(Pending::task)
-                .filter(task -> !taskOps.isTerminal(task))
-                .toList();
+        List<T> tasks = new ArrayList<>(deferred.size());
+        for (Pending<T> pending : deferred.values()) {
+            if (taskOps.isTerminal(pending.task())) {
+                discardedTerminalTasks = saturatedIncrement(discardedTerminalTasks);
+            } else {
+                tasks.add(pending.task());
+            }
+        }
         deferred.clear();
         return new OfferResult<>(Action.FAIL_OPEN, tasks);
     }
