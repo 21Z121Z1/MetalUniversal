@@ -48,7 +48,9 @@ public final class VanillaTerrainAdmissionTelemetry {
                     0L,
                     new BoundedTerrainTaskAdmission.Snapshot(
                             false, false, false, 0, 0, 0,
-                            0L, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0L
+                            0L, 0L, 0L, 0L, 0L, 0L,
+                            BoundedTerrainTaskAdmission.FailOpenReason.NONE,
+                            0L, 0, 0L
                     )
             );
         }
