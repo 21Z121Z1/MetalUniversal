@@ -36,12 +36,13 @@ final class VanillaGameplay {
         world.getServer().runCommand("time set noon");
         world.getServer().runCommand("weather clear");
         world.getServer().runCommand("tp @a 160.5 140 160.5 -65 15");
-        context.waitFor(client -> client.player != null && client.player.getY() > 130);
-        // Double-tap jump enters ordinary creative flight through the input path.
-        input.pressKey(options -> options.keyJump);
-        context.waitTicks(1);
-        input.pressKey(options -> options.keyJump);
-        context.waitFor(client -> client.player.getAbilities().flying);
+        context.waitFor(client -> client.player != null && client.player.getY() > 130
+                && client.player.getAbilities().mayfly);
+        // Establish the flight pose before measurement. Route movement itself is input-driven.
+        context.runOnClient(client -> {
+            client.player.getAbilities().flying = true;
+            client.player.onUpdateAbilities();
+        });
         world.getConnection().waitForChunksRender();
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
@@ -72,9 +73,10 @@ final class VanillaGameplay {
                     .getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, position.getX(), position.getZ()));
             world.getServer().runCommand("tp @a " + (position.getX() + 0.5) + " " + groundY
                     + " " + (position.getZ() + 0.5) + " 0 15");
-            input.pressKey(options -> options.keyJump);
-            context.waitTicks(1);
-            input.pressKey(options -> options.keyJump);
+            context.runOnClient(client -> {
+                client.player.getAbilities().flying = false;
+                client.player.onUpdateAbilities();
+            });
             context.waitFor(client -> !client.player.getAbilities().flying);
             input.holdKey(options -> options.keyUp);
             input.holdKey(options -> options.keyJump);

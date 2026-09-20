@@ -225,3 +225,35 @@ Ordinary presentation samples the submitted `GpuTextureView`, including its base
 mip, rather than the underlying texture's level zero. Pre-present capture uses the
 same mip and dimensions. A subview does not inherit a full-texture MetalFX synthesis
 receipt and continues through ordinary source-frame presentation.
+
+## Normal-world gameplay profiling
+
+The existing production Client GameTest has an opt-in `-Pgameplay=true` route.
+It uses [Fabric 26.3 TestInput](https://github.com/FabricMC/fabric/blob/26.3/fabric-client-gametest-api-v1/src/client/java/net/fabricmc/fabric/api/client/gametest/v1/TestInput.java)
+for creative flight across new chunks, walking/jumping, inventory, block placement
+and breaking, and camera turns in rain. World generation remains normal, seed 1;
+initial positioning and landing are explicit setup teleports. Simulation, entities,
+weather and texture animation continue normally. This is a bounded gameplay workload,
+not a claim to cover every survival action or every biome.
+
+Build the committed production JAR, then record on a physical Mac with Xcode 27:
+
+```bash
+python3 scripts/agent/record_vanilla_gameplay.py \
+  --jar build/libs/metallum-1.0.3.jar \
+  --output build/agent-runs/gameplay-unique-run
+```
+
+The launcher attaches Instruments' `Game Performance` template to the exact client
+PID. A recording-start notification releases the input route, so attachment startup
+does not consume the workload. `gameplay.trace` contains CPU/Metal/system activity;
+`gameplay.jfr` supplies Java method stacks. `gameplay.json` records actual movement,
+interaction results and phase timestamps. High-frequency hot-path counters and broad
+readbacks stay off during this route. The output directory must be new; saves and
+previous recordings are preserved.
+
+Use the trace to choose a concrete optimization, then compare that candidate under
+the same workload. A completed route proves only its reported actions; it does not
+replace image correctness, paired performance trials or GPU validation. Xcode's
+M3-only offline GPU-counter profiler is separate from the Instruments timeline and
+must not be reported as available on an M1 Pro.
