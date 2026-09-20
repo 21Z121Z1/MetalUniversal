@@ -93,10 +93,17 @@ public final class VanillaTerrainWorkTracker {
      */
     public synchronized void markDirty(final long sectionId, final DirtyKind kind) {
         Objects.requireNonNull(kind, "kind");
-        SectionRevision revision = sectionRevisions.computeIfAbsent(
-                sectionId,
-                ignored -> new SectionRevision(INITIAL_REVISION, INITIAL_REVISION)
-        );
+        SectionRevision revision = sectionRevisions.get(sectionId);
+        if (revision == null) {
+            if (!admitSectionIdentity(sectionId)) {
+                recorder.markDropped();
+                return;
+            }
+            revision = sectionRevisions.computeIfAbsent(
+                    sectionId,
+                    ignored -> new SectionRevision(INITIAL_REVISION, INITIAL_REVISION)
+            );
+        }
         switch (kind) {
             case GEOMETRY -> revision.geometry.updateAndGet(VanillaTerrainWorkTracker::incrementGeneration);
             case LIGHTING -> revision.lighting.updateAndGet(VanillaTerrainWorkTracker::incrementGeneration);
