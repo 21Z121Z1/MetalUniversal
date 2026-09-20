@@ -9,43 +9,74 @@ permissions:
   contents: read
 
 jobs:
-  export:
+  reference:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Export repository history and public comparison inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Materialize exact reference for this investigation
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/mu-audit"
-          OUT="$RUNNER_TEMP/mu-audit"
-          git bundle create "$OUT/MetalUniversal.bundle" --all
-          git rev-parse HEAD > "$OUT/source-sha.txt"
-          gh api --paginate 'repos/21Z121Z1/MetalUniversal/pulls?state=all&per_page=100' > "$OUT/pulls.json"
-          gh api 'repos/21Z121Z1/MetalUniversal' > "$OUT/repository.json"
-          gh api 'repos/21Z121Z1/MetalUniversal/releases?per_page=100' > "$OUT/releases.json"
-          gh api 'repos/21Z121Z1/MetalUniversal/actions/runs?per_page=100' > "$OUT/runs.json"
-          gh api 'repos/21Z121Z1/MetalUniversal/rulesets' > "$OUT/rulesets.json"
-          gh api --paginate 'repos/EternityQwQ/MetalUniversal/forks?per_page=100&sort=newest' > "$OUT/forks.json"
-          for repo in EternityQwQ/MetalUniversal kokodio/metallum twoyears666/MetalUniversal PigeonCoders/MetalUniversal-Iris PigeonCoders/MetalUniversal-1.21.11; do
-            key="${repo//\//__}"
-            if git clone --bare "https://github.com/$repo.git" "$RUNNER_TEMP/$key.git"; then
-              git -C "$RUNNER_TEMP/$key.git" bundle create "$OUT/$key.bundle" --all
-              gh api "repos/$repo" > "$OUT/$key.json"
-            else
-              printf '%s\n' "Unavailable: $repo" >> "$OUT/unavailable.txt"
-            fi
-          done
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          mkdir -p "$RUNNER_TEMP/reference-audit"
+          cp "$(dirname "$SRC")/REFERENCE_INFO.txt" "$RUNNER_TEMP/reference-audit/"
+          tar -czf "$RUNNER_TEMP/reference-audit/sources.tar.gz" -C "$SRC" com/mojang net/minecraft/client
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: repository-audit-inputs
-          path: ${{ runner.temp }}/mu-audit/
+          name: reference-audit-inputs
+          path: ${{ runner.temp }}/reference-audit/
+          if-no-files-found: error
+          retention-days: 2
+
+  native-diagnosis:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Build shipping native module
+        run: ./gradlew --no-daemon buildMacNative
+      - name: Compare direct FFM with the shipping bridge
+        run: |
+          mkdir -p build/native-diagnosis
+          git rev-parse HEAD > build/native-diagnosis/source-sha.txt
+          set +e
+          java --enable-native-access=ALL-UNNAMED -XX:ErrorFile="$PWD/build/native-diagnosis/direct-hs_err_pid%p.log" \
+            .github/ci/JvmPsoThreadingProbe.java "$PWD/src/main/resources/natives/macos/libmetallum.dylib" \
+            > build/native-diagnosis/direct.log 2>&1
+          echo "direct_ffm_exit=$?" > build/native-diagnosis/exits.txt
+          NSZombieEnabled=YES ./gradlew --no-daemon --stacktrace test \
+            --tests com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest \
+            -Pmetallum.hsErrDir=native-diagnosis -x buildIOSNative -x buildIOSSpvc \
+            > build/native-diagnosis/zombie.log 2>&1
+          echo "shipping_bridge_zombie_exit=$?" >> build/native-diagnosis/exits.txt
+          cat build/native-diagnosis/exits.txt
+          echo 'Diagnostic outcomes only. These runs do not replace required CI gates.'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-diagnosis
+          path: |
+            build/native-diagnosis/
+            build/test-results/
+            build/reports/tests/
           if-no-files-found: error
           retention-days: 2
