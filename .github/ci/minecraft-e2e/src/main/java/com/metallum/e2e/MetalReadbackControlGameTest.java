@@ -21,7 +21,7 @@ public final class MetalReadbackControlGameTest implements FabricClientGameTest 
         require(FabricLoader.getInstance().isModLoaded("iris"), "Iris was not loaded");
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            singleplayer.getClientLevel().waitForChunksRender();
+            singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(30);
 
             String backend = context.computeOnClient(
