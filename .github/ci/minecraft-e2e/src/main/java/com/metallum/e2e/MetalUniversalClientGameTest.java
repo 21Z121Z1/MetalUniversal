@@ -114,6 +114,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 int y = singleplayer.getServer().computeOnServer(server ->
                         server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20);
                 singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+                if (frameId == 1) {
+                    singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
+                            + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
+                }
                 context.waitFor(client -> client.player != null
                         && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
                 context.waitTicks(10);
