@@ -1,5 +1,8 @@
 package com.metallum.e2e;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.GsonBuilder;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
@@ -13,6 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.zip.ZipFile;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -42,8 +48,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         boolean irisLoaded = FabricLoader.getInstance().isModLoaded("iris");
 
         require(metallumLoaded, "MetalUniversal mod was not loaded in the production client");
-        require(sodiumLoaded, "Sodium was not loaded in the production client");
-        require(irisLoaded, "Iris was not loaded in the production client");
+        boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
+        require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
+        require(irisLoaded == !vanillaOnly, "Iris runtime presence disagrees with the requested lane");
+        writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly);
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
@@ -360,6 +368,51 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         } catch (IOException exception) {
             throw new IllegalStateException("Could not stat evidence file " + path, exception);
         }
+    }
+
+    /** Read the artifact that actually defined the backend, not a requested path or SHA. */
+    private static void writeLoadedArtifactIdentity(Path output, boolean vanillaOnly) {
+        try {
+            Class<?> backend = Class.forName("com.metallum.client.metal.render.MetalDevice");
+            Path jar = Path.of(backend.getProtectionDomain().getCodeSource().getLocation().toURI());
+            require(Files.isRegularFile(jar), "Production test loaded development classes instead of a JAR: " + jar);
+            JsonObject report = new JsonObject();
+            report.addProperty("rendererMode", vanillaOnly ? "vanilla" : "sodium-iris");
+            report.addProperty("loadedJavaArtifact", jar.toString());
+            try (var input = Files.newInputStream(jar)) {
+                report.addProperty("javaArtifactSha256", sha256(input));
+            }
+            try (ZipFile archive = new ZipFile(jar.toFile())) {
+                try (var input = archive.getInputStream(archive.getEntry("metallum-build-identity.json"))) {
+                    JsonObject build = JsonParser.parseString(new String(input.readAllBytes(), StandardCharsets.UTF_8))
+                            .getAsJsonObject();
+                    String expected = System.getProperty("metallum.ci.expectedSourceSha", "unrecorded");
+                    require(expected.matches("[0-9a-f]{40}"), "Production test requires an exact expected source SHA");
+                    require(expected.equals(build.get("sourceSha").getAsString()), "Loaded JAR has the wrong source SHA");
+                    require(!build.get("dirty").getAsBoolean(), "Loaded JAR was built from a dirty checkout");
+                    report.add("build", build);
+                }
+                try (var input = archive.getInputStream(archive.getEntry("natives/macos/libmetallum.dylib"))) {
+                    // This is the bundled artifact hash; it does not claim an independently observed load path.
+                    report.addProperty("packagedNativeSha256", sha256(input));
+                }
+            }
+            JsonObject mods = new JsonObject();
+            FabricLoader.getInstance().getAllMods().stream()
+                    .sorted(java.util.Comparator.comparing(mod -> mod.getMetadata().getId()))
+                    .forEach(mod -> mods.addProperty(mod.getMetadata().getId(), mod.getMetadata().getVersion().getFriendlyString()));
+            report.add("mods", mods);
+            Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n");
+        } catch (Exception exception) {
+            throw new IllegalStateException("Could not verify the loaded production artifact", exception);
+        }
+    }
+
+    private static String sha256(java.io.InputStream input) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] chunk = new byte[65_536];
+        for (int count; (count = input.read(chunk)) != -1;) digest.update(chunk, 0, count);
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static void writeEvidence(

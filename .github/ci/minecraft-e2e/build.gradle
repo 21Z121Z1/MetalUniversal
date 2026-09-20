@@ -7,6 +7,12 @@ repositories {
 }
 
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+def noOptionalRenderMods = providers.gradleProperty("metallum.noOptionalMods")
+        .map { it.toBoolean() }.orElse(false).get()
+def expectedSourceSha = providers.gradleProperty("metallumSourceSha")
+        .orElse(providers.gradleProperty("p1SourceSha"))
+        .orElse(providers.environmentVariable("METALLUM_SOURCE_SHA"))
+        .orElse("unrecorded").get()
 def legacyRequireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
         .map { it.toBoolean() }
         .orElse(false)
@@ -35,10 +41,12 @@ dependencies {
     // the independently-built production MetalUniversal JAR below.
     compileOnly files(metallumJarProvider)
 
-    // Production runtime mirrors MetalUniversal's shipping client dependencies.
+    // Fabric API supplies the test driver. Renderer adapters are optional.
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-    productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-    productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+    if (!noOptionalRenderMods) {
+        productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+        productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+    }
 }
 
 java {
@@ -57,7 +65,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         }
     }
 
-    // Minecraft 26.2 uses Loom's non-obfuscated plugin, so ordinary JARs are
+    // Minecraft 26.3 uses Loom's non-obfuscated plugin, so ordinary JARs are
     // the production artifacts; there is intentionally no remapJar task.
     mods.from(tasks.named("jar"))
     mods.from(metallumJarProvider)
@@ -65,6 +73,8 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
 
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
     jvmArgs.add("-Dmetallum.ci.p1SourceSha=${p1SourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1ProductionJarSha256=${p1ProductionJarSha256}")
@@ -72,7 +82,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Compatibility seam for older invocations while P1 switches to the
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
-    jvmArgs.add("-Dmetallum.iris.semantic=true")
+    jvmArgs.add("-Dmetallum.iris.semantic=${!noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")

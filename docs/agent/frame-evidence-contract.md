@@ -68,6 +68,26 @@ Require the real-client report's mod list to omit Sodium/Iris, its main readback
 pass, and its terrain lifecycle report to pass the independent oracle. A nonzero
 readback proves image production, not full Minecraft pixel parity or performance.
 
+The existing production Client GameTest also has a Vanilla lane. Build from a clean
+commit, then run the actual JAR with Fabric's test driver. It creates disposable worlds
+under the test project's `build/` directory and exercises readback controls, world
+rendering, ordinary presentation and resource reload:
+
+```bash
+./gradlew --no-daemon jar -x buildIOSNative -x buildIOSSpvc
+./gradlew --no-daemon -p .github/ci/minecraft-e2e \
+  -PmetallumJar="$PWD/build/libs/metallum-1.0.3.jar" \
+  -Pmetallum.noOptionalMods=true -PmetallumSourceSha="$(git rev-parse HEAD)" \
+  runProductionClientGameTest
+```
+
+`artifact-identity.json` records the JAR that actually defined `MetalDevice`, its
+embedded clean source identity, bundled native hash and the loaded mod set. Its
+bundled native hash is an artifact check, not a separate observation of the native
+load path. CI checks the loaded JAR against its independently built artifact. The
+resource-reload/presentation reports prove completion and recovery; they do not yet
+prove terrain generation safety across teleport and dimension changes.
+
 ```bash
 ./gradlew --no-daemon minecraftNativeFullscreenBaseline \
   -Pworld="frame-evidence-test-copy" -Pmetallum.noOptionalMods=true \
