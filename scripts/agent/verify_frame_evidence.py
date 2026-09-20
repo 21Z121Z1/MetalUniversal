@@ -156,12 +156,13 @@ def self_test():
         "scope": "Minecraft.renderFrame/render-thread/main-command-queue", "shutdownDrained": True,
         "validationStatus": "passed", "droppedFrames": 0, "unavailable": {"gpuFrameNs": "not command-buffer time"},
         "frames": [{"frameId": 1, "parentFrameId": 0, "cpuFrameNs": 100, "renderLevel": True, "ended": True, "failure": "",
-                    "producerEntries": ["vanilla-terrain-layer-return"],
+                    "producerEntries": ["vanilla-terrain-layer-return"], "terrainBatchIndices": [0, 7],
                     "abi": {"metallum_draw": {"calls": 2, "inclusiveNs": 50, "exclusiveNs": 40, "failures": 0}},
                     "commandBuffers": [{"submissionId": 1, "nativeSubmitIndex": 0, "submitted": True,
                                         "presentationRequested": True, "nativePresentationId": 17,
                                         "presentationIdUnavailableReason": "",
                                         "completed": True, "success": True, "gpuServiceNs": 80,
+                                        "drawableWaitNs": 0, "drawableWaitUnavailableReason": "",
                                         "gpuUnavailableReason": ""}]}]}
     assert verify(fixture, head, True)["cpuFrameNs"]["p99"] == 100
     legacy = copy.deepcopy(fixture)
@@ -184,6 +185,11 @@ def self_test():
         lambda x: x["frames"][0].update(cpuFrameNs=30),
         lambda x: x["frames"][0].update(ended=False),
         lambda x: x["frames"][0].update(parentFrameId=1),
+        lambda x: x["frames"][0].update(terrainBatchIndices=[7, 7]),
+        lambda x: x["frames"][0].update(terrainBatchIndices=[-1]),
+        lambda x: x["frames"][0].update(terrainBatchIndices=list(range(65))),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(drawableWaitNs=-1),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(drawableWaitNs=None),
         lambda x: x["frames"][0]["abi"]["metallum_draw"].update(failures=1),
         lambda x: x["frames"][0]["abi"]["metallum_draw"].update(exclusiveNs=51),
         lambda x: x["frames"][0]["commandBuffers"][0].update(completed=False),

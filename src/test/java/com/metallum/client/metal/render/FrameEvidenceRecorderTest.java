@@ -148,6 +148,27 @@ class FrameEvidenceRecorderTest {
         assertSame(target, FrameEvidenceRuntime.instrument("disabled", target));
     }
 
+    @Test void terrainBatchJoinsRestoreOuterScopeAndDrawableWaitKeepsSubmissionOwner() {
+        recorder.beginFrame(true);
+        recorder.terrainBatchEncoded(17);
+        var first = recorder.commandBuffer(8);
+        recorder.submitted(first);
+        recorder.beginFrame(false);
+        recorder.terrainBatchEncoded(18);
+        var second = recorder.commandBuffer(9);
+        recorder.submitted(second);
+        recorder.endFrame();
+        recorder.terrainBatchEncoded(17);
+        recorder.terrainBatchEncoded(19);
+        recorder.endFrame();
+        recorder.drawableWait(first, 0);
+        recorder.drawableWait(second, 73);
+        assertEquals("[17,19]", frame(0).getAsJsonArray("terrainBatchIndices").toString());
+        assertEquals("[18]", frame(1).getAsJsonArray("terrainBatchIndices").toString());
+        assertEquals(0, frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("drawableWaitNs").getAsLong());
+        assertEquals(73, frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("drawableWaitNs").getAsLong());
+    }
+
     private JsonObject frame(int index) {
         return recorder.snapshot(new JsonObject()).getAsJsonArray("frames").get(index).getAsJsonObject();
     }

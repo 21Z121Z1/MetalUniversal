@@ -138,6 +138,42 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void positionedTextureUploadAndTransientRetirementPreserveData() {
+        int bytes = WIDTH * HEIGHT * 4;
+        int prefix = 37;
+        ByteBuffer source = ByteBuffer.allocateDirect(prefix + bytes + 11);
+        for (int i = 0; i < bytes; i++) source.put(prefix + i, (byte) (i * 31));
+        source.position(prefix);
+        source.limit(prefix + bytes + 11);
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                () -> "positioned upload", TEXTURE_USAGE
+                        | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1)) {
+            encoder.writeToTexture(texture, source, 0, 0, 0, 0, WIDTH, HEIGHT);
+            ByteBuffer actual = readback(texture);
+            for (int i = 0; i < bytes; i++) assertEquals((byte) (i * 31), actual.get(i), "texel byte " + i);
+            assertEquals(prefix, source.position());
+            assertEquals(prefix + bytes + 11, source.limit());
+        }
+
+        try (MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                () -> "transient copy", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64)) {
+            var slice = encoder.transientMemory().uploadStaging(
+                    source.slice(prefix, 64), 4, GpuBuffer.USAGE_COPY_SRC);
+            MetalGpuBuffer transientBuffer = (MetalGpuBuffer) slice.buffer();
+            assertDoesNotThrow(transientBuffer::nativeHandle);
+            encoder.copyToBuffer(slice, destination.slice(0, 64));
+            encoder.submit();
+            assertTrue(transientBuffer.isClosed());
+            assertThrows(IllegalStateException.class, transientBuffer::nativeHandle);
+            assertThrows(IllegalStateException.class, transientBuffer::allocationIdentity);
+            device.waitForSubmittedGpuWork();
+            ByteBuffer copied = destination.currentStorage();
+            for (int i = 0; i < 64; i++) assertEquals((byte) (i * 31), copied.get(i));
+        }
+    }
+
+    @Test
     void renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance() {
         String name = "vanilla_indirect";
         vertexShaders.put(name, """
