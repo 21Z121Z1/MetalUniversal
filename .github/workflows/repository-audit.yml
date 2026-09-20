@@ -27,113 +27,218 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
+      - name: Reproduce the interface failure
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 84d86ef8f7216ffc994e2028c4f242126368e627
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/repository-audit.yml
+          mkdir -p build/contract-audit
+          set +e
+          ./gradlew --no-daemon test --tests com.metallum.client.metal.render.IrisStageInterfaceTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc > build/contract-audit/before.log 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          cp build/test-results/test/TEST-com.metallum.client.metal.render.IrisStageInterfaceTest.xml build/contract-audit/before.xml
       - name: Apply the reviewed source delta
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = 9b12f0e577c900b421217ef5c7b97dc5f4aaf4bf
-          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/repository-audit.yml
-          mkdir -p build/contract-audit
           python3 - <<'PY'
-          from pathlib import Path
-          import subprocess
-          p=Path('src/main/native/MetallumNative.swift')
-          t=p.read_text()
-          a=t.index('    // Pipeline compilation (MTLCompiler XPC scheduling)')
-          b=t.index('    static func logMetal4PipelineFallback',a)
-          t=t[:a]+t[b:]
-          a=t.index('    /// Runs a blocking pipeline-compilation body')
-          b=t.index('    static func register(function:',a)
-          t=t[:a]+t[b:]
-          assert t.count('NativeState.onCompilerThread {')==11
-          t=t.replace('NativeState.onCompilerThread {','autoreleasepool {')
-          for key in ('MTL_HUD_ENABLED','MTLFX_HUD_ENABLED'):
-              old=f'setenv("{key}", "1", 1)'
-              assert t.count(old)==1
-              t=t.replace(old,f'setenv("{key}", "1", 0)')
-          t=t.replace('        // Metal\'s HUD subsystem must be enabled before the device is created.', '        // Preserve explicit launcher settings, including HUD=0.\n        // Set the default before the device is created.')
-          p.write_text(t)
-          p=Path('build.gradle');t=p.read_text()
-          a=t.index('\t\t// Capability gate mirrors HostedMetalGradle.init.gradle:')
-          b=t.index('\n\t}\n}',a)
-          t=t[:a]+t[b:]
-          p.write_text(t)
-          p=Path('.github/ci/HostedMetalGradle.init.gradle');t=p.read_text()
-          t=t.replace('import org.gradle.api.tasks.Exec\n','')
-          a=t.index('    // Execute the shipping dylib through dlopen/dlsym')
-          b=t.index('    def configureHostedTest',a)
-          t=t[:a]+t[b:]
-          t=t.replace('            task.dependsOn(project.tasks.named("hostedMetalShippingPipelineAbiSmoke"))\n','')
-          a=t.index('            // Until this hosted compiler failure is closed')
-          b=t.index('            task.systemProperty "metallum.metal.hud"',a)
-          t=t[:a]+t[b:]
-          a=t.index('    // Capability-gated JVM GPU suites.')
-          b=t.index('    def hostedBridgeFfmSmoke',a)
-          t=t[:a]+t[b:]
-          a=t.index('    if (jvmPsoSmokeMode == "environment-blocked")')
-          t=t[:a]+'}\n'
-          t=t.replace('"com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest"','"com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest",\n            "com.metallum.client.metal.render.MetalNativeBridgeTerrainVisibilityContractTest"')
-          p.write_text(t)
-          p=Path('.github/ci/minecraft-e2e/build.gradle');t=p.read_text()
-          t=t.replace('def metallumJarProvider', '''def adapterProfile = providers.gradleProperty("adapterProfile").orElse("adapters").get()
-          if (!(adapterProfile in ["vanilla", "adapters"])) {
-              throw new GradleException("adapterProfile must be vanilla or adapters")
-          }
-          def optionalAdapters = adapterProfile == "adapters"
-
-          def metallumJarProvider''',1)
-          a='''    productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-              productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"'''
-          b='''    if (optionalAdapters) {
-                  productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-                  productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
-              }'''
-          assert a in t;t=t.replace(a,b)
-          t=t.replace('// Minecraft 26.2 uses', '// Minecraft 26.3 uses')
-          t=t.replace('    jvmArgs.add("-Dmetallum.ci.e2e=true")', '    jvmArgs.add("-Dmetallum.ci.e2e=true")\n    jvmArgs.add("-Dmetallum.ci.optionalAdapters=${optionalAdapters}")')
-          t+='''
-          tasks.named("processResources") {
-              inputs.property("minecraft_version", project.minecraft_version)
-              filesMatching("fabric.mod.json") {
-                  expand(minecraft_version: project.minecraft_version)
+          import subprocess, textwrap
+          text = subprocess.check_output(['git', 'show', 'a110f056c52ba3f1ca108905bebcb72818ca4711:.github/workflows/repository-audit.yml'], text=True)
+          start = text.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+          end = text.index('\n          PY\n', start)
+          # This exact-SHA script is the seven-file delta already verified by the native control.
+          exec(compile(textwrap.dedent(text[start:end]), 'reviewed-native-delta', 'exec'))
+          PY
+          cat > "$RUNNER_TEMP/interface-methods.txt" <<'JAVA'
+              private record InterfaceVariable(String name, int start, boolean explicit, int location,
+                                               int slots, List<Integer> type) {
               }
-          }
-          '''
+
+              private record StageInterface(String source, List<InterfaceVariable> inputs,
+                                            List<InterfaceVariable> outputs) {
+              }
+
+              /** Assign locations once, before RenderPearl compiles the paired stages. */
+              private static String[] linkInterfaceLocations(String name, String vertex, String fragment) {
+                  StageInterface v = reflectInterface(name, StageKind.VERTEX, vertex);
+                  StageInterface f = reflectInterface(name, StageKind.FRAGMENT, fragment);
+                  Map<String, Integer> locations = new java.util.LinkedHashMap<>();
+                  Map<Integer, String> occupied = new java.util.HashMap<>();
+                  Map<String, InterfaceVariable> outputs = new java.util.LinkedHashMap<>();
+                  for (InterfaceVariable output : v.outputs()) {
+                      outputs.put(output.name(), output);
+                      if (output.explicit()) reserveInterface(output.name(), output, output.location(), locations, occupied);
+                  }
+                  Map<String, String> producers = new java.util.HashMap<>();
+                  for (InterfaceVariable input : f.inputs()) {
+                      InterfaceVariable output = input.explicit() ? v.outputs().stream()
+                              .filter(candidate -> candidate.explicit() && candidate.location() == input.location())
+                              .findFirst().orElse(outputs.get(input.name())) : outputs.get(input.name());
+                      if (output == null || !output.type().equals(input.type())) {
+                          throw new IllegalArgumentException("Missing or incompatible vertex output for " + input.name());
+                      }
+                      producers.put(input.name(), output.name());
+                      if (input.explicit()) reserveInterface(output.name(), input, input.location(), locations, occupied);
+                  }
+                  for (InterfaceVariable output : v.outputs()) {
+                      if (locations.containsKey(output.name())) continue;
+                      int location = 0;
+                      while (!freeInterfaceRange(occupied, location, output.slots())) location++;
+                      reserveInterface(output.name(), output, location, locations, occupied);
+                  }
+                  Map<String, Integer> inputLocations = new java.util.HashMap<>();
+                  for (InterfaceVariable input : f.inputs()) inputLocations.put(input.name(), locations.get(producers.get(input.name())));
+                  return new String[]{explicitInterface(v, Map.of(), locations), explicitInterface(f, inputLocations, Map.of())};
+              }
+
+              private static boolean freeInterfaceRange(Map<Integer, String> occupied, int location, int slots) {
+                  for (int i = 0; i < slots; i++) if (occupied.containsKey(Math.addExact(location, i))) return false;
+                  return true;
+              }
+
+              private static void reserveInterface(String owner, InterfaceVariable variable, int location,
+                                                   Map<String, Integer> locations, Map<Integer, String> occupied) {
+                  Integer previous = locations.putIfAbsent(owner, location);
+                  if (previous != null && previous != location) {
+                      throw new IllegalArgumentException("Conflicting interface locations for " + owner);
+                  }
+                  for (int i = 0; i < variable.slots(); i++) {
+                      String conflict = occupied.putIfAbsent(Math.addExact(location, i), owner);
+                      if (conflict != null && !conflict.equals(owner)) {
+                          throw new IllegalArgumentException("Overlapping interface locations for " + owner + " and " + conflict);
+                      }
+                  }
+              }
+
+              private static String explicitInterface(StageInterface stage, Map<String, Integer> inputs,
+                                                      Map<String, Integer> outputs) {
+                  Map<Integer, String> edits = new java.util.TreeMap<>(java.util.Comparator.reverseOrder());
+                  for (int side = 0; side < 2; side++) {
+                      for (InterfaceVariable variable : side == 0 ? stage.inputs() : stage.outputs()) {
+                          if (!variable.explicit()) {
+                              int location = (side == 0 ? inputs : outputs).getOrDefault(variable.name(), variable.location());
+                              edits.put(variable.start(), "layout(location = " + location + ") ");
+                          }
+                      }
+                  }
+                  StringBuilder result = new StringBuilder(stage.source());
+                  edits.forEach(result::insert);
+                  return result.toString();
+              }
+
+              private static StageInterface reflectInterface(String name, StageKind kind, String source) {
+                  SpirvResult spirv = glslToSpirv(name, kind, source);
+                  try (MemoryStack stack = MemoryStack.stackPush()) {
+                      PointerBuffer pointer = stack.mallocPointer(1);
+                      checkSpvc(name, kind, Spvc.spvc_context_create(pointer), "interface context");
+                      long context = pointer.get(0);
+                      try {
+                          IntBuffer words = spirv.spirv().asIntBuffer();
+                          checkSpvc(name, kind, Spvc.spvc_context_parse_spirv(context, words, words.remaining(), pointer), "interface IR");
+                          long ir = pointer.get(0);
+                          checkSpvc(name, kind, Spvc.spvc_context_create_compiler(context, Spvc.SPVC_BACKEND_NONE,
+                                  ir, Spvc.SPVC_CAPTURE_MODE_COPY, pointer), "interface compiler");
+                          long compiler = pointer.get(0);
+                          checkSpvc(name, kind, Spvc.spvc_compiler_create_shader_resources(compiler, pointer), "interface resources");
+                          long resources = pointer.get(0);
+                          List<InterfaceVariable> inputs = reflectInterfaceVariables(name, kind, source, stack, compiler, resources,
+                                  Spvc.SPVC_RESOURCE_TYPE_STAGE_INPUT, "in");
+                          List<InterfaceVariable> outputs = reflectInterfaceVariables(name, kind, source, stack, compiler, resources,
+                                  Spvc.SPVC_RESOURCE_TYPE_STAGE_OUTPUT, "out");
+                          return new StageInterface(source, inputs, outputs);
+                      } finally {
+                          Spvc.spvc_context_destroy(context);
+                      }
+                  }
+              }
+
+              private static List<InterfaceVariable> reflectInterfaceVariables(
+                      String program, StageKind kind, String source, MemoryStack stack, long compiler,
+                      long resources, int resourceType, String direction) {
+                  PointerBuffer list = stack.mallocPointer(1), count = stack.mallocPointer(1);
+                  checkSpvc(program, kind, Spvc.spvc_resources_get_resource_list_for_type(resources, resourceType, list, count),
+                          "interface variables");
+                  int size = Math.toIntExact(count.get(0));
+                  List<InterfaceVariable> variables = new ArrayList<>();
+                  if (size == 0) return variables;
+                  for (SpvcReflectedResource resource : SpvcReflectedResource.create(list.get(0), size)) {
+                      if (Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationBuiltIn)) continue;
+                      String name = resource.nameString();
+                      // Iris has already parsed and printed these declarations. Reject blocks,
+                      // multiple declarators and component packing rather than rewrite them by guess.
+                      Pattern declaration = Pattern.compile("(?m)^[ \\t]*(?<qualifiers>(?:(?:layout\\s*\\([^;{}]*\\)|"
+                              + "in|out|flat|smooth|noperspective|centroid|sample|invariant|precise|lowp|mediump|highp)\\s+)+)"
+                              + "[A-Za-z_][A-Za-z0-9_]*\\s+" + Pattern.quote(name) + "\\s*(?:\\[[^;{}]*?\\]\\s*)*;");
+                      Matcher match = declaration.matcher(source);
+                      if (!match.find() || !Pattern.compile("\\b" + direction + "\\b").matcher(match.group("qualifiers")).find()) {
+                          throw new IllegalArgumentException("Unsupported " + kind + " interface declaration: " + name);
+                      }
+                      int start = match.start();
+                      boolean explicit = Pattern.compile("\\blocation\\s*=").matcher(match.group("qualifiers")).find();
+                      if (match.find() || Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationComponent)
+                              || Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationIndex)) {
+                          throw new IllegalArgumentException("Unsupported packed or duplicate interface: " + name);
+                      }
+                      long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                      int base = Spvc.spvc_type_get_basetype(type);
+                      int components = Spvc.spvc_type_get_vector_size(type);
+                      int columns = Spvc.spvc_type_get_columns(type);
+                      if (base == Spvc.SPVC_BASETYPE_STRUCT || components < 1 || columns < 1) {
+                          throw new IllegalArgumentException("Unsupported interface type: " + name);
+                      }
+                      int slots = Math.multiplyExact(columns, (base == Spvc.SPVC_BASETYPE_FP64
+                              || base == Spvc.SPVC_BASETYPE_INT64 || base == Spvc.SPVC_BASETYPE_UINT64) && components > 2 ? 2 : 1);
+                      List<Integer> signature = new ArrayList<>(List.of(base, components, columns));
+                      for (int dimension = 0; dimension < Spvc.spvc_type_get_num_array_dimensions(type); dimension++) {
+                          int length = Spvc.spvc_type_get_array_dimension(type, dimension);
+                          if (!Spvc.spvc_type_array_dimension_is_literal(type, dimension) || length <= 0) {
+                              throw new IllegalArgumentException("Unsupported interface array size: " + name);
+                          }
+                          slots = Math.multiplyExact(slots, length);
+                          signature.add(length);
+                      }
+                      int location = Spvc.spvc_compiler_get_decoration(compiler, resource.id(), Spv.SpvDecorationLocation);
+                      variables.add(new InterfaceVariable(name, start, explicit, location, slots, List.copyOf(signature)));
+                  }
+                  return variables;
+              }
+
+          JAVA
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          p=Path('src/main/java/com/metallum/client/metal/render/MetalIrisShaderCompiler.java')
+          t=p.read_text(); pos=t.index('    static GlslProgram linkPatchedPair(')
+          t=t[:pos]+Path(os.environ['RUNNER_TEMP'],'interface-methods.txt').read_text()+t[pos:]
+          old='            Map<String, String> samplers = new java.util.LinkedHashMap<>();'
+          assert t.count(old)==1
+          t=t.replace(old, '            String[] linkedStages = linkInterfaceLocations(name, vertexOut, fragmentOut);\n            vertexOut = linkedStages[0];\n            fragmentOut = linkedStages[1];\n\n'+old)
+          a=t.index(' * <p><b>Interface locations.</b>'); b=t.index(' * <p>Class notes:',a)
+          t=t[:a]+''' * <p><b>Interface locations.</b> The paired GLSL entry point assigns explicit
+           * locations before RenderPearl compilation. It links legacy varyings by name,
+           * preserves explicit locations, and accounts for matrix and array ranges.
+           * Unsupported declarations fail before pipeline activation.</p>
+           *
+          '''+t[b:]
+          t=t.replace('''    // (vanilla GlslCompiler -> IntermediaryShaderModule.rebind -> Spvc ->
+              // MetalCompiledRenderPipeline), which pairs varyings by name and assigns
+              // bindings from the RenderPipeline's BindGroupLayout.''','''    // (RenderPearl GlslCompiler -> Spvc -> MetalCompiledRenderPipeline).
+              // This adapter pairs legacy varyings before RenderPearl assigns bindings.''')
           p.write_text(t)
-          p=Path('.github/ci/minecraft-e2e/src/main/resources/fabric.mod.json');t=p.read_text();assert '"minecraft": "26.3"' in t;p.write_text(t.replace('"minecraft": "26.3"','"minecraft": "${minecraft_version}"'))
-          p=Path('.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/MetalReadbackControlGameTest.java');t=p.read_text()
-          a='''        require(FabricLoader.getInstance().isModLoaded("sodium"), "Sodium was not loaded");
-                  require(FabricLoader.getInstance().isModLoaded("iris"), "Iris was not loaded");'''
-          b='''        boolean optionalAdapters = Boolean.parseBoolean(System.getProperty("metallum.ci.optionalAdapters", "true"));
-                  require(FabricLoader.getInstance().isModLoaded("sodium") == optionalAdapters,
-                          "Sodium presence does not match the requested profile");
-                  require(FabricLoader.getInstance().isModLoaded("iris") == optionalAdapters,
-                          "Iris presence does not match the requested profile");'''
-          assert a in t;p.write_text(t.replace(a,b))
-          p=Path('.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/MetalUniversalClientGameTest.java');t=p.read_text()
-          a='''        require(sodiumLoaded, "Sodium was not loaded in the production client");
-                  require(irisLoaded, "Iris was not loaded in the production client");'''
-          b='''        boolean optionalAdapters = Boolean.parseBoolean(System.getProperty("metallum.ci.optionalAdapters", "true"));
-                  require(sodiumLoaded == optionalAdapters, "Sodium presence does not match the requested profile");
-                  require(irisLoaded == optionalAdapters, "Iris presence does not match the requested profile");'''
-          assert a in t;p.write_text(t.replace(a,b))
-          expected='''.github/ci/HostedMetalGradle.init.gradle 081c5e37e6fcf76a327121d94d0f8775fe591acf
-          .github/ci/minecraft-e2e/build.gradle 3f76ae30d3908e1aa1f5a842e25d8474ef1221a8
-          .github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/MetalReadbackControlGameTest.java ec0c8970f8d08100dbbcb2636d386a9c86634fd5
-          .github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/MetalUniversalClientGameTest.java b766daa3b5aa0f0f022b78b5656d14c3e64ba2a6
-          .github/ci/minecraft-e2e/src/main/resources/fabric.mod.json 2cbb902a4e0961f130c3183b6cae8fb78a14432f
-          build.gradle ebe15e70d708392d66d34bcca9f60a46ddb72e13
-          src/main/native/MetallumNative.swift cc29c7cf0590ae19e46245e55af01592a9752236'''
-          for line in expected.splitlines():
-              path,sha=line.split()
-              actual=subprocess.check_output(['git','hash-object',path],text=True).strip()
-              assert actual==sha,(path,actual,sha)
-              subprocess.run(['git','add','--',path],check=True)
+          sha=subprocess.check_output(['git','hash-object',str(p)],text=True).strip()
+          assert sha=='a814a8536e55053ba590fdbc02062d8ccab5fb5b',sha
+          subprocess.run(['git','add','--',str(p)],check=True)
           PY
           git diff --cached --check
           git diff --cached > build/contract-audit/candidate.patch
-      - name: Run strict shipping native and Iris contracts
+      - name: Run strict shipping contracts
         run: |
           set -euo pipefail
+          ./gradlew --no-daemon --stacktrace test --tests com.metallum.client.metal.render.IrisStageInterfaceTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc > build/contract-audit/interface.log 2>&1
+          cp build/test-results/test/TEST-com.metallum.client.metal.render.IrisStageInterfaceTest.xml build/contract-audit/after.xml
           ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
             buildMacNative hostedMetalCoreIntegrationTest hostedMetalIrisIntegrationTest \
             verifyProductionJarIsolation jar > build/contract-audit/contracts.log 2>&1
@@ -147,7 +252,7 @@ jobs:
           set -euo pipefail
           git config user.name '21Z121Z1'
           git config user.email '89170834+21Z121Z1@users.noreply.github.com'
-          git commit -m 'fix(native): honor HUD settings and restore strict JVM GPU gates'
+          git commit -m 'fix(native): honor HUD settings and link Iris stage interfaces before RenderPearl'
           git rev-parse HEAD > build/contract-audit/result-sha.txt
           git bundle create build/contract-audit/result.bundle HEAD ^9b12f0e577c900b421217ef5c7b97dc5f4aaf4bf
           git push origin "HEAD:refs/heads/$TARGET"
