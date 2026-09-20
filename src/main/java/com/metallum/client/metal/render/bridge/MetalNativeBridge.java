@@ -818,6 +818,8 @@ public final class MetalNativeBridge {
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
+            processMemorySample = downcallWithoutCritical(lookup, "metallum_process_memory_sample",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT));
             encoderCountsReset = downcallWithoutCritical(lookup, "metallum_encoder_counts_reset", FunctionDescriptor.of(INT, INT));
             encoderCountsBind = downcallWithoutCritical(lookup, "metallum_encoder_counts_bind",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG));
@@ -1233,6 +1235,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
+    private static final MethodHandle processMemorySample;
     private static final MethodHandle encoderCountsReset;
     private static final MethodHandle encoderCountsBind;
     private static final MethodHandle encoderCountsCopy;
@@ -3739,6 +3742,19 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_gpu_encoder_timing_enabled", throwable);
+        }
+    }
+
+    public static com.metallum.client.metal.render.NativeProcessMemory.Sample metallum_process_memory_sample() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment output = arena.allocate(6L * Long.BYTES, Long.BYTES);
+            int result = (int) processMemorySample.invokeExact(output, 6);
+            if (result != 0 && result != 1) throw new IllegalStateException("Invalid memory sampler ABI result: " + result);
+            var sample = com.metallum.client.metal.render.NativeProcessMemory.decode(output.toArray(LONG));
+            if ((result == 1) != sample.successful()) throw new IllegalStateException("Inconsistent memory sampler status");
+            return sample;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_process_memory_sample", throwable);
         }
     }
 

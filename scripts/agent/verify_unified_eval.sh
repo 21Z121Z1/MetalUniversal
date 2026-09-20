@@ -72,11 +72,23 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.FrameMeasurementWindowTest \
   --tests com.metallum.client.validation.GpuMeasurementWindowTest \
   --tests com.metallum.client.validation.EncoderMeasurementWindowTest \
+  --tests com.metallum.client.validation.ProcessMemoryMeasurementTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 
 python3 scripts/agent/verify_terrain_generation.py \
   build/agent-state/terrain-generation-java-fixture.json --require-active \
   --output build/agent-state/terrain-generation-java-fixture.oracle.json
+
+PYTHONPATH="$ROOT/scripts/agent" python3 - "$ROOT/build/agent-state/process-memory-java-fixture.json" <<'PY'
+import json, sys
+from normalize_unified_trial import validate_process_memory
+with open(sys.argv[1], encoding="utf-8") as source:
+    fixture = json.load(source)
+raw, errors = validate_process_memory(fixture, fixture["measurementWindow"])
+if raw is None or errors:
+    raise SystemExit("process-memory fixture invalid: " + repr(errors))
+print("Process-memory Java fixture: PASS")
+PY
 
 echo "Unified evaluation static verification: PASS"

@@ -18,6 +18,12 @@ from typing import Any
 SCHEMA_VERSION = 2
 SIGNED_INT64_MAX = (1 << 63) - 1
 NATIVE_ENCODER_MAX_ROWS = 65_536
+PROCESS_MEMORY_SCHEMA_VERSION = 1
+PROCESS_MEMORY_SOURCE = "mach_task_info(TASK_VM_INFO.resident_size)"
+PROCESS_MEMORY_SCOPE = "current-process"
+PROCESS_MEMORY_SAMPLING_POLICY = "frame-boundaries-and-final-drain"
+PROCESS_MEMORY_PEAK_KIND = "sampled-maximum"
+PROCESS_MEMORY_MAX_SAMPLES = 65_536
 
 
 def finite_number(value: Any) -> float | None:
@@ -94,6 +100,252 @@ def validate_measurement_window(
             f"measuredGpuCommandBuffers={gpu_submission_count} is less than completedFrames={completed}"
         )
     return raw, errors
+
+
+def validate_process_memory(
+    report: dict[str, Any], measurement_window: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Validate process RSS samples without presenting them as a continuous peak.
+
+    The producer emits two probes for every completed frame and one final drain
+    probe.  All summary values are derived from those rows; no reported peak is
+    trusted independently of the raw samples.
+    """
+    if "processMemory" not in report:
+        # Older reports remain diagnostically usable, with this metric absent.
+        return None, []
+    raw = report.get("processMemory")
+    if not isinstance(raw, dict):
+        return None, ["processMemory is present but is not an object"]
+    errors: list[str] = []
+    if measurement_window is None:
+        return None, ["processMemory cannot be checked without measurementWindow"]
+
+    window_id = strict_integer(measurement_window.get("id"))
+    first_frame = strict_integer(measurement_window.get("startFrameInclusive"))
+    end_frame = strict_integer(measurement_window.get("endFrameExclusive"))
+    completed = strict_integer(measurement_window.get("completedFrames"))
+    if window_id is None or first_frame is None or end_frame is None or completed is None:
+        errors.append("processMemory requires a valid measurementWindow")
+    if window_id is None or window_id <= 0:
+        errors.append("processMemory measurementWindow.id must be positive")
+    if first_frame is None or first_frame < 0:
+        errors.append("processMemory measurementWindow.startFrameInclusive must be non-negative")
+    if end_frame is None or end_frame <= (first_frame if first_frame is not None else 0):
+        errors.append("processMemory measurementWindow.endFrameExclusive must exceed startFrameInclusive")
+    if completed is None or completed <= 0:
+        errors.append("processMemory measurementWindow.completedFrames must be positive")
+    if (
+        first_frame is not None
+        and end_frame is not None
+        and completed is not None
+        and end_frame > first_frame
+        and end_frame - first_frame != completed
+    ):
+        errors.append("processMemory measurementWindow frame bounds do not equal completedFrames")
+
+    if strict_integer(raw.get("schemaVersion")) != PROCESS_MEMORY_SCHEMA_VERSION:
+        errors.append("processMemory.schemaVersion must be 1")
+    if raw.get("source") != PROCESS_MEMORY_SOURCE:
+        errors.append(f"processMemory.source must be {PROCESS_MEMORY_SOURCE}")
+    if raw.get("scope") != PROCESS_MEMORY_SCOPE:
+        errors.append("processMemory.scope must be current-process")
+    if raw.get("samplingPolicy") != PROCESS_MEMORY_SAMPLING_POLICY:
+        errors.append(
+            "processMemory.samplingPolicy must be frame-boundaries-and-final-drain"
+        )
+    if raw.get("peakKind") != PROCESS_MEMORY_PEAK_KIND:
+        errors.append("processMemory.peakKind must be sampled-maximum")
+    if raw.get("complete") is not True:
+        errors.append("processMemory.complete is not true")
+    if raw.get("status") != "complete-sampled-process-rss":
+        errors.append("processMemory.status must be complete-sampled-process-rss")
+
+    process_window = strict_integer(raw.get("windowId"))
+    process_first = strict_integer(raw.get("firstFrame"))
+    process_end = strict_integer(raw.get("endFrameExclusive"))
+    capacity = strict_integer(raw.get("capacitySamples"))
+    dropped = strict_integer(raw.get("droppedSamples"))
+    failed = strict_integer(raw.get("failedSamples"))
+    invalid = strict_integer(raw.get("invalidEvents"))
+    sample_count = strict_integer(raw.get("sampleCount"))
+    if process_window != window_id:
+        errors.append("processMemory.windowId does not match measurementWindow.id")
+    if process_first != first_frame:
+        errors.append("processMemory.firstFrame does not match measurementWindow.startFrameInclusive")
+    if process_end != end_frame:
+        errors.append("processMemory.endFrameExclusive does not match measurementWindow.endFrameExclusive")
+    if capacity is None or not 1 <= capacity <= PROCESS_MEMORY_MAX_SAMPLES:
+        errors.append("processMemory.capacitySamples must be an integer in 1..65536")
+    if sample_count is None or sample_count < 0:
+        errors.append("processMemory.sampleCount must be a non-negative JSON integer")
+    for name, value in (
+        ("droppedSamples", dropped),
+        ("failedSamples", failed),
+        ("invalidEvents", invalid),
+    ):
+        if value is None or value < 0:
+            errors.append(f"processMemory.{name} must be a non-negative JSON integer")
+        elif value != 0:
+            errors.append(f"processMemory.{name} is non-zero")
+
+    samples = raw.get("samples")
+    if not isinstance(samples, list):
+        errors.append("processMemory.samples is missing or is not an array")
+        return None, errors
+    if capacity is not None and len(samples) > capacity:
+        errors.append("processMemory.samples exceeds capacitySamples")
+    expected_count: int | None = None
+    if completed is not None and completed > 0:
+        expected_count = 2 * completed + 1
+        if sample_count != expected_count:
+            errors.append(
+                f"processMemory.sampleCount={sample_count} does not equal 2*completedFrames+1={expected_count}"
+            )
+        if len(samples) != expected_count:
+            errors.append(
+                f"processMemory samples={len(samples)} does not equal 2*completedFrames+1={expected_count}"
+            )
+    elif completed is not None:
+        errors.append("processMemory.completedFrames must be positive")
+    if sample_count is not None and sample_count != len(samples):
+        errors.append(f"processMemory.sampleCount={sample_count} does not equal samples={len(samples)}")
+
+    summary_fields = (
+        "peakResidentBytes",
+        "peakPhysicalFootprintBytes",
+        "lifetimeResidentPeakBytesLast",
+        "totalProbeNanos",
+        "maxProbeNanos",
+        "endOffsetNanos",
+    )
+    summary: dict[str, int | None] = {}
+    for field in summary_fields:
+        value = strict_integer(raw.get(field))
+        summary[field] = value
+        if value is None or value < 0:
+            errors.append(f"processMemory.{field} must be a non-negative signed Int64")
+
+    if (
+        expected_count is not None
+        and capacity is not None
+        and expected_count > capacity
+    ):
+        errors.append(
+            "processMemory capacitySamples is smaller than 2*completedFrames+1"
+        )
+
+    resident_values: list[int] = []
+    physical_values: list[int] = []
+    lifetime_values: list[int] = []
+    durations: list[int] = []
+    previous_end: int | None = None
+    valid_rows = True
+    for index, sample in enumerate(samples):
+        prefix = f"processMemory.samples[{index}]"
+        if not isinstance(sample, dict):
+            errors.append(f"{prefix} is not an object")
+            valid_rows = False
+            continue
+        sequence = strict_integer(sample.get("sequence"))
+        row_window = strict_integer(sample.get("windowId"))
+        frame_id = strict_integer(sample.get("frameId"))
+        phase = sample.get("phase")
+        begin = strict_integer(sample.get("beginOffsetNanos"))
+        end = strict_integer(sample.get("endOffsetNanos"))
+        kernel_status = strict_integer(sample.get("kernelStatus"))
+        returned_words = strict_integer(sample.get("returnedWordCount"))
+        resident = strict_integer(sample.get("residentBytes"))
+        physical = strict_integer(sample.get("physicalFootprintBytes"))
+        lifetime = strict_integer(sample.get("lifetimeResidentPeakBytes"))
+        if sequence is None or sequence != index:
+            errors.append(f"{prefix}.sequence must be {index}")
+            valid_rows = False
+        if row_window != window_id:
+            errors.append(f"{prefix}.windowId does not match measurementWindow.id")
+            valid_rows = False
+        if (
+            expected_count is not None
+            and first_frame is not None
+            and end_frame is not None
+            and index < expected_count
+        ):
+            if index == expected_count - 1:
+                expected_frame, expected_phase = end_frame, "window-drain"
+            else:
+                expected_frame = first_frame + index // 2
+                expected_phase = "frame-begin" if index % 2 == 0 else "frame-end"
+            if frame_id != expected_frame or phase != expected_phase:
+                errors.append(
+                    f"{prefix} must be {expected_phase} for frame {expected_frame}"
+                )
+                valid_rows = False
+        else:
+            errors.append(f"{prefix} is outside the expected frame/drain sequence")
+            valid_rows = False
+        if kernel_status != 0:
+            errors.append(f"{prefix}.kernelStatus must be 0")
+            valid_rows = False
+        if returned_words is None or returned_words < 38:
+            errors.append(f"{prefix}.returnedWordCount must be at least 38")
+            valid_rows = False
+        if begin is None or begin < 0 or end is None or end < 0 or end < begin:
+            errors.append(f"{prefix} has invalid non-negative probe offsets")
+            valid_rows = False
+        if previous_end is not None and begin is not None and begin < previous_end:
+            errors.append(f"{prefix}.beginOffsetNanos overlaps the preceding probe")
+            valid_rows = False
+        if begin is not None and end is not None:
+            if summary["endOffsetNanos"] is not None and end > summary["endOffsetNanos"]:
+                errors.append(f"{prefix}.endOffsetNanos exceeds processMemory.endOffsetNanos")
+                valid_rows = False
+            duration = end - begin
+            durations.append(duration)
+            previous_end = end
+        if resident is None or resident <= 0:
+            errors.append(f"{prefix}.residentBytes must be positive")
+            valid_rows = False
+        else:
+            resident_values.append(resident)
+        if physical is None or physical < 0:
+            errors.append(f"{prefix}.physicalFootprintBytes must be non-negative")
+            valid_rows = False
+        else:
+            physical_values.append(physical)
+        if lifetime is None or lifetime < 0:
+            errors.append(f"{prefix}.lifetimeResidentPeakBytes must be non-negative")
+            valid_rows = False
+        else:
+            lifetime_values.append(lifetime)
+
+    if expected_count is not None and len(samples) != expected_count:
+        valid_rows = False
+    total_probe = 0
+    max_probe = 0
+    for duration in durations:
+        next_total = checked_nonnegative_add(total_probe, duration)
+        if next_total is None:
+            errors.append("processMemory probe duration sum overflows signed Int64")
+            valid_rows = False
+            break
+        total_probe = next_total
+        max_probe = max(max_probe, duration)
+    if valid_rows and resident_values and summary["peakResidentBytes"] != max(resident_values):
+        errors.append("processMemory.peakResidentBytes does not match sampled RSS maximum")
+    if valid_rows and physical_values and summary["peakPhysicalFootprintBytes"] != max(physical_values):
+        errors.append(
+            "processMemory.peakPhysicalFootprintBytes does not match sampled physical-footprint maximum"
+        )
+    if valid_rows and lifetime_values and summary["lifetimeResidentPeakBytesLast"] != lifetime_values[-1]:
+        errors.append("processMemory.lifetimeResidentPeakBytesLast does not match the final sample")
+    if valid_rows and summary["totalProbeNanos"] != total_probe:
+        errors.append("processMemory.totalProbeNanos does not match the raw duration sum")
+    if valid_rows and summary["maxProbeNanos"] != max_probe:
+        errors.append("processMemory.maxProbeNanos does not match the raw maximum duration")
+
+    if errors:
+        return None, errors
+    return raw, []
 
 
 def validate_gpu_submission_samples(
@@ -550,6 +802,9 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         measured_frames,
         gpu_submission_count,
     )
+    process_memory, process_memory_errors = validate_process_memory(
+        report, measurement_window
+    )
     reported_gpu_p50 = finite_number(report.get("gpuP50Milliseconds"))
     gpu_numeric_matches = (
         gpu_submission_p50 is not None
@@ -572,7 +827,48 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         and encoder_frames == completed_frames
         and not native_encoder_errors
     )
+    process_memory_matches = (
+        process_memory is not None
+        and not process_memory_errors
+        and window_valid
+        and completed_frames == measured_frames
+    )
     unavailable = report.get("unavailableMetrics", {}) if isinstance(report.get("unavailableMetrics"), dict) else {}
+
+    process_memory_definition = {
+        "source": PROCESS_MEMORY_SOURCE,
+        "scope": PROCESS_MEMORY_SCOPE,
+        "unit": "bytes",
+        "sampling_policy": PROCESS_MEMORY_SAMPLING_POLICY,
+        "peak_kind": PROCESS_MEMORY_PEAK_KIND,
+        "definition": (
+            "peakResidentBytes is the maximum resident_size observed in the two "
+            "frame-boundary samples per completed frame plus one final window-drain sample; "
+            "it is a sampled maximum, not a continuous process peak"
+        ),
+    }
+    process_memory_metric_reason = (
+        None
+        if process_memory_matches
+        else (
+            "processMemory is missing; sampled process RSS is unavailable"
+            if "processMemory" not in report
+            else "processMemory raw samples or derived summary failed strict validation"
+        )
+    )
+    process_memory_sample_count = (
+        len(process_memory.get("samples", []))
+        if isinstance(process_memory, dict) and isinstance(process_memory.get("samples"), list)
+        else 0
+    )
+    process_memory_metric = metric(
+        process_memory.get("peakResidentBytes") if process_memory_matches else None,
+        "bytes",
+        "lower",
+        process_memory_sample_count,
+        process_memory_metric_reason,
+    )
+    process_memory_metric["source"] = dict(process_memory_definition)
 
     metrics = {
         "fps_median": metric(report.get("sourceFpsFromP50"), "FPS", "higher", measured_frames),
@@ -613,10 +909,7 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             None, "bytes", "lower", 0,
             str(unavailable.get("residentRenderResourceBytes") or "resident render-resource accounting is unavailable"),
         ),
-        "peak_resident_memory_bytes": metric(
-            None, "bytes", "lower", 0,
-            str(unavailable.get("peakResidentMemoryBytes") or "peak resident memory accounting is unavailable"),
-        ),
+        "peak_resident_memory_bytes": process_memory_metric,
         "frame_time_stutter_count": metric(report.get("frameTimeStutterCount"), "events", "lower", measured_frames),
     }
 
@@ -643,6 +936,10 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         )
     identity_errors.extend(f"GPU sample evidence: {error}" for error in gpu_sample_errors)
     identity_errors.extend(f"Native encoder ledger evidence: {error}" for error in native_encoder_errors)
+    if process_memory_errors:
+        identity_errors.extend(
+            f"Process memory evidence: {error}" for error in process_memory_errors
+        )
     if measured_frames > 0 and not encoder_window_matches:
         identity_errors.append(
             f"native encoder evidence is not identity-complete for measurement window={completed_frames}"
@@ -684,6 +981,13 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "readback": report.get("nativeMainReadback"),
             "measurement_window": measurement_window,
             "measurement_window_errors": window_errors,
+            "process_memory_errors": process_memory_errors,
+            "process_memory_definition": process_memory_definition,
+            "process_memory": {
+                "present": "processMemory" in report,
+                "sample_count": process_memory_sample_count,
+                "validated": process_memory_matches,
+            },
             "unavailable_metrics": unavailable,
         },
     }
@@ -695,6 +999,46 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as temp:
         trial = Path(temp)
         (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
+        process_memory_samples: list[dict[str, Any]] = []
+        process_offset = 0
+        process_sequence = 0
+        for index in range(300):
+            frame_id = 40 + index
+            for phase in ("frame-begin", "frame-end"):
+                begin = process_offset
+                process_offset += 10
+                process_memory_samples.append(
+                    {
+                        "sequence": process_sequence,
+                        "windowId": 1,
+                        "frameId": frame_id,
+                        "phase": phase,
+                        "beginOffsetNanos": begin,
+                        "endOffsetNanos": process_offset,
+                        "kernelStatus": 0,
+                        "returnedWordCount": 38,
+                        "residentBytes": 1 + index,
+                        "physicalFootprintBytes": 2 + index,
+                        "lifetimeResidentPeakBytes": 10000,
+                    }
+                )
+                process_sequence += 1
+        process_memory_samples.append(
+            {
+                "sequence": process_sequence,
+                "windowId": 1,
+                "frameId": 340,
+                "phase": "window-drain",
+                "beginOffsetNanos": process_offset,
+                "endOffsetNanos": process_offset + 10,
+                "kernelStatus": 0,
+                "returnedWordCount": 38,
+                "residentBytes": 300,
+                "physicalFootprintBytes": 301,
+                "lifetimeResidentPeakBytes": 10000,
+            }
+        )
+        process_offset += 10
         report = {
             "mode": "native-metalfx-off",
             "measuredFrameIntervals": 300,
@@ -766,6 +1110,30 @@ def self_test() -> None:
                 "gpuSubmissionIdentityComplete": True,
                 "nativeEncoderIdentityComplete": True,
             },
+            "processMemory": {
+                "schemaVersion": PROCESS_MEMORY_SCHEMA_VERSION,
+                "source": PROCESS_MEMORY_SOURCE,
+                "scope": PROCESS_MEMORY_SCOPE,
+                "samplingPolicy": PROCESS_MEMORY_SAMPLING_POLICY,
+                "peakKind": PROCESS_MEMORY_PEAK_KIND,
+                "windowId": 1,
+                "firstFrame": 40,
+                "endFrameExclusive": 340,
+                "capacitySamples": 601,
+                "droppedSamples": 0,
+                "failedSamples": 0,
+                "invalidEvents": 0,
+                "sampleCount": 601,
+                "complete": True,
+                "status": "complete-sampled-process-rss",
+                "peakResidentBytes": 300,
+                "peakPhysicalFootprintBytes": 301,
+                "lifetimeResidentPeakBytesLast": 10000,
+                "totalProbeNanos": process_offset,
+                "maxProbeNanos": 10,
+                "endOffsetNanos": process_offset,
+                "samples": process_memory_samples,
+            },
             "renderFusionRuntime": {"admissions": 1},
             "bindingPathRuntime": {"renderForwardedCalls": 30, "renderSuppressedCalls": 12, "packetCalls": 9},
         }
@@ -781,6 +1149,8 @@ def self_test() -> None:
         assert result["metrics"]["fps_median"]["median"] == 40.0
         assert result["metrics"]["gpu_frame_time_ms_median"]["available"]
         assert result["metrics"]["native_encoder_count_per_frame_median"]["median"] == 8.0
+        assert result["metrics"]["peak_resident_memory_bytes"]["available"]
+        assert result["metrics"]["peak_resident_memory_bytes"]["median"] == 300
 
         legacy_report = dict(report)
         legacy_report.pop("measurementWindow")

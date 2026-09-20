@@ -110,6 +110,9 @@ public final class MetalValidationClient implements ClientModInitializer {
             Math.multiplyExact(BASELINE_WARMUP_MILLIS, 1_000_000L),
             Math.multiplyExact(BASELINE_SAMPLE_MILLIS, 1_000_000L),
             BASELINE_SETTLE_FRAMES, BASELINE_MEASURED_FRAMES);
+    private static final ProcessMemoryMeasurement baselineMemory = new ProcessMemoryMeasurement(
+            ProcessMemoryMeasurement.MAX_SAMPLES, MetalNativeBridge::metallum_process_memory_sample, System::nanoTime);
+
     private static final long BASELINE_WINDOW_ID = 1L;
     private static long baselineFirstSubmitIndex;
     private static boolean baselineReported;
@@ -651,6 +654,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         // GPU attachment capture is intentionally connected separately in the
         // MetalFX manager after temporal encoding and before present.
         if (timelineAnchored && PERFORMANCE_ONLY) {
+            baselineMemory.afterFrame(BASELINE_WINDOW_ID, frame - 1L);
             baselineWindow.afterFrame(frame - 1L, System.nanoTime());
         }
         if (timelineAnchored && !PERFORMANCE_ONLY && frame > 0) {
@@ -685,17 +689,20 @@ public final class MetalValidationClient implements ClientModInitializer {
             MetalGpuTimingRecorder.beginMeasurementWindow(BASELINE_WINDOW_ID);
             IrisMetalPerformanceCounters.reset();
             IrisMetalArgumentBindingRuntime.resetStats();
+            baselineMemory.begin(BASELINE_WINDOW_ID, frame);
             baselineWindow.reanchorStart(System.nanoTime());
         }
         if (step != FrameMeasurementWindow.Step.COMPLETE) {
             if (step != FrameMeasurementWindow.Step.WARMUP) {
                 MetalGpuTimingRecorder.beginMeasurementFrame(BASELINE_WINDOW_ID, frame);
+                baselineMemory.beforeFrame(BASELINE_WINDOW_ID, frame);
             }
             frame++;
             return;
         }
         baselineReported = true;
         long endSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
+        var processMemory = baselineMemory.finish(BASELINE_WINDOW_ID, baselineWindow.endFrame());
         MetalGpuTimingRecorder.endMeasurementWindow();
         List<Double> baselineFrameIntervalsMillis = baselineWindow.intervals();
         List<Double> baselineCpuFrameMillis = baselineWindow.cpuDurations();
@@ -813,6 +820,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                     MetalGpuTimingRecorder.gpuEncoderSnapshot(BASELINE_WINDOW_ID);
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             report.add("nativeEncoderTimingSamples", new GsonBuilder().create().toJsonTree(gpuEncoderSamples));
+            report.add("processMemory", new GsonBuilder().create().toJsonTree(processMemory));
             report.add("nativeEncoderLedger", new GsonBuilder().create().toJsonTree(encoderLedger));
             addNativeEncoderCounts(report, encoderWindow, baselineFrameIntervalsMillis.size());
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
@@ -839,10 +847,9 @@ public final class MetalValidationClient implements ClientModInitializer {
                     "residentRenderResourceBytes",
                     "unavailable — current native bridge does not expose MTLResource allocated-size telemetry"
             );
-            unavailable.addProperty(
-                    "peakResidentMemoryBytes",
-                    "unavailable — validation does not sample process or Metal resident memory"
-            );
+            if (!processMemory.complete()) {
+                unavailable.addProperty("peakResidentMemoryBytes", "unavailable — " + processMemory.status());
+            }
             unavailable.addProperty(
                     "javaToNativeFfmCallCount",
                     "unavailable — the current FFM bridge does not expose per-frame downcall counters"

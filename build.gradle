@@ -108,6 +108,7 @@ tasks.test {
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
 	exclude "**/NativeEncoderCountsGpuTest.class"
+	exclude "**/NativeProcessMemoryIntegrationTest.class"
 	exclude "**/MetalGpuTimingRecorderRetentionTest.class"
 	if (hostedCi) {
 		exclude "**/IrisMetalPostChainCompilationTest.class"
@@ -279,6 +280,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift"
 	)
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
@@ -300,6 +302,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift"
 }
 
@@ -390,6 +393,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 	)
@@ -416,6 +420,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
 }
@@ -532,6 +537,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 	)
@@ -551,6 +557,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
 }
@@ -571,6 +578,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 	)
@@ -589,6 +597,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"-o", metalFrameGenerationPresentationValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 }
@@ -716,6 +725,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 	)
@@ -736,6 +746,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 		"-o", metalFxOffscreenValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
 }
@@ -2662,6 +2673,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
 			"src/main/native/MetallumInterface.swift",
 			"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/ProcessMemorySampler.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }
@@ -3056,6 +3068,37 @@ tasks.register("renderContractNativeTest") {
 	group = "verification"
 	description = "Runs render-contract GPU integration tests for both Metal 3 and Metal 4."
 	dependsOn "renderContractMetal3NativeTest", "renderContractMetal4NativeTest"
+}
+
+def processMemorySamplerTestBinary = file("${buildDir}/metal-tests/ProcessMemorySamplerTest")
+tasks.register("compileProcessMemorySamplerTest", Exec) {
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	inputs.files("src/main/native/ProcessMemorySampler.swift", "src/test/native/ProcessMemorySamplerTest.swift")
+	outputs.file(processMemorySamplerTestBinary)
+	workingDir project.projectDir
+	doFirst { processMemorySamplerTestBinary.parentFile.mkdirs() }
+	commandLine "xcrun", "swiftc", "-O", "-target", "arm64-apple-macosx14.0",
+		"src/main/native/ProcessMemorySampler.swift", "src/test/native/ProcessMemorySamplerTest.swift",
+		"-o", processMemorySamplerTestBinary.absolutePath
+}
+tasks.register("nativeProcessMemoryAbiTest", Exec) {
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	dependsOn "compileProcessMemorySamplerTest"
+	commandLine processMemorySamplerTestBinary.absolutePath
+}
+
+// Real current-process Mach query; no GPU or WindowServer session is required.
+tasks.register("nativeProcessMemoryTest", Test) { task ->
+	task.dependsOn "nativeProcessMemoryAbiTest"
+	task.group = "verification"
+	task.description = "Checks the current-process Mach memory sampler through its production FFM ABI."
+	task.onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	task.dependsOn tasks.named("buildMacNative"), tasks.named("testClasses")
+	task.testClassesDirs = sourceSets.test.output.classesDirs
+	task.classpath = sourceSets.test.runtimeClasspath
+	task.useJUnitPlatform()
+	task.filter { includeTestsMatching "com.metallum.client.metal.render.NativeProcessMemoryIntegrationTest" }
+	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
 }
 
 // Timing retention is tested in a separate JVM with recording enabled, without loading Metal.

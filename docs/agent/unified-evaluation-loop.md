@@ -347,3 +347,34 @@ Distinguish validated, environment-blocked/unvalidated, rejected/reverted, incon
 Include exact start/end SHA, changed ownership/boundaries, actual executed proof profiles and exit status, latest exact-head CI, correctness/first divergence, activation, required physical limits, artifact paths, review readiness and residual risk.
 
 For performance report before/after, raw delta, direction-normalized improvement and paired block count for every available relevant metric. Mark missing metrics `unavailable` with the exact absent structured source.
+
+### Process resident-memory sampling
+
+`processMemory` samples the current client process with public Mach
+`task_info(TASK_VM_INFO)` at each measured frame's beginning and end, plus once
+following the final GPU drain. The expected trace has exactly `2 * frames + 1`
+rows, with explicit window/frame/phase/sequence identity and monotonic probe
+intervals. Warmup observations cannot enter this trace. Capacity, failure, and
+invalid-event counters fail closed; a failed probe does not interrupt rendering.
+Collection only runs in the explicit performance validation timeline.
+
+`peak_resident_memory_bytes` is the **sampled maximum of current process RSS**
+(`resident_size`) under `frame-boundaries-and-final-drain`; transient peaks between
+samples may be missed. It includes the JVM and native allocations in the client
+process and is neither Java heap usage nor GPU/Metal resource residency. The
+process-lifetime `resident_size_peak` and `phys_footprint` are separate diagnostic
+fields and cannot substitute for window RSS. No operating-system lifetime peak
+is reset or represented as a measurement-window peak.
+
+The independent normalizer recomputes maxima and probe-time totals from every
+raw sample and validates the full frame sequence. `totalProbeNanos` and
+`maxProbeNanos` describe the observed synchronous query duration, including FFM;
+other recorder/allocation overhead is not isolated by these timings. Before
+accepting performance improvements, use identical sampling for both lanes and
+measure observer overhead separately. This instrumentation alone does not
+establish a performance gain or close the other resource metrics.
+
+Run `nativeProcessMemoryTest` for a current-process production-ABI query without
+a Minecraft window. `ProcessMemoryMeasurementTest` covers window boundaries,
+truncation, failures, malformed ABI records, and separation from lifetime peaks;
+its generated fixture is independently checked by the Python normalizer.

@@ -21,6 +21,63 @@ def write_trial(report: dict) -> Path:
     return root
 
 
+def process_memory_fixture() -> dict:
+    samples = [
+        {"sequence": 0, "windowId": 4, "frameId": 40, "phase": "frame-begin",
+         "beginOffsetNanos": 0, "endOffsetNanos": 10, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 100, "physicalFootprintBytes": 200,
+         "lifetimeResidentPeakBytes": 105},
+        {"sequence": 1, "windowId": 4, "frameId": 40, "phase": "frame-end",
+         "beginOffsetNanos": 10, "endOffsetNanos": 25, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 120, "physicalFootprintBytes": 180,
+         "lifetimeResidentPeakBytes": 125},
+        {"sequence": 2, "windowId": 4, "frameId": 41, "phase": "frame-begin",
+         "beginOffsetNanos": 25, "endOffsetNanos": 35, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 110, "physicalFootprintBytes": 220,
+         "lifetimeResidentPeakBytes": 125},
+        {"sequence": 3, "windowId": 4, "frameId": 41, "phase": "frame-end",
+         "beginOffsetNanos": 35, "endOffsetNanos": 50, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 130, "physicalFootprintBytes": 210,
+         "lifetimeResidentPeakBytes": 135},
+        {"sequence": 4, "windowId": 4, "frameId": 42, "phase": "frame-begin",
+         "beginOffsetNanos": 50, "endOffsetNanos": 60, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 115, "physicalFootprintBytes": 240,
+         "lifetimeResidentPeakBytes": 135},
+        {"sequence": 5, "windowId": 4, "frameId": 42, "phase": "frame-end",
+         "beginOffsetNanos": 60, "endOffsetNanos": 75, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 140, "physicalFootprintBytes": 230,
+         "lifetimeResidentPeakBytes": 145},
+        {"sequence": 6, "windowId": 4, "frameId": 43, "phase": "window-drain",
+         "beginOffsetNanos": 75, "endOffsetNanos": 85, "kernelStatus": 0,
+         "returnedWordCount": 38, "residentBytes": 125, "physicalFootprintBytes": 190,
+         "lifetimeResidentPeakBytes": 145},
+    ]
+    return {
+        "schemaVersion": 1,
+        "source": "mach_task_info(TASK_VM_INFO.resident_size)",
+        "scope": "current-process",
+        "samplingPolicy": "frame-boundaries-and-final-drain",
+        "peakKind": "sampled-maximum",
+        "windowId": 4,
+        "firstFrame": 40,
+        "endFrameExclusive": 43,
+        "capacitySamples": 7,
+        "droppedSamples": 0,
+        "failedSamples": 0,
+        "invalidEvents": 0,
+        "sampleCount": 7,
+        "complete": True,
+        "status": "complete-sampled-process-rss",
+        "peakResidentBytes": 140,
+        "peakPhysicalFootprintBytes": 240,
+        "lifetimeResidentPeakBytesLast": 145,
+        "totalProbeNanos": 85,
+        "maxProbeNanos": 15,
+        "endOffsetNanos": 85,
+        "samples": samples,
+    }
+
+
 def valid_report() -> dict:
     encoder_rows = [
         {
@@ -91,6 +148,7 @@ def valid_report() -> dict:
             "gpuSubmissionIdentityComplete": True,
             "nativeEncoderIdentityComplete": True,
         },
+        "processMemory": process_memory_fixture(),
     }
 
 
@@ -105,6 +163,101 @@ class MeasurementWindowTests(unittest.TestCase):
             "native_encoder_count_per_frame_median",
         ):
             self.assertTrue(result["metrics"][name]["available"])
+        self.assertTrue(result["metrics"]["peak_resident_memory_bytes"]["available"])
+        self.assertEqual(140, result["metrics"]["peak_resident_memory_bytes"]["median"])
+        self.assertEqual(
+            "sampled-maximum",
+            result["metrics"]["peak_resident_memory_bytes"]["source"]["peak_kind"],
+        )
+
+    def test_missing_process_memory_remains_unavailable(self) -> None:
+        report = valid_report()
+        del report["processMemory"]
+        result = normalizer.normalize(write_trial(report))
+        self.assertTrue(result["complete"])
+        metric = result["metrics"]["peak_resident_memory_bytes"]
+        self.assertFalse(metric["available"])
+        self.assertIn("missing", metric["reason"])
+
+    def test_process_memory_foreign_window_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["windowId"] = 99
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_wrong_phase_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["samples"][1]["phase"] = "window-drain"
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_missing_frame_sample_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["samples"].pop(2)
+        report["processMemory"]["sampleCount"] = 6
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_wrong_summary_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["peakResidentBytes"] = 999
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_drop_and_failed_samples_are_rejected(self) -> None:
+        for field in ("droppedSamples", "failedSamples", "invalidEvents"):
+            report = valid_report()
+            report["processMemory"][field] = 1
+            result = normalizer.normalize(write_trial(report))
+            self.assertFalse(result["complete"], field)
+            self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_int64_overflow_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["endOffsetNanos"] = 1 << 63
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_time_order_is_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["samples"][3]["beginOffsetNanos"] = 20
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_huge_window_is_rejected_without_expanding_expected_rows(self) -> None:
+        report = valid_report()
+        report["measurementWindow"].update({
+            "endFrameExclusive": (1 << 63) - 1,
+            "completedFrames": (1 << 63) - 1 - 40,
+        })
+        report["processMemory"].update({
+            "endFrameExclusive": (1 << 63) - 1,
+            "sampleCount": (1 << 64) - 79,
+            "capacitySamples": 65536,
+        })
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_process_memory_invalid_local_bounds_are_rejected(self) -> None:
+        report = valid_report()
+        report["processMemory"]["firstFrame"] = -1
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
+
+    def test_lifetime_peak_is_not_substituted_for_window_rss_peak(self) -> None:
+        report = valid_report()
+        report["processMemory"]["lifetimeResidentPeakBytesLast"] = 140
+        result = normalizer.normalize(write_trial(report))
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["metrics"]["peak_resident_memory_bytes"]["available"])
 
     def test_legacy_report_is_diagnostic_only(self) -> None:
         report = valid_report()
@@ -116,6 +269,7 @@ class MeasurementWindowTests(unittest.TestCase):
             "gpu_frame_time_ms_median",
             "cpu_render_encode_time_ms_median",
             "native_encoder_count_per_frame_median",
+            "peak_resident_memory_bytes",
         ):
             self.assertFalse(result["metrics"][name]["available"])
 
