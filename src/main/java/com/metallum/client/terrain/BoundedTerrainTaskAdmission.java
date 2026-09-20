@@ -185,7 +185,10 @@ public final class BoundedTerrainTaskAdmission<T> {
             return OfferResult.of(Action.REPLACE_DEFERRED);
         }
 
-        if (liveQueuedTasks < config.queueCapacity()) {
+        // Once a backlog exists, keep new work in the deferred cohort even if the current
+        // vanilla batch has started to drain. Otherwise a stream of newly-near tasks can refill
+        // every free slot and starve an older far task forever under distance-only polling.
+        if (deferred.isEmpty() && liveQueuedTasks < config.queueCapacity()) {
             admittedTasks = saturatedIncrement(admittedTasks);
             return OfferResult.of(Action.ADMIT);
         }
