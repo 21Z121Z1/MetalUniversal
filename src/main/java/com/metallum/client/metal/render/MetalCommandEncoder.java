@@ -1647,9 +1647,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         int pixelSize = metalDst.pixelSize();
-        int rowBytes = width * pixelSize;
-        int bytesPerImage = rowBytes * height;
-        GpuBufferSlice slice = transientMemory.uploadStaging(source.duplicate().limit(bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC);
+        int rowBytes = Math.multiplyExact(width, pixelSize);
+        int bytesPerImage = Math.multiplyExact(rowBytes, height);
+        GpuBufferSlice slice = transientMemory.uploadStaging(
+                source.slice(source.position(), bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC
+        );
 
         MTLBlitCommandEncoder blit = blitCommandEncoder();
         blit.copyFromBufferToTexture(
@@ -1687,7 +1689,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int bytesPerImage = Math.multiplyExact(rowBytes, height);
         int byteCount = Math.multiplyExact(bytesPerImage, depth);
         GpuBufferSlice slice = transientMemory.uploadStaging(
-                source.duplicate().limit(byteCount), pixelSize, GpuBuffer.USAGE_COPY_SRC
+                source.slice(source.position(), byteCount), pixelSize, GpuBuffer.USAGE_COPY_SRC
         );
         blitCommandEncoder().copyFromBufferToTextureVolume(
                 ((MetalGpuBuffer) slice.buffer()).nativeHandle(), slice.offset(), destination.nativeHandle(),

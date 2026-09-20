@@ -129,6 +129,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     }
 
     ByteBuffer sliceStorage(final long offset, final long length) {
+        checkCanBeUsed();
         if (this.storage == null) {
             throw new IllegalStateException("Buffer is not CPU-accessible");
         }
@@ -140,7 +141,9 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     }
 
     MemorySegment nativeHandle() {
-        if (this.nativeHandle == null || this.nativeHandle.address() == 0L) {
+        // Transient facades expire at submission even though the pooled native
+        // allocation is still alive. Respect that lifetime before crossing the ABI.
+        if (isClosed() || this.nativeHandle == null || this.nativeHandle.address() == 0L) {
             throw new IllegalStateException("Native Metal buffer is closed or null");
         }
         return this.nativeHandle;
@@ -192,6 +195,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     }
 
     ByteBuffer currentStorage() {
+        checkCanBeUsed();
         if (this.storage == null) {
             throw new IllegalStateException("Buffer is not CPU-accessible");
         }
@@ -309,7 +313,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
 
     private MetalAllocationIdentity liveAllocationIdentity() {
         MetalAllocationIdentity identity = this.allocationIdentity;
-        if (this.closed
+        if (isClosed()
                 || this.nativeHandle == null
                 || this.nativeHandle.address() == 0L
                 || identity == null) {
