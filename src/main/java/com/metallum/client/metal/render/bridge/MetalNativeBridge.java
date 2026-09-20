@@ -819,6 +819,17 @@ public final class MetalNativeBridge {
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
+            frameEvidenceEnable = optionalDowncall(lookup, "metallum_frame_evidence_enable", FunctionDescriptor.ofVoid(INT));
+            commandBufferEncodingCounters = optionalDowncall(lookup, "metallum_command_buffer_encoding_counters_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
+            if (Boolean.getBoolean("metallum.frameEvidence.enabled") && MetalNativeBridge.frameEvidenceEnable != null
+                    && MetalNativeBridge.commandBufferEncodingCounters != null) {
+                try {
+                    MetalNativeBridge.frameEvidenceEnable.invokeExact(1);
+                } catch (Throwable throwable) {
+                    throw bridgeFailure("metallum_frame_evidence_enable", throwable);
+                }
+            }
             gpuEncoderTimingReset = downcall(lookup, "metallum_gpu_encoder_timing_reset", FunctionDescriptor.ofVoid());
             gpuEncoderTimingCount = downcall(lookup, "metallum_gpu_encoder_timing_count", FunctionDescriptor.of(INT));
             gpuEncoderTimingMilliseconds = downcall(lookup, "metallum_gpu_encoder_timing_milliseconds", FunctionDescriptor.of(DOUBLE, INT));
@@ -1216,6 +1227,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
+    @Nullable
+    private static final MethodHandle frameEvidenceEnable;
+    @Nullable
+    private static final MethodHandle commandBufferEncodingCounters;
     private static final MethodHandle gpuEncoderTimingReset;
     private static final MethodHandle gpuEncoderTimingCount;
     private static final MethodHandle gpuEncoderTimingMilliseconds;
@@ -3718,6 +3733,20 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_gpu_encoder_timing_enabled", throwable);
+        }
+    }
+
+    /** Five signed 64-bit counters, copied synchronously after the owning buffer completes. */
+    public static long[] commandBufferEncodingCounters(final MemorySegment commandBuffer) {
+        if (commandBufferEncodingCounters == null) return null;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment output = arena.allocate(5L * Long.BYTES, Long.BYTES);
+            int copied = (int) commandBufferEncodingCounters.invokeExact(segment(commandBuffer), output, 5);
+            if (copied == 0) return null; // Older/disabled native observation, not five zero counts.
+            if (copied != 5) throw new IllegalStateException("Invalid native encoding counter layout: " + copied);
+            return output.toArray(ValueLayout.JAVA_LONG);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_command_buffer_encoding_counters_v1", throwable);
         }
     }
 

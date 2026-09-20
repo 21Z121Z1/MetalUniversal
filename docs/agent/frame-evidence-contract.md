@@ -2,7 +2,7 @@
 
 P0 observation slice. This is a permanent opt-in observer, not a rendering optimization
 or evidence that P0's full metric coverage is complete. It leaves scheduling, draw order,
-native ABI descriptors, resource ownership and presentation unchanged.
+existing ABI descriptors, resource ownership and presentation unchanged.
 
 ## Authority and coverage
 
@@ -13,6 +13,7 @@ native ABI descriptors, resource ownership and presentation unchanged.
 | Java binary | Runtime code-source JAR SHA-256 | Loom development classes explicitly report `unavailable-dev-classes`; packaged acceptance requires `--require-packaged` |
 | CPU frame interval | `Minecraft.renderFrame` HEAD through RETURN, monotonic clock | Includes observer overhead, extraction and render work; not input latency or source FPS |
 | ABI count and inclusive/exclusive duration | All four central `MetalNativeBridge` downcall factories | Render-thread calls inside this frame only; worker/startup calls excluded; duration includes native waits/compilation |
+| Native encoding counts | Actual successful encoder creation and emitted direct/ordinary-indirect draw commands | Partial: main encoder bridges, clear helpers and ordinary presentation; excludes MetalFX and GPU-scene/ICB internal work |
 | GPU service time | Existing main command-buffer completion and GPU start/end timestamps | One row per submission; never renamed GPU frame critical-path time or present time |
 | Native presentation ticket | Existing ordinary-present encode return, attached to the owning command-buffer record before commit | Scheduling identity only, not a displayed frame; Metal 4 assigns its ticket at native commit and currently returns no encode-time ticket |
 | Producer entries | Vanilla completed layer submission, Sodium terrain setup, active Iris generation | Distinct facts; installed mods and producer entry do not prove an optimized draw executed |
@@ -35,10 +36,19 @@ Recursive loading-screen calls retain `parentFrameId` and restore their outer sc
 Their CPU duration is inclusive; do not sum nested frame durations as elapsed time.
 
 Each frame retains drawable dimensions, render distance and the actual Metal main path.
-The report lists missing native-internal draw/encoder counts, effective PSO/binding changes,
+The report lists uncovered native-internal draw/encoder paths, effective PSO/binding changes,
 memory/copy metrics, worker costs and presentation evidence under `unavailable`.
 Do not infer those metrics from similarly named ABI calls. The existing aggregate
 performance report is unchanged; its samples are not silently upgraded to frame evidence.
+
+`commandBuffers[].nativeEncoding` reports render/compute/blit encoder counts and direct/
+ordinary-indirect draw counts, or null when unavailable. Counts belong to the existing
+command buffer (a per-submission lease on Metal 4) and are copied after its existing
+completion check, before release. No GPU wait is added. The opt-in native v1 ABI copies
+five signed 64-bit fields into caller-owned memory and retains no output pointer.
+Metal 4 upload encoders count as compute encoders. These are encoded commands, not
+visible draws or whole-frame totals. Disabled observation allocates no counter object
+and performs no counter readback call.
 
 ## Capture and verification
 

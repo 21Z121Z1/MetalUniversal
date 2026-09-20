@@ -4,10 +4,12 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.blaze3d.systems.RenderSystem;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.invoke.MethodHandle;
+import java.lang.foreign.MemorySegment;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,8 +76,11 @@ public final class FrameEvidenceRuntime {
         if (ENABLED) RECORDER.presentationRequested(submission, nativeId);
     }
 
-    public static void completed(FrameEvidenceRecorder.Submission submission, boolean success, double start, double end) {
-        if (ENABLED) RECORDER.completed(submission, success, start, end);
+    public static void completed(FrameEvidenceRecorder.Submission submission, boolean success, double start, double end,
+                                 MemorySegment commandBuffer) {
+        if (!ENABLED || submission == null) return;
+        RECORDER.nativeEncoding(submission, MetalNativeBridge.commandBufferEncodingCounters(commandBuffer));
+        RECORDER.completed(submission, success, start, end);
     }
 
     public static void validationFinished(String status) {

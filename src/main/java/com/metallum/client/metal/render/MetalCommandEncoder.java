@@ -2051,7 +2051,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             double gpuEnd = buffer.gpuEndTime();
             MetalGpuTimingRecorder.record(index, gpuStart, gpuEnd);
             boolean success = buffer.completedSuccessfully();
-            FrameEvidenceRuntime.completed(frameEvidenceSubmission, success, gpuStart, gpuEnd);
+            FrameEvidenceRuntime.completed(frameEvidenceSubmission, success, gpuStart, gpuEnd, buffer.nativeHandle());
             if (frameGenerationSubmit) {
                 MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
             }

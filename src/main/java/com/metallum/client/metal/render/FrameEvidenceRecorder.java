@@ -16,6 +16,9 @@ import java.util.function.LongSupplier;
 
 /** Bounded, opt-in observations. Frame IDs are diagnostic joins, never render semantics. */
 public final class FrameEvidenceRecorder {
+    private static final String[] NATIVE_COUNTER_NAMES = {
+            "renderEncoders", "computeEncoders", "blitEncoders", "directDraws", "indirectDraws"
+    };
     private final int capacity;
     private final LongSupplier clock;
     private final List<Frame> frames = new ArrayList<>();
@@ -101,6 +104,15 @@ public final class FrameEvidenceRecorder {
         if (success && Double.isFinite(start) && Double.isFinite(end) && start > 0 && end > start) {
             submission.gpuNanos = Math.round((end - start) * 1_000_000_000.0);
         }
+    }
+
+    public synchronized void nativeEncoding(Submission submission, long[] counters) {
+        if (submission == null || counters == null) return;
+        if (counters.length != NATIVE_COUNTER_NAMES.length || java.util.Arrays.stream(counters).anyMatch(n -> n < 0)) {
+            submission.frame.failure = "invalid-native-encoding-counters";
+            return;
+        }
+        submission.nativeEncoding = counters.clone();
     }
 
     /** Keeps the exact ABI MethodType, including primitive/void returns and exceptional exits. */
@@ -191,6 +203,15 @@ public final class FrameEvidenceRecorder {
                 value.addProperty("submitted", submission.submitted);
                 value.addProperty("completed", submission.completed);
                 value.addProperty("success", submission.success);
+                if (submission.nativeEncoding == null) {
+                    value.add("nativeEncoding", JsonNull.INSTANCE);
+                } else {
+                    JsonObject counters = new JsonObject();
+                    for (int index = 0; index < NATIVE_COUNTER_NAMES.length; index++) {
+                        counters.addProperty(NATIVE_COUNTER_NAMES[index], submission.nativeEncoding[index]);
+                    }
+                    value.add("nativeEncoding", counters);
+                }
                 value.add("gpuServiceNs", submission.gpuNanos > 0
                         ? new JsonPrimitive(submission.gpuNanos) : JsonNull.INSTANCE);
                 value.addProperty("gpuUnavailableReason", submission.gpuNanos > 0 ? ""
@@ -202,10 +223,11 @@ public final class FrameEvidenceRecorder {
             rows.add(row);
         }
         root.add("frames", rows);
+        root.addProperty("nativeEncodingScope", "partial: ordinary draw bridges, main render/blit/compute creation, clear helpers and ordinary presentation; excludes MetalFX and GPU-scene/ICB internal work");
         JsonObject unavailable = new JsonObject();
         unavailable.addProperty("gpuFrameNs", "per-command-buffer service durations are not frame critical-path time");
         unavailable.addProperty("nativeEncodeNs", "ABI wall duration includes dispatch, waits and native work");
-        unavailable.addProperty("nativeEncoderAndDrawCounts", "native internal encoders/draws are not inferred from ABI calls");
+        unavailable.addProperty("nativeInternalEncoderAndDrawCounts", "only the nativeEncodingScope paths are counted; uninstrumented helper/MetalFX/ICB work is not zero");
         unavailable.addProperty("psoSwitchesAndResourceBindingChanges", "ABI calls do not prove effective native state changes");
         unavailable.addProperty("workerAbiNs", "worker calls cannot be assigned to a render-thread frame");
         unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports; no timestamp proximity join");
@@ -255,6 +277,7 @@ public final class FrameEvidenceRecorder {
         private boolean completed;
         private boolean success;
         private long gpuNanos;
+        private long[] nativeEncoding;
         private boolean presentationRequested;
         private long nativePresentationId;
         private Submission(Frame frame, long id, long nativeSubmitIndex) {

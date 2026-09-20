@@ -1,7 +1,7 @@
 import Foundation
+import ObjectiveC
 #if os(macOS)
 import AppKit
-import ObjectiveC
 #elseif os(iOS)
 import UIKit
 #endif
@@ -207,6 +207,7 @@ private enum NativeState {
     // macOS 26, not on Metal 4 family support.
     static var metal4BarrierEnabled = false
     static var gpuEncoderTimingEnabled = false
+    static var frameEvidenceEnabled = false
     // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
     // from, and MTLFunction does not expose it, so the association is kept
     // beside it. Weak keys: the entry disappears when the function is released,
@@ -566,6 +567,58 @@ private final class NativePresentationTelemetry {
     }
 }
 
+// Main-queue encoding observations only. Owned by a command buffer (or its Metal 4
+// lease), shared with its encoders, and read after completion. No global history or
+// GPU resources are retained here. Encoding remains on the existing owner thread.
+private final class NativeCommandEncodingCounters {
+    var renderEncoders: Int64 = 0
+    var computeEncoders: Int64 = 0
+    var blitEncoders: Int64 = 0
+    var directDraws: Int64 = 0
+    var indirectDraws: Int64 = 0
+}
+
+private var nativeEncodingCountersKey: UInt8 = 0
+
+private func encodingCounters(_ object: AnyObject) -> NativeCommandEncodingCounters? {
+    guard NativeState.frameEvidenceEnabled else { return nil }
+    return objc_getAssociatedObject(object, &nativeEncodingCountersKey) as? NativeCommandEncodingCounters
+}
+
+private func recordRenderEncoder(_ encoder: MTLRenderCommandEncoder, commandBuffer: MTLCommandBuffer) {
+    guard let counters = encodingCounters(commandBuffer) else { return }
+    counters.renderEncoders += 1
+    objc_setAssociatedObject(encoder, &nativeEncodingCountersKey, counters, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+}
+
+@_cdecl("metallum_frame_evidence_enable")
+public func metallum_frame_evidence_enable(_ enabled: Int32) {
+    // Configured once during bridge initialization, before command buffers exist.
+    NativeState.frameEvidenceEnabled = enabled != 0
+}
+
+@_cdecl("metallum_command_buffer_encoding_counters_v1")
+public func metallum_command_buffer_encoding_counters_v1(
+    _ pointer: UnsafeMutableRawPointer,
+    _ output: UnsafeMutablePointer<Int64>?,
+    _ fieldCount: Int32
+) -> Int32 {
+    guard let output, fieldCount == 5 else { return -1 }
+    let counters: NativeCommandEncodingCounters?
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+        counters = lease.encodingCounters
+    } else {
+        counters = encodingCounters(metal3CommandBuffer(pointer))
+    }
+    guard let counters else { return 0 }
+    output[0] = counters.renderEncoders
+    output[1] = counters.computeEncoders
+    output[2] = counters.blitEncoders
+    output[3] = counters.directDraws
+    output[4] = counters.indirectDraws
+    return 5
+}
+
 private struct CompletedGpuEncoderTiming {
     let label: String
     let kind: Int32
@@ -780,6 +833,7 @@ private final class Metal4MainQueuePilot {
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainCommandBufferLease {
+    fileprivate let encodingCounters = NativeState.frameEvidenceEnabled ? NativeCommandEncodingCounters() : nil
     fileprivate let owner: Metal4MainQueueContext
     fileprivate let slotIndex: Int
     private let condition = NSCondition()
@@ -4247,6 +4301,7 @@ private func encodeClearDraw(
     }
 
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    encodingCounters(encoder)?.directDraws += 1
 }
 
 @available(macOS 26.0, iOS 26.0, *)
@@ -4283,6 +4338,7 @@ private func encodeClearDrawMetal4(
         vertexStart: 0,
         vertexCount: 3
     )
+    lease.encodingCounters?.directDraws += 1
     return true
 }
 
@@ -8505,6 +8561,10 @@ public func metallum_MTLCommandQueue_makeCommandBuffer(
         if NativeState.debugLabelsEnabled {
             commandBuffer.label = stringFromOptionalCString(labelPtr)
         }
+        if NativeState.frameEvidenceEnabled {
+            objc_setAssociatedObject(commandBuffer, &nativeEncodingCountersKey,
+                                     NativeCommandEncodingCounters(), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
         return retainedPointer(commandBuffer)
     }
 }
@@ -8643,6 +8703,7 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
         let label = stringFromOptionalCString(labelPtr) ?? "blit"
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
+            lease.encodingCounters?.computeEncoders += 1
             encoder.label = label
             // Upload/copy work may overwrite a mesh buffer that an earlier
             // submitted render encoder is still fetching. Metal 3's fence wait
@@ -8668,6 +8729,7 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
         guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
             return nil
         }
+        encodingCounters(commandBuffer)?.blitEncoders += 1
         encoder.label = label
         metal4BarrierBlitAfterRender(encoder)
         return retainedPointer(encoder)
@@ -9263,6 +9325,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return nil
             }
+            lease.encodingCounters?.renderEncoders += 1
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
                 beforeStages: [.vertex, .fragment],
@@ -9312,6 +9375,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
         }
+        recordRenderEncoder(encoder, commandBuffer: commandBuffer)
         metal4BarrierRenderAfterUploadAndRender(encoder)
         encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: viewportWidth, height: viewportHeight, znear: 0.0, zfar: 1.0))
         return retainedPointer(encoder)
@@ -9400,6 +9464,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return nil
             }
+            lease.encodingCounters?.renderEncoders += 1
             encoder.label = label
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
@@ -9490,6 +9555,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
         }
+        recordRenderEncoder(encoder, commandBuffer: commandBuffer)
         encoder.label = label
         metal4BarrierRenderAfterUploadAndRender(encoder)
         encoder.setViewport(MTLViewport(
@@ -9642,6 +9708,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return nil
             }
+            lease.encodingCounters?.renderEncoders += 1
             encoder.label = label
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
@@ -9713,6 +9780,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
         }
+        recordRenderEncoder(encoder, commandBuffer: commandBuffer)
         encoder.label = label
         metal4BarrierRenderAfterUploadAndRender(encoder)
         encoder.setViewport(MTLViewport(
@@ -9887,6 +9955,7 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitives(
             instanceCount: instanceCount,
             baseInstance: baseInstance
         )
+        bridge.lease.encodingCounters?.directDraws += 1
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -9897,6 +9966,7 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitives(
         instanceCount: instanceCount,
         baseInstance: baseInstance
     )
+    encodingCounters(encoder)?.directDraws += 1
 }
 
 @_cdecl("metallum_MTLRenderCommandEncoder_drawIndexedPrimitives")
@@ -9923,6 +9993,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
             baseVertex: baseVertex,
             baseInstance: baseInstance
         )
+        bridge.lease.encodingCounters?.directDraws += 1
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -9936,6 +10007,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
         baseVertex: baseVertex,
         baseInstance: baseInstance
     )
+    encodingCounters(encoder)?.directDraws += 1
 }
 
 @_cdecl("metallum_MTLRenderCommandEncoder_multiDrawIndexed")
@@ -9956,6 +10028,7 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
             let indexCount = Int(indexCounts[i])
             let offset = max(firstIndexOffsets[i], 0)
             if indexCount > 0 {
+                bridge.lease.encodingCounters?.directDraws += 1
                 bridge.encoder.drawIndexedPrimitives(
                     primitiveType: primitiveType,
                     indexCount: indexCount,
@@ -9974,6 +10047,7 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     for i in 0..<drawCount {
         let indexCount = Int(indexCounts[i])
         if indexCount > 0 {
+            encodingCounters(encoder)?.directDraws += 1
             encoder.drawIndexedPrimitives(
                 type: primitiveType,
                 indexCount: indexCount,
@@ -10020,6 +10094,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
             )
             offset += Int(stride)
         }
+        bridge.lease.encodingCounters?.indirectDraws += Int64(drawCount)
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -10035,6 +10110,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
         )
         offset += Int(stride)
     }
+    encodingCounters(encoder)?.indirectDraws += Int64(drawCount)
 }
 
 @available(macOS 26.0, iOS 26.0, *)
@@ -12144,6 +12220,7 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
             )
             offset += Int(stride)
         }
+        bridge.lease.encodingCounters?.indirectDraws += Int64(drawCount)
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -12156,6 +12233,7 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
         )
         offset += Int(stride)
     }
+    encodingCounters(encoder)?.indirectDraws += Int64(drawCount)
 }
 
 @_cdecl("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan")
@@ -12192,6 +12270,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
             baseVertex: baseVertex,
             baseInstance: baseInstance
         )
+        bridge.lease.encodingCounters?.directDraws += 1
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -12205,6 +12284,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
         baseVertex: baseVertex,
         baseInstance: baseInstance
     )
+    encodingCounters(encoder)?.directDraws += 1
 }
 
 @_cdecl("metallum_MTLCommandBuffer_clearColorDepthTexturesRegion")
@@ -12263,6 +12343,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return
             }
+            lease.encodingCounters?.renderEncoders += 1
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
                 beforeStages: [.vertex, .fragment],
@@ -12333,6 +12414,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return
         }
+        recordRenderEncoder(encoder, commandBuffer: commandBuffer)
 
         metal4BarrierRenderAfterRender(encoder)
         if let globalFence {
@@ -12524,6 +12606,7 @@ private func encodePresentTextureToDrawable(
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return 0
             }
+            lease.encodingCounters?.renderEncoders += 1
             encoder.barrier(
                 afterQueueStages: [.fragment, .dispatch, .blit],
                 beforeStages: .fragment,
@@ -12549,6 +12632,7 @@ private func encodePresentTextureToDrawable(
             tables.1.setSamplerState(sampler.gpuResourceID, index: 0)
             encoder.setArgumentTable(tables.1, stages: MTLRenderStages.fragment)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+            lease.encodingCounters?.directDraws += 1
             encoder.endEncoding()
             lease.presentDrawable = drawable
             return 0
@@ -12564,6 +12648,7 @@ private func encodePresentTextureToDrawable(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return 0
         }
+        recordRenderEncoder(encoder, commandBuffer: commandBuffer)
 
         metal4BarrierRenderAfterRender(encoder)
         if let globalFence {
@@ -12593,6 +12678,8 @@ private func encodePresentTextureToDrawable(
             vertexStart: 0,
             vertexCount: 3
         )
+
+        encodingCounters(encoder)?.directDraws += 1
 
         // Without this update the next frame's first writer of the sampled
         // texture has no GPU edge to this read: fence waits only order
@@ -12734,7 +12821,9 @@ public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
     _ commandBuffer: MTLCommandBuffer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(commandBuffer.makeComputeCommandEncoder())
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encodingCounters(commandBuffer)?.computeEncoders += 1
+        return retainedPointer(encoder)
     }
 }
 

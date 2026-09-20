@@ -89,6 +89,12 @@ def verify(report, expected_head, require_packaged=False):
                     reason = ""
                 require(submission["presentationIdUnavailableReason"] == reason, "contradictory presentation ID availability")
             require(all(submission[k] is True for k in ("submitted", "completed", "success")), "pending/failed command buffer")
+            counters = submission.get("nativeEncoding")
+            if counters is not None:
+                require(set(counters) == {"renderEncoders", "computeEncoders", "blitEncoders", "directDraws", "indirectDraws"},
+                        "invalid native encoding counter layout")
+                for count in counters.values():
+                    integer(count)
             ns = submission["gpuServiceNs"]
             if ns is not None:
                 integer(ns, 1)
