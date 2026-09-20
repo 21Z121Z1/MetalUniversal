@@ -50,6 +50,7 @@ public final class VanillaTerrainAdmissionTelemetry {
                             false, false, false, 0, 0, 0,
                             0L, 0L, 0L, 0L, 0L, 0L,
                             BoundedTerrainTaskAdmission.FailOpenReason.NONE,
+                            0L, 0L, 0L,
                             0L, 0, 0L
                     )
             );
