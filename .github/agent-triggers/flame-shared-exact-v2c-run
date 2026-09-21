@@ -1,0 +1,1 @@
+Re-run the guarded Flame shared exact-motion patch after correcting Java 25 nested-type nullable syntax; compile, targeted-test, jar-build and fail-closed wiring must pass before runtime commit.

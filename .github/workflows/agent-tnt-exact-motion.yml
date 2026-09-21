@@ -1,0 +1,189 @@
+name: Agent exact TNT motion
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): verify exact TNT motion'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 32
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Build agent context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/context.py \
+            --task 'MetalFX exact previous-position motion for TNT and TNT minecart' \
+            --claim correctness
+
+      - name: Verify pinned Minecraft 26.2 TNT contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          for rel in \
+            net/minecraft/client/renderer/entity/TntRenderer.java \
+            net/minecraft/client/renderer/entity/TntMinecartRenderer.java \
+            net/minecraft/client/renderer/entity/AbstractMinecartRenderer.java \
+            net/minecraft/client/renderer/entity/state/TntRenderState.java \
+            net/minecraft/client/renderer/entity/state/MinecartTntRenderState.java \
+            net/minecraft/client/renderer/block/BlockModelRenderState.java \
+            net/minecraft/client/renderer/Sheets.java \
+            net/minecraft/client/renderer/RenderPipelines.java; do
+            curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+              "$BASE/$rel" -o "/tmp/$(basename "$rel")"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          tnt = Path('/tmp/TntRenderer.java').read_text()
+          cart = Path('/tmp/TntMinecartRenderer.java').read_text()
+          abstract_cart = Path('/tmp/AbstractMinecartRenderer.java').read_text()
+          tnt_state = Path('/tmp/TntRenderState.java').read_text()
+          cart_state = Path('/tmp/MinecartTntRenderState.java').read_text()
+          block = Path('/tmp/BlockModelRenderState.java').read_text()
+          sheets = Path('/tmp/Sheets.java').read_text()
+          pipelines = Path('/tmp/RenderPipelines.java').read_text()
+
+          checks = [
+              (tnt, 'extends EntityRenderer<PrimedTnt, TntRenderState>'),
+              (tnt, 'if (fuse < 10.0f) {'),
+              (tnt, 'poseStack.scale(scale, scale, scale);'),
+              (tnt, 'TntMinecartRenderer.submitWhiteSolidBlock(state.blockState, poseStack, submitNodeCollector'),
+              (tnt_state, 'public final BlockModelRenderState blockState = new BlockModelRenderState();'),
+              (cart_state, 'extends MinecartRenderState'),
+              (cart, 'if (fuse > -1.0f && fuse < 10.0f) {'),
+              (cart, 'poseStack.scale(scale, scale, scale);'),
+              (cart, 'blockModel.submit(poseStack, submitNodeCollector, lightCoords, overlayCoords, outlineColor);'),
+              (abstract_cart, 'this.submitMinecartContents(state, displayBlockModel, poseStack, submitNodeCollector'),
+              (abstract_cart, 'submitNodeCollector.submitModel(this.model, state, poseStack, MINECART_LOCATION'),
+              (block, 'this.renderType = hasTranslucency ? Sheets.translucentBlockItemSheet() : Sheets.cutoutBlockItemSheet();'),
+              (block, 'submitNodeCollector.submitBlockModel(poseStack, renderType'),
+              (sheets, 'CUTOUT_BLOCK_ITEM_SHEET = RenderTypes.itemCutout(TextureAtlas.LOCATION_BLOCKS);'),
+              (sheets, 'TRANSLUCENT_BLOCK_ITEM_SHEET = RenderTypes.itemTranslucent(TextureAtlas.LOCATION_BLOCKS);'),
+              (pipelines, 'withVertexShader("core/item").withFragmentShader("core/item")'),
+              (pipelines, 'withVertexBinding(0, DefaultVertexFormat.ENTITY)'),
+          ]
+          for text, needle in checks:
+              if needle not in text:
+                  raise SystemExit(f'Minecraft 26.2 TNT motion contract changed: {needle}')
+          print('Pinned Minecraft 26.2 TNT exact-motion contracts: PASS')
+          PY
+
+      - name: Verify existing exact staged carriers and item ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/ModelFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild' src/main/java/com/metallum/mixin/render/ModelFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/BlockModelFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild' src/main/java/com/metallum/mixin/render/BlockModelFeatureRendererMetalFxMixin.java
+          grep -F 'if ((shader.equals("core/entity") || shader.equals("core/item"))' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'DefaultVertexFormat.ENTITY.equals(format)' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Apply exact TNT admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one anchor, found {count}: {old[:160]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          eligibility = 'src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java'
+          replace_once(
+              eligibility,
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartTntRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\n'''
+          )
+          replace_once(
+              eligibility,
+              '''import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.TntRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n'''
+          )
+          replace_once(
+              eligibility,
+              '''                || state instanceof EvokerFangsRenderState\n                || state instanceof PaintingRenderState\n''',
+              '''                || state instanceof EvokerFangsRenderState\n                || state instanceof TntRenderState\n                || state instanceof MinecartTntRenderState\n                || state instanceof PaintingRenderState\n'''
+          )
+          replace_once(
+              eligibility,
+              '''        if (state instanceof PaintingRenderState) {\n''',
+              '''        if (state instanceof TntRenderState || state instanceof MinecartTntRenderState) {\n            // Fuse swell changes local vertices. MinecartTntRenderState is a MinecartRenderState\n            // subclass, so this exact-required case must stay ahead of the generic rigid minecart\n            // admission below. The cart model and TNT BlockModel are both staged and the complete\n            // per-object manifest must match before interpolation can consume history.\n            return 0;\n        }\n        if (state instanceof PaintingRenderState) {\n'''
+          )
+
+          test = 'src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java'
+          replace_once(
+              test,
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartTntRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\n'''
+          )
+          replace_once(
+              test,
+              '''import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.TntRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n'''
+          )
+          replace_once(
+              test,
+              '''    @Test\n    void paintingIsAnExactCustomGeometryCandidate() {\n''',
+              '''    @Test\n    void tntAndTntMinecartCannotFallBackToRigidMotion() {\n        EntityRenderState[] candidates = {new TntRenderState(), new MinecartTntRenderState()};\n        for (EntityRenderState candidate : candidates) {\n            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));\n            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));\n        }\n        assertTrue(new MinecartTntRenderState() instanceof MinecartRenderState);\n    }\n\n    @Test\n    void paintingIsAnExactCustomGeometryCandidate() {\n'''
+          )
+          PY
+          git diff --check
+
+      - name: Compile and test TNT exact motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify TNT fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'state instanceof TntRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'state instanceof MinecartTntRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'MetalFxMotionEligibility.requiresExactPreviousPositions(state)' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Commit verified runtime implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add exact TNT motion vectors'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
