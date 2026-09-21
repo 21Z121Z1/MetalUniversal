@@ -201,6 +201,10 @@ options; it does not alter production scheduling or claim a system deadline. The
 native-max profile above remains a headroom workload. The stationary route ends after
 its 5-second warmup and 10-second sample, retaining pose, native dimensions, quality,
 Metal 4 activation and sample-completion checks; it does not run the movement route.
+After measurement, it requests normal integrated-server halt on the server thread and
+drives test ticks until shutdown before closing the world, avoiding Fabric's client/server
+phase-barrier deadlock in 26.3 `IntegratedServer.halt`. The ordinary client/device shutdown
+and its existing GPU drain still own final evidence export.
 
 Before warmup, the fixed camera must have an empty compile queue and occlusion expected
 chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
