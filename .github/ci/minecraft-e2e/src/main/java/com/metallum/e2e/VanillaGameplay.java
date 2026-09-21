@@ -150,7 +150,11 @@ public final class VanillaGameplay {
             // The launcher releases this only after Instruments signals recording started.
             context.waitFor(client -> Files.exists(output.resolve("profiler-started")), 1200);
         }
+        input.lookAt(-65, 15);
         context.runOnClient(client -> {
+            // Loading the full view can exceed Vanilla's AFK threshold. The
+            // route starts with synthetic camera input, just like each flight leg.
+            client.getFramerateLimitTracker().onInputReceived();
             frameCount = invalidSettingsFrames = throttledFrames = droppedSamples = 0;
             drawableWaitNanos = 0;
             drawableWaitSamples = 0;
