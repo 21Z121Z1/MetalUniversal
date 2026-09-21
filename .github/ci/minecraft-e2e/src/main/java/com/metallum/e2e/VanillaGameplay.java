@@ -196,7 +196,6 @@ public final class VanillaGameplay {
             require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
                     "Metal 4 did not submit work during gameplay");
             report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
-            report.addProperty("submitBeforePresent", Boolean.getBoolean("metallum.opt.submitBeforePresent"));
             report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
             JsonObject finalSettings = context.computeOnClient(VanillaGameplay::settings);
             report.add("finalSettings", finalSettings);

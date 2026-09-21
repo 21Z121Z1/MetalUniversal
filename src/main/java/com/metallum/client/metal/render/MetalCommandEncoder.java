@@ -64,8 +64,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.deferredColorStore", "true"));
     private static final boolean BLIT_BATCH =
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
-    private static final boolean SUBMIT_BEFORE_PRESENT =
-            Boolean.getBoolean("metallum.opt.submitBeforePresent");
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
@@ -1152,12 +1150,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClear(source);
         submitRenderPass();
         endEncoder();
-        // Let offscreen scene work start while nextDrawable waits. Metal 4's
-        // drawable wait then gates only the presentation submission; the
-        // existing queue-stage barrier still orders the source texture read.
-        if (SUBMIT_BEFORE_PRESENT && device.metal4MainRendererEnabled()) {
-            submit();
-        }
         MTLCommandBuffer commandBuffer = commandBuffer();
         commandBuffer.encodePresentTextureToDrawable(layer, presentedTexture, fence);
         FrameEvidenceRuntime.presentationRequested(frameEvidenceSubmission, commandBuffer.nativePresentationTelemetryId());

@@ -118,7 +118,6 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // still required before any measurements are accepted.
         jvmArgs.add("-Dmetallum.validation.forceMetal=true")
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${providers.gradleProperty('reuseEncoderState').orElse('false').get()}")
-        jvmArgs.add("-Dmetallum.opt.submitBeforePresent=${providers.gradleProperty('submitBeforePresent').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")
         jvmArgs.add("-Dmetallum.ci.nativeHeight=${providers.gradleProperty('nativeHeight').get()}")
         if (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()) {
