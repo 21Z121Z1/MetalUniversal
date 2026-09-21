@@ -110,6 +110,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (gameplay) {
+        if (providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()) {
+            programArgs.add('--renderDebugLabels')
+        }
         // A failed automated launch can persist Vanilla's OpenGL recovery choice.
         // Select Metal explicitly for this profiling lane; native activation is
         // still required before any measurements are accepted.

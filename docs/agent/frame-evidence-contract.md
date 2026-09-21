@@ -286,6 +286,13 @@ world, inputs and quality settings without Instruments or JFR overhead, retainin
 the bounded source-frame counter. Do not compare these FPS values directly to a
 profiled run or treat one trial as an accepted improvement.
 
+For pass attribution, use `--capture-seconds 10 --render-labels`. This records an
+Instruments clip at the beginning of the route; JFR and the gameplay report still
+cover the full route. Inspect exported timestamp coverage: a long trace can retain
+only its trailing GPU events even when its overall recording duration is complete.
+Labels use Vanilla's existing `--renderDebugLabels` option and are rejected with
+`--metrics-only` so diagnostic label work does not enter timing trials.
+
 Use the trace to choose a concrete optimization, then compare that candidate under
 the same workload. A completed route proves only its reported actions; it does not
 replace image correctness, paired performance trials or GPU validation. Xcode's

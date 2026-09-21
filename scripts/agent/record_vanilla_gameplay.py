@@ -24,9 +24,17 @@ def main():
     parser.add_argument("--template", default="Game Performance")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
+    parser.add_argument("--capture-seconds", type=int, default=120,
+                        help="Instruments clip length; short clips avoid losing early GPU events in long traces")
+    parser.add_argument("--render-labels", action="store_true",
+                        help="Enable Vanilla renderDebugLabels for diagnostic pass attribution")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
     args = parser.parse_args()
+    if not 1 <= args.capture_seconds <= 120:
+        parser.error("--capture-seconds must be between 1 and 120")
+    if args.metrics_only and args.render_labels:
+        parser.error("render labels are diagnostic-only; omit them for timing trials")
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -49,6 +57,7 @@ def main():
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true",
                f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
+               f"-PrenderDebugLabels={str(args.render_labels).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
@@ -65,6 +74,8 @@ def main():
     notify.notify_check(token, ctypes.byref(changed))
     receipt = {"source": identity, "clientCommand": command, "template": None if args.metrics_only else args.template,
                "profilingEnabled": not args.metrics_only,
+               "captureSeconds": None if args.metrics_only else args.capture_seconds,
+               "renderDebugLabels": args.render_labels,
                "display": main_display,
                "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}
@@ -85,7 +96,8 @@ def main():
             if not args.metrics_only:
                 trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
                                  "--attach", str(pid), "--output", str(output / "gameplay.trace"),
-                                 "--time-limit", "120s", "--window", "120s", "--no-prompt",
+                                 "--time-limit", f"{args.capture_seconds}s",
+                                 "--window", f"{args.capture_seconds}s", "--no-prompt",
                                  "--notify-tracing-started", notification]
                 receipt["traceCommand"] = trace_command
                 recording = subprocess.Popen(trace_command, stdout=trace_log, stderr=subprocess.STDOUT)
