@@ -203,6 +203,9 @@ scopes, including callbacks after the source window ends. It sorts actual drawab
 independently of callback arrival order. The actual-present event-span rate is `(N-1)/(last-first)`
 on that drawable clock; it is explicitly **not** a count divided by the Java window duration.
 Uncalibrated Java/native clocks are never subtracted. System DisplayLink deadline stays unavailable.
+Distinct native tickets can receive coincident presented timestamps. Keep every callback and
+the zero interval; do not deduplicate by time. Such captures are valid observations, but distinct
+display-event count/rate and P99.9 are unavailable and comparison eligibility fails closed.
 
 Missing/cancelled/evicted callbacks, native identity gaps, unfinished windows, epoch or quality
 changes, route failure and capacity loss cannot silently approve comparison. Observed partial

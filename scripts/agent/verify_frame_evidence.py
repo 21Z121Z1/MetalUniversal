@@ -248,13 +248,16 @@ def verify_window(report, packaged, artifact_root):
     require(bool(roots), "window has no root source frames")
     require(all(frame["renderLevel"] is True for frame in roots), "window contains non-world root source frames")
     observed.sort()
-    require(len(set(observed)) == len(observed), "conflicting actual presentation timestamps")
+    coincident = len(observed) - len(set(observed))
+    if coincident:
+        reasons.append("non-unique-presented-timestamps-cannot-count-distinct-display-events")
     intervals = sorted((b - a) * 1e9 for a, b in zip(observed, observed[1:]))
-    require(all(math.isfinite(value) and value > 0 for value in intervals), "invalid native presentation interval")
+    require(all(math.isfinite(value) and value >= 0 for value in intervals), "invalid native presentation interval")
     quantiles = {f"p{q}": intervals[math.ceil(q / 100 * len(intervals)) - 1] if intervals else None
                  for q in (50, 95, 99)}
-    quantiles["p99.9"] = intervals[math.ceil(.999 * len(intervals)) - 1] if len(intervals) >= 1000 else None
-    quantiles["p99.9UnavailableReason"] = "" if len(intervals) >= 1000 else "fewer-than-predeclared-1000-intervals"
+    quantiles["p99.9"] = intervals[math.ceil(.999 * len(intervals)) - 1] if len(intervals) >= 1000 and not coincident else None
+    quantiles["p99.9UnavailableReason"] = ("non-unique-presented-timestamps" if coincident else
+            "" if len(intervals) >= 1000 else "fewer-than-predeclared-1000-intervals")
     if missing:
         reasons.append("incomplete-actual-presentation-coverage")
     if len(observed) < 2:
@@ -276,12 +279,17 @@ def verify_window(report, packaged, artifact_root):
                    "sourceScopesCrossingEnd": crossing_end,
                    "presentationCohort": "all callbacks of window-owned source scopes, including callbacks after source-window end",
                    "actualPresentationClock": "CAMetalDrawable.presentedTime-seconds",
-                   "actualPresentationCount": len(observed), "requestedPresentationCount": requested,
+                   "actualDrawableCallbackCount": len(observed),
+                   "coincidentPresentedTimestampCount": coincident,
+                   "actualPresentationCount": None if coincident else len(observed),
+                   "actualPresentationCountUnavailableReason": "non-unique-presented-timestamps" if coincident else "",
+                   "requestedPresentationCount": requested,
                    "missingPresentationReasons": missing,
-                   "actualPresentEventSpanRateHz": ((len(observed) - 1) / (observed[-1] - observed[0])) if len(observed) >= 2 else None,
+                   "actualPresentEventSpanRateHz": ((len(observed) - 1) / (observed[-1] - observed[0])) if len(observed) >= 2 and not coincident else None,
                    "actualPresentEventSpanRateScope": "first-to-last callback event span; not the Java source window or a display refresh rate",
                    "presentIntervalNs": {"samples": len(intervals), **quantiles,
-                                         "scope": "complete cohort" if not missing else "observed callbacks only; missing events can merge intervals"}})
+                                         "scope": "callback timestamp intervals including zeros; distinct display events ambiguous" if coincident else
+                                         "complete cohort" if not missing else "observed callbacks only; missing events can merge intervals"}})
     result["comparisonEligibility"]["eligible"] = not reasons
     if isinstance(profile, dict):
         result["comparisonIdentity"] = {
@@ -478,6 +486,19 @@ def self_test():
     assert abs(delivery["actualPresentEventSpanRateHz"] - 50) < .00001
     assert delivery["presentIntervalNs"]["p99.9"] is None
     assert delivery["physicalPerformanceAcceptance"] == "unverified"
+    tied = copy.deepcopy(windowed)
+    tied["frames"][0]["commandBuffers"][0].update(presentedTimeSeconds=90.0)
+    ambiguous = verify(tied, head)["frameDelivery"]
+    assert ambiguous["actualDrawableCallbackCount"] == 3 and ambiguous["coincidentPresentedTimestampCount"] == 1
+    assert ambiguous["actualPresentationCount"] is None and ambiguous["actualPresentEventSpanRateHz"] is None
+    assert ambiguous["presentIntervalNs"]["samples"] == 2  # Keep the zero interval; never deduplicate receipts.
+    assert not ambiguous["comparisonEligibility"]["eligible"]
+    try:
+        verify(tied, head, require_comparable=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("coincident callbacks claimed distinct comparable display events")
     timing = verify(windowed, head)
     assert timing["renderThreadAbiCrossings"]["samples"] == 0
     assert timing["renderThreadAbiExclusiveNs"]["p50"] is None
@@ -529,7 +550,6 @@ def self_test():
         lambda x: x["frames"][-1].update(sourceStartNs=2000),
         lambda x: x["frames"][1]["context"].update(internalWidth=90),
         lambda x: x["frames"][1]["context"].update(targetFps=30),
-        lambda x: x["frames"][0]["commandBuffers"][0].update(presentedTimeSeconds=90.0),
         lambda x: x["frames"][0]["commandBuffers"][0].update(nativePresentationId=18),
         lambda x: x["frames"][0].update(abi={"call": {"calls": 1, "inclusiveNs": 1, "exclusiveNs": 1, "failures": 0}}),
         lambda x: x["identity"]["mods"].update(iris="fixture"),
