@@ -108,6 +108,26 @@
         "repo.static",
         "minecraft.conformance"
       ]
+    },
+    {
+      "path": "docs/agent/terrain-work-events.schema.json",
+      "expected_changed_components": [
+        "validation.contract"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "path": "docs/agent/minecraft-26.3-p0-baseline.json",
+      "expected_changed_components": [
+        "evaluation.control"
+      ],
+      "must_execute": [
+        "repo.static",
+        "hosted.exact-head"
+      ]
     }
   ],
   "task_cases": [

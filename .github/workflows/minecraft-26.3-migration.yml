@@ -54,6 +54,18 @@ jobs:
           test ! -e src/main/java/com/metallum/mixin/render/MacRetinaFullscreenMixin.java
           ! grep -Fq 'render.MacRetinaFullscreenMixin' src/main/resources/metallum.mixins.json
 
+      - name: Verify P0 terrain evidence contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m json.tool docs/agent/minecraft-26.3-p0-baseline.json >/dev/null
+          python3 -m json.tool docs/agent/terrain-work-events.schema.json >/dev/null
+          python3 -m json.tool validation/terrain-work-events/oracle-fixtures.json >/dev/null
+          python3 -m py_compile scripts/agent/verify_terrain_work_events.py
+          python3 scripts/agent/verify_terrain_work_events.py --self-test
+          python3 scripts/agent/verify_terrain_work_events.py \
+            --check-baseline docs/agent/minecraft-26.3-p0-baseline.json
+
       - name: Resolve 26.3 dependencies
         run: ./gradlew --no-daemon dependencies --configuration compileClasspath
 
@@ -147,6 +159,69 @@ jobs:
           cat build/agent-evidence/minecraft-26.3-api-probe.txt
           test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
 
+      - name: Probe exact vanilla terrain ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/.minecraft-reference/26.3/sources"
+          test -f "$root/net/minecraft/client/renderer/LevelRenderer.java"
+          python3 - "$root" > build/agent-evidence/minecraft-26.3-terrain-probe.txt <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          target_names = [
+              "LevelRenderer.java",
+              "LevelExtractor.java",
+              "ViewArea.java",
+              "RenderRegionCache.java",
+              "SectionRenderDispatcher.java",
+              "SectionCompiler.java",
+              "SectionTaskDynamicQueue.java",
+              "ChunkSectionsToRender.java",
+          ]
+          needles = (
+              "compileSections",
+              "prepareChunkRendersIndirect",
+              "sectionUpdates",
+              "runTask",
+              "doTask",
+              "uploadTerrainBuffersToGpu",
+              "addSectionBuffersToUberBuffer",
+              "checkSectionMesh",
+              "setSectionMesh",
+              "drawIndexedIndirect",
+              "drawMultipleIndexed",
+              "MAX_RECOMPILE_QUOTA",
+              "poll(",
+              "resetLevelRenderData",
+          )
+
+          for name in target_names:
+              matches = sorted(root.rglob(name))
+              print(f"===== {name} matches={len(matches)} =====")
+              for path in matches:
+                  rel = path.relative_to(root)
+                  lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                  print(f"--- {rel}; line_count={len(lines)} ---")
+                  hit_lines = []
+                  for index, line in enumerate(lines):
+                      if any(needle in line for needle in needles):
+                          hit_lines.append(index)
+                  emitted = set()
+                  for index in hit_lines:
+                      lo = max(0, index - 35)
+                      hi = min(len(lines), index + 95)
+                      key = (lo, hi)
+                      if key in emitted:
+                          continue
+                      emitted.add(key)
+                      print(f"--- lines {lo + 1}-{hi} ---")
+                      for lineno in range(lo, hi):
+                          print(f"{lineno + 1:05d}: {lines[lineno]}")
+          PY
+          cat build/agent-evidence/minecraft-26.3-terrain-probe.txt
+
       - name: Compile Java migration surface
         shell: bash
         run: |
@@ -186,6 +261,7 @@ jobs:
           path: |
             build/agent-evidence/minecraft-26.3-source-sha.txt
             build/agent-evidence/minecraft-26.3-api-probe.txt
+            build/agent-evidence/minecraft-26.3-terrain-probe.txt
             build/agent-evidence/compile-26.3.log
             build/agent-evidence/runtime-no-optional-mods.txt
             build/agent-evidence/test-no-optional-mods.log

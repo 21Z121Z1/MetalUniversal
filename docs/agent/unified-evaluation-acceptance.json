@@ -66,6 +66,21 @@
     "log_regex_is_authoritative": false,
     "minimum_positive_block_fraction": 0.75
   },
+  "terrain_observation_gate": {
+    "status": "p0-observation-only",
+    "schema": "docs/agent/terrain-work-events.schema.json",
+    "baseline_manifest": "docs/agent/minecraft-26.3-p0-baseline.json",
+    "oracle": "scripts/agent/verify_terrain_work_events.py",
+    "fixtures": "validation/terrain-work-events/oracle-fixtures.json",
+    "performance_thresholds_registered": false,
+    "rules": [
+      "Work identity includes world epoch plus geometry, lighting and material generations; reports may not join events across world epochs.",
+      "FIRST_VALID_DRAW must reference the exact mesh generation that was published for the same work identity.",
+      "Missing first-valid-draw samples, cancellations, dropped events and failed trials remain visible in structured evidence and are never silently discarded.",
+      "Malformed generation joins, per-work timestamp inversions, duplicate first-draw observations and cross-world contamination reject the evidence before any performance decision.",
+      "P0 does not define a terrain speedup threshold; thresholds are preregistered only after a clean baseline exists."
+    ]
+  },
   "target_metrics": [
     {
       "name": "fps_median",

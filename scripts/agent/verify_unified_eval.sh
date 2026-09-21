@@ -8,6 +8,9 @@ python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
 python3 -m json.tool docs/agent/minecraft-26.3-implementation-baseline.json >/dev/null
 python3 -m json.tool docs/agent/terrain-work-evidence.schema.json >/dev/null
 python3 -m json.tool docs/agent/presentation-pacing-evidence.schema.json >/dev/null
+python3 -m json.tool docs/agent/minecraft-26.3-p0-baseline.json >/dev/null
+python3 -m json.tool docs/agent/terrain-work-events.schema.json >/dev/null
+python3 -m json.tool validation/terrain-work-events/oracle-fixtures.json >/dev/null
 python3 -m json.tool docs/agent/benchmark-profiles.json >/dev/null
 python3 -m json.tool docs/agent/metal4-main-production-acceptance.json >/dev/null
 python3 scripts/agent/context.py --self-test
@@ -24,6 +27,7 @@ python3 scripts/agent/analyze_unified_eval.py --self-test
 python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 scripts/agent/check_terrain_work_evidence.py --self-test
+python3 scripts/agent/verify_terrain_work_events.py --self-test
 python3 -m py_compile \
   scripts/agent/context.py \
   scripts/agent/checkpoint.py \
@@ -37,7 +41,8 @@ python3 -m py_compile \
   scripts/agent/analyze_unified_eval.py \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py \
-  scripts/agent/check_terrain_work_evidence.py
+  scripts/agent/check_terrain_work_evidence.py \
+  scripts/agent/verify_terrain_work_events.py
 bash -n scripts/agent/doctor.sh
 bash -n scripts/agent/run_unified_eval_cycle.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh

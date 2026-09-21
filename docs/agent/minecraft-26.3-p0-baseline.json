@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "purpose": "minecraft-26.3-p0-reference-baseline",
+  "repository": "21Z121Z1/MetalUniversal",
+  "referenceBranch": "agent/minecraft-26.3-renderpearl-migration-20260916",
+  "referenceCommit": "5694bdbd04d7754e0df8c523786a6a8ee95a246b",
+  "referenceTree": "d5bf91fcefc550acb62a91345544aaac88228b35",
+  "minecraft": {
+    "version": "26.3",
+    "decompiledJavaFileCount": 7301,
+    "clientSha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
+    "decompiler": {
+      "name": "Vineflower",
+      "version": "1.12.0"
+    },
+    "sourcePolicy": "analysis-only; generated .minecraft-reference sources are ignored and never committed"
+  },
+  "evidence": {
+    "repositoryAndStaticReferenceReviewed": true,
+    "buildEvidenceAvailable": true,
+    "pairedAppleSiliconPerformanceAvailable": false,
+    "performanceClaim": "none",
+    "workflowRunIds": [
+      35408904560,
+      35408904339
+    ]
+  },
+  "implementationOrder": [
+    "P0a",
+    "P0b",
+    "T1-or-R1-after-evidence"
+  ],
+  "notes": [
+    "This is a reference identity manifest, not the identity of later candidate commits.",
+    "A passing build at this baseline is not evidence of a performance improvement.",
+    "Minecraft 26.2 remains a separately validated support line."
+  ]
+}
