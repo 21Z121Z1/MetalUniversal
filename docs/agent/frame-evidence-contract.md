@@ -299,3 +299,10 @@ format pairs without temporary records, and descriptor traversal avoids an itera
 The bounded render-graph event list stops constructing events at capacity while
 continuing all cumulative counters; reset reopens event capture. These are candidate
 CPU/allocation reductions, not a measured FPS improvement.
+
+Fence polling follows the 26.3 producer contract: an unsubmitted fence queried
+with a zero timeout stays pending and does not force a native submission or rotate
+transient allocations. Explicit blocking waits retain the staging-ring flush path.
+The RenderPearl negative timeout sentinel maps to an infinite native wait; completed
+fences cache their completion. The native readback regression covers poll, explicit
+submit, completion and transient-slice lifetime together.

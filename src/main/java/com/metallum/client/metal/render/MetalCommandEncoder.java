@@ -1878,11 +1878,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     boolean awaitSubmitCompletion(final long submitIndex, final long timeoutMs) {
         long target = submitIndex;
         if (submitIndex == currentSubmitIndex) {
+            // Vanilla polls queued GPU tasks and staging-buffer fences during
+            // frame construction. Match RenderPearl: polling unsubmitted work
+            // is not a submission boundary and must not rotate transient data.
+            if (timeoutMs == 0L) {
+                return false;
+            }
             if (commandBuffer != null) {
-                // GL fence semantics (glClientWaitSync with the flush bit):
-                // waiting on a fence whose commands were never flushed must
-                // flush them, not fail. Sodium's staging buffer relies on
-                // this when its ring wraps within a single frame of uploads.
+                // Retain the explicit blocking-wait flush used when a staging
+                // ring wraps within a single frame of uploads.
                 submit();
             } else {
                 // Nothing has been encoded into this submit; the fence

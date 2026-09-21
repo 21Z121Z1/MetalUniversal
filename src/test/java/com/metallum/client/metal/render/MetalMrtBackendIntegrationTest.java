@@ -106,6 +106,33 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void pollingUnsubmittedFencePreservesTransientUploadsUntilExplicitSubmit() {
+        ByteBuffer source = ByteBuffer.allocateDirect(64);
+        for (int i = 0; i < 64; i++) source.put(i, (byte) (i * 17));
+        try (MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                () -> "fence poll copy", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64)) {
+            var slice = encoder.transientMemory().uploadStaging(source, 4, GpuBuffer.USAGE_COPY_SRC);
+            MetalGpuBuffer transientBuffer = (MetalGpuBuffer) slice.buffer();
+            encoder.copyToBuffer(slice, destination.slice(0, 64));
+            AtomicInteger submits = new AtomicInteger();
+            encoder.onCurrentSubmit(submits::incrementAndGet, () -> fail("submit failed"));
+            try (var fence = encoder.createFence()) {
+                assertFalse(fence.awaitCompletion(0L));
+                assertFalse(fence.awaitCompletion(0L));
+                assertEquals(0, submits.get(), "polling must not split the frame submission");
+                assertFalse(transientBuffer.isClosed(), "polling must not invalidate current transient slices");
+
+                encoder.submit();
+                assertEquals(1, submits.get());
+                assertTrue(fence.awaitCompletion(-1L), "RenderPearl's infinite wait must complete");
+                assertTrue(fence.awaitCompletion(0L), "completed fences remain complete");
+                ByteBuffer copied = destination.currentStorage();
+                for (int i = 0; i < 64; i++) assertEquals((byte) (i * 17), copied.get(i));
+            }
+        }
+    }
+
+    @Test
     void pendingPipelineDoesNotSurviveCacheInvalidation() {
         String name = "pending_generation";
         fragmentShaders.put(name, """
