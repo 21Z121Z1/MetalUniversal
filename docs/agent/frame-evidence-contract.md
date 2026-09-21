@@ -313,3 +313,6 @@ transient allocations. Explicit blocking waits retain the staging-ring flush pat
 The RenderPearl negative timeout sentinel maps to an infinite native wait; completed
 fences cache their completion. The native readback regression covers poll, explicit
 submit, completion and transient-slice lifetime together.
+When a ring rotates after submission and no deferred work remains, its fence
+captures the preceding actual submission. It does not acquire a dependency on
+the next frame merely because encoding later resumes on the same command encoder.

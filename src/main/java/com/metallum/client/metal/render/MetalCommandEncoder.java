@@ -1868,7 +1868,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public @NonNull GpuFence createFence() {
-        return new MetalFence(this, currentSubmitIndex);
+        // Vanilla rotates dynamic uniform rings after the frame was submitted.
+        // A fence created then covers that frame, not the next frame's work.
+        // Keep deferred operations conservative until they have been encoded.
+        boolean pendingWork = commandBuffer != null || currentEncoder != null || currentRenderPass != null
+                || !pendingColorClears.isEmpty() || !pendingDepthClears.isEmpty();
+        return new MetalFence(this, pendingWork ? currentSubmitIndex : currentSubmitIndex - 1L);
     }
 
     void queueForDestroy(final Runnable destroyAction) {

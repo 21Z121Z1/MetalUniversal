@@ -128,6 +128,17 @@ final class MetalMrtBackendIntegrationTest {
                 assertTrue(fence.awaitCompletion(0L), "completed fences remain complete");
                 ByteBuffer copied = destination.currentStorage();
                 for (int i = 0; i < 64; i++) assertEquals((byte) (i * 17), copied.get(i));
+
+                // Frame-end ring rotation occurs after submit. Its fence must
+                // not start depending on work recorded after that rotation.
+                try (var frameEndFence = encoder.createFence()) {
+                    encoder.commandBuffer();
+                    encoder.onCurrentSubmit(submits::incrementAndGet, () -> fail("later submit failed"));
+                    assertTrue(frameEndFence.awaitCompletion(-1L));
+                    assertEquals(1, submits.get(), "frame-end fence must not flush future work");
+                    encoder.submit();
+                    assertEquals(2, submits.get());
+                }
             }
         }
     }
