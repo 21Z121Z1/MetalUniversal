@@ -316,3 +316,11 @@ submit, completion and transient-slice lifetime together.
 When a ring rotates after submission and no deferred work remains, its fence
 captures the preceding actual submission. It does not acquire a dependency on
 the next frame merely because encoding later resumes on the same command encoder.
+
+`--submit-before-present` opts into a Metal 4 scheduling experiment: ordinary
+offscreen work is submitted before `nextDrawable` can block the CPU, and only the
+following presentation submission waits for the drawable on the queue. The
+existing cross-submission barriers and retirement rules remain in force. This
+does not alter Metal 3 or frame synthesis. Default is off; native submission
+counts and the route's explicit flag identify activation. More submissions are
+acceptable only if controlled trials show better frame timing and correctness.

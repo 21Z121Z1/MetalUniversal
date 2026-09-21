@@ -30,6 +30,8 @@ def main():
                         help="Enable Vanilla renderDebugLabels for diagnostic pass attribution")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
+    parser.add_argument("--submit-before-present", action="store_true",
+                        help="Submit Metal 4 offscreen work before waiting for a drawable")
     args = parser.parse_args()
     if not 1 <= args.capture_seconds <= 120:
         parser.error("--capture-seconds must be between 1 and 120")
@@ -60,6 +62,7 @@ def main():
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
+               f"-PsubmitBeforePresent={str(args.submit_before_present).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
                f"-PevidenceDir={output}", "runProductionClientGameTest"]
     recording = None
