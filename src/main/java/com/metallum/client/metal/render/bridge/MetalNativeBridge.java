@@ -293,6 +293,13 @@ public final class MetalNativeBridge {
             metalfxCopy = downcallWithoutCritical(lookup, "metallum_encode_texture_copy", FunctionDescriptor.of(
                     INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS
             ));
+            metalfxColorTransfer = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_metalfx_color_transfer",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS
+                    )
+            );
             metalfxShutdown = downcall(lookup, "metallum_metalfx_shutdown", FunctionDescriptor.ofVoid());
             metalfxReleaseScalers = downcall(lookup, "metallum_metalfx_release_scalers", FunctionDescriptor.ofVoid());
             metalfxStopFrameGeneration = downcall(lookup, "metallum_metalfx_stop_frame_generation", FunctionDescriptor.ofVoid());
@@ -1261,6 +1268,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxEncode;
     private static final MethodHandle metalfxTransparencyMask;
     private static final MethodHandle metalfxCopy;
+    @Nullable
+    private static final MethodHandle metalfxColorTransfer;
     private static final MethodHandle metalfxShutdown;
     private static final MethodHandle metalfxReleaseScalers;
     private static final MethodHandle metalfxStopFrameGeneration;
@@ -1906,6 +1915,31 @@ public final class MetalNativeBridge {
                 destination.set(FLOAT, (long) index * Float.BYTES, source[index]);
             }
             return destination;
+        }
+    }
+
+
+    public static boolean metallum_metalfx_color_transfer_available() {
+        return metalfxColorTransfer != null;
+    }
+
+    /** mode 0 decodes display-sRGB numeric RGB to linear; mode 1 encodes linear RGB to display-sRGB. */
+    public static boolean metallum_metalfx_color_transfer(
+            final MemorySegment commandBuffer,
+            final MemorySegment source,
+            final MemorySegment destination,
+            final int mode,
+            final MemorySegment fence
+    ) {
+        if (metalfxColorTransfer == null || (mode != 0 && mode != 1)) {
+            return false;
+        }
+        try {
+            return (int) metalfxColorTransfer.invokeExact(
+                    segment(commandBuffer), segment(source), segment(destination), mode, segment(fence)
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_color_transfer", throwable);
         }
     }
 

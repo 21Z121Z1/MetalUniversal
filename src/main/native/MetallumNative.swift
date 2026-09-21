@@ -417,6 +417,11 @@ private enum NativeState {
     static var transparencyMaskPipeline: MTLComputePipelineState?
     static var cutoutReactivePipeline: MTLComputePipelineState?
     static var handOverlayPipeline: MTLComputePipelineState?
+    // Explicit transfer-function bridge around MetalFX Temporal. Minecraft's scene
+    // target stores display-referred sRGB numeric values in plain RGBA8_UNORM;
+    // Temporal itself requires linear numeric input/output. This device-scoped
+    // compute PSO performs only the transfer function, preserving alpha.
+    static var colorTransferPipeline: MTLComputePipelineState?
     static var metalFxFailureKeys: Set<String> = []
     static var frameGenerationLogged = false
     // Most recent temporal scaler from the v2 encode path. The frame
@@ -1820,6 +1825,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var uiWidth: Int
     private var uiHeight: Int
     private var outputFormat: MTLPixelFormat
+    private var uiFormat: MTLPixelFormat
     private var depthFormat: MTLPixelFormat
     private var motionFormat: MTLPixelFormat
     private var nextBufferIndex = 0
@@ -1873,7 +1879,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ) {
         guard nativeSceneColor.width == uiColor.width,
               nativeSceneColor.height == uiColor.height,
-              nativeSceneColor.pixelFormat == uiColor.pixelFormat else {
+              nativeSceneColor.pixelFormat == sceneColor.pixelFormat else {
             return nil
         }
         guard let presentQueue = device.makeCommandQueue(),
@@ -1917,6 +1923,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.uiWidth = uiColor.width
         self.uiHeight = uiColor.height
         self.outputFormat = sceneColor.pixelFormat
+        self.uiFormat = uiColor.pixelFormat
         self.depthFormat = depth.pixelFormat
         self.motionFormat = motion.pixelFormat
         layer.maximumDrawableCount = metalFrameGenerationDrawableCount
@@ -1970,6 +1977,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiWidth: uiColor.width,
             uiHeight: uiColor.height,
             outputFormat: sceneColor.pixelFormat,
+            uiFormat: uiColor.pixelFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat,
             depthWidth: inputWidth,
@@ -2160,6 +2168,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiWidth: Int,
         uiHeight: Int,
         outputFormat: MTLPixelFormat,
+        uiFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat,
         depthWidth: Int,
@@ -2208,7 +2217,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 usage: .shaderRead,
                 label: "Frame Generation Native Scene \(index)"
             ), let uiOverlay = makeTexture(
-                pixelFormat: outputFormat,
+                pixelFormat: uiFormat,
                 width: uiWidth,
                 height: uiHeight,
                 usage: uiUsage,
@@ -2262,6 +2271,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiWidth: Int,
         uiHeight: Int,
         outputFormat: MTLPixelFormat,
+        uiFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat
     ) {
@@ -2270,6 +2280,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.uiWidth = uiWidth
         self.uiHeight = uiHeight
         self.outputFormat = outputFormat
+        self.uiFormat = uiFormat
         self.depthFormat = depthFormat
         self.motionFormat = motionFormat
         self.sceneBuffers = textureSet.scene
@@ -2298,6 +2309,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiWidth: Int,
         uiHeight: Int,
         outputFormat: MTLPixelFormat,
+        uiFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat,
         depthWidth: Int,
@@ -2311,6 +2323,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiWidth: uiWidth,
             uiHeight: uiHeight,
             outputFormat: outputFormat,
+            uiFormat: uiFormat,
             depthFormat: depthFormat,
             motionFormat: motionFormat,
             depthWidth: depthWidth,
@@ -2327,6 +2340,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiWidth: uiWidth,
             uiHeight: uiHeight,
             outputFormat: outputFormat,
+            uiFormat: uiFormat,
             depthFormat: depthFormat,
             motionFormat: motionFormat
         )
@@ -2339,6 +2353,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiWidth: Int,
         uiHeight: Int,
         outputFormat: MTLPixelFormat,
+        uiFormat: MTLPixelFormat,
         depth: MTLTexture,
         motion: MTLTexture,
         inputWidth: Int,
@@ -2351,6 +2366,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiWidth: uiWidth,
             uiHeight: uiHeight,
             outputFormat: outputFormat,
+            uiFormat: uiFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat,
             depthWidth: inputWidth,
@@ -2382,6 +2398,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiWidth: uiWidth,
             uiHeight: uiHeight,
             outputFormat: outputFormat,
+            uiFormat: uiFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat
         )
@@ -2541,8 +2558,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
               nativeSceneColor.width > 0, nativeSceneColor.height > 0,
               uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
-              sceneColor.pixelFormat == uiColor.pixelFormat,
-              nativeSceneColor.pixelFormat == uiColor.pixelFormat,
+              sceneColor.pixelFormat == nativeSceneColor.pixelFormat,
               nativeSceneColor.width == uiColor.width,
               nativeSceneColor.height == uiColor.height,
               depth.width == motion.width, depth.height == motion.height,
@@ -2554,6 +2570,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         if sceneColor.width != outputWidth || sceneColor.height != outputHeight
                 || uiColor.width != uiWidth || uiColor.height != uiHeight
                 || sceneColor.pixelFormat != outputFormat
+                || uiColor.pixelFormat != uiFormat
                 || depth.pixelFormat != depthFormat || motion.pixelFormat != motionFormat
                 || depthBuffers.first?.width != inputWidth || depthBuffers.first?.height != inputHeight
                 || motionBuffers.first?.width != inputWidth || motionBuffers.first?.height != inputHeight
@@ -2564,6 +2581,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 uiWidth: uiColor.width,
                 uiHeight: uiColor.height,
                 outputFormat: sceneColor.pixelFormat,
+                uiFormat: uiColor.pixelFormat,
                 depth: depth,
                 motion: motion,
                 inputWidth: inputWidth,
@@ -5458,6 +5476,182 @@ private func motionFusedV2MslSource() -> String {
     """
 }
 
+
+private struct MetalFxColorTransferUniforms {
+    var viewport: SIMD2<UInt32>
+    /// 0 = display-sRGB numeric values -> linear, 1 = linear -> display-sRGB numeric values.
+    var mode: UInt32
+    var padding: UInt32 = 0
+}
+
+private func colorTransferMslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct ColorTransferUniforms {
+      uint2 viewport;
+      uint mode;
+      uint padding;
+    };
+
+    inline float metallum_srgb_decode(float x) {
+      x = clamp(x, 0.0f, 1.0f);
+      return x <= 0.04045f
+        ? x / 12.92f
+        : pow((x + 0.055f) / 1.055f, 2.4f);
+    }
+
+    inline float metallum_srgb_encode(float x) {
+      x = clamp(x, 0.0f, 1.0f);
+      return x <= 0.0031308f
+        ? x * 12.92f
+        : 1.055f * pow(x, 1.0f / 2.4f) - 0.055f;
+    }
+
+    kernel void metallum_color_transfer(
+      texture2d<float, access::read> sourceTexture [[texture(0)]],
+      texture2d<float, access::write> destinationTexture [[texture(1)]],
+      constant ColorTransferUniforms& u [[buffer(0)]],
+      uint2 pixel [[thread_position_in_grid]]) {
+      if (pixel.x >= u.viewport.x || pixel.y >= u.viewport.y) return;
+      float4 sample = sourceTexture.read(pixel);
+      float3 rgb;
+      if (u.mode == 0u) {
+        rgb = float3(
+          metallum_srgb_decode(sample.r),
+          metallum_srgb_decode(sample.g),
+          metallum_srgb_decode(sample.b)
+        );
+      } else {
+        rgb = float3(
+          metallum_srgb_encode(sample.r),
+          metallum_srgb_encode(sample.g),
+          metallum_srgb_encode(sample.b)
+        );
+      }
+      // Alpha is coverage/compositing data, not color, and must never pass
+      // through an RGB transfer function.
+      destinationTexture.write(float4(rgb, sample.a), pixel);
+    }
+    """
+}
+
+private func ensureColorTransferPipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    if let existing = NativeState.colorTransferPipeline {
+        return existing
+    }
+    do {
+        let library = try device.makeLibrary(source: colorTransferMslSource(), options: nil)
+        guard let function = library.makeFunction(name: "metallum_color_transfer") else {
+            return nil
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
+        NativeState.colorTransferPipeline = pipeline
+        return pipeline
+    } catch {
+        #if os(macOS) && canImport(MetalFX)
+        logMetalFxFailureOnce(
+            "color-transfer-pipeline",
+            "failed to build explicit sRGB transfer pipeline: \(error)"
+        )
+        #endif
+        return nil
+    }
+}
+
+private func metal3MetalFxColorTransfer(
+    _ commandBuffer: MTLCommandBuffer,
+    _ sourceTexture: MTLTexture,
+    _ destinationTexture: MTLTexture,
+    _ mode: Int32,
+    _ fence: MTLFence?
+) -> Int32 {
+    guard mode == 0 || mode == 1,
+          sourceTexture.width == destinationTexture.width,
+          sourceTexture.height == destinationTexture.height,
+          sourceTexture.width > 0,
+          sourceTexture.height > 0,
+          let pipeline = ensureColorTransferPipeline(commandBuffer.device),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        return 0
+    }
+    encoder.label = mode == 0
+        ? "MetalFX sRGB Decode -> Linear"
+        : "MetalFX Linear -> sRGB Encode"
+    metal4BarrierComputeAfterRender(encoder)
+    if let fence {
+        encoder.waitForFence(fence)
+    }
+    var uniforms = MetalFxColorTransferUniforms(
+        viewport: SIMD2(UInt32(sourceTexture.width), UInt32(sourceTexture.height)),
+        mode: UInt32(mode)
+    )
+    encoder.setComputePipelineState(pipeline)
+    encoder.setBytes(&uniforms, length: MemoryLayout<MetalFxColorTransferUniforms>.stride, index: 0)
+    encoder.setTexture(sourceTexture, index: 0)
+    encoder.setTexture(destinationTexture, index: 1)
+    let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
+    let threadHeight = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / threadWidth))
+    encoder.dispatchThreads(
+        MTLSize(width: sourceTexture.width, height: sourceTexture.height, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadWidth, height: threadHeight, depth: 1)
+    )
+    if let fence {
+        encoder.updateFence(fence)
+    }
+    encoder.endEncoding()
+    return 1
+}
+
+/// Explicit numeric transfer-function conversion used at the Temporal boundary.
+/// This is intentionally separate from texture-copy/resample: sampling an
+/// RGBA8_UNORM texture never implies sRGB decoding because the source view is
+/// not an `_srgb` pixel format.
+@_cdecl("metallum_metalfx_color_transfer")
+public func metallumMetalFxColorTransferEntry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ sourceTexture: MTLTexture,
+    _ destinationTexture: MTLTexture,
+    _ mode: Int32,
+    _ fence: MTLFence?
+) -> Int32 {
+    guard mode == 0 || mode == 1,
+          sourceTexture.width == destinationTexture.width,
+          sourceTexture.height == destinationTexture.height,
+          sourceTexture.width > 0,
+          sourceTexture.height > 0 else {
+        return 0
+    }
+    if #available(macOS 26.0, iOS 26.0, *),
+       let lease = metal4MainLease(commandBufferPointer),
+       let pipeline = ensureColorTransferPipeline(sourceTexture.device) {
+        let uniforms = MetalFxColorTransferUniforms(
+            viewport: SIMD2(UInt32(sourceTexture.width), UInt32(sourceTexture.height)),
+            mode: UInt32(mode)
+        )
+        return encodeMetal4Compute(
+            lease: lease,
+            label: mode == 0
+                ? "MetalFX sRGB Decode -> Linear (Metal 4)"
+                : "MetalFX Linear -> sRGB Encode (Metal 4)",
+            pipeline: pipeline,
+            uniforms: uniforms,
+            textures: [(0, sourceTexture), (1, destinationTexture)],
+            width: sourceTexture.width,
+            height: sourceTexture.height
+        ) ? 1 : 0
+    }
+    return metal3MetalFxColorTransfer(
+        metal3CommandBuffer(commandBufferPointer),
+        sourceTexture,
+        destinationTexture,
+        mode,
+        fence
+    )
+}
+
 private func motionClearV2MslSource() -> String {
     """
     #include <metal_stdlib>
@@ -7581,6 +7775,7 @@ public func metallum_metalfx_shutdown() {
     residencyTrackReleased(NativeState.transparencyMaskPipeline)
     residencyTrackReleased(NativeState.cutoutReactivePipeline)
     residencyTrackReleased(NativeState.handOverlayPipeline)
+    residencyTrackReleased(NativeState.colorTransferPipeline)
     NativeState.motionPipeline = nil
     NativeState.motionV2Pipeline = nil
     NativeState.motionMergePipeline = nil
@@ -7588,6 +7783,8 @@ public func metallum_metalfx_shutdown() {
     NativeState.motionClearPipeline = nil
     NativeState.transparencyMaskPipeline = nil
     NativeState.cutoutReactivePipeline = nil
+    NativeState.handOverlayPipeline = nil
+    NativeState.colorTransferPipeline = nil
     NativeState.frameGenerationLogged = false
     #endif
     for pipeline in NativeState.copyPipelines.values {
