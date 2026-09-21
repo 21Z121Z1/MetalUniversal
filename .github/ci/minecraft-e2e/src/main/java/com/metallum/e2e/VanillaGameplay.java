@@ -23,8 +23,7 @@ import java.time.Instant;
 public final class VanillaGameplay {
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
     private static final int NATIVE_HEIGHT = Integer.getInteger("metallum.ci.nativeHeight", 0);
-    // Test-only bounded timestamps, plus one scalar native wait getter per frame.
-    // No GPU readback or per-frame allocation.
+    // Test-only, bounded timestamps. No FFM timing, readback or per-frame allocation.
     private static final long[] FRAME_TIMES = new long[131_072];
     private static boolean recordingFrames;
     private static int frameCount;
@@ -32,8 +31,6 @@ public final class VanillaGameplay {
     private static int invalidSettingsFrames;
     private static int throttledFrames;
     private static int droppedSamples;
-    private static long drawableWaitNanos;
-    private static int drawableWaitSamples;
     private static GpuSurface.Configuration lastPresentedConfiguration;
 
     public static void sourceFramePresented(Minecraft client, GpuSurface.Configuration presented) {
@@ -42,11 +39,6 @@ public final class VanillaGameplay {
         long now = System.nanoTime();
         if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
         else droppedSamples++;
-        long wait = MetalNativeBridge.metallum_presentation_latest_drawable_wait_nanos();
-        if (wait >= 0) {
-            drawableWaitNanos += wait;
-            drawableWaitSamples++;
-        }
         var target = client.gameRenderer.mainRenderTarget();
         if (client.getWindow().getWidth() != NATIVE_WIDTH || client.getWindow().getHeight() != NATIVE_HEIGHT
                 || target.width != NATIVE_WIDTH || target.height != NATIVE_HEIGHT
@@ -121,8 +113,6 @@ public final class VanillaGameplay {
         }
         context.runOnClient(client -> {
             frameCount = invalidSettingsFrames = throttledFrames = droppedSamples = 0;
-            drawableWaitNanos = 0;
-            drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
             recordingFrames = true;
         });
@@ -240,8 +230,6 @@ public final class VanillaGameplay {
             value.addProperty("y", client.player.getY());
             value.addProperty("z", client.player.getZ());
             value.addProperty("sourceFrames", frameCount);
-            value.addProperty("drawableWaitNanos", drawableWaitNanos);
-            value.addProperty("drawableWaitSamples", drawableWaitSamples);
             value.addProperty("elapsedNanos", System.nanoTime() - startedNanos);
             return value;
         });
@@ -296,9 +284,6 @@ public final class VanillaGameplay {
         value.addProperty("invalidSettingsFrames", invalidSettingsFrames);
         value.addProperty("throttledFrames", throttledFrames);
         value.addProperty("droppedSamples", droppedSamples);
-        value.addProperty("drawableWaitNanos", drawableWaitNanos);
-        value.addProperty("drawableWaitSamples", drawableWaitSamples);
-        value.addProperty("instrumentation", "one existing native drawable-wait getter per source frame");
         if (intervals.length > 0) {
             for (int percentile : new int[]{50, 95, 99}) {
                 int index = (int) Math.ceil(intervals.length * percentile / 100.0) - 1;
