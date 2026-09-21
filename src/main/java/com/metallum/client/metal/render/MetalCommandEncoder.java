@@ -1889,9 +1889,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             if (timeoutMs == 0L) {
                 return false;
             }
+            if (commandBuffer == null
+                    && (!pendingColorClears.isEmpty() || !pendingDepthClears.isEmpty())) {
+                // A deferred whole-texture clear is real work even before a
+                // native command buffer exists. A blocking fence must
+                // materialize it before choosing the previous submission as
+                // its completion witness; otherwise it can return true for a
+                // completed older submit while this clear is still pending.
+                flushAllPendingClears();
+            }
             if (commandBuffer != null) {
                 // Retain the explicit blocking-wait flush used when a staging
-                // ring wraps within a single frame of uploads.
+                // ring wraps within a single frame of uploads, and submit any
+                // command buffer created while materializing deferred clears.
                 submit();
             } else {
                 // Nothing has been encoded into this submit; the fence

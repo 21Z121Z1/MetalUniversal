@@ -144,6 +144,38 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void blockingFenceMaterializesDeferredClearBeforeUsingPreviousSubmit() {
+        // The device may leave an empty command buffer open during setup. End
+        // it so this reproduces the deferred-clear-only state from the
+        // production boundary.
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                () -> "blocking deferred fence clear",
+                TEXTURE_USAGE,
+                GpuFormat.RGBA8_UNORM,
+                WIDTH,
+                HEIGHT,
+                1,
+                1
+        )) {
+            // This leaves no native command buffer open. The fence must still
+            // cover the deferred clear rather than treating the previous
+            // submit as the completion witness.
+            encoder.clearColorTexture(texture, new Vector4f(0.125F, 0.25F, 0.5F, 1.0F));
+            try (var fence = encoder.createFence()) {
+                assertFalse(fence.awaitCompletion(0L),
+                        "zero-time poll must not materialize or submit deferred clear");
+                assertTrue(encoder.hasPendingClear(texture));
+                assertTrue(fence.awaitCompletion(-1L));
+                assertFalse(encoder.hasPendingClear(texture),
+                        "blocking fence must materialize deferred clear before it completes");
+            }
+            device.waitForSubmittedGpuWork();
+        }
+    }
+
+    @Test
     void pendingPipelineDoesNotSurviveCacheInvalidation() {
         String name = "pending_generation";
         fragmentShaders.put(name, """
