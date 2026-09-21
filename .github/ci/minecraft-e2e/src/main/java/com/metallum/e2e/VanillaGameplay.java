@@ -267,6 +267,8 @@ public final class VanillaGameplay {
             context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
             require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
                     "Frame evidence did not finish the predeclared stationary window");
+            report.add("stationarySourceFrames", context.computeOnClient(client ->
+                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS)));
             if (STATIONARY_BASELINE) {
                 JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
                 report.add("finalStationaryTerrain", finalTerrain);
@@ -274,8 +276,6 @@ public final class VanillaGameplay {
                         report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")),
                         "Stationary terrain changed across the window");
             }
-            report.add("stationarySourceFrames", context.computeOnClient(client ->
-                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS)));
             if (!STATIONARY_BASELINE) {
                 phase(context, output, report, phases, "flight-new-chunks");
                 if (EVIDENCE_PHASE.equals("streaming")) {
@@ -386,6 +386,7 @@ public final class VanillaGameplay {
             context.takeScreenshot("vanilla-gameplay-completed");
         } catch (RuntimeException | Error failure) {
             context.runOnClient(client -> FrameEvidenceRuntime.validationFinished("failed"));
+            report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
             report.addProperty("status", "failed");
             report.addProperty("failure", failure.toString());
             write(output.resolve("gameplay.json"), report);

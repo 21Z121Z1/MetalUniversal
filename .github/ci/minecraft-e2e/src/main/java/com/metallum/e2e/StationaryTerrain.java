@@ -71,6 +71,9 @@ final class StationaryTerrain {
         // Canonical section identity; traversal order and native allocation addresses are not content.
         rows.sort(String::compareTo);
         JsonObject result = new JsonObject();
+        var canonicalRows = new com.google.gson.JsonArray();
+        rows.forEach(canonicalRows::add);
+        result.add("canonicalDrawRows", canonicalRows);
         result.addProperty("visibleSections", rows.size());
         result.addProperty("layerIndexCount", indexCount);
         try {
