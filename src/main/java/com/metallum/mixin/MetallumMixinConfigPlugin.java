@@ -33,6 +33,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.terrain.CompileTaskTerrainGenerationMixin"
     );
     private static final String VANILLA_TERRAIN_ADMISSION_PROPERTY = "metallum.terrain.vanillaAdmission";
+    private static final Set<String> VANILLA_TERRAIN_SLICE_CACHE_MIXINS = Set.of(
+            "com.metallum.mixin.terrain.CompiledSectionMeshSliceCacheMixin",
+            "com.metallum.mixin.terrain.SectionRenderDispatcherSliceCacheMixin",
+            "com.metallum.mixin.terrain.UberGpuBufferSliceInvalidationMixin"
+    );
     private static final String VANILLA_TERRAIN_GENERATION_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
@@ -85,6 +90,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && Boolean.getBoolean(VANILLA_TERRAIN_GENERATION_PROPERTY)
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
+        }
+        if (VANILLA_TERRAIN_SLICE_CACHE_MIXINS.contains(mixinClassName)) {
+            FabricLoader loader = FabricLoader.getInstance();
+            return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.terrainSliceCache")
+                    && !loader.isModLoaded("sodium") && !loader.isModLoaded("iris");
         }
         if (mixinClassName.contains(".mixin.terrain.")) {
             FabricLoader loader = FabricLoader.getInstance();

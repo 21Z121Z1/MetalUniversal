@@ -32,11 +32,17 @@ def main():
                         help="Sample native drawable wait once per frame; diagnostic, excluded from timing trials")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
+    parser.add_argument("--terrain-slice-cache", action="store_true",
+                        help="Reuse mesh-owned terrain allocation metadata until allocation mutation")
+    parser.add_argument("--verify-terrain-cache", action="store_true",
+                        help="Compare every cache hit with live Vanilla allocation lookup; diagnostic only")
     args = parser.parse_args()
     if not 1 <= args.capture_seconds <= 120:
         parser.error("--capture-seconds must be between 1 and 120")
     if args.metrics_only and args.render_labels:
         parser.error("render labels are diagnostic-only; omit them for timing trials")
+    if args.verify_terrain_cache and not args.terrain_slice_cache:
+        parser.error("--verify-terrain-cache requires --terrain-slice-cache")
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -63,6 +69,8 @@ def main():
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
+               f"-PterrainSliceCache={str(args.terrain_slice_cache).lower()}",
+               f"-PverifyTerrainSliceCache={str(args.verify_terrain_cache).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
                f"-PevidenceDir={output}", "runProductionClientGameTest"]
     recording = None
@@ -80,6 +88,8 @@ def main():
                "captureSeconds": None if args.metrics_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
+               "terrainSliceCache": args.terrain_slice_cache,
+               "verifyTerrainSliceCache": args.verify_terrain_cache,
                "display": main_display,
                "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}

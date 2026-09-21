@@ -10153,16 +10153,19 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     guard !additionOverflow, needed >= 0, needed <= indirectBuffer.length else { return }
 
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        let indexAddress = indexBuffer.gpuAddress
+        let indexLength = indexBuffer.length
+        let indirectAddress = indirectBuffer.gpuAddress
         var offset = baseOffset
         for _ in 0..<drawCount {
             bridge.encoder.drawIndexedPrimitives(
                 primitiveType: primitiveType,
                 indexType: indexType,
-                indexBuffer: indexBuffer.gpuAddress,
-                indexBufferLength: indexBuffer.length,
-                indirectBuffer: indirectBuffer.gpuAddress + UInt64(offset)
+                indexBuffer: indexAddress,
+                indexBufferLength: indexLength,
+                indirectBuffer: indirectAddress + UInt64(offset)
             )
-            offset += Int(stride)
+            offset += strideInt
         }
         bridge.lease.encodingCounters?.indirectDraws += Int64(drawCount)
         return
@@ -12282,13 +12285,15 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
     _ stride: UInt64
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        let indirectAddress = indirectBuffer.gpuAddress
+        let strideInt = Int(stride)
         var offset = Int(indirectBufferOffset)
         for _ in 0..<drawCount {
             bridge.encoder.drawPrimitives(
                 primitiveType: primitiveType,
-                indirectBuffer: indirectBuffer.gpuAddress + UInt64(offset)
+                indirectBuffer: indirectAddress + UInt64(offset)
             )
-            offset += Int(stride)
+            offset += strideInt
         }
         bridge.lease.encodingCounters?.indirectDraws += Int64(drawCount)
         return

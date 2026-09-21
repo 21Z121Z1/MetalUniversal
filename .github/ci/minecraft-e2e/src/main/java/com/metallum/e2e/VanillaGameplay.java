@@ -61,6 +61,17 @@ public final class VanillaGameplay {
         if (client.getFramerateLimitTracker().getFramerateLimit() < 260) throttledFrames++;
     }
 
+    private static long[] sliceCacheCounters(boolean enabled) {
+        if (!enabled) return new long[3]; // The same harness also runs the pre-cache baseline JAR.
+        try {
+            Class<?> cache = Class.forName("com.metallum.client.terrain.VanillaTerrainSliceCache");
+            return new long[] { cache.getField("hits").getLong(null), cache.getField("misses").getLong(null),
+                    cache.getField("verifiedHits").getLong(null) };
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("Cannot read terrain slice cache activation evidence", failure);
+        }
+    }
+
     static void run(ClientGameTestContext context, TestSingleplayerContext world,
                     Path output, JsonObject worldEvidence) {
         var input = context.getInput();
@@ -139,6 +150,11 @@ public final class VanillaGameplay {
                 && settings.get("presentHeight").getAsInt() == NATIVE_HEIGHT,
                 "Native window/present dimensions differ from the physical display: " + settings);
         report.addProperty("reuseEncoderState", Boolean.getBoolean("metallum.opt.reuseEncoderState"));
+        boolean terrainSliceCache = Boolean.getBoolean("metallum.opt.terrainSliceCache");
+        boolean verifyTerrainSliceCache = Boolean.getBoolean("metallum.terrain.verifySliceCache");
+        report.addProperty("terrainSliceCache", terrainSliceCache);
+        report.addProperty("verifyTerrainSliceCache", verifyTerrainSliceCache);
+        long[] initialCache = context.computeOnClient(client -> sliceCacheCounters(terrainSliceCache));
         int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
         report.addProperty("initialVisibleSections", initialVisibleSections);
         long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
@@ -244,6 +260,18 @@ public final class VanillaGameplay {
                     "Metal 4 did not submit work during gameplay");
             report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
             report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
+            JsonObject cacheEvidence = context.computeOnClient(client -> {
+                JsonObject stats = new JsonObject();
+                long[] counters = sliceCacheCounters(terrainSliceCache);
+                stats.addProperty("hits", counters[0] - initialCache[0]);
+                stats.addProperty("misses", counters[1] - initialCache[1]);
+                stats.addProperty("verifiedHits", counters[2] - initialCache[2]);
+                return stats;
+            });
+            report.add("terrainSliceCacheEvidence", cacheEvidence);
+            require(!terrainSliceCache || cacheEvidence.get("hits").getAsLong() > 0, "Terrain slice cache did not activate");
+            require(!verifyTerrainSliceCache || cacheEvidence.get("verifiedHits").getAsLong() > 0,
+                    "Terrain slice differential oracle did not activate");
             JsonObject finalSettings = context.computeOnClient(VanillaGameplay::settings);
             report.add("finalSettings", finalSettings);
             require(settings.equals(finalSettings), "Rendering settings changed during the route");
