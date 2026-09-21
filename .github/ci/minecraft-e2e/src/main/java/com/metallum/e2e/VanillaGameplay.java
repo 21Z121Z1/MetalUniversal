@@ -199,7 +199,13 @@ public final class VanillaGameplay {
         if (STATIONARY_BASELINE) {
             var readiness = new StationaryTerrain();
             context.waitFor(readiness::ready, 1200);
-            stationaryTerrain = readiness.evidence();
+            // Incremental loading can leave a conservative graph dependent on arrival order.
+            // Request Vanilla's normal full rebuild after upload convergence, before warmup.
+            context.runOnClient(client -> client.levelRenderer.sectionOcclusionGraph().invalidate());
+            var rebuiltReadiness = new StationaryTerrain();
+            context.waitFor(rebuiltReadiness::ready, 1200);
+            stationaryTerrain = rebuiltReadiness.evidence();
+            stationaryTerrain.addProperty("fullGraphRebuildAfterLoad", true);
             stationaryVisibleSections = stationaryTerrain.get("visibleSections").getAsInt();
             report.addProperty("initialVisibleSections", stationaryVisibleSections);
             report.add("stationaryTerrain", stationaryTerrain);

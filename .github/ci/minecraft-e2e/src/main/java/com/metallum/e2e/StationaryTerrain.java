@@ -41,6 +41,10 @@ final class StationaryTerrain {
     static JsonObject capture(Minecraft client) {
         var renderer = client.levelRenderer;
         var dispatcher = renderer.sectionRenderDispatcher();
+        var graph = (com.metallum.e2e.mixin.StationaryOcclusionAccessor) renderer.sectionOcclusionGraph();
+        var graphTask = graph.metallum$fullUpdateTask();
+        if (graph.metallum$needsFullUpdate() || graph.metallum$needsFrustumUpdate().get()
+                || (graphTask != null && graphTask.state() != java.util.concurrent.Future.State.SUCCESS)) return null;
         if (dispatcher == null || !renderer.hasRenderedAllSections()
                 || !renderer.sectionOcclusionGraph().expectedChunks().isEmpty()
                 || renderer.visibleSections().isEmpty()) return null;

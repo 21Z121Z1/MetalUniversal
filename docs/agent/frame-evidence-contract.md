@@ -205,7 +205,10 @@ Metal 4 activation and sample-completion checks; it does not run the movement ro
 Before warmup, the fixed camera must have an empty compile queue and occlusion expected
 chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
 hash of section nodes and layer draw metadata must remain stable for at least 40 checks
-and 2 seconds. It is recorded again after sampling and must match. Visible-section count,
+and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
+(to remove loading-order-dependent conservative accumulation), waits for the graph task
+and frustum update to finish without blocking, and repeats convergence. It is recorded
+again after sampling and must match. Visible-section count,
 pose and quality remain guarded each source frame. This proves a bounded stationary
 rendering workload condition, not JVM-object equality or pixel identity. Pairwise analysis
 must additionally match this hash, snapshot, quality, target and physical display conditions.
