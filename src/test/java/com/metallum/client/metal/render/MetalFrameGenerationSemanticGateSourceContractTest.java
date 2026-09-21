@@ -44,6 +44,12 @@ final class MetalFrameGenerationSemanticGateSourceContractTest {
         assertTrue(iris.contains("MetalFxManager.observeIrisMotionSemanticsUnproven();"));
         assertTrue(manager.contains("irisMotionSemanticsUnprovenThisFrame"));
         assertTrue(manager.contains("iris-active-pipeline-motion-semantics-unproven"));
-        assertTrue(manager.contains("!IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven()"));
+        assertTrue(manager.contains("return !FabricLoader.getInstance().isModLoaded(\"iris\")"
+                + "\n                || IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven();"),
+                "Vanilla must short-circuit before linking the optional Iris adapter");
+        assertTrue(manager.contains("irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();"));
+        assertTrue(manager.contains("if (irisMotionSemanticsUnprovenThisFrame\n"
+                + "                || !sourceShaderMotionSemanticsProven()) {"),
+                "Final admission must reject both a sticky selection and currently unproven motion");
     }
 }

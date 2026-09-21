@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.FrameEvidenceRuntime;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.minecraft.core.BlockPos;
@@ -24,6 +25,9 @@ import java.time.Instant;
 
 /** Opt-in real-client workload using Fabric's input driver, in the existing normal world. */
 public final class VanillaGameplay {
+    private static final String EVIDENCE_PHASE = System.getProperty("metallum.ci.frameEvidencePhase", "stationary");
+    private static final long WARMUP_NS = 5_000_000_000L;
+    private static final long SAMPLE_NS = 10_000_000_000L;
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
     private static final int NATIVE_HEIGHT = Integer.getInteger("metallum.ci.nativeHeight", 0);
     private static final boolean PRESENTATION_METRICS = Boolean.getBoolean("metallum.ci.presentationMetrics");
@@ -39,6 +43,7 @@ public final class VanillaGameplay {
     private static long drawableWaitNanos;
     private static int drawableWaitSamples;
     private static GpuSurface.Configuration lastPresentedConfiguration;
+    private static java.util.List<java.util.function.BooleanSupplier> qualityChecks = java.util.List.of();
 
     public static void sourceFramePresented(Minecraft client, GpuSurface.Configuration presented) {
         lastPresentedConfiguration = presented;
@@ -58,6 +63,9 @@ public final class VanillaGameplay {
                 || target.width != NATIVE_WIDTH || target.height != NATIVE_HEIGHT
                 || presented == null || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT
                 || client.options.getEffectiveRenderDistance() != 32) invalidSettingsFrames++;
+        for (var check : qualityChecks) {
+            if (!check.getAsBoolean()) { invalidSettingsFrames++; break; }
+        }
         if (client.getFramerateLimitTracker().getFramerateLimit() < 260) throttledFrames++;
     }
 
@@ -74,6 +82,7 @@ public final class VanillaGameplay {
 
     static void run(ClientGameTestContext context, TestSingleplayerContext world,
                     Path output, JsonObject worldEvidence) {
+        require(EVIDENCE_PHASE.equals("stationary") || EVIDENCE_PHASE.equals("streaming"), "Unknown frame evidence phase");
         var input = context.getInput();
         JsonObject report = new JsonObject();
         report.addProperty("scenario", "vanilla-normal-gameplay-native-max-v3");
@@ -160,6 +169,36 @@ public final class VanillaGameplay {
         long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
         require(initialMetal4[0] == 1, "Gameplay profiling requires an active Metal 4 main renderer");
         report.addProperty("metal4MainRendererActive", true);
+        JsonObject initialContent = world.getServer().computeOnServer(server -> {
+            server.saveEverything(false, true, true);
+            return WorldSnapshot.capture(world.getWorldSave().getSaveDirectory(),
+                    output.resolve(worldEvidence.has("replaySourceSnapshotSha256") ? "prewarmup-world" : "initial-world"), worldEvidence);
+        });
+        if (worldEvidence.has("replaySourceSnapshotSha256")) {
+            initialContent.addProperty("preWarmupSnapshotSha256", initialContent.get("snapshotSha256").getAsString());
+            initialContent.addProperty("preWarmupSnapshotDirectory", "prewarmup-world");
+            initialContent.addProperty("snapshotSha256", worldEvidence.get("replaySourceSnapshotSha256").getAsString());
+            initialContent.addProperty("snapshotDirectory", "initial-world");
+        }
+        JsonObject profile = new JsonObject();
+        profile.addProperty("profileId", "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        profile.add("initialContent", initialContent);
+        profile.add("quality", settings.deepCopy());
+        JsonObject targetIntent = new JsonObject();
+        targetIntent.addProperty("fpsLimit", 260);
+        targetIntent.addProperty("vsync", false);
+        targetIntent.addProperty("authority", "requested-options-not-system-deadline");
+        profile.add("targetIntent", targetIntent);
+        JsonObject route = new JsonObject();
+        route.addProperty("id", "vanilla-normal-gameplay-native-max-v3");
+        route.addProperty("inputAuthority", "Fabric client GameTest input driver");
+        route.addProperty("samplePhase", EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
+        route.addProperty("warmupNs", WARMUP_NS);
+        route.addProperty("sampleNs", SAMPLE_NS);
+        route.addProperty("completion", "selected window duration and all existing flight/place-break/quality assertions");
+        profile.add("route", route);
+        profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
+        report.add("frameEvidenceProfile", profile);
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
         if (Boolean.getBoolean("metallum.ci.waitForProfiler")) {
@@ -167,20 +206,42 @@ public final class VanillaGameplay {
             context.waitFor(client -> Files.exists(output.resolve("profiler-started")), 1200);
         }
         input.lookAt(-65, 15);
-        context.runOnClient(client -> {
+        long stationaryStart = context.computeOnClient(client -> {
             // Loading the full view can exceed Vanilla's AFK threshold. The
             // route starts with synthetic camera input, just like each flight leg.
             client.getFramerateLimitTracker().onInputReceived();
+            // Cache requested OptionInstance values once. Checking them creates no per-frame JSON
+            // and catches a transient quality change even when final settings are restored.
+            var guardedOptions = java.util.List.of(client.options.graphicsPreset(), client.options.renderDistance(),
+                    client.options.simulationDistance(), client.options.ambientOcclusion(), client.options.cloudStatus(),
+                    client.options.cloudRange(), client.options.particles(), client.options.mipmapLevels(),
+                    client.options.entityDistanceScaling(), client.options.entityShadows(), client.options.biomeBlendRadius(),
+                    client.options.improvedTransparency(), client.options.textureFiltering(), client.options.maxAnisotropyBit(),
+                    client.options.cutoutLeaves(), client.options.weatherRadius(), client.options.enableVsync(),
+                    client.options.framerateLimit());
+            qualityChecks = guardedOptions.stream().map(option -> {
+                Object initial = option.get();
+                return (java.util.function.BooleanSupplier) () -> initial.equals(option.get());
+            }).toList();
             frameCount = invalidSettingsFrames = throttledFrames = droppedSamples = 0;
             drawableWaitNanos = 0;
             drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
             recordingFrames = true;
+            if (EVIDENCE_PHASE.equals("stationary")) FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
+            return System.nanoTime();
         });
         try {
             phase(context, output, report, phases, "stationary-full-view");
-            context.waitTicks(240);
+            // Identical off/on workload clock: observer presence never controls the route.
+            context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS, 1200);
+            context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
+            require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
+                    "Frame evidence did not finish the predeclared stationary window");
             phase(context, output, report, phases, "flight-new-chunks");
+            if (EVIDENCE_PHASE.equals("streaming")) {
+                context.runOnClient(client -> FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS));
+            }
             double startX = context.computeOnClient(client -> client.player.getX());
             double startZ = context.computeOnClient(client -> client.player.getZ());
             input.holdKey(options -> options.keyUp);
@@ -196,6 +257,8 @@ public final class VanillaGameplay {
             input.releaseKey(options -> options.keySprint);
             double distance = context.computeOnClient(client -> Math.hypot(
                     client.player.getX() - startX, client.player.getZ() - startZ));
+            require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
+                    "Frame evidence did not finish the predeclared streaming window");
             report.addProperty("flightDistanceBlocks", distance);
             require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
 
@@ -277,10 +340,12 @@ public final class VanillaGameplay {
             require(settings.equals(finalSettings), "Rendering settings changed during the route");
             require(invalidSettingsFrames == 0 && droppedSamples == 0 && throttledFrames == 0,
                     "Source frame measurements failed the full-resolution, maximum-distance or cadence gate");
+            context.runOnClient(client -> FrameEvidenceRuntime.validationFinished("passed"));
             report.addProperty("completedAt", Instant.now().toString());
             write(output.resolve("gameplay.json"), report);
             context.takeScreenshot("vanilla-gameplay-completed");
         } catch (RuntimeException | Error failure) {
+            context.runOnClient(client -> FrameEvidenceRuntime.validationFinished("failed"));
             report.addProperty("status", "failed");
             report.addProperty("failure", failure.toString());
             write(output.resolve("gameplay.json"), report);

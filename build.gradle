@@ -250,11 +250,33 @@ def frameEvidenceGit = { List<String> arguments ->
 		return null
 	}
 }
+// The native input digest also distinguishes dirty builds at the same Git HEAD.
+// Keep the compiler recipe in the digest alongside every shipping Swift input.
+def frameEvidenceNativeInputs = [
+        "build.gradle",
+        "src/main/native/MetalFrameGenerationLifecycle.swift",
+        "src/main/native/MetallumInterface.swift",
+        "src/main/native/MetallumNative.swift"
+]
+def frameEvidenceFileSha256 = { File input ->
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    input.withInputStream { stream ->
+        byte[] buffer = new byte[65536]
+        int count
+        while ((count = stream.read(buffer)) != -1) digest.update(buffer, 0, count)
+    }
+    digest.digest().encodeHex().toString()
+}
+def frameEvidenceNativeInputHashes = {
+    frameEvidenceNativeInputs.collectEntries { path -> [(path): frameEvidenceFileSha256(file(path))] }
+}
+def frameEvidenceNativeSources = frameEvidenceNativeInputHashes()
 def frameEvidenceBuildIdentity = groovy.json.JsonOutput.toJson([
 		sourceSha: frameEvidenceGit(["rev-parse", "HEAD"]),
 		treeSha: frameEvidenceGit(["rev-parse", "HEAD^{tree}"]),
 		dirty: frameEvidenceGit(["status", "--porcelain", "--untracked-files=normal"]) != "",
-		minecraftVersion: project.minecraft_version
+		minecraftVersion: project.minecraft_version,
+		nativeSourceInputs: frameEvidenceNativeSources
 ])
 
 processResources {
@@ -320,9 +342,26 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift"
 	)
+	inputs.property "frameEvidenceBuildIdentity", frameEvidenceBuildIdentity
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
+	outputs.file("src/main/resources/natives/macos/libmetallum-build-identity.json")
 	doFirst {
 		file("src/main/resources/natives/macos").mkdirs()
+		if (frameEvidenceNativeInputHashes() != frameEvidenceNativeSources) {
+			throw new GradleException("Native sources changed after build identity capture; restart the build")
+		}
+	}
+	doLast {
+		if (frameEvidenceNativeInputHashes() != frameEvidenceNativeSources) {
+			throw new GradleException("Native sources changed during compilation; refusing provenance manifest")
+		}
+		def manifest = [
+				schemaVersion: 1,
+				build: new groovy.json.JsonSlurper().parseText(frameEvidenceBuildIdentity),
+				nativeSha256: frameEvidenceFileSha256(file("src/main/resources/natives/macos/libmetallum.dylib"))
+		]
+		file("src/main/resources/natives/macos/libmetallum-build-identity.json").text =
+				groovy.json.JsonOutput.toJson(manifest) + "\n"
 	}
 
 	commandLine "swiftc",

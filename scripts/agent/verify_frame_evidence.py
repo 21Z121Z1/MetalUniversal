@@ -4,6 +4,8 @@ import argparse
 import copy
 import json
 import math
+import hashlib
+import tempfile
 import re
 from pathlib import Path
 
@@ -19,7 +21,7 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def verify(report, expected_head, require_packaged=False):
+def verify(report, expected_head, require_packaged=False, require_comparable=False, artifact_root=None):
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "expected HEAD must be a full SHA")
     require(report["schemaVersion"] == 1, "unsupported schema")
     identity = report["identity"]
@@ -40,6 +42,8 @@ def verify(report, expected_head, require_packaged=False):
     require(report["validationStatus"] == "passed", "client validation did not pass")
     require(integer(report["droppedFrames"]) == 0, "bounded capture lost frames")
     require(bool(report["frames"]), "empty capture")
+    mode = identity.get("instrumentationMode", "diagnostic")
+    require(mode in ("diagnostic", "timing"), "unknown instrumentation mode")
     previous_frame = 0
     seen_frames = set()
     seen_submissions = set()
@@ -77,6 +81,7 @@ def verify(report, expected_head, require_packaged=False):
             require(integer(counter["failures"]) == 0, "failed ABI call")
             exclusive += own_time
         require(exclusive <= duration, "ABI time exceeds its owning frame")
+        require(mode != "timing" or not frame["abi"], "timing mode must not claim ABI diagnostics")
         for submission in frame["commandBuffers"]:
             sid = integer(submission["submissionId"], 1)
             require(sid not in seen_submissions, "duplicate submission identity")
@@ -132,7 +137,8 @@ def verify(report, expected_head, require_packaged=False):
             cpu.append(duration)
             crossings.append(calls)
             abi_time.append(exclusive)
-    require(bool(cpu) and sum(crossings) > 0 and bool(seen_submissions), "no world-frame Metal activation")
+    require(bool(cpu) and (mode == "timing" or sum(crossings) > 0) and bool(seen_submissions),
+            "no world-frame Metal activation")
     require(bool(report["unavailable"]), "missing measurement coverage boundary")
 
     def summary(values):
@@ -140,11 +146,236 @@ def verify(report, expected_head, require_packaged=False):
         return {"samples": len(values), **{f"p{q}": values[math.ceil(q / 100 * len(values)) - 1]
                                          if values else None for q in (50, 95, 99)}}
 
+    delivery = verify_window(report, packaged, artifact_root)
+    if require_packaged and "window" in report:
+        require("native-build-provenance-unavailable" not in delivery["comparisonEligibility"]["reasons"],
+                "packaged window lacks matching native build provenance")
+    require(not require_comparable or delivery["comparisonEligibility"]["eligible"],
+            "comparison prerequisites unavailable: " + ", ".join(delivery["comparisonEligibility"]["reasons"]))
+    abi_crossings = summary(crossings)
+    abi_exclusive = summary(abi_time)
+    if mode == "timing":
+        # Empty instrumentation is missing measurement, not zero native work.
+        abi_crossings = {**summary([]), "unavailableReason": "timing-mode-does-not-instrument-ABI"}
+        abi_exclusive = dict(abi_crossings)
     return {"status": "valid-observation-no-performance-decision", "sourceSha": expected_head,
+            "instrumentationMode": mode, "frameDelivery": delivery,
+            "legacyDiagnosticScope": "renderLevel scopes including nested scopes; CPU and GPU service are not presentation",
             "packagedJavaIdentity": packaged, "worldFrames": len(cpu),
-            "cpuFrameNs": summary(cpu), "renderThreadAbiCrossings": summary(crossings),
-            "renderThreadAbiExclusiveNs": summary(abi_time), "commandBufferGpuServiceNs": summary(gpu_service),
+            "cpuFrameNs": summary(cpu), "renderThreadAbiCrossings": abi_crossings,
+            "renderThreadAbiExclusiveNs": abi_exclusive, "commandBufferGpuServiceNs": summary(gpu_service),
             "unavailable": report["unavailable"]}
+
+
+
+def verify_window(report, packaged, artifact_root):
+    """Use only declared source membership and actual callback authority.
+
+    Java source rate and native callback event-span rate use separate clocks.
+    The callback cohort includes completed callbacks after the source window:
+    there is deliberately no attempt to map its endpoints onto the Java clock.
+    """
+    reasons = []
+    result = {"comparisonEligibility": {"eligible": False, "reasons": reasons,
+              "scope": "controlled-physical-baseline-prerequisites-only"},
+              "physicalPerformanceAcceptance": "unverified",
+              "systemDeadline": {"available": False,
+                                 "reason": "ordinary path has no authoritative DisplayLink deadline"}}
+    window = report.get("window")
+    if window is None:
+        reasons.append("legacy-capture-without-explicit-window")
+        return result
+    native_build = report["identity"].get("nativeBuild")
+    if native_build is None:
+        reasons.append("native-build-provenance-unavailable")
+    else:
+        require(native_build.get("schemaVersion") == 1, "unknown native provenance schema")
+        require(native_build.get("build") == report["identity"]["build"], "Java/native build provenance mismatch")
+        require(native_build.get("nativeSha256") == report["identity"]["nativeSha256"], "native artifact/provenance digest mismatch")
+    require(window["armed"] is True and window["closed"] is True, "unarmed/incomplete measurement window")
+    integer(window["epoch"], 1)
+    require(window["clock"] == "java-System.nanoTime", "unknown source clock")
+    require(window["membership"] == "root-source-start-half-open; nested-inherits-parent", "unknown window membership")
+    # nanoTime has an arbitrary origin and may be negative.
+    start, end = window["startNs"], window["endNs"]
+    require(type(start) is int and type(end) is int and end > start, "invalid finite source window")
+    integer(window["warmupNs"])
+    frames = {frame["frameId"]: frame for frame in report["frames"]}
+    roots, crossing_end, requested, observed = [], 0, 0, []
+    missing = {}
+    baseline_context = None
+    quality_keys = ("drawableWidth", "drawableHeight", "internalWidth", "internalHeight", "renderDistance",
+                    "targetFps", "vsync")
+    nested_presentations = False
+    for frame in report["frames"]:
+        require(type(frame["epoch"]) is int and frame["epoch"] == window["epoch"], "cross-epoch frame")
+        began = frame["sourceStartNs"]
+        require(type(began) is int, "invalid source start clock")
+        parent_id = frame["parentFrameId"]
+        if parent_id == 0:
+            require(start <= began < end, "root frame outside declared sample window")
+            roots.append(frame)
+            crossing_end += began + frame["cpuFrameNs"] > end
+        else:
+            parent = frames[parent_id]
+            require(parent["sourceStartNs"] <= began
+                    and began + frame["cpuFrameNs"] <= parent["sourceStartNs"] + parent["cpuFrameNs"],
+                    "nested scope does not fit its owning source interval")
+        context = frame.get("context", {})
+        if not all(key in context for key in quality_keys):
+            if "quality-or-target-context-unavailable" not in reasons:
+                reasons.append("quality-or-target-context-unavailable")
+        else:
+            values = {key: context[key] for key in quality_keys}
+            for key in quality_keys[:5]:
+                integer(values[key], 1)
+            integer(values["targetFps"], 1)
+            require(type(values["vsync"]) is bool, "invalid vsync intent")
+            if baseline_context is None:
+                baseline_context = values
+            require(values == baseline_context, "quality/size/target intent changed inside sample window")
+        for submission in frame["commandBuffers"]:
+            if submission.get("presentationRequested") is not True:
+                continue
+            requested += 1
+            nested_presentations |= parent_id != 0
+            stamp = submission.get("presentedTimeSeconds")
+            if stamp is None:
+                reason = submission.get("presentedUnavailableReason", "callback-field-unavailable")
+                missing[reason] = missing.get(reason, 0) + 1
+            else:
+                observed.append(stamp)
+    require(bool(roots), "window has no root source frames")
+    require(all(frame["renderLevel"] is True for frame in roots), "window contains non-world root source frames")
+    observed.sort()
+    coincident = len(observed) - len(set(observed))
+    if coincident:
+        reasons.append("non-unique-presented-timestamps-cannot-count-distinct-display-events")
+    intervals = sorted((b - a) * 1e9 for a, b in zip(observed, observed[1:]))
+    require(all(math.isfinite(value) and value >= 0 for value in intervals), "invalid native presentation interval")
+    quantiles = {f"p{q}": intervals[math.ceil(q / 100 * len(intervals)) - 1] if intervals else None
+                 for q in (50, 95, 99)}
+    quantiles["p99.9"] = intervals[math.ceil(.999 * len(intervals)) - 1] if len(intervals) >= 1000 and not coincident else None
+    quantiles["p99.9UnavailableReason"] = ("non-unique-presented-timestamps" if coincident else
+            "" if len(intervals) >= 1000 else "fewer-than-predeclared-1000-intervals")
+    if missing:
+        reasons.append("incomplete-actual-presentation-coverage")
+    if len(observed) < 2:
+        reasons.append("fewer-than-two-actual-presentations")
+    if nested_presentations:
+        reasons.append("nested-scope-presentation-cohort-needs-independent-comparison-proof")
+    if not packaged:
+        reasons.append("packaged-java-identity-unavailable")
+    profile = window.get("profile")
+    if not isinstance(profile, dict) or not profile:
+        reasons.append("replay-profile-unavailable")
+    else:
+        verify_profile(profile, baseline_context, window, report["identity"], reasons, artifact_root)
+    require("iris" not in report["identity"]["mods"] and "sodium" not in report["identity"]["mods"],
+            "ordinary Vanilla window includes optional render mods")
+    result.update({"epoch": window["epoch"], "sourceClock": window["clock"],
+                   "sourceRootCount": len(roots), "sourceWindowDurationNs": end - start,
+                   "sourceCountRateHz": len(roots) * 1e9 / (end - start),
+                   "sourceScopesCrossingEnd": crossing_end,
+                   "presentationCohort": "all callbacks of window-owned source scopes, including callbacks after source-window end",
+                   "actualPresentationClock": "CAMetalDrawable.presentedTime-seconds",
+                   "actualDrawableCallbackCount": len(observed),
+                   "coincidentPresentedTimestampCount": coincident,
+                   "actualPresentationCount": None if coincident else len(observed),
+                   "actualPresentationCountUnavailableReason": "non-unique-presented-timestamps" if coincident else "",
+                   "requestedPresentationCount": requested,
+                   "missingPresentationReasons": missing,
+                   "actualPresentEventSpanRateHz": ((len(observed) - 1) / (observed[-1] - observed[0])) if len(observed) >= 2 and not coincident else None,
+                   "actualPresentEventSpanRateScope": "first-to-last callback event span; not the Java source window or a display refresh rate",
+                   "presentIntervalNs": {"samples": len(intervals), **quantiles,
+                                         "scope": "callback timestamp intervals including zeros; distinct display events ambiguous" if coincident else
+                                         "complete cohort" if not missing else "observed callbacks only; missing events can merge intervals"}})
+    result["comparisonEligibility"]["eligible"] = not reasons
+    if isinstance(profile, dict):
+        result["comparisonIdentity"] = {
+            "initialContentSha256": profile.get("initialContent", {}).get("snapshotSha256"),
+            "quality": profile.get("quality"), "targetIntent": profile.get("targetIntent"),
+            "route": profile.get("route"), "instrumentationMode": report["identity"].get("instrumentationMode"),
+            "scope": "pairs must additionally match content/quality/target/route; eligibility is not a pairwise or physical verdict"}
+    return result
+
+
+def verify_profile(profile, context, window, identity, reasons, artifact_root):
+    # Profile schema is checked separately from a caller-supplied source SHA.
+    # Absent replay facts lower comparison eligibility, never become defaults.
+    require(profile.get("instrumentationMode") == identity.get("instrumentationMode"),
+            "profile/runtime instrumentation mode mismatch")
+    if not isinstance(profile.get("initialContent"), dict):
+        reasons.append("initial-content-identity-unavailable")
+    else:
+        digest = profile["initialContent"].get("snapshotSha256", "")
+        require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+                "invalid initial content snapshot identity")
+        require(profile["initialContent"].get("kind") == "flushed-world-snapshot", "initial content is not a saved snapshot")
+        if artifact_root is None:
+            reasons.append("snapshot-bytes-not-verified")
+        else:
+            verify_snapshot(artifact_root, profile["initialContent"])
+    if not isinstance(profile.get("quality"), dict) or not profile["quality"]:
+        reasons.append("quality-profile-unavailable")
+    elif context is not None:
+        quality = profile["quality"]
+        bindings = {"framebufferWidth": "drawableWidth", "framebufferHeight": "drawableHeight",
+                    "renderWidth": "internalWidth", "renderHeight": "internalHeight",
+                    "effectiveRenderDistance": "renderDistance", "fpsLimitOption": "targetFps", "vsync": "vsync"}
+        require(all(quality.get(key) == context[value] for key, value in bindings.items()),
+                "profile quality differs from sampled source context")
+        require(quality.get("nativeWindowPixelWidth") == quality.get("presentWidth") == context["drawableWidth"]
+                and quality.get("nativeWindowPixelHeight") == quality.get("presentHeight") == context["drawableHeight"],
+                "profile is not full native output quality")
+    if not isinstance(profile.get("targetIntent"), dict) or not profile["targetIntent"]:
+        reasons.append("target-intent-unavailable")
+    else:
+        target = profile["targetIntent"]
+        require(target.get("authority") == "requested-options-not-system-deadline", "target intent claims unknown authority")
+        if context is not None:
+            require(target.get("fpsLimit") == context["targetFps"] and target.get("vsync") == context["vsync"],
+                    "profile target intent differs from measured options")
+    if not isinstance(profile.get("route"), dict) or not profile["route"]:
+        reasons.append("replay-route-unavailable")
+    else:
+        route = profile["route"]
+        require(route.get("warmupNs") == window["warmupNs"] and route.get("sampleNs") == window["endNs"] - window["startNs"],
+                "profile/window duration mismatch")
+        require(all(isinstance(route.get(key), str) and route[key] for key in
+                    ("id", "inputAuthority", "samplePhase", "completion")), "incomplete replay route")
+
+
+
+def verify_snapshot(artifact_root, content):
+    root = Path(artifact_root).resolve()
+    directory = content.get("snapshotDirectory")
+    require(isinstance(directory, str) and directory in ("initial-world", "prewarmup-world"), "invalid snapshot directory")
+    snapshot = root / directory
+    require(snapshot.is_dir() and not snapshot.is_symlink(), "missing snapshot directory")
+    manifest = json.loads((root / (directory + "-manifest.json")).read_text(), object_pairs_hook=unique_object)
+    require(content.get("snapshotHashAlgorithm") == "sha256(sorted(relative-path + NUL + file-sha256 + LF))",
+            "unknown snapshot hash algorithm")
+    digest = hashlib.sha256()
+    listed = set()
+    previous = ""
+    for item in manifest["files"]:
+        relative = item["path"]
+        require(isinstance(relative, str) and relative > previous and relative != "session.lock", "invalid snapshot manifest order/path")
+        previous = relative
+        path = snapshot / relative
+        require(not Path(relative).is_absolute() and ".." not in Path(relative).parts and path.resolve().is_relative_to(snapshot),
+                "snapshot path escapes content directory")
+        require(path.is_file() and not any(part.is_symlink() for part in (path, *path.parents)), "snapshot symlink/missing file")
+        require(path.stat().st_size == integer(item["bytes"]), "snapshot size mismatch")
+        with path.open("rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        require(actual == item["sha256"], "snapshot file digest mismatch")
+        digest.update((relative + "\0" + actual + "\n").encode())
+        listed.add(relative)
+    actual_paths = {str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()}
+    require("level.dat" in listed and listed == actual_paths, "snapshot incomplete/unlisted content")
+    require(digest.hexdigest() == content["snapshotSha256"] == manifest["identity"]["snapshotSha256"], "snapshot aggregate digest mismatch")
 
 
 def self_test():
@@ -207,6 +438,130 @@ def self_test():
         except (ValueError, KeyError, TypeError):
             continue
         raise AssertionError("invalid evidence accepted")
+    windowed = copy.deepcopy(fixture)
+    windowed["identity"]["instrumentationMode"] = "timing"
+    windowed["window"] = {"epoch": 1, "clock": "java-System.nanoTime",
+                          "membership": "root-source-start-half-open; nested-inherits-parent",
+                          "armed": True, "closed": True, "startNs": 1000, "endNs": 2000, "warmupNs": 100,
+                          "profile": {"instrumentationMode": "timing", "initialContent": {"snapshotSha256": "e" * 64, "kind": "flushed-world-snapshot"},
+                                      "quality": {"fixture": True}, "targetIntent": {"fpsLimit": 60, "vsync": False, "authority": "requested-options-not-system-deadline"},
+                                      "route": {"id": "fixture", "inputAuthority": "fixture", "samplePhase": "stationary",
+                                                "completion": "fixture", "warmupNs": 100, "sampleNs": 1000}}}
+    windowed["identity"]["nativeBuild"] = {"schemaVersion": 1,
+        "build": copy.deepcopy(windowed["identity"]["build"]), "nativeSha256": "c" * 64}
+    context = {"drawableWidth": 100, "drawableHeight": 100, "internalWidth": 100,
+               "internalHeight": 100, "renderDistance": 8, "targetFps": 60, "vsync": False}
+    windowed["frames"] = []
+    # Timestamp order deliberately differs from source order. No cross-clock subtraction.
+    for index, stamp in enumerate((90.04, 90.0, 90.02)):
+        row = copy.deepcopy(fixture["frames"][0])
+        row.update(frameId=index + 1, sourceStartNs=1000 + index * 400, epoch=1, abi={}, context=context.copy())
+        row["commandBuffers"][0].update(submissionId=index + 1, nativePresentationId=index + 17,
+                                        presentedTimeSeconds=stamp, presentedUnavailableReason="")
+        windowed["frames"].append(row)
+    windowed["window"]["profile"]["quality"] = {
+        "framebufferWidth": 100, "framebufferHeight": 100, "renderWidth": 100, "renderHeight": 100,
+        "nativeWindowPixelWidth": 100, "nativeWindowPixelHeight": 100, "presentWidth": 100, "presentHeight": 100,
+        "effectiveRenderDistance": 8, "fpsLimitOption": 60, "vsync": False}
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "initial-world").mkdir()
+        (root / "initial-world" / "level.dat").write_bytes(b"synthetic-test-only")
+        file_digest = hashlib.sha256(b"synthetic-test-only").hexdigest()
+        aggregate = hashlib.sha256(("level.dat\0" + file_digest + "\n").encode()).hexdigest()
+        content = windowed["window"]["profile"]["initialContent"]
+        content.update(snapshotSha256=aggregate, snapshotDirectory="initial-world",
+                       snapshotHashAlgorithm="sha256(sorted(relative-path + NUL + file-sha256 + LF))")
+        manifest = {"identity": content, "files": [{"path": "level.dat", "sha256": file_digest, "bytes": 19}]}
+        (root / "initial-world-manifest.json").write_text(json.dumps(manifest))
+        delivery = verify(windowed, head, True, True, root)["frameDelivery"]
+        (root / "initial-world" / "level.dat").write_bytes(b"changed")
+        try:
+            verify(windowed, head, artifact_root=root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("changed snapshot accepted")
+    assert delivery["sourceRootCount"] == 3 and delivery["sourceCountRateHz"] == 3_000_000
+    assert abs(delivery["actualPresentEventSpanRateHz"] - 50) < .00001
+    assert delivery["presentIntervalNs"]["p99.9"] is None
+    assert delivery["physicalPerformanceAcceptance"] == "unverified"
+    tied = copy.deepcopy(windowed)
+    tied["frames"][0]["commandBuffers"][0].update(presentedTimeSeconds=90.0)
+    ambiguous = verify(tied, head)["frameDelivery"]
+    assert ambiguous["actualDrawableCallbackCount"] == 3 and ambiguous["coincidentPresentedTimestampCount"] == 1
+    assert ambiguous["actualPresentationCount"] is None and ambiguous["actualPresentEventSpanRateHz"] is None
+    assert ambiguous["presentIntervalNs"]["samples"] == 2  # Keep the zero interval; never deduplicate receipts.
+    assert not ambiguous["comparisonEligibility"]["eligible"]
+    try:
+        verify(tied, head, require_comparable=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("coincident callbacks claimed distinct comparable display events")
+    timing = verify(windowed, head)
+    assert timing["renderThreadAbiCrossings"]["samples"] == 0
+    assert timing["renderThreadAbiExclusiveNs"]["p50"] is None
+    assert timing["renderThreadAbiCrossings"]["unavailableReason"] == "timing-mode-does-not-instrument-ABI"
+    missing = copy.deepcopy(windowed)
+    missing["frames"][1]["commandBuffers"][0].update(presentedTimeSeconds=None,
+                                                    presentedUnavailableReason="callback-pending-at-export")
+    incomplete = verify(missing, head)["frameDelivery"]
+    assert not incomplete["comparisonEligibility"]["eligible"] and incomplete["actualPresentationCount"] == 2
+    try:
+        verify(missing, head, require_comparable=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("incomplete coverage claimed comparable")
+    # Source end crossing is explicit cohort membership; full late callbacks remain included.
+    late = copy.deepcopy(windowed)
+    late["frames"][-1].update(cpuFrameNs=300)
+    assert verify(late, head)["frameDelivery"]["sourceScopesCrossingEnd"] == 1
+    nested = copy.deepcopy(windowed)
+    nested["frames"][0].update(cpuFrameNs=600)
+    nested["frames"][1].update(parentFrameId=1)
+    nested_delivery = verify(nested, head)["frameDelivery"]
+    assert nested_delivery["sourceRootCount"] == 2 and nested_delivery["actualPresentationCount"] == 3
+    assert not nested_delivery["comparisonEligibility"]["eligible"]
+    later_epoch = copy.deepcopy(windowed)
+    later_epoch["window"]["epoch"] = 7
+    for row in later_epoch["frames"]:
+        row["epoch"] = 7
+    assert verify(later_epoch, head)["frameDelivery"]["epoch"] == 7
+    enough = copy.deepcopy(windowed)
+    enough["frames"] = []
+    for index in range(1001):
+        row = copy.deepcopy(windowed["frames"][0])
+        row.update(frameId=index + 1)
+        row["commandBuffers"][0].update(submissionId=index + 1, nativePresentationId=index + 1,
+                                        presentedTimeSeconds=100 + index * .02)
+        enough["frames"].append(row)
+    assert verify(enough, head)["frameDelivery"]["presentIntervalNs"]["p99.9"] is not None
+    enough["frames"].pop()
+    assert verify(enough, head)["frameDelivery"]["presentIntervalNs"]["p99.9"] is None
+    mutations = [
+        lambda x: x["window"].update(closed=False),
+        lambda x: x["identity"]["nativeBuild"]["build"].update(treeSha="f" * 40),
+        lambda x: x["identity"]["nativeBuild"].update(nativeSha256="f" * 64),
+        lambda x: x["window"].update(epoch=0),
+        lambda x: x["frames"][1].update(epoch=2),
+        lambda x: x["frames"][0].update(sourceStartNs=999),
+        lambda x: x["frames"][-1].update(sourceStartNs=2000),
+        lambda x: x["frames"][1]["context"].update(internalWidth=90),
+        lambda x: x["frames"][1]["context"].update(targetFps=30),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(nativePresentationId=18),
+        lambda x: x["frames"][0].update(abi={"call": {"calls": 1, "inclusiveNs": 1, "exclusiveNs": 1, "failures": 0}}),
+        lambda x: x["identity"]["mods"].update(iris="fixture"),
+    ]
+    for mutate in mutations:
+        broken = copy.deepcopy(windowed)
+        mutate(broken)
+        try:
+            verify(broken, head)
+        except (ValueError, KeyError, TypeError):
+            continue
+        raise AssertionError("invalid explicit window accepted")
     print("Frame evidence self-test: PASS")
 
 
@@ -223,6 +578,7 @@ if __name__ == "__main__":
     parser.add_argument("report", type=Path, nargs="?")
     parser.add_argument("--expected-head")
     parser.add_argument("--require-packaged", action="store_true")
+    parser.add_argument("--require-comparable", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -233,7 +589,7 @@ if __name__ == "__main__":
         try:
             report = json.loads(args.report.read_text(), object_pairs_hook=unique_object,
                                 parse_constant=lambda value: require(False, f"non-finite JSON value: {value}"))
-            print(json.dumps(verify(report, args.expected_head, args.require_packaged), indent=2))
+            print(json.dumps(verify(report, args.expected_head, args.require_packaged, args.require_comparable, args.report.parent), indent=2))
         except (ValueError, KeyError, TypeError, OSError) as error:
             print(json.dumps({"status": "rejected-frame-evidence", "reason": str(error)}))
             raise SystemExit(1)

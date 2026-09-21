@@ -24,24 +24,39 @@ import net.minecraft.client.Minecraft;
 /** Optional observer; no alternate renderer, native module, wait, or per-frame file I/O. */
 public final class FrameEvidenceRuntime {
     public static final boolean ENABLED = Boolean.getBoolean("metallum.frameEvidence.enabled");
+    private static final String MODE = System.getProperty("metallum.frameEvidence.mode", "diagnostic");
     private static final FrameEvidenceRecorder RECORDER = ENABLED
-            ? new FrameEvidenceRecorder(Integer.getInteger("metallum.frameEvidence.capacity", 16_384), System::nanoTime)
+            ? new FrameEvidenceRecorder(Integer.getInteger("metallum.frameEvidence.capacity", 16_384), System::nanoTime,
+                    Boolean.getBoolean("metallum.frameEvidence.windowed"))
             : null;
     private static final JsonObject IDENTITY = new JsonObject();
-    private static String validationStatus = "unvalidated";
+    private static volatile String validationStatus = "unvalidated";
+    private static long sourceScopes;
+    private static Object observedLevel;
 
     private FrameEvidenceRuntime() { }
 
     public static MethodHandle instrument(String symbol, MethodHandle target) {
         // Disabled calls retain the original downcall handle: no per-ABI branch/timer/allocation.
-        return ENABLED ? RECORDER.instrument(symbol, target) : target;
+        return ENABLED && !"timing".equals(MODE) ? RECORDER.instrument(symbol, target) : target;
     }
+
+    public static void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
+        if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
+    }
+
+    public static boolean windowComplete() { return ENABLED && RECORDER.windowComplete(); }
 
     public static void beginFrame(boolean advanceGameTime) {
         if (!ENABLED) return;
         if (!IDENTITY.has("build")) initializeIdentity();
         Minecraft client = Minecraft.getInstance();
+        if (observedLevel != client.level) {
+            observedLevel = client.level;
+            RECORDER.advanceEpoch();
+        }
         RECORDER.beginFrame(client.level != null);
+        if (!RECORDER.retainingCurrentFrame()) return;
         int irisGeneration = FabricLoader.getInstance().isModLoaded("iris")
                 ? IrisMetalPipelineOverrides.activeGenerationForDiagnostics() : -1;
         JsonObject context = new JsonObject();
@@ -49,6 +64,10 @@ public final class FrameEvidenceRuntime {
         context.addProperty("drawableWidth", client.getWindow().getWidth());
         context.addProperty("drawableHeight", client.getWindow().getHeight());
         context.addProperty("renderDistance", client.options.getEffectiveRenderDistance());
+        context.addProperty("internalWidth", client.gameRenderer.mainRenderTarget().width);
+        context.addProperty("internalHeight", client.gameRenderer.mainRenderTarget().height);
+        context.addProperty("targetFps", client.options.framerateLimit().get());
+        context.addProperty("vsync", client.options.enableVsync().get());
         context.addProperty("irisGeneration", irisGeneration);
         context.addProperty("metalTier", MetalDevice.current() == null ? "unavailable"
                 : MetalDevice.current().metal4MainRenderer() ? "metal4-main" : "metal3-main");
@@ -60,7 +79,15 @@ public final class FrameEvidenceRuntime {
     }
 
     public static void endFrame() {
-        if (ENABLED) RECORDER.endFrame();
+        if (ENABLED) {
+            RECORDER.endFrame();
+            if (++sourceScopes % 64 == 0) collectPresented();
+        }
+    }
+
+    private static void collectPresented() {
+        long[] ids = RECORDER.presentationIds();
+        if (ids.length > 0) RECORDER.presented(ids, MetalNativeBridge.presentationEvidence(ids));
     }
 
     public static void producer(String source) {
@@ -87,8 +114,10 @@ public final class FrameEvidenceRuntime {
                                  MemorySegment commandBuffer) {
         if (!ENABLED || submission == null) return;
         RECORDER.nativePresentationId(submission, MetalNativeBridge.commandBufferPresentationId(commandBuffer));
-        RECORDER.nativeEncoding(submission, MetalNativeBridge.commandBufferEncodingCounters(commandBuffer));
-        RECORDER.drawableWait(submission, MetalNativeBridge.commandBufferDrawableWaitNanos(commandBuffer));
+        if (!"timing".equals(MODE)) {
+            RECORDER.nativeEncoding(submission, MetalNativeBridge.commandBufferEncodingCounters(commandBuffer));
+            RECORDER.drawableWait(submission, MetalNativeBridge.commandBufferDrawableWaitNanos(commandBuffer));
+        }
         RECORDER.completed(submission, success, start, end);
     }
 
@@ -97,7 +126,16 @@ public final class FrameEvidenceRuntime {
     }
 
     public static void nativeLoaded(Path path) throws IOException {
-        if (ENABLED) IDENTITY.addProperty("nativeSha256", sha256(path));
+        if (!ENABLED) return;
+        IDENTITY.addProperty("nativeSha256", sha256(path));
+        try (var stream = FrameEvidenceRuntime.class.getResourceAsStream("/natives/macos/libmetallum-build-identity.json")) {
+            if (stream == null) IDENTITY.addProperty("nativeBuildUnavailableReason", "packaged-native-manifest-missing");
+            else IDENTITY.add("nativeBuild",
+                    JsonParser.parseReader(new InputStreamReader(stream, StandardCharsets.UTF_8)).getAsJsonObject());
+        } catch (IOException | RuntimeException exception) {
+            IDENTITY.remove("nativeBuild");
+            IDENTITY.addProperty("nativeBuildUnavailableReason", exception.toString());
+        }
     }
 
     /** Called after the existing device shutdown drain, never adds a profiling-induced GPU wait. */
@@ -106,17 +144,24 @@ public final class FrameEvidenceRuntime {
         Path output = Path.of(System.getProperty("metallum.frameEvidence.output",
                 System.getProperty("metallum.validation.output", "build/frame-evidence") + "/frame-evidence.json"));
         try {
-            long[] presentationIds = RECORDER.presentationIds();
-            RECORDER.presented(presentationIds, MetalNativeBridge.presentationEvidence(presentationIds));
+            collectPresented();
             JsonObject report = RECORDER.snapshot(IDENTITY);
             report.addProperty("validationStatus", validationStatus);
             report.addProperty("shutdownDrained", true);
             Files.createDirectories(output.toAbsolutePath().getParent());
             writeTerrainEvidence(output.toAbsolutePath().getParent(), report);
-            Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(report) + "\n");
+            writeReport(output, report);
         } catch (IOException exception) {
             Metallum.LOGGER.error("Could not export frame evidence to {}", output, exception);
         }
+    }
+
+    static void writeReport(Path output, JsonObject report) throws IOException {
+        Files.createDirectories(output.toAbsolutePath().getParent());
+        Path temporary = output.resolveSibling(output.getFileName() + ".partial");
+        Files.writeString(temporary, new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(report) + "\n");
+        Files.move(temporary, output, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     }
 
     private static void writeTerrainEvidence(Path directory, JsonObject frameReport) {
@@ -152,6 +197,7 @@ public final class FrameEvidenceRuntime {
         }
         IDENTITY.addProperty("requestedSourceSha", System.getProperty("metallum.validation.sourceCommit", "unknown"));
         IDENTITY.addProperty("trialId", System.getProperty("metallum.frameEvidence.trialId", "unspecified"));
+        IDENTITY.addProperty("instrumentationMode", MODE);
         IDENTITY.addProperty("vanillaTerrainWorkEventsRequested", Boolean.getBoolean("metallum.terrain.vanillaWorkEvents"));
         IDENTITY.addProperty("world", System.getProperty("metallum.validation.world", "unspecified"));
         IDENTITY.addProperty("os", System.getProperty("os.name") + " " + System.getProperty("os.version"));

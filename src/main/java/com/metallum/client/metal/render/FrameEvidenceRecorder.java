@@ -23,26 +23,66 @@ public final class FrameEvidenceRecorder {
     private final LongSupplier clock;
     private final List<Frame> frames = new ArrayList<>();
     private final ThreadLocal<Frame> current = new ThreadLocal<>();
+    private final Map<Long, Submission> presentations = new LinkedHashMap<>();
+    private final LinkedHashSet<Long> pendingPresentations = new LinkedHashSet<>();
     private long sequence;
     private long submissionSequence;
     private long droppedFrames;
+    private final boolean explicitWindow;
+    private JsonObject profile;
+    private long windowStart;
+    private long windowEnd;
+    private long warmupNanos;
+    private boolean windowClosed;
+    private long outsideWindowFrames;
+    private long epoch = 1;
+    private long windowEpoch = 1;
 
     public FrameEvidenceRecorder(int capacity, LongSupplier clock) {
+        this(capacity, clock, false);
+    }
+
+    public FrameEvidenceRecorder(int capacity, LongSupplier clock, boolean explicitWindow) {
         if (capacity < 1) throw new IllegalArgumentException("capacity must be positive");
         this.capacity = capacity;
         this.clock = clock;
+        this.explicitWindow = explicitWindow;
+    }
+
+    /** One predeclared finite window per process; no reset across in-flight submissions. */
+    public synchronized void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
+        if (!explicitWindow || this.profile != null || (current.get() != null && current.get().retained)
+                || warmupNs < 0 || sampleNs <= 0) throw new IllegalStateException("invalid window declaration");
+        this.profile = profile.deepCopy();
+        windowEpoch = epoch;
+        warmupNanos = warmupNs;
+        windowStart = Math.addExact(clock.getAsLong(), warmupNs);
+        windowEnd = Math.addExact(windowStart, sampleNs);
+    }
+
+    public synchronized boolean windowComplete() { return windowClosed; }
+    public synchronized void advanceEpoch() { epoch = Math.incrementExact(epoch); }
+    public boolean retainingCurrentFrame() {
+        Frame frame = current.get();
+        return frame != null && frame.retained;
     }
 
     public synchronized void beginFrame(boolean renderLevel) {
         Frame previous = current.get();
         long id = Math.incrementExact(sequence);
         sequence = id;
-        boolean retained = frames.size() < capacity;
-        if (!retained) {
+        long now = clock.getAsLong();
+        if (profile != null && now >= windowEnd) windowClosed = true;
+        // Nested scopes inherit membership: never capture a child without its parent.
+        boolean eligible = !explicitWindow || (previous != null ? previous.retained
+                : profile != null && now >= windowStart && now < windowEnd);
+        boolean retained = eligible && frames.size() < capacity;
+        if (eligible && !retained) {
             droppedFrames = Math.incrementExact(droppedFrames);
         }
+        if (!eligible) outsideWindowFrames++;
         // Minecraft can render loading screens recursively while an outer frame runs tasks.
-        Frame frame = new Frame(id, clock.getAsLong(), renderLevel, previous, retained);
+        Frame frame = new Frame(id, now, renderLevel, previous, retained, epoch);
         if (retained) frames.add(frame);
         current.set(frame);
     }
@@ -52,6 +92,7 @@ public final class FrameEvidenceRecorder {
         if (frame == null) return;
         frame.cpuNanos = Math.subtractExact(clock.getAsLong(), frame.start);
         frame.ended = true;
+        if (profile != null && clock.getAsLong() >= windowEnd) windowClosed = true;
         if (frame.depth != 0) frame.failure = "open-abi-call-at-frame-end";
         if (frame.parent == null) current.remove();
         else current.set(frame.parent);
@@ -86,6 +127,10 @@ public final class FrameEvidenceRecorder {
     public synchronized Submission commandBuffer(long nativeSubmitIndex) {
         Frame frame = current.get();
         if (frame == null || !frame.retained) return null;
+        if (frame.submissions.size() >= 256) {
+            frame.failure = "submission-evidence-overflow";
+            return null;
+        }
         submissionSequence = Math.incrementExact(submissionSequence);
         Submission submission = new Submission(frame, submissionSequence, nativeSubmitIndex);
         frame.submissions.add(submission);
@@ -109,6 +154,7 @@ public final class FrameEvidenceRecorder {
         if (submission.frame != current.get()) submission.frame.failure = "cross-frame-presentation";
         submission.presentationRequested = true;
         submission.nativePresentationId = nativeId;
+        indexPresentation(submission);
     }
 
     /** Completion can supply the Metal 4 ID, which does not exist at encode time. */
@@ -120,11 +166,20 @@ public final class FrameEvidenceRecorder {
             return;
         }
         submission.nativePresentationId = nativeId;
+        indexPresentation(submission);
+    }
+
+    private void indexPresentation(Submission submission) {
+        long id = submission.nativePresentationId;
+        if (id <= 0) return;
+        Submission previous = presentations.putIfAbsent(id, submission);
+        if (previous != null && previous != submission) {
+            previous.frame.failure = submission.frame.failure = "duplicate-native-presentation-id";
+        } else if (previous == null) pendingPresentations.add(id);
     }
 
     public synchronized long[] presentationIds() {
-        return frames.stream().flatMap(frame -> frame.submissions.stream())
-                .mapToLong(submission -> submission.nativePresentationId).filter(id -> id > 0).distinct().toArray();
+        return pendingPresentations.stream().mapToLong(Long::longValue).toArray();
     }
 
     /** Export-time snapshot of callbacks already received; GPU drain is not a display wait. */
@@ -132,21 +187,31 @@ public final class FrameEvidenceRecorder {
         if (timestamps == null) return; // Older native module; do not fabricate zero timestamps.
         if (identifiers.length != timestamps.length) throw new IllegalArgumentException("Presentation evidence length mismatch");
         Map<Long, Double> byId = new java.util.HashMap<>();
-        for (int index = 0; index < identifiers.length; index++) byId.put(identifiers[index], timestamps[index]);
-        for (Frame frame : frames) {
-            for (Submission submission : frame.submissions) {
-                Double timestamp = byId.get(submission.nativePresentationId);
-                if (timestamp == null) continue;
+        for (int index = 0; index < identifiers.length; index++) {
+            if (byId.put(identifiers[index], timestamps[index]) != null)
+                throw new IllegalArgumentException("duplicate presentation receipt identity");
+        }
+        for (var entry : byId.entrySet()) {
+                Submission submission = presentations.get(entry.getKey());
+                if (submission == null) continue;
+                Frame frame = submission.frame;
+                double timestamp = entry.getValue();
+                if (submission.presentedTimeSeconds > 0) {
+                    if (timestamp > 0 && Double.compare(timestamp, submission.presentedTimeSeconds) != 0)
+                        frame.failure = "conflicting-presented-timestamp";
+                    continue; // A later eviction/pending snapshot cannot erase an observed callback.
+                }
                 if (Double.isFinite(timestamp) && timestamp > 0) {
                     submission.presentedTimeSeconds = timestamp;
                     submission.presentedUnavailableReason = "";
+                    pendingPresentations.remove(entry.getKey());
                 } else {
                     submission.presentedUnavailableReason = timestamp == 0 ? "presented-callback-pending"
                             : timestamp == -1 ? "presentation-cancelled-or-failed"
                             : timestamp == -2 ? "invalid-presented-timestamp"
                             : timestamp == -3 ? "native-evidence-not-retained" : "invalid-native-evidence";
+                    if (timestamp != 0) pendingPresentations.remove(entry.getKey());
                 }
-            }
         }
     }
 
@@ -230,10 +295,26 @@ public final class FrameEvidenceRecorder {
         root.add("identity", identity.deepCopy());
         root.addProperty("scope", "Minecraft.renderFrame/render-thread/main-command-queue");
         root.addProperty("droppedFrames", droppedFrames);
+        if (explicitWindow) {
+            JsonObject window = new JsonObject();
+            window.addProperty("epoch", windowEpoch);
+            window.addProperty("clock", "java-System.nanoTime");
+            window.addProperty("membership", "root-source-start-half-open; nested-inherits-parent");
+            window.addProperty("armed", profile != null);
+            window.addProperty("closed", windowClosed);
+            window.addProperty("startNs", windowStart);
+            window.addProperty("endNs", windowEnd);
+            window.addProperty("warmupNs", warmupNanos);
+            window.addProperty("outsideWindowFrames", outsideWindowFrames);
+            window.add("profile", profile == null ? JsonNull.INSTANCE : profile.deepCopy());
+            root.add("window", window);
+        }
         JsonArray rows = new JsonArray();
         for (Frame frame : frames) {
             JsonObject row = new JsonObject();
             row.addProperty("frameId", frame.id);
+            row.addProperty("sourceStartNs", frame.start);
+            row.addProperty("epoch", frame.epoch);
             row.addProperty("parentFrameId", frame.parent == null ? 0L : frame.parent.id);
             row.addProperty("renderLevel", frame.renderLevel);
             row.addProperty("cpuFrameNs", frame.cpuNanos);
@@ -308,9 +389,10 @@ public final class FrameEvidenceRecorder {
         unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports joined by terrainBatchIndices; per-mesh GPU completion and presentation remain unavailable");
         unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
         unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
-        root.addProperty("presentationScope", "ordinary source frames only; exact native ID joined to CAMetalDrawable.presentedTime seconds; first 65536 native tickets retained when enabled; callbacks pending at export remain unavailable");
+        root.addProperty("presentationScope", "ordinary source cohort; exact native ID joined to CAMetalDrawable.presentedTime seconds; latest 65536 native tickets retained; copied callbacks survive eviction; pending at export remains unavailable");
         unavailable.addProperty("generatedFrames", "MetalFX frame-generation presentation uses a separate timeline");
         unavailable.addProperty("inputToPhotonNs", "drawable presentedTime is not an input or scanout measurement");
+        unavailable.addProperty("systemDeadline", "ordinary path has no authoritative DisplayLink deadline");
         root.add("unavailable", unavailable);
         return root;
     }
@@ -318,24 +400,34 @@ public final class FrameEvidenceRecorder {
     private static final class Frame {
         final long id;
         final long start;
+        final long epoch;
         final boolean renderLevel;
         final Frame parent;
         final boolean retained;
-        final Map<String, Counter> abi = new LinkedHashMap<>();
-        final LinkedHashSet<String> producers = new LinkedHashSet<>();
-        final LinkedHashSet<Long> terrainBatchIndices = new LinkedHashSet<>();
-        final List<Submission> submissions = new ArrayList<>();
-        final long[] started = new long[32];
-        final long[] children = new long[32];
-        final Counter[] calls = new Counter[32];
+        final Map<String, Counter> abi;
+        final LinkedHashSet<String> producers;
+        final LinkedHashSet<Long> terrainBatchIndices;
+        final List<Submission> submissions;
+        final long[] started;
+        final long[] children;
+        final Counter[] calls;
         int depth;
         long cpuNanos;
         boolean ended;
         String failure = "";
-        JsonObject context = new JsonObject();
-        Frame(long id, long start, boolean renderLevel, Frame parent, boolean retained) {
+        JsonObject context;
+        Frame(long id, long start, boolean renderLevel, Frame parent, boolean retained, long epoch) {
             this.id = id; this.start = start; this.renderLevel = renderLevel;
+            this.epoch = epoch;
             this.parent = parent; this.retained = retained;
+            abi = retained ? new LinkedHashMap<>() : null;
+            producers = retained ? new LinkedHashSet<>() : null;
+            terrainBatchIndices = retained ? new LinkedHashSet<>() : null;
+            submissions = retained ? new ArrayList<>() : null;
+            started = retained ? new long[32] : null;
+            children = retained ? new long[32] : null;
+            calls = retained ? new Counter[32] : null;
+            context = retained ? new JsonObject() : null;
         }
     }
 

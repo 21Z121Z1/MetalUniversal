@@ -30,6 +30,20 @@ def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse
 def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
 def requireP1Metal4Evidence = p1Metal4Lane != "off"
 def gameplay = providers.gradleProperty('gameplay').orElse('false').get().toBoolean()
+def frameEvidenceMode = providers.gradleProperty('frameEvidenceMode').orElse('off').get()
+if (!(frameEvidenceMode in ['off', 'timing', 'diagnostic'])) {
+    throw new GradleException('frameEvidenceMode must be off, timing, or diagnostic')
+}
+if (frameEvidenceMode == 'timing' && (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()
+        || providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()
+        || providers.gradleProperty('presentationMetrics').orElse('false').get().toBoolean()
+        || providers.gradleProperty('waitForProfiler').orElse('false').get().toBoolean())) {
+    throw new GradleException('Timing frame evidence requires gameplayJfr=false and diagnostic instrumentation disabled')
+}
+def frameEvidencePhase = providers.gradleProperty('frameEvidencePhase').orElse('stationary').get()
+if (!(frameEvidencePhase in ['stationary', 'streaming'])) {
+    throw new GradleException('frameEvidencePhase must be stationary or streaming')
+}
 def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
 
 dependencies {
@@ -42,6 +56,8 @@ dependencies {
     // texture -> buffer path. Keep this compile-only: the runtime still loads
     // the independently-built production MetalUniversal JAR below.
     compileOnly files(metallumJarProvider)
+    testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 
     // Fabric API supplies the test driver. Renderer adapters are optional.
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
@@ -110,6 +126,13 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (gameplay) {
+        jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
+        jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
+        jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
+        jvmArgs.add("-Dmetallum.ci.initialWorld=${providers.gradleProperty('initialWorld').orElse('').get()}")
+        jvmArgs.add("-Dmetallum.frameEvidence.mode=${frameEvidenceMode}")
+        jvmArgs.add("-Dmetallum.frameEvidence.trialId=${providers.gradleProperty('frameEvidenceTrialId').orElse('gameplay').get()}")
+        jvmArgs.add("-Dmetallum.frameEvidence.output=${new File(evidenceDirectory, 'frame-evidence.json').absolutePath}")
         if (providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()) {
             programArgs.add('--renderDebugLabels')
         }
@@ -161,3 +184,5 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     useXVFB = false
     runDir = file("${buildDir}/run/clientGameTest")
 }
+
+tasks.named("test") { useJUnitPlatform() }

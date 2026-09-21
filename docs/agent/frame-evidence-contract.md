@@ -10,6 +10,7 @@ existing ABI descriptors, resource ownership and presentation unchanged.
 |---|---|---|
 | Source commit/tree/dirty state | Embedded `metallum-build-identity.json` from `processResources` | Caller-supplied SHA cannot replace build provenance; dirty builds reject exact-head verification |
 | Native binary | SHA-256 of the file actually loaded by `MetalNativeBridge.extractAndLoad` | Preloaded iOS modules remain unavailable |
+| Native build provenance | Packaged `natives/macos/libmetallum-build-identity.json`, emitted after successful shipping Swift compilation | Its binary hash must match the loaded file, and its source/tree/dirty/input hashes must equal the Java build identity; absent/stale manifests cannot approve packaged windows |
 | Java binary | Runtime code-source JAR SHA-256 | Loom development classes explicitly report `unavailable-dev-classes`; packaged acceptance requires `--require-packaged` |
 | CPU frame interval | `Minecraft.renderFrame` HEAD through RETURN, monotonic clock | Includes observer overhead, extraction and render work; not input latency or source FPS |
 | ABI count and inclusive/exclusive duration | All four central `MetalNativeBridge` downcall factories | Render-thread calls inside this frame only; worker/startup calls excluded; duration includes native waits/compilation |
@@ -35,10 +36,12 @@ present attempt. `nativePresentationId` is the existing native ticket when retur
 otherwise null with a reason. A failed command buffer retains its scheduled ticket;
 neither the ticket nor GPU completion is an assertion that the image was displayed.
 `presentedTimeSeconds` is filled only by an actual finite, positive drawable callback.
-The native observer retains the first 65,536 presentation tickets when evidence is enabled,
+The native observer retains the latest 65,536 presentation tickets in insertion order when evidence is enabled,
 without retaining GPU objects. Cancelled, invalid, pending and unretained observations have
-separate absence reasons. Export queries callbacks already received after the existing GPU
-drain; it never waits for presentation. A late callback remains unavailable in that snapshot.
+separate absence reasons. Every 64 source scopes the observer copies already-received callbacks
+for unresolved captured tickets; successful copies survive native eviction. Export also queries
+after the existing GPU drain; neither operation waits for presentation. A late callback remains
+unavailable in that final snapshot. Eviction cannot resurrect or reassign a ticket.
 Delayed/out-of-order completion cannot be assigned to the latest frame. Reused buffers
 crossing frame boundaries invalidate evidence. Existing `Metallum frame <submitIndex>`
 command labels allow inspection in GPU captures; they remain diagnostic labels.
@@ -141,20 +144,90 @@ python3 scripts/agent/verify_frame_evidence.py \
 
 The report is written after the existing device shutdown drain. It introduces no GPU
 wait or per-frame file I/O. A crash may leave no report; missing reports are not passes.
-`metallum.frameEvidence.capacity` defaults to 16,384 frames; overflow is reported and
-rejected, never silently trimmed into a successful sample. Start a new process for each
-trial instead of resetting counters across in-flight submissions.
+`metallum.frameEvidence.capacity` defaults to 16,384 frames, with at most 256 submissions
+per retained scope; overflow is reported and rejected, never silently trimmed into a
+successful sample. Start a new process for each trial instead of resetting counters
+across in-flight submissions.
 
 The verifier checks exact source identity, clean build, native identity, validation
 completion, monotonic unique frame IDs, ABI timing invariants, loss, submission lifecycle
-and measurement availability. Its P50/P95/P99 summaries include **all observed world
-frames**, including warmup. They are diagnostic and cannot approve a performance PR.
+and measurement availability. Legacy unwindowed P50/P95/P99 summaries include **all
+observed world frames**, including warmup, and remain diagnostic only.
 Passing returns `valid-observation-no-performance-decision`. Use the existing unified
 correctness and paired-trial protocol for performance acceptance.
 
-Disabled instrumentation retains original downcall handles. Enabled overhead is not
-yet budgeted or accepted; do not use this diagnostic lane as low-overhead performance
-instrumentation until matched off/on correctness and overhead measurements pass.
+Disabled instrumentation retains original downcall handles. `timing` mode also retains
+original ABI handles and omits Java per-submission encoding/wait diagnostic reads; it
+still records source context, submission identities, completion and native presentation
+receipts. `diagnostic` adds ABI timings and native counters. Neither mode has an accepted
+overhead budget until matched physical off/on measurements pass.
+
+## Explicit ordinary window and replay
+
+The existing production gameplay launcher supports `--frame-evidence off|timing|diagnostic`.
+The fixed `vanilla-normal-stationary-v1` profile uses the existing normal-world route,
+native output/internal dimensions, FABULOUS/render distance 32, requested 260 fps with
+vsync disabled, and MetalFX off. Optional mods are absent. It declares 5 seconds warmup
+and 10 seconds sample **before running**; these are an engineering observation window,
+not the thermal/performance acceptance protocol. Full existing flight, input, block
+placement/break and quality assertions must subsequently finish successfully.
+`--frame-evidence-phase streaming` arms the same format and durations at the existing
+input-driven flight phase, rather than adding another driver or changing the route.
+
+Before warmup the test driver flushes and copies a disposable world's initial content,
+with a sorted path/file-hash manifest. `--initial-world` replays a verified snapshot into
+only a newly created disposable test world. Fresh seed alone never proves equal input.
+Use the same saved snapshot for off/on runs; preserve the snapshot and manifest together.
+
+```bash
+./gradlew --no-daemon jar -x buildIOSNative -x buildIOSSpvc
+# First run preserves a snapshot; all runs must use a clean committed JAR.
+python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
+  --output build/frame-seed --metrics-only --frame-evidence off
+python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
+  --output build/frame-off --metrics-only --frame-evidence off \
+  --initial-world build/frame-seed/initial-world
+python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
+  --output build/frame-on --metrics-only --frame-evidence timing \
+  --initial-world build/frame-seed/initial-world
+python3 scripts/agent/verify_frame_evidence.py build/frame-on/frame-evidence.json \
+  --expected-head "$(git rev-parse HEAD)" --require-packaged --require-comparable
+```
+
+The observer admits root source scopes whose Java monotonic start lies in `[startNs,endNs)`.
+Nested scopes inherit parent membership; warmup and long session tails allocate no retained
+frame history. A level-object change advances the epoch, invalidating a cross-world window.
+The source count rate uses root starts divided by the declared Java window duration.
+Presentation analysis uses the complete callback cohort belonging to these captured source
+scopes, including callbacks after the source window ends. It sorts actual drawable timestamps
+independently of callback arrival order. The actual-present event-span rate is `(N-1)/(last-first)`
+on that drawable clock; it is explicitly **not** a count divided by the Java window duration.
+Uncalibrated Java/native clocks are never subtracted. System DisplayLink deadline stays unavailable.
+Distinct native tickets can receive coincident presented timestamps. Keep every callback and
+the zero interval; do not deduplicate by time. Such captures are valid observations, but distinct
+display-event count/rate and P99.9 are unavailable and comparison eligibility fails closed.
+
+Missing/cancelled/evicted callbacks, native identity gaps, unfinished windows, epoch or quality
+changes, route failure and capacity loss cannot silently approve comparison. Observed partial
+distributions retain their coverage label. P99.9 requires at least 1,000 intervals; otherwise
+its value is unavailable with the sample-count reason. Nested presentations remain visible
+but need independent comparison proof. File export uses an atomic final rename; failed export
+logs the error and leaves no new successful final report (a `.partial` file is not evidence).
+
+`valid-observation-no-performance-decision` remains an integrity result. Comparison eligibility
+adds replay, artifact, window and coverage prerequisites; it never asserts physical parity,
+accepted observer overhead, pacing, power, or an optimization win. Legacy median and per-trial
+`2 × median` stutter diagnostics cannot promote this result. Native pending-ID accounting is separately bounded to the latest 65,536 scheduled IDs,
+even with the evidence observer off. Expiring an unresolved ID makes aggregate frames-in-flight
+permanently unavailable (`-1`); later schedules/completions cannot manufacture a recovered count.
+Its receipt becomes unretained, and a late callback cannot resurrect it. Recent authoritative
+callbacks remain observable. Consumers already treat negative occupancy as unavailable; this
+changes no scheduling, synchronization, drawable lifetime or display-wait behavior.
+
+Review base for this continuation is `1fe0df7098218477c1006cb557b0b640f3540460` on
+`codex/frame-evidence-contract-v1-20260920`. At branch creation the declared canonical
+`integration/metaluniversal` was absent remotely; `master` and `integration/iris-metal-next`
+were 26.2. This branch does not resolve or change that shared-mainline decision.
 
 ## Xcode 27 / macOS 27 tools
 
