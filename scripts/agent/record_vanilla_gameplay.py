@@ -28,6 +28,8 @@ def main():
                         help="Instruments clip length; short clips avoid losing early GPU events in long traces")
     parser.add_argument("--render-labels", action="store_true",
                         help="Enable Vanilla renderDebugLabels for diagnostic pass attribution")
+    parser.add_argument("--presentation-metrics", action="store_true",
+                        help="Sample native drawable wait once per frame; diagnostic, excluded from timing trials")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
     args = parser.parse_args()
@@ -58,6 +60,7 @@ def main():
                f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
+               f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
@@ -76,6 +79,7 @@ def main():
                "profilingEnabled": not args.metrics_only,
                "captureSeconds": None if args.metrics_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
+               "presentationMetrics": args.presentation_metrics,
                "display": main_display,
                "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}

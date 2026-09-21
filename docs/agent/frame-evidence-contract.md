@@ -293,6 +293,14 @@ only its trailing GPU events even when its overall recording duration is complet
 Labels use Vanilla's existing `--renderDebugLabels` option and are rejected with
 `--metrics-only` so diagnostic label work does not enter timing trials.
 
+`--presentation-metrics` optionally samples the existing native drawable-wait
+getter once after each ordinary source present. The report and phase boundaries
+include cumulative `drawableWaitNanos` and `drawableWaitSamples`. This measures
+the synchronous ordinary-present path only, not GPU service time or displayed
+frame cadence. It adds one FFM call per frame; keep it off for timing trials and
+compare diagnostic runs only with the same instrumentation. With it disabled,
+the source-frame observer still performs no per-frame FFM call.
+
 Use the trace to choose a concrete optimization, then compare that candidate under
 the same workload. A completed route proves only its reported actions; it does not
 replace image correctness, paired performance trials or GPU validation. Xcode's
