@@ -128,6 +128,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     if (gameplay) {
         jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
         jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
+        jvmArgs.add("-Dmetallum.ci.stationaryBaseline=${providers.gradleProperty('stationaryBaseline').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
         jvmArgs.add("-Dmetallum.ci.initialWorld=${providers.gradleProperty('initialWorld').orElse('').get()}")
         jvmArgs.add("-Dmetallum.frameEvidence.mode=${frameEvidenceMode}")

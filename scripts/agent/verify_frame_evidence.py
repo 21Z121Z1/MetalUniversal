@@ -271,6 +271,12 @@ def verify_window(report, packaged, artifact_root):
         reasons.append("replay-profile-unavailable")
     else:
         verify_profile(profile, baseline_context, window, report["identity"], reasons, artifact_root)
+        # This fixed-view ordinary path encodes one real drawable request per root.
+        # Callback coverage alone cannot detect an omitted carry-in command buffer.
+        if profile.get("profileId") == "vanilla-stationary-60-v1" and any(
+                sum(submission.get("presentationRequested") is True
+                    for submission in frame["commandBuffers"]) != 1 for frame in roots):
+            reasons.append("stationary-source-presentation-request-coverage-incomplete")
     require("iris" not in report["identity"]["mods"] and "sodium" not in report["identity"]["mods"],
             "ordinary Vanilla window includes optional render mods")
     result.update({"epoch": window["epoch"], "sourceClock": window["clock"],
@@ -463,6 +469,11 @@ def self_test():
         "framebufferWidth": 100, "framebufferHeight": 100, "renderWidth": 100, "renderHeight": 100,
         "nativeWindowPixelWidth": 100, "nativeWindowPixelHeight": 100, "presentWidth": 100, "presentHeight": 100,
         "effectiveRenderDistance": 8, "fpsLimitOption": 60, "vsync": False}
+    stationary_gap = copy.deepcopy(windowed)
+    stationary_gap["window"]["profile"]["profileId"] = "vanilla-stationary-60-v1"
+    stationary_gap["frames"][1]["commandBuffers"] = []
+    gap_delivery = verify(stationary_gap, head)["frameDelivery"]
+    assert "stationary-source-presentation-request-coverage-incomplete" in gap_delivery["comparisonEligibility"]["reasons"]
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "initial-world").mkdir()

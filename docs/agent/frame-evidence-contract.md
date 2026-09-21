@@ -194,6 +194,42 @@ python3 scripts/agent/verify_frame_evidence.py build/frame-on/frame-evidence.jso
   --expected-head "$(git rev-parse HEAD)" --require-packaged --require-comparable
 ```
 
+For a controlled fixed-view physical baseline, add `--stationary-baseline` to the
+existing launcher with `--metrics-only --initial-world <snapshot>` and `off` or `timing`.
+`vanilla-stationary-60-v1` requests 60 FPS and VSync through the existing Minecraft
+options; it does not alter production scheduling or claim a system deadline. The
+native-max profile above remains a headroom workload. The stationary route ends after
+its 5-second warmup and 10-second sample, retaining pose, native dimensions, quality,
+Metal 4 activation and sample-completion checks; it does not run the movement route.
+After measurement, it requests normal integrated-server halt on the server thread and
+drives test ticks until shutdown before closing the world, avoiding Fabric's client/server
+phase-barrier deadlock in 26.3 `IntegratedServer.halt`. The ordinary client/device shutdown
+and its existing GPU drain still own final evidence export.
+
+Before warmup, the fixed camera must have an empty compile queue and occlusion expected
+chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
+hash of section nodes and layer draw metadata must remain stable for at least 40 checks
+and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
+(to remove loading-order-dependent conservative accumulation), waits for the graph task
+and frustum update to finish without blocking, and repeats convergence. It is recorded
+again after sampling; section identity and draw admission must still match. Normal
+world ticks can change layer draw counts (for example kelp growth or grass eating).
+Their raw rows, initial/final draw hashes and `stationaryGeometryChanged` remain
+reported; do not freeze gameplay or claim identical per-frame geometry. Visible-section count,
+pose and quality remain guarded each source frame. This proves a bounded stationary
+rendering workload condition, not JVM-object equality or pixel identity. Pairwise analysis
+must additionally match the section-identity hash, snapshot, quality, target and physical
+display conditions. Report natural geometry evolution when interpreting overhead; these
+readiness checks do not establish identical GPU work or a renderer optimization win.
+
+`stationarySourceFrames` is present in both off/timing runs. It counts source returns in
+its declared half-open Java-clock window, excluding warmup; intervals require both endpoints
+inside that window. It is distinct from recorder source-entry and native presentation metrics.
+Use off → timing → timing → off and report raw common metrics and both adjacent paired
+deltas. A capped source rate can bound observable frame-delivery overhead; it cannot prove
+zero CPU cost. Retain all trials and classify noisy results as inconclusive. Timing-only
+presentation fields are never the off/on overhead oracle.
+
 The observer admits root source scopes whose Java monotonic start lies in `[startNs,endNs)`.
 Nested scopes inherit parent membership; warmup and long session tails allocate no retained
 frame history. A level-object change advances the epoch, invalidating a cross-world window.
@@ -400,3 +436,10 @@ submit, completion and transient-slice lifetime together.
 When a ring rotates after submission and no deferred work remains, its fence
 captures the preceding actual submission. It does not acquire a dependency on
 the next frame merely because encoding later resumes on the same command encoder.
+
+A shared ordinary command buffer may be allocated by tick uploads before a source
+scope. Its first use inside a retained source scope records the existing native
+submit index; reuse never replaces an already recorded owner. GPU service time
+therefore describes the whole buffer, including any preceding uploads, rather than
+a source-only critical path. Presentation coverage requires this carry-in ownership:
+a complete callback subset is not proof that all ordinary requests were recorded.

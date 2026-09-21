@@ -175,13 +175,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     MTLCommandBuffer commandBuffer() {
-        if (commandBuffer != null) {
-            return commandBuffer;
+        if (commandBuffer == null) {
+            commandBuffer = device.commandQueue.makeCommandBuffer(
+                    device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
+            );
         }
-        commandBuffer = device.commandQueue.makeCommandBuffer(
-                device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
-        );
-        frameEvidenceSubmission = FrameEvidenceRuntime.commandBuffer(currentSubmitIndex);
+        // Tick uploads can allocate this same buffer before renderFrame begins.
+        // Capture its real submit identity on first use in a retained source scope;
+        // never reassign an existing owner when scopes nest or change.
+        if (frameEvidenceSubmission == null) {
+            frameEvidenceSubmission = FrameEvidenceRuntime.commandBuffer(currentSubmitIndex);
+        }
         return commandBuffer;
     }
 
