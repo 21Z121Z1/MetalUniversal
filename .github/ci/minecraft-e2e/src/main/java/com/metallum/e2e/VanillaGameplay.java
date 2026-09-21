@@ -11,6 +11,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.GraphicsPreset;
 import com.mojang.renderpearl.api.device.GpuSurface;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.server.level.ChunkTrackingView;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 
@@ -62,7 +65,7 @@ public final class VanillaGameplay {
                     Path output, JsonObject worldEvidence) {
         var input = context.getInput();
         JsonObject report = new JsonObject();
-        report.addProperty("scenario", "vanilla-normal-gameplay-native-max-v2");
+        report.addProperty("scenario", "vanilla-normal-gameplay-native-max-v3");
         report.addProperty("pid", ProcessHandle.current().pid());
         report.add("world", worldEvidence);
         JsonArray phases = new JsonArray();
@@ -95,11 +98,32 @@ public final class VanillaGameplay {
             client.player.getAbilities().flying = true;
             client.player.onUpdateAbilities();
         });
-        // Profiling live streaming does not require Fabric's full square of
-        // downloaded chunks (including corners outside Vanilla's send radius).
-        // Let received geometry finish and retain ordinary generation during flight.
         context.waitTicks(100);
+        // Use Vanilla's actual sending footprint, not Fabric's square (whose
+        // corners are intentionally never sent). Do not measure a 32-distance
+        // scene while most of its normally generated terrain is still absent.
+        var expectedChunks = world.getServer().computeOnServer(server -> {
+            var view = server.getPlayerList().getPlayers().getFirst().getChunkTrackingView();
+            require(view instanceof ChunkTrackingView.Positioned positioned && positioned.viewDistance() == 32,
+                    "The server did not activate the requested 32-chunk view");
+            var positions = new java.util.ArrayList<ChunkPos>();
+            view.forEach(positions::add);
+            return java.util.List.copyOf(positions);
+        });
+        long terrainWaitStart = System.nanoTime();
+        context.waitFor(client -> expectedChunks.stream().allMatch(pos ->
+                client.level.getChunkSource().getChunk(pos.x(), pos.z(), ChunkStatus.FULL, false) != null), 6000);
         world.getConnection().waitForChunksRender(false, 1200);
+        context.waitTicks(40);
+        JsonObject terrainReady = new JsonObject();
+        terrainReady.addProperty("expectedChunks", expectedChunks.size());
+        long receivedChunks = context.computeOnClient(client -> expectedChunks.stream().filter(pos ->
+                client.level.getChunkSource().getChunk(pos.x(), pos.z(), ChunkStatus.FULL, false) != null).count());
+        require(receivedChunks == expectedChunks.size(), "The full starting view must remain loaded");
+        terrainReady.addProperty("receivedChunks", receivedChunks);
+        terrainReady.addProperty("waitNanos", System.nanoTime() - terrainWaitStart);
+        terrainReady.addProperty("scope", "Vanilla server sending footprint at the starting camera; normal generation");
+        report.add("initialTerrainReadiness", terrainReady);
         JsonObject settings = context.computeOnClient(VanillaGameplay::settings);
         report.add("settings", settings);
         require(settings.get("effectiveRenderDistance").getAsInt() == 32, "Maximum view distance did not activate");
@@ -130,6 +154,8 @@ public final class VanillaGameplay {
             recordingFrames = true;
         });
         try {
+            phase(context, output, report, phases, "stationary-full-view");
+            context.waitTicks(240);
             phase(context, output, report, phases, "flight-new-chunks");
             double startX = context.computeOnClient(client -> client.player.getX());
             double startZ = context.computeOnClient(client -> client.player.getZ());
