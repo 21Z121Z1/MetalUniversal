@@ -16,9 +16,14 @@ on:
     branches:
       - master
       - 'integration/**'
+      - codex/frame-evidence-contract-v1-20260920
 
 permissions:
   contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
@@ -26,9 +31,10 @@ jobs:
     # On pull_request this job intentionally tests GitHub's synthetic merge
     # result; candidate-oriented workflows test the exact head separately.
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - name: checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Record CI proof subject
@@ -47,12 +53,16 @@ jobs:
       - name: Verify frame evidence contract
         run: python3 scripts/agent/verify_frame_evidence.py --self-test
       - name: validate gradle wrapper
-        uses: gradle/actions/wrapper-validation@v6
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       - name: setup jdk
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: '25'
           distribution: 'temurin'
+      - name: Cache Gradle state
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
       - name: select latest xcode
@@ -75,10 +85,15 @@ jobs:
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXTemporalScaler.h" 2>/dev/null
           echo "=== MTLFXFrameInterpolator.h ==="
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
+      - name: Preserve SDK declaration authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/record_sdk_contract.py --output build/agent-evidence/sdk-api-contract.txt
       - name: Probe raw pipeline-compile threading capability
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           ./gradlew buildMacNative
           xcrun swiftc -O -target arm64-apple-macosx14.0 \
             -framework Foundation -framework Metal \
@@ -95,6 +110,8 @@ jobs:
             .github/ci/JvmPsoThreadingProbe.java \
             "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
             | tee "$RUNNER_TEMP/jvm-pso-threading-probe.log") || true
+          cp "$RUNNER_TEMP/shipping-abi-threading-probe.log" build/agent-evidence/
+          cp "$RUNNER_TEMP/jvm-pso-threading-probe.log" build/agent-evidence/
           if grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log" \
             && grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS "$RUNNER_TEMP/jvm-pso-threading-probe.log"; then
             echo "METALLUM_JVM_PSO_SMOKE_MODE=required" >> "$GITHUB_ENV"
@@ -113,28 +130,33 @@ jobs:
           -x metalFxOffscreenValidation
       - name: capture JVM crash evidence
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: jvm-crash-evidence
+          name: jvm-crash-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
           path: |
             build/agent-evidence/
             hs_err_pid*.log
           if-no-files-found: ignore
       - name: Preserve CI proof identity
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: build-ci-identity-${{ github.run_attempt }}
+          name: build-ci-identity-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
           path: |
             build/agent-evidence/ci-subject-build.json
             build/agent-evidence/source.bundle
+            build/agent-evidence/sdk-api-contract.txt
+            build/agent-evidence/*threading-probe.log
             build/test-results/
             build/reports/tests/
           if-no-files-found: error
       - name: capture build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: metallum
+          name: metallum-${{ github.sha }}
+          retention-days: 14
           path: build/libs/
 
   publish:
@@ -147,12 +169,12 @@ jobs:
       MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
     steps:
       - name: checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: download build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: metallum
+          name: metallum-${{ github.sha }}
           path: release-artifacts
 
       - name: resolve release metadata
@@ -177,7 +199,7 @@ jobs:
 
       - name: publish to Modrinth
         if: env.MODRINTH_TOKEN != ''
-        uses: cloudnode-pro/modrinth-publish@v2
+        uses: cloudnode-pro/modrinth-publish@3870f66007063f03fb70118ca9eddbc09a4ba666 # v2
         with:
           token: ${{ env.MODRINTH_TOKEN }}
           project: w79ASAJD
@@ -190,7 +212,7 @@ jobs:
             [{ "project_id": "AANobbMI", "dependency_type": "optional" }]
 
       - name: create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
