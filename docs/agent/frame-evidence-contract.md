@@ -436,3 +436,10 @@ submit, completion and transient-slice lifetime together.
 When a ring rotates after submission and no deferred work remains, its fence
 captures the preceding actual submission. It does not acquire a dependency on
 the next frame merely because encoding later resumes on the same command encoder.
+
+A shared ordinary command buffer may be allocated by tick uploads before a source
+scope. Its first use inside a retained source scope records the existing native
+submit index; reuse never replaces an already recorded owner. GPU service time
+therefore describes the whole buffer, including any preceding uploads, rather than
+a source-only critical path. Presentation coverage requires this carry-in ownership:
+a complete callback subset is not proof that all ordinary requests were recorded.

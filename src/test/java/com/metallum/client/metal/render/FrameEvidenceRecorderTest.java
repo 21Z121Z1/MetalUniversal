@@ -50,6 +50,38 @@ class FrameEvidenceRecorderTest {
 
     private void work() { clock.addAndGet(20); }
 
+    @Test void preScopeBufferCanAcquireOwnerWithoutLosingItsSubmitIdentity() {
+        assertNull(recorder.commandBuffer(42)); // tick upload, outside renderFrame
+        recorder.beginFrame(true);
+        var carried = recorder.commandBuffer(42); // same buffer first used in source scope
+        recorder.presentationRequested(carried, 0);
+        recorder.submitted(carried);
+        recorder.endFrame();
+        recorder.nativePresentationId(carried, 901);
+        recorder.completed(carried, true, 1, 2);
+        recorder.presented(new long[]{901}, new double[]{3});
+        var row = frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject();
+        assertEquals(42, row.get("nativeSubmitIndex").getAsLong());
+        assertEquals(3, row.get("presentedTimeSeconds").getAsDouble());
+        assertEquals("", frame(0).get("failure").getAsString());
+        recorder.beginFrame(true);
+        recorder.presentationRequested(carried, 902);
+        assertEquals("invalid-presentation-request", frame(0).get("failure").getAsString());
+        assertTrue(frame(1).getAsJsonArray("commandBuffers").isEmpty());
+        recorder.endFrame();
+    }
+
+    @Test void encoderObservesReusedBuffersBeforeReturningThem() throws Exception {
+        String source = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java"));
+        String accessor = source.substring(source.indexOf("    MTLCommandBuffer commandBuffer()"),
+                source.indexOf("    MTLBlitCommandEncoder blitCommandEncoder()"));
+        assertEquals(1, accessor.split("return commandBuffer;", -1).length - 1);
+        assertTrue(accessor.indexOf("FrameEvidenceRuntime.commandBuffer(currentSubmitIndex)")
+                < accessor.indexOf("return commandBuffer;"));
+        assertTrue(accessor.contains("if (frameEvidenceSubmission == null)"));
+    }
+
     @Test void delayedCompletionsKeepTheirOriginalFrameAndFailuresAreNotGpuSamples() {
         recorder.beginFrame(true);
         var first = recorder.commandBuffer(8);

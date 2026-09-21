@@ -123,7 +123,7 @@ public final class FrameEvidenceRecorder {
         if (frame != null && frame.retained) frame.context = context.deepCopy();
     }
 
-    /** Identity is captured at allocation, not guessed from a later GPU sample's position. */
+    /** Identity is captured on first observed buffer use, never inferred from GPU sample order. */
     public synchronized Submission commandBuffer(long nativeSubmitIndex) {
         Frame frame = current.get();
         if (frame == null || !frame.retained) return null;
