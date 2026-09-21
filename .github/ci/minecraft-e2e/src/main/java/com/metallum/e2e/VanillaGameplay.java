@@ -80,6 +80,9 @@ public final class VanillaGameplay {
             client.getWindow().setPreferredFullscreenVideoMode(java.util.Optional.empty());
             client.options.fullscreen().set(true);
             client.getWindow().setFullscreen(true);
+            // OptionInstance.set does not send ClientInformation. The server
+            // otherwise keeps the smaller view requested during world entry.
+            client.options.broadcastOptions();
         });
         // Fabric intentionally decouples its virtual framebuffer from native
         // resize events. Set the public test-input size as well as fullscreen.
@@ -102,20 +105,21 @@ public final class VanillaGameplay {
         // Use Vanilla's actual sending footprint, not Fabric's square (whose
         // corners are intentionally never sent). Do not measure a 32-distance
         // scene while most of its normally generated terrain is still absent.
-        var expectedChunks = world.getServer().computeOnServer(server -> {
+        var startingView = world.getServer().computeOnServer(server -> {
             var view = server.getPlayerList().getPlayers().getFirst().getChunkTrackingView();
             require(view instanceof ChunkTrackingView.Positioned positioned && positioned.viewDistance() == 32,
-                    "The server did not activate the requested 32-chunk view");
-            var positions = new java.util.ArrayList<ChunkPos>();
-            view.forEach(positions::add);
-            return java.util.List.copyOf(positions);
+                    "The server did not activate the requested 32-chunk view: " + view);
+            return (ChunkTrackingView.Positioned) view;
         });
+        var expectedChunks = new java.util.ArrayList<ChunkPos>();
+        startingView.forEach(expectedChunks::add);
         long terrainWaitStart = System.nanoTime();
         context.waitFor(client -> expectedChunks.stream().allMatch(pos ->
                 client.level.getChunkSource().getChunk(pos.x(), pos.z(), ChunkStatus.FULL, false) != null), 6000);
         world.getConnection().waitForChunksRender(false, 1200);
         context.waitTicks(40);
         JsonObject terrainReady = new JsonObject();
+        terrainReady.addProperty("serverTrackedViewDistance", startingView.viewDistance());
         terrainReady.addProperty("expectedChunks", expectedChunks.size());
         long receivedChunks = context.computeOnClient(client -> expectedChunks.stream().filter(pos ->
                 client.level.getChunkSource().getChunk(pos.x(), pos.z(), ChunkStatus.FULL, false) != null).count());
