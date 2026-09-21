@@ -1391,6 +1391,41 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
+
+    boolean encodeMetalFxColorTransfer(
+            final MetalGpuTexture source,
+            final MetalGpuTexture destination,
+            final boolean encodeSrgb
+    ) {
+        if (!MetalNativeBridge.metallum_metalfx_color_transfer_available()) {
+            return false;
+        }
+        flushPendingClear(source);
+        submitRenderPass();
+        endEncoder();
+        destination.markContentsDirty();
+        boolean encoded = MetalNativeBridge.metallum_metalfx_color_transfer(
+                commandBuffer().nativeHandle(),
+                source.nativeHandle(),
+                destination.nativeHandle(),
+                encodeSrgb ? 1 : 0,
+                fence
+        );
+        if (RenderContractRuntime.enabled()) {
+            ResourceIdentity sourceIdentity = contractResource(source, 0);
+            ResourceIdentity destinationIdentity = contractResource(destination, 0);
+            RenderContractRuntime.recordTransfer(
+                    PassType.COMPUTE,
+                    encodeSrgb ? "metallum/metalfx-srgb-encode" : "metallum/metalfx-srgb-decode",
+                    ProducerType.COPY,
+                    List.of(destinationIdentity),
+                    Map.of("encoded", Boolean.toString(encoded)),
+                    Map.of("source", sourceIdentity.stableKey())
+            );
+        }
+        return encoded;
+    }
+
     boolean encodeTextureCopy(final MetalGpuTexture source, final MetalGpuTexture destination, final boolean linear) {
         return encodeTextureCopy(source, destination, linear, ProducerType.COPY, "metallum/texture-copy");
     }
