@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/21Z121Z1/MetalUniversal/docs/agent/terrain-work-evidence.schema.json",
+  "title": "MetalUniversal terrain work lifecycle evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sourceSha",
+    "trialStatus",
+    "complete",
+    "droppedEvents",
+    "observationWindowEndNanos",
+    "events"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "sourceSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "trialStatus": {"enum": ["passed", "failed", "cancelled", "incomplete"]},
+    "complete": {"type": "boolean"},
+    "droppedEvents": {"type": "integer", "minimum": 0},
+    "observationWindowEndNanos": {"type": "integer", "minimum": 0},
+    "events": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/event"}
+    }
+  },
+  "$defs": {
+    "workKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worldEpoch",
+        "sectionId",
+        "geometryRevision",
+        "lightingRevision",
+        "materialGeneration"
+      ],
+      "properties": {
+        "worldEpoch": {"type": "integer", "minimum": 0},
+        "sectionId": {"type": "integer"},
+        "geometryRevision": {"type": "integer", "minimum": 0},
+        "lightingRevision": {"type": "integer", "minimum": 0},
+        "materialGeneration": {"type": "integer", "minimum": 0}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "domain",
+        "key",
+        "stage",
+        "monotonicNanos",
+        "bytes",
+        "reason",
+        "frameId",
+        "meshGeneration",
+        "drawExpected"
+      ],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "domain": {"type": "string", "minLength": 1},
+        "key": {"$ref": "#/$defs/workKey"},
+        "stage": {
+          "enum": [
+            "DATA_READY",
+            "QUEUED",
+            "BUILD_START",
+            "BUILD_END",
+            "UPLOAD_QUEUED",
+            "GPU_ENCODED",
+            "GPU_DEPENDENCY_READY",
+            "PUBLISHED",
+            "FIRST_VALID_DRAW",
+            "GPU_COMPLETED",
+            "CANCELLED",
+            "RETIRED"
+          ]
+        },
+        "monotonicNanos": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string", "minLength": 1},
+        "frameId": {"type": ["integer", "null"], "minimum": 0},
+        "meshGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "drawExpected": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"stage": {"const": "PUBLISHED"}}, "required": ["stage"]},
+          "then": {"properties": {"meshGeneration": {"type": "integer", "minimum": 0}}}
+        },
+        {
+          "if": {"properties": {"stage": {"const": "FIRST_VALID_DRAW"}}, "required": ["stage"]},
+          "then": {
+            "properties": {
+              "meshGeneration": {"type": "integer", "minimum": 0},
+              "frameId": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

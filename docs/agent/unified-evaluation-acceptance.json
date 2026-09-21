@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
   "reference_branch": "integration/iris-metal-next",
   "suite_model": {
@@ -82,19 +82,53 @@
     ]
   },
   "target_metrics": [
-    {"name": "fps_median", "direction": "higher", "mandatory": true},
-    {"name": "gpu_frame_time_ms_median", "direction": "lower"},
-    {"name": "cpu_render_encode_time_ms_median", "direction": "lower"},
-    {"name": "native_encoder_count_per_frame_median", "direction": "lower"},
-    {"name": "render_pass_store_load_bytes_estimate_median", "direction": "lower"},
-    {"name": "resident_render_resource_bytes", "direction": "lower"}
+    {
+      "name": "fps_median",
+      "direction": "higher",
+      "mandatory": true
+    },
+    {
+      "name": "gpu_frame_time_ms_median",
+      "direction": "lower"
+    },
+    {
+      "name": "cpu_render_encode_time_ms_median",
+      "direction": "lower"
+    },
+    {
+      "name": "native_encoder_count_per_frame_median",
+      "direction": "lower"
+    },
+    {
+      "name": "render_pass_store_load_bytes_estimate_median",
+      "direction": "lower"
+    },
+    {
+      "name": "resident_render_resource_bytes",
+      "direction": "lower"
+    }
   ],
   "guardrails": [
-    {"name": "gpu_frame_time_ms_median", "relative_regression_max": 0.02},
-    {"name": "cpu_render_encode_time_ms_median", "relative_regression_max": 0.02},
-    {"name": "peak_resident_memory_bytes", "relative_regression_max": 0.03},
-    {"name": "frame_time_stutter_count", "relative_regression_max": 0.0},
-    {"name": "validation_errors", "absolute_max": 0}
+    {
+      "name": "gpu_frame_time_ms_median",
+      "relative_regression_max": 0.02
+    },
+    {
+      "name": "cpu_render_encode_time_ms_median",
+      "relative_regression_max": 0.02
+    },
+    {
+      "name": "peak_resident_memory_bytes",
+      "relative_regression_max": 0.03
+    },
+    {
+      "name": "frame_time_stutter_count",
+      "relative_regression_max": 0
+    },
+    {
+      "name": "validation_errors",
+      "absolute_max": 0
+    }
   ],
   "acceptance_rule": "Accept only when correctness and admission pass, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
   "decision_states": [
@@ -126,5 +160,73 @@
     "accept a visual/semantic difference as intentional without an existing specification",
     "delete worlds, shader packs, captures or unrelated files",
     "enable an optimization by default when admission or runtime evidence is incomplete"
-  ]
+  ],
+  "terrain_observation_contract": {
+    "status": "P0a contract; runtime event emission and vanilla draw association are implemented by P0b",
+    "baseline_manifest": "docs/agent/minecraft-26.3-implementation-baseline.json",
+    "schema": "docs/agent/terrain-work-evidence.schema.json",
+    "oracle": "scripts/agent/check_terrain_work_evidence.py",
+    "clock_rule": "All CPU lifecycle timestamps use one monotonic CPU clock. GPU execution time is correlated explicitly and is never directly subtracted from CPU timestamps.",
+    "work_key": [
+      "worldEpoch",
+      "sectionId",
+      "geometryRevision",
+      "lightingRevision",
+      "materialGeneration"
+    ],
+    "stages": [
+      "DATA_READY",
+      "QUEUED",
+      "BUILD_START",
+      "BUILD_END",
+      "UPLOAD_QUEUED",
+      "GPU_ENCODED",
+      "GPU_DEPENDENCY_READY",
+      "PUBLISHED",
+      "FIRST_VALID_DRAW",
+      "GPU_COMPLETED",
+      "CANCELLED",
+      "RETIRED"
+    ],
+    "rules": [
+      "FIRST_VALID_DRAW is emitted only by the actual draw-authority path and carries the exact published mesh generation.",
+      "World epochs are part of identity; evidence must never join publication and draw events across worlds or dimensions.",
+      "Cancelled, incomplete and observation-window-ended work remains visible in evidence so completed samples cannot hide survivor bias.",
+      "Dropped events, failed/incomplete trials, timing inversions, duplicate lifecycle stages and generation mismatches reject terrain evidence.",
+      "A zero eligible-sample denominator is unavailable/inconclusive rather than numeric zero."
+    ],
+    "metrics": [
+      {
+        "name": "first_valid_draw_latency_p95_nanos",
+        "direction": "lower",
+        "threshold": "pre-register after P0 baseline"
+      },
+      {
+        "name": "visible_not_ready_integral",
+        "direction": "lower",
+        "threshold": "pre-register after P0 baseline"
+      },
+      {
+        "name": "oldest_required_task_age_nanos",
+        "direction": "lower",
+        "threshold": "pre-register after P0 baseline"
+      },
+      {
+        "name": "cancelled_waste_cpu_nanos",
+        "direction": "lower",
+        "threshold": "pre-register after P0 baseline"
+      },
+      {
+        "name": "upload_peak_bytes",
+        "direction": "lower",
+        "threshold": "guardrail/calibration after P0 baseline"
+      },
+      {
+        "name": "resident_peak_bytes",
+        "direction": "lower",
+        "threshold": "guardrail/calibration after P0 baseline"
+      }
+    ],
+    "threshold_policy": "No fabricated terrain improvement threshold is accepted before P0 baseline measurements are available."
+  }
 }
