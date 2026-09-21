@@ -51,7 +51,9 @@ jobs:
           git bundle create build/agent-evidence/source.bundle HEAD
           git bundle verify build/agent-evidence/source.bundle
       - name: Verify frame evidence contract
-        run: python3 scripts/agent/verify_frame_evidence.py --self-test
+        run: |
+          python3 scripts/agent/verify_frame_evidence.py --self-test
+          python3 -m unittest discover -s scripts/agent -p 'test_frame_*.py'
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       - name: setup jdk

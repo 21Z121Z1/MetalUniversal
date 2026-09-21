@@ -466,7 +466,8 @@ struct NativePresentationTelemetryState {
     // Most-recent-N evidence, opt-in; never retains a drawable or command buffer.
     // Eviction is insertion ordered, including pending tickets: an evicted ticket
     // stays unavailable even if its callback subsequently arrives.
-    // 0 pending, -1 cancelled/failed, -2 invalid timestamp, -3 not retained.
+    // 0 pending, -1 cancelled/failed, -2 invalid timestamp, -3 not retained,
+    // -4 callback received but drawable not presented (MTLDrawable.presentedTime == 0).
     private var presentedEvidence: [UInt64: Double] = [:]
     private var evidenceTicketRing: [UInt64] = []
     private var nextEvidenceSlot = 0
@@ -525,9 +526,12 @@ struct NativePresentationTelemetryState {
         guard pendingPresentationIDs.contains(identifier) else { return }
         guard presentedTime.isFinite,
               presentedTime > 0.0 else {
-            // A callback with a zero timestamp still closes the pending
-            // drawable, but it is not evidence of a display interval.
-            if presentedEvidence[identifier] != nil { presentedEvidence[identifier] = -2 }
+            // MTLDrawable.h defines zero as not presented or skipped. It is
+            // a terminal receipt without a display timestamp, not a clock fault.
+            // Negative/non-finite values remain invalid; neither is a present.
+            if presentedEvidence[identifier] != nil {
+                presentedEvidence[identifier] = presentedTime == 0 ? -4 : -2
+            }
             _ = resolvePresentation(identifier)
             return
         }
