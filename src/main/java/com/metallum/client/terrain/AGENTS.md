@@ -12,4 +12,4 @@ Local invariants:
 - CPU/GPU scheduling changes need deterministic correctness evidence before timing claims.
 - Performance claims require the unified paired protocol; hosted synthetic speedups alone are directional evidence.
 
-Route the task with `python3 scripts/agent/context.py --task "<task>"` and follow its proof ladder. Check lifecycle/reload paths as carefully as the steady-state hot path.
+Run `python3 scripts/agent/verify_terrain_work_events.py --self-test` and the nearest terrain behavior tests before broad verification. Check lifecycle/reload paths as carefully as the steady-state hot path.

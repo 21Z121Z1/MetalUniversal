@@ -12,4 +12,4 @@ Local invariants:
 - Metal 3/4 paths must remain intentionally equivalent or capability-gated with explicit evidence.
 - Do not re-derive hazard/liveness policy from pointers, encoder state or ad-hoc native heuristics when an immutable plan/admission record exists upstream.
 
-Use the proof plan from `python3 scripts/agent/context.py --task "<task>"`; native compilation proves ABI/toolchain compatibility, not visible presentation or shader-pack correctness.
+Use the relevant native validation task in `build.gradle` and the nearest `src/test/native` test. Native compilation proves ABI/toolchain compatibility, not visible presentation or shader-pack correctness.

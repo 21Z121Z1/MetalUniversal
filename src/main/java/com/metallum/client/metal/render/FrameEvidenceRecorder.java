@@ -209,7 +209,8 @@ public final class FrameEvidenceRecorder {
                     submission.presentedUnavailableReason = timestamp == 0 ? "presented-callback-pending"
                             : timestamp == -1 ? "presentation-cancelled-or-failed"
                             : timestamp == -2 ? "invalid-presented-timestamp"
-                            : timestamp == -3 ? "native-evidence-not-retained" : "invalid-native-evidence";
+                            : timestamp == -3 ? "native-evidence-not-retained"
+                            : timestamp == -4 ? "drawable-not-presented" : "invalid-native-evidence";
                     if (timestamp != 0) pendingPresentations.remove(entry.getKey());
                 }
         }

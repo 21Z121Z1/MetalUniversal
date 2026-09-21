@@ -62,6 +62,22 @@ struct NativePresentationTelemetryStateTest {
         state.recordPresented(invalidObserved, presentedTime: .nan)
         check(state.presentedTimeEvidence(invalidObserved) == -2, "non-finite callback is explicitly unavailable")
 
+        let notPresented = state.schedulePresentation(recordEvidence: true)
+        state.recordPresented(notPresented, presentedTime: 0)
+        check(state.presentedTimeEvidence(notPresented) == -4,
+              "zero callback reports not-presented, not an invalid clock")
+        state.recordPresented(notPresented, presentedTime: 21)
+        check(state.presentedTimeEvidence(notPresented) == -4,
+              "a terminal callback cannot be replaced by a duplicate callback")
+        let negativeTime = state.schedulePresentation(recordEvidence: true)
+        state.recordPresented(negativeTime, presentedTime: -0.5)
+        check(state.presentedTimeEvidence(negativeTime) == -2,
+              "negative callback remains an invalid timestamp")
+        let infiniteTime = state.schedulePresentation(recordEvidence: true)
+        state.recordPresented(infiniteTime, presentedTime: .infinity)
+        check(state.presentedTimeEvidence(infiniteTime) == -2,
+              "infinite callback remains an invalid timestamp")
+
         var rolling = NativePresentationTelemetryState()
         let oldestPending = rolling.schedulePresentation(recordEvidence: true)
         let oldestResolved = rolling.schedulePresentation(recordEvidence: true)

@@ -259,6 +259,24 @@ class FrameEvidenceRecorderTest {
         assertEquals("conflicting-presented-timestamp", frame(0).get("failure").getAsString());
     }
 
+    @Test void zeroReceiptIsNotPresentationAndIsDistinctFromInvalidClock() {
+        recorder.beginFrame(true);
+        var notPresented = recorder.commandBuffer(1);
+        var invalidClock = recorder.commandBuffer(2);
+        recorder.presentationRequested(notPresented, 40);
+        recorder.presentationRequested(invalidClock, 41);
+        recorder.submitted(notPresented); recorder.submitted(invalidClock);
+        recorder.endFrame();
+        recorder.completed(notPresented, true, 1, 2);
+        recorder.completed(invalidClock, true, 1, 2);
+        recorder.presented(new long[]{41, 40}, new double[]{-2, -4});
+        var rows = frame(0).getAsJsonArray("commandBuffers");
+        assertTrue(rows.get(0).getAsJsonObject().get("presentedTimeSeconds").isJsonNull());
+        assertEquals("drawable-not-presented", rows.get(0).getAsJsonObject().get("presentedUnavailableReason").getAsString());
+        assertEquals("invalid-presented-timestamp", rows.get(1).getAsJsonObject().get("presentedUnavailableReason").getAsString());
+        assertEquals(0, recorder.presentationIds().length);
+    }
+
     @Test void epochChangesRemainExplicitAndSubmissionHistoryIsBounded() {
         var bounded = new FrameEvidenceRecorder(2, clock::get, true);
         bounded.armWindow(new JsonObject(), 0, 100);

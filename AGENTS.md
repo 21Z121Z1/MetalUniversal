@@ -59,6 +59,6 @@ Hosted compilation does not prove physical Metal behavior, WindowServer presenta
 
 ## Git safety
 
-`integration/metaluniversal` is the canonical development line. `master` remains the existing stable line until a separately verified release decision changes it. `research/modernization-backlog` is the deliberate history anchor. The mobile lineage remains isolated.
+`codex/frame-evidence-contract-v1-20260920` is the confirmed 26.3 evidence/development target as of 2026-09-21. Re-resolve its HEAD before work. The formerly documented `integration/metaluniversal` ref was absent from the remote; its name does not establish authority. `master` remains the existing stable 26.2 line until a separately verified release decision changes it. `research/modernization-backlog` is the history anchor. Keep the mobile lineage isolated.
 
-Do not force-push shared history. Do not merge an old task branch wholesale. Compare it with the canonical line, port only a coherent superior delta with its tests, and then retire the task branch after the result is reachable.
+Do not force-push shared history. Do not merge an old task branch wholesale. Compare it with the confirmed target, port only a coherent superior delta with its tests, and then retire the task branch after the result is reachable.
