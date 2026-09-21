@@ -278,9 +278,11 @@ public final class VanillaGameplay {
             if (STATIONARY_BASELINE) {
                 JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
                 report.add("finalStationaryTerrain", finalTerrain);
-                require(finalTerrain != null && finalTerrain.get("visibleDrawSha256").equals(
-                        report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")),
-                        "Stationary terrain changed across the window");
+                require(finalTerrain != null && finalTerrain.get("visibleSectionSha256").equals(
+                        report.getAsJsonObject("stationaryTerrain").get("visibleSectionSha256")),
+                        "Stationary visible section identity changed across the window");
+                report.addProperty("stationaryGeometryChanged", !finalTerrain.get("visibleDrawSha256").equals(
+                        report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")));
             }
             if (!STATIONARY_BASELINE) {
                 phase(context, output, report, phases, "flight-new-chunks");

@@ -208,10 +208,15 @@ hash of section nodes and layer draw metadata must remain stable for at least 40
 and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
 (to remove loading-order-dependent conservative accumulation), waits for the graph task
 and frustum update to finish without blocking, and repeats convergence. It is recorded
-again after sampling and must match. Visible-section count,
+again after sampling; section identity and draw admission must still match. Normal
+world ticks can change layer draw counts (for example kelp growth or grass eating).
+Their raw rows, initial/final draw hashes and `stationaryGeometryChanged` remain
+reported; do not freeze gameplay or claim identical per-frame geometry. Visible-section count,
 pose and quality remain guarded each source frame. This proves a bounded stationary
 rendering workload condition, not JVM-object equality or pixel identity. Pairwise analysis
-must additionally match this hash, snapshot, quality, target and physical display conditions.
+must additionally match the section-identity hash, snapshot, quality, target and physical
+display conditions. Report natural geometry evolution when interpreting overhead; these
+readiness checks do not establish identical GPU work or a renderer optimization win.
 
 `stationarySourceFrames` is present in both off/timing runs. It counts source returns in
 its declared half-open Java-clock window, excluding warmup; intervals require both endpoints

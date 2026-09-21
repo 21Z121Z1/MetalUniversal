@@ -81,6 +81,9 @@ final class StationaryTerrain {
         result.addProperty("visibleSections", rows.size());
         result.addProperty("layerIndexCount", indexCount);
         try {
+            result.addProperty("visibleSectionSha256", HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(rows.stream().map(row -> row.split(":", 2)[0]).collect(java.util.stream.Collectors.joining("\n"))
+                            .getBytes(StandardCharsets.UTF_8))));
             result.addProperty("visibleDrawSha256", HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(String.join("\n", rows).getBytes(StandardCharsets.UTF_8))));
         } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
