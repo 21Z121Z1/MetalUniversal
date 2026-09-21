@@ -39,12 +39,13 @@ final class MetalRenderStateShadow {
     private static final int DEFAULT_MAX_BINDINGS = 64;
 
     private final int maxBindings;
-    private final boolean[][] bufferValid;
+    private int generation = 1;
+    private final int[][] bufferGeneration;
     private final long[][] bufferAddress;
     private final long[][] bufferOffset;
-    private final boolean[][] textureValid;
+    private final int[][] textureGeneration;
     private final long[][] textureAddress;
-    private final boolean[][] samplerValid;
+    private final int[][] samplerGeneration;
     private final long[][] samplerAddress;
 
     private boolean pipelineValid;
@@ -76,12 +77,12 @@ final class MetalRenderStateShadow {
             throw new IllegalArgumentException("maxBindings must be positive");
         }
         this.maxBindings = maxBindings;
-        this.bufferValid = new boolean[MAX_STAGE_BITS][maxBindings];
+        this.bufferGeneration = new int[MAX_STAGE_BITS][maxBindings];
         this.bufferAddress = new long[MAX_STAGE_BITS][maxBindings];
         this.bufferOffset = new long[MAX_STAGE_BITS][maxBindings];
-        this.textureValid = new boolean[MAX_STAGE_BITS][maxBindings];
+        this.textureGeneration = new int[MAX_STAGE_BITS][maxBindings];
         this.textureAddress = new long[MAX_STAGE_BITS][maxBindings];
-        this.samplerValid = new boolean[MAX_STAGE_BITS][maxBindings];
+        this.samplerGeneration = new int[MAX_STAGE_BITS][maxBindings];
         this.samplerAddress = new long[MAX_STAGE_BITS][maxBindings];
     }
 
@@ -171,7 +172,7 @@ final class MetalRenderStateShadow {
                 continue;
             }
             int slot = (int) index;
-            if (!bufferValid[bit][slot] || bufferAddress[bit][slot] != address) {
+            if (bufferGeneration[bit][slot] != generation || bufferAddress[bit][slot] != address) {
                 everyStageHasSameBuffer = false;
                 everyStageHasSameOffset = false;
                 break;
@@ -201,7 +202,7 @@ final class MetalRenderStateShadow {
             if ((stageMask & (1 << bit)) == 0) {
                 continue;
             }
-            bufferValid[bit][slot] = true;
+            bufferGeneration[bit][slot] = generation;
             bufferAddress[bit][slot] = address;
             bufferOffset[bit][slot] = offset;
         }
@@ -217,7 +218,7 @@ final class MetalRenderStateShadow {
             if ((stageMask & (1 << bit)) == 0) {
                 continue;
             }
-            if (!bufferValid[bit][slot] || bufferOffset[bit][slot] != offset) {
+            if (bufferGeneration[bit][slot] != generation || bufferOffset[bit][slot] != offset) {
                 allKnownAndEqual = false;
                 break;
             }
@@ -226,7 +227,7 @@ final class MetalRenderStateShadow {
             return false;
         }
         for (int bit = 0; bit < MAX_STAGE_BITS; bit++) {
-            if ((stageMask & (1 << bit)) != 0 && bufferValid[bit][slot]) {
+            if ((stageMask & (1 << bit)) != 0 && bufferGeneration[bit][slot] == generation) {
                 bufferOffset[bit][slot] = offset;
             }
         }
@@ -244,7 +245,7 @@ final class MetalRenderStateShadow {
             if ((stageMask & (1 << bit)) == 0) {
                 continue;
             }
-            if (!textureValid[bit][slot] || textureAddress[bit][slot] != address) {
+            if (textureGeneration[bit][slot] != generation || textureAddress[bit][slot] != address) {
                 allEqual = false;
                 break;
             }
@@ -254,7 +255,7 @@ final class MetalRenderStateShadow {
         }
         for (int bit = 0; bit < MAX_STAGE_BITS; bit++) {
             if ((stageMask & (1 << bit)) != 0) {
-                textureValid[bit][slot] = true;
+                textureGeneration[bit][slot] = generation;
                 textureAddress[bit][slot] = address;
             }
         }
@@ -278,9 +279,9 @@ final class MetalRenderStateShadow {
             if ((stageMask & (1 << bit)) == 0) {
                 continue;
             }
-            if (!textureValid[bit][slot]
+            if (textureGeneration[bit][slot] != generation
                     || textureAddress[bit][slot] != textureValue
-                    || !samplerValid[bit][slot]
+                    || samplerGeneration[bit][slot] != generation
                     || samplerAddress[bit][slot] != samplerValue) {
                 allEqual = false;
                 break;
@@ -291,9 +292,9 @@ final class MetalRenderStateShadow {
         }
         for (int bit = 0; bit < MAX_STAGE_BITS; bit++) {
             if ((stageMask & (1 << bit)) != 0) {
-                textureValid[bit][slot] = true;
+                textureGeneration[bit][slot] = generation;
                 textureAddress[bit][slot] = textureValue;
-                samplerValid[bit][slot] = true;
+                samplerGeneration[bit][slot] = generation;
                 samplerAddress[bit][slot] = samplerValue;
             }
         }
@@ -324,10 +325,17 @@ final class MetalRenderStateShadow {
         cullModeValid = false;
         fillModeValid = false;
         scissorValid = false;
-        for (int bit = 0; bit < MAX_STAGE_BITS; bit++) {
-            java.util.Arrays.fill(bufferValid[bit], false);
-            java.util.Arrays.fill(textureValid[bit], false);
-            java.util.Arrays.fill(samplerValid[bit], false);
+        // Most encoders bind only a few slots. Retiring their CPU shadow must
+        // not scan all stage/binding arrays on every pass.
+        if (generation == Integer.MAX_VALUE) {
+            for (int bit = 0; bit < MAX_STAGE_BITS; bit++) {
+                java.util.Arrays.fill(bufferGeneration[bit], 0);
+                java.util.Arrays.fill(textureGeneration[bit], 0);
+                java.util.Arrays.fill(samplerGeneration[bit], 0);
+            }
+            generation = 1;
+        } else {
+            generation++;
         }
     }
 

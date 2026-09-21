@@ -892,6 +892,10 @@ private final class Metal4MainQueuePilot {
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainCommandBufferLease {
+    private static let reuseRenderPassDescriptors =
+        ProcessInfo.processInfo.environment["METALLUM_REUSE_RENDER_PASS_DESCRIPTORS"] == "1"
+    private var reusableRenderPass: MTL4RenderPassDescriptor?
+    private var previousColorCount = 0
     fileprivate let encodingCounters = NativeState.frameEvidenceEnabled ? NativeCommandEncodingCounters() : nil
     fileprivate let owner: Metal4MainQueueContext
     fileprivate let slotIndex: Int
@@ -903,6 +907,29 @@ private final class Metal4MainCommandBufferLease {
     private var endTime = 0.0
     fileprivate var presentDrawable: CAMetalDrawable?
     fileprivate var presentationTelemetryID: UInt64?
+
+    // CPU descriptors are copied into the encoder at creation. Reuse within
+    // this recording lease only; presentation keeps a separate descriptor so
+    // this cache can never retain a drawable past present.
+    func prepareRenderPassDescriptor(colorCount: Int) -> MTL4RenderPassDescriptor {
+        guard Self.reuseRenderPassDescriptors else { return MTL4RenderPassDescriptor() }
+        let descriptor: MTL4RenderPassDescriptor
+        if let existing = reusableRenderPass {
+            descriptor = existing
+        } else {
+            descriptor = MTL4RenderPassDescriptor()
+            reusableRenderPass = descriptor
+        }
+        if colorCount < previousColorCount {
+            for index in colorCount..<previousColorCount {
+                descriptor.colorAttachments[index].texture = nil
+                descriptor.colorAttachments[index].loadAction = .dontCare
+                descriptor.colorAttachments[index].storeAction = .dontCare
+            }
+        }
+        previousColorCount = colorCount
+        return descriptor
+    }
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
 
@@ -9731,10 +9758,11 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
         let label = stringFromOptionalCString(labelPtr) ?? "render"
 
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
-            let renderPass = MTL4RenderPassDescriptor()
+            let renderPass = lease.prepareRenderPassDescriptor(colorCount: count)
             for index in 0..<count {
                 guard let attachment = renderPass.colorAttachments[index] else { return nil }
                 guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                    attachment.texture = nil
                     attachment.loadAction = .dontCare
                     attachment.storeAction = .dontCare
                     continue
@@ -9758,6 +9786,8 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                     renderPass.depthAttachment.loadAction = v3LoadAction(depthLoadActionRaw)
                     renderPass.depthAttachment.storeAction = v3StoreAction(depthStoreActionRaw)
                     renderPass.depthAttachment.clearDepth = clearDepth
+                } else {
+                    renderPass.depthAttachment.texture = nil
                 }
                 if stencilFormat != .invalid || depthFormat == .stencil8 {
                     renderPass.stencilAttachment.texture = depthTexture
@@ -9765,7 +9795,12 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                     // Every pass loads stencil as .dontCare, so no pass can
                     // ever observe a stored stencil value.
                     renderPass.stencilAttachment.storeAction = .dontCare
+                } else {
+                    renderPass.stencilAttachment.texture = nil
                 }
+            } else {
+                renderPass.depthAttachment.texture = nil
+                renderPass.stencilAttachment.texture = nil
             }
             renderPass.renderTargetWidth = Int(viewportWidth)
             renderPass.renderTargetHeight = Int(viewportHeight)
@@ -9773,7 +9808,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                 return nil
             }
             lease.encodingCounters?.renderEncoders += 1
-            encoder.label = label
+            if NativeState.debugLabelsEnabled { encoder.label = label }
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
                 beforeStages: [.vertex, .fragment],

@@ -77,7 +77,8 @@ def main():
                "captureSeconds": None if args.metrics_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "display": main_display,
-               "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
+               "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0",
+                                     "METALLUM_REUSE_RENDER_PASS_DESCRIPTORS": "1" if args.reuse_encoder_state else "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}
     with (output / "client.log").open("w") as log, (output / "instruments.log").open("w") as trace_log:
         client = subprocess.Popen(command, cwd=root, stdout=log, stderr=subprocess.STDOUT,

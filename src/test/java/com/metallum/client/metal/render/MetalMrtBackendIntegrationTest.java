@@ -298,6 +298,50 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void consecutivePassesDropRemovedColorAndDepthAttachments() {
+        fragmentShaders.put("descriptor_reuse", """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(0, 1, 0, 1); }
+                """);
+        RenderPipeline pipeline = pipeline("descriptor_reuse", List.of(GpuFormat.RGBA8_UNORM), null,
+                ColorTargetState.WRITE_ALL);
+        device.getOrCompilePipeline(pipeline);
+        List<MetalGpuTexture> textures = createTextures(
+                java.util.Collections.nCopies(4, GpuFormat.RGBA8_UNORM), "descriptor reuse");
+        List<MetalGpuTextureView> views = new ArrayList<>();
+        try (MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                "descriptor depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView depthView = new MetalGpuTextureView(depth, 0, 1)) {
+            RenderPassDescriptor.Builder first = RenderPassDescriptor.builder(() -> "four colors");
+            for (MetalGpuTexture texture : textures) {
+                MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1);
+                views.add(view);
+                first.withColorAttachment(view, Optional.of(new Vector4f(1, 0, 0, 1)));
+            }
+            encoder.createRenderPass(first.build());
+            encoder.submitRenderPass();
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "depth only")
+                    .withDepthAttachment(depthView, java.util.OptionalDouble.of(0.75)).build());
+            encoder.submitRenderPass();
+            MetalRenderPass last = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "one color")
+                    .withColorAttachment(views.get(0), Optional.empty()).build());
+            last.setPipeline(pipeline);
+            last.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+            // All three passes were encoded in one lease, before any readback.
+            assertByteNear(readback(textures.get(0)).get(1), 255, "new color pass");
+            for (int slot = 1; slot < textures.size(); slot++) {
+                assertByteNear(readback(textures.get(slot)).get(0), 255, "removed color preserved");
+            }
+            assertEquals(0.75F, readback(depth).order(ByteOrder.nativeOrder()).getFloat(0), 0.001F);
+        } finally {
+            views.forEach(MetalGpuTextureView::close);
+            closeTextures(textures);
+        }
+    }
+
+    @Test
     void deferredColorStoreClearIsAttachmentLocal() {
         long submitsBefore = Boolean.getBoolean("metallum.test.mrtMetal4Commands")
                 ? MetalNativeBridge.metallum_metal4_main_renderer_stats()[2] : -1;
