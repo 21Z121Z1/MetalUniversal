@@ -1,0 +1,2 @@
+Execute MetalFX semantic contracts v5. Use registry-independent direct Holder<Item> fixtures for ItemStack lifetime tests; runtime design remains unchanged: MetalFX auto exposure on both live Temporal descriptors, ItemStack-sensitive first-person exact-history lifetime, production FrameGen gates fail-closed, and one-shot scaffolding removed only after build and focused tests pass.
+rerun=2026-09-11-first-product-pass
