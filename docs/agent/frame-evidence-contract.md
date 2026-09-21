@@ -194,6 +194,30 @@ python3 scripts/agent/verify_frame_evidence.py build/frame-on/frame-evidence.jso
   --expected-head "$(git rev-parse HEAD)" --require-packaged --require-comparable
 ```
 
+For a controlled fixed-view physical baseline, add `--stationary-baseline` to the
+existing launcher with `--metrics-only --initial-world <snapshot>` and `off` or `timing`.
+`vanilla-stationary-60-v1` requests 60 FPS and VSync through the existing Minecraft
+options; it does not alter production scheduling or claim a system deadline. The
+native-max profile above remains a headroom workload. The stationary route ends after
+its 5-second warmup and 10-second sample, retaining pose, native dimensions, quality,
+Metal 4 activation and sample-completion checks; it does not run the movement route.
+
+Before warmup, the fixed camera must have an empty compile queue and occlusion expected
+chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
+hash of section nodes and layer draw metadata must remain stable for at least 40 checks
+and 2 seconds. It is recorded again after sampling and must match. Visible-section count,
+pose and quality remain guarded each source frame. This proves a bounded stationary
+rendering workload condition, not JVM-object equality or pixel identity. Pairwise analysis
+must additionally match this hash, snapshot, quality, target and physical display conditions.
+
+`stationarySourceFrames` is present in both off/timing runs. It counts source returns in
+its declared half-open Java-clock window, excluding warmup; intervals require both endpoints
+inside that window. It is distinct from recorder source-entry and native presentation metrics.
+Use off → timing → timing → off and report raw common metrics and both adjacent paired
+deltas. A capped source rate can bound observable frame-delivery overhead; it cannot prove
+zero CPU cost. Retain all trials and classify noisy results as inconclusive. Timing-only
+presentation fields are never the off/on overhead oracle.
+
 The observer admits root source scopes whose Java monotonic start lies in `[startNs,endNs)`.
 Nested scopes inherit parent membership; warmup and long session tails allocate no retained
 frame history. A level-object change advances the epoch, invalidating a cross-world window.

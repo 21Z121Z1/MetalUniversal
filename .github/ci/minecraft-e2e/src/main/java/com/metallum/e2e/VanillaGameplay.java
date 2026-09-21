@@ -26,6 +26,11 @@ import java.time.Instant;
 /** Opt-in real-client workload using Fabric's input driver, in the existing normal world. */
 public final class VanillaGameplay {
     private static final String EVIDENCE_PHASE = System.getProperty("metallum.ci.frameEvidencePhase", "stationary");
+    private static final boolean STATIONARY_BASELINE = Boolean.getBoolean("metallum.ci.stationaryBaseline");
+    private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
+    private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static long sampleStartNanos;
+    private static int stationaryVisibleSections;
     private static final long WARMUP_NS = 5_000_000_000L;
     private static final long SAMPLE_NS = 10_000_000_000L;
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
@@ -66,7 +71,14 @@ public final class VanillaGameplay {
         for (var check : qualityChecks) {
             if (!check.getAsBoolean()) { invalidSettingsFrames++; break; }
         }
-        if (client.getFramerateLimitTracker().getFramerateLimit() < 260) throttledFrames++;
+        if (STATIONARY_BASELINE && client.levelRenderer.visibleSections().size() != stationaryVisibleSections)
+            invalidSettingsFrames++;
+        if (STATIONARY_BASELINE && (client.player == null
+                || Math.abs(client.player.getX() - 160.5) > 0.001 || Math.abs(client.player.getY() - 140) > 0.001
+                || Math.abs(client.player.getZ() - 160.5) > 0.001
+                || Math.abs(net.minecraft.util.Mth.wrapDegrees(client.player.getYRot() + 65)) > 0.001 || Math.abs(client.player.getXRot() - 15) > 0.001))
+            invalidSettingsFrames++;
+        if (client.getFramerateLimitTracker().getFramerateLimit() < TARGET_FPS) throttledFrames++;
     }
 
     private static long[] sliceCacheCounters(boolean enabled) {
@@ -83,9 +95,11 @@ public final class VanillaGameplay {
     static void run(ClientGameTestContext context, TestSingleplayerContext world,
                     Path output, JsonObject worldEvidence) {
         require(EVIDENCE_PHASE.equals("stationary") || EVIDENCE_PHASE.equals("streaming"), "Unknown frame evidence phase");
+        require(!STATIONARY_BASELINE || EVIDENCE_PHASE.equals("stationary"), "Stationary baseline requires stationary phase");
+        require(!STATIONARY_BASELINE || worldEvidence.has("replaySourceSnapshotSha256"), "Stationary baseline requires a verified initial snapshot");
         var input = context.getInput();
         JsonObject report = new JsonObject();
-        report.addProperty("scenario", "vanilla-normal-gameplay-native-max-v3");
+        report.addProperty("scenario", ROUTE);
         report.addProperty("pid", ProcessHandle.current().pid());
         report.add("world", worldEvidence);
         JsonArray phases = new JsonArray();
@@ -95,8 +109,8 @@ public final class VanillaGameplay {
             client.options.pauseOnLostFocus = false;
             client.options.graphicsPreset().set(GraphicsPreset.FABULOUS);
             client.options.renderDistance().set(32);
-            client.options.enableVsync().set(false);
-            client.options.framerateLimit().set(260);
+            client.options.enableVsync().set(STATIONARY_BASELINE);
+            client.options.framerateLimit().set(TARGET_FPS);
             client.getWindow().setPreferredFullscreenVideoMode(java.util.Optional.empty());
             client.options.fullscreen().set(true);
             client.getWindow().setFullscreen(true);
@@ -121,6 +135,7 @@ public final class VanillaGameplay {
             client.player.getAbilities().flying = true;
             client.player.onUpdateAbilities();
         });
+        input.lookAt(-65, 15);
         context.waitTicks(100);
         // Use Vanilla's actual sending footprint, not Fabric's square (whose
         // corners are intentionally never sent). Do not measure a 32-distance
@@ -180,22 +195,34 @@ public final class VanillaGameplay {
             initialContent.addProperty("snapshotSha256", worldEvidence.get("replaySourceSnapshotSha256").getAsString());
             initialContent.addProperty("snapshotDirectory", "initial-world");
         }
+        JsonObject stationaryTerrain = null;
+        if (STATIONARY_BASELINE) {
+            var readiness = new StationaryTerrain();
+            context.waitFor(readiness::ready, 1200);
+            stationaryTerrain = readiness.evidence();
+            stationaryVisibleSections = stationaryTerrain.get("visibleSections").getAsInt();
+            report.addProperty("initialVisibleSections", stationaryVisibleSections);
+            report.add("stationaryTerrain", stationaryTerrain);
+        }
         JsonObject profile = new JsonObject();
-        profile.addProperty("profileId", "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        profile.addProperty("profileId", STATIONARY_BASELINE ? ROUTE : "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
         profile.add("initialContent", initialContent);
         profile.add("quality", settings.deepCopy());
+        if (stationaryTerrain != null) profile.add("stationaryTerrain", stationaryTerrain.deepCopy());
         JsonObject targetIntent = new JsonObject();
-        targetIntent.addProperty("fpsLimit", 260);
-        targetIntent.addProperty("vsync", false);
+        targetIntent.addProperty("fpsLimit", TARGET_FPS);
+        targetIntent.addProperty("vsync", STATIONARY_BASELINE);
         targetIntent.addProperty("authority", "requested-options-not-system-deadline");
         profile.add("targetIntent", targetIntent);
         JsonObject route = new JsonObject();
-        route.addProperty("id", "vanilla-normal-gameplay-native-max-v3");
+        route.addProperty("id", ROUTE);
         route.addProperty("inputAuthority", "Fabric client GameTest input driver");
         route.addProperty("samplePhase", EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
+        route.addProperty("camera", "160.5,140,160.5 yaw=-65 pitch=15; creative flight fixed view");
         route.addProperty("warmupNs", WARMUP_NS);
         route.addProperty("sampleNs", SAMPLE_NS);
-        route.addProperty("completion", "selected window duration and all existing flight/place-break/quality assertions");
+        route.addProperty("completion", STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
+                : "selected window duration and all existing flight/place-break/quality assertions");
         profile.add("route", route);
         profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
         report.add("frameEvidenceProfile", profile);
@@ -229,7 +256,9 @@ public final class VanillaGameplay {
             startedNanos = System.nanoTime();
             recordingFrames = true;
             if (EVIDENCE_PHASE.equals("stationary")) FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
-            return System.nanoTime();
+            long start = System.nanoTime();
+            sampleStartNanos = start + WARMUP_NS;
+            return start;
         });
         try {
             phase(context, output, report, phases, "stationary-full-view");
@@ -238,84 +267,95 @@ public final class VanillaGameplay {
             context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
             require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
                     "Frame evidence did not finish the predeclared stationary window");
-            phase(context, output, report, phases, "flight-new-chunks");
-            if (EVIDENCE_PHASE.equals("streaming")) {
-                context.runOnClient(client -> FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS));
+            if (STATIONARY_BASELINE) {
+                JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
+                report.add("finalStationaryTerrain", finalTerrain);
+                require(finalTerrain != null && finalTerrain.get("visibleDrawSha256").equals(
+                        report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")),
+                        "Stationary terrain changed across the window");
             }
-            double startX = context.computeOnClient(client -> client.player.getX());
-            double startZ = context.computeOnClient(client -> client.player.getZ());
-            input.holdKey(options -> options.keyUp);
-            input.holdKey(options -> options.keySprint);
-            for (int leg = 0; leg < 6; leg++) {
-                input.lookAt(-65 + leg * 12, 15);
-                // Fabric's synthetic input drives key state directly; report the
-                // input to Vanilla's AFK limiter just as a real mouse event does.
-                context.runOnClient(client -> client.getFramerateLimitTracker().onInputReceived());
-                context.waitTicks(160);
-            }
-            input.releaseKey(options -> options.keyUp);
-            input.releaseKey(options -> options.keySprint);
-            double distance = context.computeOnClient(client -> Math.hypot(
-                    client.player.getX() - startX, client.player.getZ() - startZ));
-            require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
-                    "Frame evidence did not finish the predeclared streaming window");
-            report.addProperty("flightDistanceBlocks", distance);
-            require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
+            report.add("stationarySourceFrames", context.computeOnClient(client ->
+                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS)));
+            if (!STATIONARY_BASELINE) {
+                phase(context, output, report, phases, "flight-new-chunks");
+                if (EVIDENCE_PHASE.equals("streaming")) {
+                    context.runOnClient(client -> FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS));
+                }
+                double startX = context.computeOnClient(client -> client.player.getX());
+                double startZ = context.computeOnClient(client -> client.player.getZ());
+                input.holdKey(options -> options.keyUp);
+                input.holdKey(options -> options.keySprint);
+                for (int leg = 0; leg < 6; leg++) {
+                    input.lookAt(-65 + leg * 12, 15);
+                    // Fabric's synthetic input drives key state directly; report the
+                    // input to Vanilla's AFK limiter just as a real mouse event does.
+                    context.runOnClient(client -> client.getFramerateLimitTracker().onInputReceived());
+                    context.waitTicks(160);
+                }
+                input.releaseKey(options -> options.keyUp);
+                input.releaseKey(options -> options.keySprint);
+                double distance = context.computeOnClient(client -> Math.hypot(
+                        client.player.getX() - startX, client.player.getZ() - startZ));
+                require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
+                        "Frame evidence did not finish the predeclared streaming window");
+                report.addProperty("flightDistanceBlocks", distance);
+                require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
 
-            phase(context, output, report, phases, "land-walk-jump");
-            BlockPos position = context.computeOnClient(client -> client.player.blockPosition());
-            int groundY = world.getServer().computeOnServer(server -> server.overworld()
-                    .getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, position.getX(), position.getZ()));
-            world.getServer().runCommand("tp @a " + (position.getX() + 0.5) + " " + groundY
-                    + " " + (position.getZ() + 0.5) + " 0 15");
-            context.runOnClient(client -> {
-                client.player.getAbilities().flying = false;
-                client.player.onUpdateAbilities();
-            });
-            context.waitFor(client -> !client.player.getAbilities().flying);
-            input.holdKey(options -> options.keyUp);
-            input.holdKey(options -> options.keyJump);
-            context.waitTicks(120);
-            input.releaseKey(options -> options.keyUp);
-            input.releaseKey(options -> options.keyJump);
-            context.waitTicks(20);
+                phase(context, output, report, phases, "land-walk-jump");
+                BlockPos position = context.computeOnClient(client -> client.player.blockPosition());
+                int groundY = world.getServer().computeOnServer(server -> server.overworld()
+                        .getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, position.getX(), position.getZ()));
+                world.getServer().runCommand("tp @a " + (position.getX() + 0.5) + " " + groundY
+                        + " " + (position.getZ() + 0.5) + " 0 15");
+                context.runOnClient(client -> {
+                    client.player.getAbilities().flying = false;
+                    client.player.onUpdateAbilities();
+                });
+                context.waitFor(client -> !client.player.getAbilities().flying);
+                input.holdKey(options -> options.keyUp);
+                input.holdKey(options -> options.keyJump);
+                context.waitTicks(120);
+                input.releaseKey(options -> options.keyUp);
+                input.releaseKey(options -> options.keyJump);
+                context.waitTicks(20);
 
-            phase(context, output, report, phases, "inventory-place-break");
-            input.pressKey(options -> options.keyInventory);
-            context.waitFor(client -> client.gui.screen() != null);
-            context.waitTicks(30);
-            input.pressKey(options -> options.keyInventory);
-            context.waitFor(client -> client.gui.screen() == null);
-            world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
-            input.pressKey(options -> options.keyHotbarSlots[0]);
-            context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.STONE));
-            // Aim beyond the player's collision box; a near-vertical placement
-            // targets the block occupied by the player and Vanilla rejects it.
-            input.lookAt(0, 45);
-            context.waitTicks(10);
-            BlockPos target = context.computeOnClient(client -> {
-                require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
-                        "No ground block targeted for placement");
-                BlockHitResult hit = (BlockHitResult) client.hitResult;
-                // Tall grass/snow can be replaced in-place; Vanilla owns that decision.
-                return new net.minecraft.world.item.context.BlockPlaceContext(client.player,
-                        net.minecraft.world.InteractionHand.MAIN_HAND, client.player.getMainHandItem(), hit).getClickedPos();
-            });
-            report.addProperty("placementTarget", target.toShortString());
-            write(output.resolve("gameplay-progress.json"), report);
-            input.holdKeyFor(options -> options.keyUse, 2);
-            context.waitFor(client -> client.level.getBlockState(target).is(net.minecraft.world.level.block.Blocks.STONE));
-            report.addProperty("placedBlock", target.toShortString());
-            input.lookAt(target);
-            input.holdKeyFor(options -> options.keyAttack, 10);
-            context.waitFor(client -> client.level.getBlockState(target).isAir());
-            report.addProperty("placedAndBroken", true);
-
-            phase(context, output, report, phases, "weather-camera");
-            world.getServer().runCommand("weather rain");
-            for (int step = 0; step < 8; step++) {
-                input.lookAt(step * 45, step % 2 == 0 ? -15 : 30);
+                phase(context, output, report, phases, "inventory-place-break");
+                input.pressKey(options -> options.keyInventory);
+                context.waitFor(client -> client.gui.screen() != null);
                 context.waitTicks(30);
+                input.pressKey(options -> options.keyInventory);
+                context.waitFor(client -> client.gui.screen() == null);
+                world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
+                input.pressKey(options -> options.keyHotbarSlots[0]);
+                context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.STONE));
+                // Aim beyond the player's collision box; a near-vertical placement
+                // targets the block occupied by the player and Vanilla rejects it.
+                input.lookAt(0, 45);
+                context.waitTicks(10);
+                BlockPos target = context.computeOnClient(client -> {
+                    require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
+                            "No ground block targeted for placement");
+                    BlockHitResult hit = (BlockHitResult) client.hitResult;
+                    // Tall grass/snow can be replaced in-place; Vanilla owns that decision.
+                    return new net.minecraft.world.item.context.BlockPlaceContext(client.player,
+                            net.minecraft.world.InteractionHand.MAIN_HAND, client.player.getMainHandItem(), hit).getClickedPos();
+                });
+                report.addProperty("placementTarget", target.toShortString());
+                write(output.resolve("gameplay-progress.json"), report);
+                input.holdKeyFor(options -> options.keyUse, 2);
+                context.waitFor(client -> client.level.getBlockState(target).is(net.minecraft.world.level.block.Blocks.STONE));
+                report.addProperty("placedBlock", target.toShortString());
+                input.lookAt(target);
+                input.holdKeyFor(options -> options.keyAttack, 10);
+                context.waitFor(client -> client.level.getBlockState(target).isAir());
+                report.addProperty("placedAndBroken", true);
+
+                phase(context, output, report, phases, "weather-camera");
+                world.getServer().runCommand("weather rain");
+                for (int step = 0; step < 8; step++) {
+                    input.lookAt(step * 45, step % 2 == 0 ? -15 : 30);
+                    context.waitTicks(30);
+                }
             }
             report.addProperty("status", "completed");
             long[] finalMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());

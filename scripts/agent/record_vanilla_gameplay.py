@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--stationary-baseline", action="store_true",
+                        help="Test-only fixed-view 60 FPS/VSync profile; no movement route")
     parser.add_argument("--template", default="Game Performance")
     parser.add_argument("--initial-world", type=Path, help="Replay an initial-world snapshot with its sibling manifest; input stays immutable")
     parser.add_argument("--frame-evidence-phase", choices=("stationary", "streaming"), default="stationary",
@@ -50,6 +52,11 @@ def main():
         parser.error("render labels are diagnostic-only; omit them for timing trials")
     if args.verify_terrain_cache and not args.terrain_slice_cache:
         parser.error("--verify-terrain-cache requires --terrain-slice-cache")
+    if args.stationary_baseline and args.initial_world is None:
+        parser.error("stationary baseline requires --initial-world with its verified immutable snapshot")
+    if args.stationary_baseline and (args.frame_evidence == "diagnostic" or args.frame_evidence_phase != "stationary" or not args.metrics_only
+            or args.presentation_metrics or args.reuse_encoder_state or args.terrain_slice_cache):
+        parser.error("stationary baseline requires stationary metrics-only without diagnostic getters or optimization experiments")
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -73,6 +80,7 @@ def main():
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true",
                f"-PframeEvidenceMode={args.frame_evidence}",
+               f"-PstationaryBaseline={str(args.stationary_baseline).lower()}",
                f"-PframeEvidencePhase={args.frame_evidence_phase}",
                f"-PframeEvidenceTrialId={output.name}",
                f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
@@ -103,7 +111,7 @@ def main():
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
                "frameEvidenceMode": args.frame_evidence,
-               "frameEvidenceProfile": f"vanilla-normal-{args.frame_evidence_phase}-v1",
+               "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
                "warmupNanos": 5_000_000_000, "sampleNanos": 10_000_000_000,
                "terrainSliceCache": args.terrain_slice_cache,
                "verifyTerrainSliceCache": args.verify_terrain_cache,
