@@ -298,6 +298,51 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void reusedEncoderRebindsPipelineAndScissorAcrossPasses() {
+        fragmentShaders.put("reuse_red", """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1, 0, 0, 1); }
+                """);
+        fragmentShaders.put("reuse_green", """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(0, 1, 0, 1); }
+                """);
+        RenderPipeline red = pipeline("reuse_red", List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        RenderPipeline green = pipeline("reuse_green", List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        device.getOrCompilePipeline(red);
+        device.getOrCompilePipeline(green);
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "encoder reuse", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1)) {
+            RenderGraphTelemetry.reset();
+            MetalRenderPass first = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "reuse left")
+                    .withColorAttachment(view, Optional.of(new Vector4f(0, 0, 1, 1))).build());
+            first.setPipeline(red);
+            first.enableScissor(0, 0, WIDTH / 2, HEIGHT);
+            first.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+            MetalRenderPass second = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "reuse right")
+                    .withColorAttachment(view, Optional.empty()).build());
+            second.setPipeline(green);
+            second.enableScissor(WIDTH / 2, 0, WIDTH / 2, HEIGHT);
+            second.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+            assertEquals(2L, RenderGraphTelemetry.snapshot().get("passesRequested"));
+            assertEquals(1L, RenderGraphTelemetry.snapshot().get("nativeEncodersCreated"));
+            assertEquals(1L, RenderGraphTelemetry.snapshot().get("encodersReused"));
+            ByteBuffer pixels = readback(texture);
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                boolean left = pixel % WIDTH < WIDTH / 2;
+                assertByteNear(pixels.get(pixel * 4), left ? 255 : 0, "reused red");
+                assertByteNear(pixels.get(pixel * 4 + 1), left ? 0 : 255, "reused green");
+                assertByteNear(pixels.get(pixel * 4 + 2), 0, "reused clear covered");
+            }
+        }
+    }
+
+    @Test
     void deferredColorStoreClearIsAttachmentLocal() {
         long submitsBefore = Boolean.getBoolean("metallum.test.mrtMetal4Commands")
                 ? MetalNativeBridge.metallum_metal4_main_renderer_stats()[2] : -1;

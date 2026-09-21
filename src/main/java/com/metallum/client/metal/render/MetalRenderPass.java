@@ -1239,6 +1239,29 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             return nativeEncoder;
         }
         MetalGpuTimingRecorder.recordRenderEncoderLookup(false);
+        String encoderLabel = label == null ? "unlabeled render pass" : label;
+        MTLRenderCommandEncoder encoder = clearColors == null && !clearDepthEnabled
+                ? commandEncoder.tryReuseRenderEncoder(colorTextures, depthTexture, encoderLabel) : null;
+        if (encoder == null) {
+            encoder = createRenderEncoder(encoderLabel);
+        }
+        nativeEncoder = encoder;
+        clearColors = null;
+        clearDepthEnabled = false;
+        long generation = commandEncoder.encoderGeneration();
+        if (generation != boundEncoderGeneration) {
+            // A rebuilt native encoder starts with no state; force a full
+            // rebind. The pipelineDirty branch of bindDrawState also refills
+            // dirtyDescriptorMask with the pipeline's full resource mask.
+            boundEncoderGeneration = generation;
+            pipelineDirty = true;
+            scissorDirty = true;
+            vertexBuffersDirty = true;
+        }
+        return encoder;
+    }
+
+    private MTLRenderCommandEncoder createRenderEncoder(final String encoderLabel) {
         MetalGpuTextureView[] colorTextureViews = new MetalGpuTextureView[colorTextures.length];
         int[] clearColorEnabled = new int[colorTextures.length];
         float[] clearColorValues = new float[colorTextures.length * 4];
@@ -1260,7 +1283,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MetalGpuTextureView depthTextureView = depthTexture == null ? null : (MetalGpuTextureView) depthTexture;
         boolean clearDepthNow = clearDepthEnabled;
         GpuTextureView extent = extentTexture();
-        MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
+        return commandEncoder.renderCommandEncoder(
                 colorTextureViews,
                 depthTextureView,
                 extent.getWidth(0),
@@ -1270,22 +1293,8 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 clearDepthNow,
                 clearDepthValue,
                 renderArea.fillsTexture(extent),
-                label == null ? "unlabeled render pass" : label
+                encoderLabel
         );
-        nativeEncoder = encoder;
-        clearColors = null;
-        clearDepthEnabled = false;
-        long generation = commandEncoder.encoderGeneration();
-        if (generation != boundEncoderGeneration) {
-            // A rebuilt native encoder starts with no state; force a full
-            // rebind. The pipelineDirty branch of bindDrawState also refills
-            // dirtyDescriptorMask with the pipeline's full resource mask.
-            boundEncoderGeneration = generation;
-            pipelineDirty = true;
-            scissorDirty = true;
-            vertexBuffersDirty = true;
-        }
-        return encoder;
     }
 
     GpuBufferSlice.MappedView allocateTransient(final long size, final long alignment, @GpuBuffer.Usage final int usage) {
