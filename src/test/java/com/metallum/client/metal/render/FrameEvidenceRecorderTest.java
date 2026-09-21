@@ -172,4 +172,86 @@ class FrameEvidenceRecorderTest {
     private JsonObject frame(int index) {
         return recorder.snapshot(new JsonObject()).getAsJsonArray("frames").get(index).getAsJsonObject();
     }
+
+    @Test void explicitWindowExcludesWarmupAndLongSessionTailWithoutLoss() {
+        var bounded = new FrameEvidenceRecorder(2, clock::get, true);
+        bounded.armWindow(new JsonObject(), 100, 200);
+        bounded.beginFrame(true); bounded.endFrame(); // warmup
+        clock.set(200);
+        bounded.beginFrame(true);
+        var first = bounded.commandBuffer(55);
+        bounded.presentationRequested(first, 71);
+        bounded.submitted(first);
+        clock.set(210); bounded.endFrame();
+        clock.set(399); bounded.beginFrame(true);
+        clock.set(410); bounded.endFrame(); // admitted by start; callback may be later
+        for (int i = 0; i < 100; i++) { bounded.beginFrame(true); bounded.endFrame(); }
+        bounded.completed(first, true, 2, 3);
+        bounded.presented(new long[]{71}, new double[]{10});
+        JsonObject report = bounded.snapshot(new JsonObject());
+        assertEquals(2, report.getAsJsonArray("frames").size());
+        assertEquals(0, report.get("droppedFrames").getAsInt());
+        assertTrue(report.getAsJsonObject("window").get("closed").getAsBoolean());
+        assertEquals(101, report.getAsJsonObject("window").get("outsideWindowFrames").getAsInt());
+        assertEquals(200, report.getAsJsonArray("frames").get(0).getAsJsonObject().get("sourceStartNs").getAsLong());
+        assertThrows(IllegalStateException.class, () -> bounded.armWindow(new JsonObject(), 0, 1));
+    }
+
+    @Test void windowNestedScopesKeepParentMembershipAcrossBoundaryAndCapacityIsExplicit() {
+        var bounded = new FrameEvidenceRecorder(2, clock::get, true);
+        bounded.armWindow(new JsonObject(), 10, 20);
+        bounded.beginFrame(false); // outside root
+        clock.set(111); bounded.beginFrame(true); bounded.endFrame(); bounded.endFrame();
+        bounded.beginFrame(true); // admitted root
+        clock.set(131); bounded.beginFrame(false); bounded.endFrame(); bounded.endFrame();
+        var rows = bounded.snapshot(new JsonObject()).getAsJsonArray("frames");
+        assertEquals(2, rows.size());
+        assertEquals(rows.get(0).getAsJsonObject().get("frameId"), rows.get(1).getAsJsonObject().get("parentFrameId"));
+        var small = new FrameEvidenceRecorder(1, clock::get, true);
+        small.armWindow(new JsonObject(), 0, 20);
+        small.beginFrame(true); small.beginFrame(false); small.endFrame(); small.endFrame();
+        assertEquals(1, small.snapshot(new JsonObject()).get("droppedFrames").getAsInt());
+    }
+
+    @Test void copiedPresentationSurvivesEvictionButConflictingReceiptInvalidates() {
+        recorder.beginFrame(true);
+        var submission = recorder.commandBuffer(1);
+        recorder.presentationRequested(submission, 4);
+        recorder.submitted(submission); recorder.endFrame();
+        recorder.presented(new long[]{4}, new double[]{12});
+        recorder.presented(new long[]{4}, new double[]{-3});
+        assertEquals(12, frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("presentedTimeSeconds").getAsDouble());
+        assertEquals(0, recorder.presentationIds().length);
+        assertThrows(IllegalArgumentException.class, () -> recorder.presented(new long[]{4, 4}, new double[]{12, 13}));
+        recorder.presented(new long[]{4}, new double[]{13});
+        assertEquals("conflicting-presented-timestamp", frame(0).get("failure").getAsString());
+    }
+
+    @Test void epochChangesRemainExplicitAndSubmissionHistoryIsBounded() {
+        var bounded = new FrameEvidenceRecorder(2, clock::get, true);
+        bounded.armWindow(new JsonObject(), 0, 100);
+        bounded.beginFrame(true); bounded.endFrame();
+        bounded.advanceEpoch();
+        bounded.beginFrame(true);
+        for (int i = 0; i < 256; i++) assertNotNull(bounded.commandBuffer(i));
+        assertNull(bounded.commandBuffer(256));
+        bounded.endFrame();
+        var report = bounded.snapshot(new JsonObject());
+        assertEquals(1, report.getAsJsonObject("window").get("epoch").getAsInt());
+        var row = report.getAsJsonArray("frames").get(1).getAsJsonObject();
+        assertEquals(2, row.get("epoch").getAsInt());
+        assertEquals("submission-evidence-overflow", row.get("failure").getAsString());
+    }
+
+    @Test void exportIsAtomicAndOutputFailureCannotBecomeAReport(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        var output = directory.resolve("report.json");
+        JsonObject report = new JsonObject(); report.addProperty("fixture", true);
+        FrameEvidenceRuntime.writeReport(output, report);
+        assertTrue(java.nio.file.Files.readString(output).contains("fixture"));
+        assertFalse(java.nio.file.Files.exists(directory.resolve("report.json.partial")));
+        var impossible = output.resolve("child.json");
+        assertThrows(java.io.IOException.class, () -> FrameEvidenceRuntime.writeReport(impossible, report));
+        assertFalse(java.nio.file.Files.exists(impossible));
+    }
 }

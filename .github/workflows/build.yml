@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Record CI proof subject
         shell: bash
         run: |
@@ -40,6 +42,10 @@ jobs:
           python3 scripts/agent/record_ci_subject.py \
             --proof-subject "$subject" \
             --output build/agent-evidence/ci-subject-build.json
+          git bundle create build/agent-evidence/source.bundle HEAD
+          git bundle verify build/agent-evidence/source.bundle
+      - name: Verify frame evidence contract
+        run: python3 scripts/agent/verify_frame_evidence.py --self-test
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
@@ -119,7 +125,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: build-ci-identity-${{ github.run_attempt }}
-          path: build/agent-evidence/ci-subject-build.json
+          path: |
+            build/agent-evidence/ci-subject-build.json
+            build/agent-evidence/source.bundle
+            build/test-results/
+            build/reports/tests/
           if-no-files-found: error
       - name: capture build artifacts
         uses: actions/upload-artifact@v7

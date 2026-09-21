@@ -463,10 +463,18 @@ struct NativePresentationTelemetryState {
     private(set) var latestDrawableWaitNanos: Int64 = -1
     private(set) var framesInFlight: Int64 = 0
     private var lastPresentedTime: CFTimeInterval = 0.0
-    // First-N evidence, opt-in; never retains a drawable or command buffer.
+    // Most-recent-N evidence, opt-in; never retains a drawable or command buffer.
+    // Eviction is insertion ordered, including pending tickets: an evicted ticket
+    // stays unavailable even if its callback subsequently arrives.
     // 0 pending, -1 cancelled/failed, -2 invalid timestamp, -3 not retained.
     private var presentedEvidence: [UInt64: Double] = [:]
+    private var evidenceTicketRing: [UInt64] = []
+    private var nextEvidenceSlot = 0
     static let evidenceCapacity = 65_536
+    // Independent of evidence mode. IDs are consecutive, so expiry needs no
+    // extra queue. Lost unresolved identity makes occupancy unknown forever;
+    // forgetting a callback is neither cancellation nor actual presentation.
+    static let pendingIdentityHorizon: UInt64 = 65_536
 
     init() {
         pendingPresentationIDs.reserveCapacity(8)
@@ -480,18 +488,30 @@ struct NativePresentationTelemetryState {
     mutating func schedulePresentation(recordEvidence: Bool = false) -> UInt64 {
         let identifier = nextPresentationID
         nextPresentationID &+= 1
+        if identifier > Self.pendingIdentityHorizon,
+           pendingPresentationIDs.remove(identifier - Self.pendingIdentityHorizon) != nil {
+            framesInFlight = -1
+            presentedEvidence.removeValue(forKey: identifier - Self.pendingIdentityHorizon)
+        }
         pendingPresentationIDs.insert(identifier)
-        if recordEvidence && presentedEvidence.count < Self.evidenceCapacity {
+        if recordEvidence {
+            if evidenceTicketRing.count < Self.evidenceCapacity {
+                evidenceTicketRing.append(identifier)
+            } else {
+                presentedEvidence.removeValue(forKey: evidenceTicketRing[nextEvidenceSlot])
+                evidenceTicketRing[nextEvidenceSlot] = identifier
+                nextEvidenceSlot = (nextEvidenceSlot + 1) % Self.evidenceCapacity
+            }
             presentedEvidence[identifier] = 0
         }
-        framesInFlight += 1
+        if framesInFlight >= 0 { framesInFlight += 1 }
         return identifier
     }
 
     @discardableResult
     mutating func resolvePresentation(_ identifier: UInt64) -> Bool {
         guard pendingPresentationIDs.remove(identifier) != nil else { return false }
-        framesInFlight = max(0, framesInFlight - 1)
+        if framesInFlight >= 0 { framesInFlight = max(0, framesInFlight - 1) }
         if presentedEvidence[identifier] == 0 {
             presentedEvidence[identifier] = -1
         }

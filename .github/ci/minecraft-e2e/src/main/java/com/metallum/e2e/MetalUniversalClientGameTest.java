@@ -38,6 +38,40 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
 
+    private static TestSingleplayerContext openGameplayWorld(ClientGameTestContext context, Path output) {
+        TestSingleplayerContext created = context.worldBuilder()
+                .setUseConsistentSettings(false)
+                .adjustSettings(settings -> {
+                    settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
+                            .worldgenLoadContext().lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(WorldPresets.NORMAL)));
+                    settings.setName("MetalUniversal normal terrain");
+                    settings.setSeed("1");
+                    settings.setGenerateStructures(true);
+                }).create();
+        String snapshotProperty = System.getProperty("metallum.ci.initialWorld", "");
+        if (snapshotProperty.isEmpty()) return created;
+        var save = created.getWorldSave();
+        created.close();
+        Path snapshot = Path.of(snapshotProperty).toAbsolutePath().normalize();
+        Path disposable = save.getSaveDirectory().toAbsolutePath().normalize();
+        require(!snapshot.startsWith(disposable) && !disposable.startsWith(snapshot), "Snapshot overlaps disposable test world");
+        WorldSnapshot.verify(snapshot);
+        try {
+            // This directory was created by this invocation above; never replace a user-selected world.
+            try (var paths = Files.walk(disposable)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+            WorldSnapshot.copyVerified(snapshot, disposable);
+            Path retained = output.resolve("initial-world");
+            WorldSnapshot.copyVerified(snapshot, retained);
+            Files.copy(snapshot.resolveSibling(snapshot.getFileName() + "-manifest.json"),
+                    output.resolve("initial-world-manifest.json"));
+        } catch (IOException failure) {
+            throw new IllegalStateException("Cannot restore disposable test world from verified snapshot", failure);
+        }
+        return save.open();
+    }
+
     @Override
     public void runTest(ClientGameTestContext context) {
         Path evidenceDir = Path.of(System.getProperty("metallum.ci.evidenceDir", "build/evidence"))
@@ -59,24 +93,23 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly);
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
-        try (TestSingleplayerContext singleplayer = context.worldBuilder()
-                .setUseConsistentSettings(false)
-                .adjustSettings(settings -> {
-                    settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
-                            .worldgenLoadContext().lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(WorldPresets.NORMAL)));
-                    settings.setName("MetalUniversal normal terrain");
-                    settings.setSeed("1");
-                    settings.setGenerateStructures(true);
-                }).create()) {
+        try (TestSingleplayerContext singleplayer = openGameplayWorld(context, evidenceDir)) {
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
             JsonObject worldEvidence = singleplayer.getServer().computeOnServer(server -> {
                 var level = server.overworld();
                 require(level.getChunkSource().getGenerator() instanceof NoiseBasedChunkGenerator,
                         "Expected normal noise-based Overworld generation");
+                require(level.getSeed() == 1, "Replay must preserve the fixed normal-world seed");
                 JsonObject world = new JsonObject();
                 world.addProperty("generator", level.getChunkSource().getGenerator().getClass().getSimpleName());
                 world.addProperty("seed", level.getSeed());
+                world.addProperty("preset", "minecraft:normal");
+                world.addProperty("generateStructures", true);
+                world.addProperty("minecraftVersion", "26.3");
+                String snapshot = System.getProperty("metallum.ci.initialWorld", "");
+                if (!snapshot.isEmpty()) world.addProperty("replaySourceSnapshotSha256",
+                        WorldSnapshot.verify(Path.of(snapshot).toAbsolutePath().normalize()));
                 world.addProperty("saveDirectory", singleplayer.getWorldSave().getSaveDirectory().toString());
                 return world;
             });

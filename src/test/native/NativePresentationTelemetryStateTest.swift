@@ -62,6 +62,59 @@ struct NativePresentationTelemetryStateTest {
         state.recordPresented(invalidObserved, presentedTime: .nan)
         check(state.presentedTimeEvidence(invalidObserved) == -2, "non-finite callback is explicitly unavailable")
 
+        var rolling = NativePresentationTelemetryState()
+        let oldestPending = rolling.schedulePresentation(recordEvidence: true)
+        let oldestResolved = rolling.schedulePresentation(recordEvidence: true)
+        rolling.recordPresented(oldestResolved, presentedTime: 30)
+        for index in 2..<NativePresentationTelemetryState.evidenceCapacity {
+            let ticket = rolling.schedulePresentation(recordEvidence: true)
+            rolling.recordPresented(ticket, presentedTime: 30 + Double(index))
+        }
+        check(rolling.presentedTimeEvidence(oldestPending) == 0, "capacity boundary retains oldest pending ticket")
+        check(rolling.presentedTimeEvidence(oldestResolved) == 30, "capacity boundary retains completed evidence")
+        let newestPending = rolling.schedulePresentation(recordEvidence: true)
+        check(newestPending > oldestResolved, "rolling retention preserves monotonic ticket identity")
+        check(rolling.presentedTimeEvidence(oldestPending) == -3, "overflow evicts oldest pending without claiming presentation")
+        check(rolling.presentedTimeEvidence(oldestResolved) == 30, "one overflow evicts exactly one ticket")
+        rolling.recordPresented(oldestPending, presentedTime: 29)
+        check(rolling.presentedTimeEvidence(oldestPending) == -3, "late evicted callback cannot resurrect evidence")
+        check(rolling.framesInFlight == -1, "expired pending identity makes occupancy unavailable, not a fabricated count")
+        let newestCancelled = rolling.schedulePresentation(recordEvidence: true)
+        check(rolling.presentedTimeEvidence(oldestResolved) == -3, "second overflow evicts second-oldest evidence")
+        _ = rolling.resolvePresentation(newestCancelled)
+        rolling.recordPresented(newestCancelled, presentedTime: 40)
+        rolling.recordPresented(newestPending, presentedTime: 39)
+        check(rolling.presentedTimeEvidence(newestCancelled) == -1, "cancelled recent ticket stays cancelled after late callback")
+        check(rolling.presentedTimeEvidence(newestPending) == 39, "out-of-order recent callback retains its actual timestamp")
+        check(rolling.framesInFlight == -1, "later completion and cancellation cannot recover unknown occupancy")
+        // Exercise a complete ring wrap, not just the first eviction boundary.
+        for _ in 0..<NativePresentationTelemetryState.evidenceCapacity {
+            let ticket = rolling.schedulePresentation(recordEvidence: true)
+            _ = rolling.resolvePresentation(ticket)
+        }
+        check(rolling.presentedTimeEvidence(newestPending) == -3, "second ring cycle expires previously retained receipt")
+        let lateSession = rolling.schedulePresentation(recordEvidence: true)
+        rolling.recordPresented(lateSession, presentedTime: 100_000)
+        check(rolling.presentedTimeEvidence(lateSession) == 100_000, "late-session windows still receive actual callbacks")
+
+        var missingCallbacks = NativePresentationTelemetryState()
+        let expired = missingCallbacks.schedulePresentation()
+        for _ in 1..<NativePresentationTelemetryState.pendingIdentityHorizon {
+            _ = missingCallbacks.schedulePresentation()
+        }
+        check(missingCallbacks.framesInFlight == Int64(NativePresentationTelemetryState.pendingIdentityHorizon),
+              "pending horizon boundary retains exact occupancy")
+        let retained = missingCallbacks.schedulePresentation(recordEvidence: true)
+        check(missingCallbacks.framesInFlight == -1, "missing callbacks exhaust bounded identity even with observer off")
+        check(!missingCallbacks.resolvePresentation(expired), "expired pending identity was actually removed")
+        missingCallbacks.recordPresented(expired, presentedTime: 5)
+        check(missingCallbacks.latestPresentIntervalNanos == -1, "forgotten callback cannot create interval authority")
+        missingCallbacks.recordPresented(retained, presentedTime: 10)
+        check(missingCallbacks.presentedTimeEvidence(retained) == 10, "recent actual receipts survive unknown aggregate occupancy")
+        let cancelAfterOverflow = missingCallbacks.schedulePresentation()
+        _ = missingCallbacks.resolvePresentation(cancelAfterOverflow)
+        check(missingCallbacks.framesInFlight == -1, "future schedule/cancel preserves unavailable occupancy")
+
         print("NativePresentationTelemetryStateTest: PASS")
     }
 }

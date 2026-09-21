@@ -22,6 +22,11 @@ def main():
     parser.add_argument("--jar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--template", default="Game Performance")
+    parser.add_argument("--initial-world", type=Path, help="Replay an initial-world snapshot with its sibling manifest; input stays immutable")
+    parser.add_argument("--frame-evidence-phase", choices=("stationary", "streaming"), default="stationary",
+                        help="Select the predeclared stationary or existing input-driven streaming window")
+    parser.add_argument("--frame-evidence", choices=("off", "timing", "diagnostic"), default="off",
+                        help="Bounded 5s warmup/10s source-to-present observation; use --metrics-only for timing")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
     parser.add_argument("--capture-seconds", type=int, default=120,
@@ -39,6 +44,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.capture_seconds <= 120:
         parser.error("--capture-seconds must be between 1 and 120")
+    if args.frame_evidence == "timing" and (not args.metrics_only or args.presentation_metrics or args.render_labels):
+        parser.error("timing frame evidence requires --metrics-only and no diagnostic presentation metrics or render labels")
     if args.metrics_only and args.render_labels:
         parser.error("render labels are diagnostic-only; omit them for timing trials")
     if args.verify_terrain_cache and not args.terrain_slice_cache:
@@ -53,9 +60,11 @@ def main():
         raise RuntimeError("Build the committed source before recording a production artifact")
     displays = json.loads(subprocess.check_output(
         ["system_profiler", "SPDisplaysDataType", "-json"], text=True))
-    main_display = next(display for gpu in displays["SPDisplaysDataType"]
-                        for display in gpu.get("spdisplays_ndrvs", [])
-                        if display.get("spdisplays_main") == "spdisplays_yes")
+    main_display = next((display for gpu in displays["SPDisplaysDataType"]
+                         for display in gpu.get("spdisplays_ndrvs", [])
+                         if display.get("spdisplays_main") == "spdisplays_yes"), None)
+    if main_display is None:
+        raise RuntimeError("Physical main display unavailable; cannot run a native-resolution presentation trial")
     native_size = re.search(r"(\d+)\s*x\s*(\d+)", main_display["_spdisplays_pixels"])
     if native_size is None:
         raise RuntimeError("Cannot establish the physical display resolution")
@@ -63,6 +72,9 @@ def main():
     command = [str(root / "gradlew"), "--no-daemon", "-p", str(root / ".github/ci/minecraft-e2e"),
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true",
+               f"-PframeEvidenceMode={args.frame_evidence}",
+               f"-PframeEvidencePhase={args.frame_evidence_phase}",
+               f"-PframeEvidenceTrialId={output.name}",
                f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
@@ -73,6 +85,8 @@ def main():
                f"-PverifyTerrainSliceCache={str(args.verify_terrain_cache).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
                f"-PevidenceDir={output}", "runProductionClientGameTest"]
+    if args.initial_world is not None:
+        command.insert(-1, f"-PinitialWorld={args.initial_world.resolve()}")
     recording = None
     # Xcode 27 supplies a Darwin notification when all instruments are recording.
     # Do not guess readiness from a delay or let attachment startup consume the route.
@@ -88,6 +102,9 @@ def main():
                "captureSeconds": None if args.metrics_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
+               "frameEvidenceMode": args.frame_evidence,
+               "frameEvidenceProfile": f"vanilla-normal-{args.frame_evidence_phase}-v1",
+               "warmupNanos": 5_000_000_000, "sampleNanos": 10_000_000_000,
                "terrainSliceCache": args.terrain_slice_cache,
                "verifyTerrainSliceCache": args.verify_terrain_cache,
                "display": main_display,

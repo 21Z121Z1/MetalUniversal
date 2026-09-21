@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.google.common.collect.ImmutableList;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.gl.shader.StandardMacros;
 import net.irisshaders.iris.helpers.StringPair;
@@ -12,12 +13,15 @@ import net.irisshaders.iris.shaderpack.programs.ProgramFallbackResolver;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,6 +52,27 @@ final class IrisMetalDimensionProgramSetTest {
             assertTrue(resolver.resolveNullable(ProgramId.Terrain) != null);
             IrisMetalPackAdmission.requireSupported(set, ColorSpace.SRGB);
         }
+    }
+
+    @Test
+    void selectedIrisGenerationWithoutMotionProofCannotAdmitFrameGeneration(@TempDir Path shaders) throws Exception {
+        // An empty, headless pack deliberately proves no motion semantics and
+        // needs neither shader compilation nor a native device.
+        ShaderPack pack = new ShaderPack(shaders, environmentDefines(), false);
+        assertNull(IrisMetalPipelineOverrides.active());
+        assertTrue(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven());
+        IrisMetalPipelineOverrides.Instance instance = IrisMetalPipelineOverrides.prepareForTests(
+                pack.getProgramSet(OVERWORLD), new Object2ObjectOpenHashMap<>(), false);
+        try {
+            assertTrue(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven(),
+                    "Preparing an unselected generation must not change the source owner");
+            IrisMetalPipelineOverrides.select(instance);
+            assertFalse(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven(),
+                    "An active Iris generation is unproven even with no translated draw programs");
+        } finally {
+            IrisMetalPipelineOverrides.deactivate(instance);
+        }
+        assertTrue(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven());
     }
 
     private static String red(final ProgramSet set) {
