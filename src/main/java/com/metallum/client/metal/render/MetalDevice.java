@@ -156,7 +156,6 @@ final class MetalDevice implements GpuDeviceBackend {
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private boolean metal4MainRenderer;
-    private boolean asyncPresentation;
     /**
      * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
      * and needs no Metal 4, so this switch is independent of the master one: the
@@ -423,12 +422,6 @@ final class MetalDevice implements GpuDeviceBackend {
             this.metal4MainRenderer = requestedMainRenderer;
         }
 
-        if (Boolean.getBoolean("metallum.opt.asyncPresent")) {
-            if (!this.metal4MainRenderer || !MetalNativeBridge.configureMetal4AsyncPresentation(true)) {
-                throw new IllegalStateException("Requested asynchronous Metal 4 presentation is unavailable");
-            }
-            this.asyncPresentation = true;
-        }
         MetalNativeBridge.metallum_init_pipelines(this.metalDeviceHandle);
         MetalFxManager.initialize(this);
         this.presentationInitialized = true;
@@ -436,13 +429,6 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     synchronized void presentationSurfaceClosed(final long sdlMetalView) {
-        if (this.asyncPresentation) {
-            waitForSubmittedGpuWork();
-            if (!MetalNativeBridge.configureMetal4AsyncPresentation(false)) {
-                throw new IllegalStateException("Could not drain asynchronous presentation before surface close");
-            }
-            this.asyncPresentation = false;
-        }
         if (sdlMetalView != 0L) {
             org.lwjgl.sdl.SDLMetal.SDL_Metal_DestroyView(sdlMetalView);
         }
@@ -711,10 +697,6 @@ final class MetalDevice implements GpuDeviceBackend {
 
     boolean metal4MainRendererEnabled() {
         return this.metal4MainRenderer;
-    }
-
-    boolean asyncPresentationEnabled() {
-        return this.asyncPresentation;
     }
 
     /**

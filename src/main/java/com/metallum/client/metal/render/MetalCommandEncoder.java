@@ -1153,13 +1153,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MTLCommandBuffer commandBuffer = commandBuffer();
         commandBuffer.encodePresentTextureToDrawable(layer, presentedTexture, fence);
         FrameEvidenceRuntime.presentationRequested(frameEvidenceSubmission, commandBuffer.nativePresentationTelemetryId());
-        if (device.asyncPresentationEnabled()) {
-            // Seal this terminal source-frame operation before handing its
-            // native lease to the presentation worker. Vanilla's subsequent
-            // explicit submit and surface.present remain no-ops, so the frame
-            // still produces exactly one submission.
-            submit();
-        }
     }
 
     boolean clearMotionInputs(
