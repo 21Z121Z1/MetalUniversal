@@ -5,14 +5,12 @@ on:
   push:
     branches:
       - integration/iris-metal-next
-      - 'agent/**'
   pull_request:
     branches:
       - integration/iris-metal-next
 
 permissions:
   contents: read
-  actions: read
 
 env:
   METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -30,7 +28,7 @@ jobs:
         with:
           ref: ${{ env.METALLUM_SOURCE_SHA }}
 
-      - name: Verify cloud-first program invariants
+      - name: Verify hosted control invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -167,15 +165,9 @@ jobs:
             -framework Foundation -framework Metal \
             src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
             -o "$RUNNER_TEMP/metallum-shipping-abi-probe"
-          # The binary disables the dylib's own compiler hop internally, so
-          # this measures raw Metal behavior. A background-thread crash is a
-          # capability verdict, not a workflow failure.
           ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
             src/main/resources/natives/macos/libmetallum.dylib \
             | tee build/agent-evidence/shipping-abi-threading-probe.log) || true
-          # JVM phase: identical sequence from a plain Java background thread,
-          # the same threading context as a Gradle test executor worker. A
-          # signal death here is a capability verdict.
           (java --enable-native-access=ALL-UNNAMED \
             .github/ci/JvmPsoThreadingProbe.java \
             "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
@@ -197,10 +189,7 @@ jobs:
           jvm_ok = "JVM_PSO_BACKGROUND_THREAD_PASS" in jvm_log
           if not main_ok:
               raise SystemExit("main-thread shipping PSO compile probe failed; environment is unusable")
-          if background_ok and jvm_ok:
-              mode = "required"
-          else:
-              mode = "environment-blocked"
+          mode = "required" if background_ok and jvm_ok else "environment-blocked"
           with open(os.environ.get("GITHUB_ENV", "/dev/null"), "a", encoding="utf-8") as handle:
               handle.write(f"METALLUM_JVM_PSO_SMOKE_MODE={mode}\n")
           capabilities_path = "agent-evidence/capabilities.json"
@@ -239,7 +228,7 @@ jobs:
             hostedMetalCoreIntegrationTest \
             hostedMetalIrisIntegrationTest
 
-      - name: Require hosted shipping integration suites to execute cleanly
+      - name: Require hosted shipping integration suites to execute cleanly or record capability block
         shell: bash
         run: |
           set -euo pipefail
@@ -259,8 +248,6 @@ jobs:
               files = glob.glob(f"build/test-results/{task}/TEST-*.xml")
               if not files:
                   if mode == "environment-blocked":
-                      # Every GPU class is capability-excluded; an empty result
-                      # set is the expected shape of a blocked run.
                       print(f"{task}: no test XML (capability-blocked)")
                       summary[task] = {
                           "tests": 0,
@@ -292,6 +279,7 @@ jobs:
                   "errors": errors,
               }
 
+          summary["capability_mode"] = mode
           if mode == "environment-blocked":
               capabilities_path = "agent-evidence/capabilities.json"
               with open(capabilities_path, encoding="utf-8") as handle:
@@ -300,44 +288,45 @@ jobs:
                   raise SystemExit(
                       "suites ran environment-blocked without a measured jvm_background_pso_compile=false verdict"
                   )
-              summary["capability_mode"] = "environment-blocked"
               summary["authority"] = "minecraft-client-e2e"
-          else:
-              summary["capability_mode"] = "required"
 
           with open("agent-evidence/hosted-shipping-tests.json", "w", encoding="utf-8") as handle:
               json.dump(summary, handle, indent=2, sort_keys=True)
               handle.write("\n")
           PY
 
-      - name: Emit correctness, activation and fail-closed stage decision
+      - name: Emit exact-head hosted proof without composing sibling workflows
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-          # The PR mergeability check ("<number>/merge") only exists while a
-          # pull request is open. Inject it on pull_request events so evidence
-          # waits for the full merge gate, and leave it empty on branch pushes
-          # (integration/agent) where no such check can ever exist for the new
-          # SHA — a hardcoded number deadlocked canonical CI after its PR
-          # merged.
-          METALLUM_MERGE_CHECK: ${{ github.event_name == 'pull_request' && format('{0}/merge', github.event.number) || '' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re, time, urllib.parse, urllib.request
+          import json, os, re
 
           source_sha = os.environ.get("METALLUM_SOURCE_SHA", "").strip().lower()
           if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
               raise SystemExit(f"invalid METALLUM_SOURCE_SHA: {source_sha!r}")
 
-          required_external = [
-              "Minecraft 26.2 production client E2E",
-              "Unified eval verification",
-          ]
-          merge_check = os.environ.get("METALLUM_MERGE_CHECK", "").strip()
-          if merge_check:
-              required_external.append(merge_check)
+          with open("agent-evidence/capabilities.json", encoding="utf-8") as handle:
+              capabilities = json.load(handle)
+          with open("agent-evidence/hosted-shipping-tests.json", encoding="utf-8") as handle:
+              hosted = json.load(handle)
+
+          mode = hosted.get("capability_mode")
+          if mode not in {"required", "environment-blocked"}:
+              raise SystemExit(f"invalid hosted capability mode: {mode!r}")
+
+          tasks = ["hostedMetalCoreIntegrationTest", "hostedMetalIrisIntegrationTest"]
+          executed = sum(int(hosted.get(task, {}).get("executed", 0)) for task in tasks)
+          if mode == "required" and executed <= 0:
+              raise SystemExit("required shipping GPU suites recorded zero executed tests")
+          if mode == "environment-blocked" and capabilities.get("jvm_background_pso_compile") is not False:
+              raise SystemExit("environment-blocked evidence lacks measured JVM capability failure")
+
+          shipping_status = "pass" if mode == "required" else "environment-blocked"
+          activation_status = (
+              "active-and-tests-executed" if mode == "required" else "environment-blocked"
+          )
+          delegated_authority = ["minecraft-client-e2e"] if mode == "environment-blocked" else []
 
           correctness = {
               "source_sha": source_sha,
@@ -345,125 +334,44 @@ jobs:
               "native_mrt_smoke": "pass",
               "metal4_shipping_path_contract": "pass",
               "layerless_device_presentation_contract": "pass",
-              "shipping_java_ffm_swift_core_gpu": "pass",
-              "shipping_iris_gpu": "pass",
+              "shipping_java_ffm_swift_core_gpu": shipping_status,
+              "shipping_iris_gpu": shipping_status,
               "p1_hotpath_static_contract": "pass",
               "physical_only_harnesses_compile": "pass",
           }
-          with open("agent-evidence/correctness.json", "w", encoding="utf-8") as handle:
-              json.dump(correctness, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-
           activation = {
               "source_sha": source_sha,
               "raw_hosted_metal_gpu": "active-and-readback-verified",
               "offscreen_presentation_state": "absent-by-layer-contract",
-              "shipping_java_ffm_swift_gpu": "active-and-tests-executed",
-              "shipping_iris_gpu": "active-and-tests-executed",
-              "required_hosted_tests_skipped": 0,
+              "shipping_java_ffm_swift_gpu": activation_status,
+              "shipping_iris_gpu": activation_status,
+              "hosted_shipping_tests_executed": executed,
+              "capability_mode": mode,
+              "delegated_authority": delegated_authority,
               "silent_fallback_detected": False,
           }
-          with open("agent-evidence/activation.json", "w", encoding="utf-8") as handle:
-              json.dump(activation, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-
-          repository = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ.get("GH_TOKEN", "")
-
-          def load_latest_required():
-              # Match the runs for THIS event context: pull_request events
-              # produce PR-scoped runs, pushes to canonical branches produce
-              # push-scoped runs. A hardcoded event name leaves one of the two
-              # contexts permanently unable to observe its authority runs.
-              query = urllib.parse.urlencode({
-                  "head_sha": source_sha,
-                  "event": os.environ.get("GITHUB_EVENT_NAME", "push"),
-                  "per_page": 100,
-              })
-              request = urllib.request.Request(
-                  f"https://api.github.com/repos/{repository}/actions/runs?{query}",
-                  headers={
-                      "Accept": "application/vnd.github+json",
-                      "Authorization": f"Bearer {token}",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                  },
-              )
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  payload = json.load(response)
-              latest = {}
-              for run in payload.get("workflow_runs", []):
-                  name = run.get("name")
-                  if name in required_external and name not in latest:
-                      latest[name] = {
-                          "run_id": run.get("id"),
-                          "status": run.get("status"),
-                          "conclusion": run.get("conclusion"),
-                          "head_sha": run.get("head_sha"),
-                      }
-              return latest
-
-          latest = {}
-          external_complete = False
-          failure_reason = None
-          for attempt in range(81):
-              latest = load_latest_required()
-              malformed = [
-                  name for name, run in latest.items()
-                  if run.get("head_sha") != source_sha
-              ]
-              if malformed:
-                  failure_reason = f"source SHA mismatch for required workflows: {malformed}"
-                  break
-
-              failed = [
-                  name for name in required_external
-                  if name in latest
-                  and latest[name].get("status") == "completed"
-                  and latest[name].get("conclusion") != "success"
-              ]
-              if failed:
-                  failure_reason = f"required workflows failed: {failed}"
-                  break
-
-              external_complete = all(
-                  name in latest
-                  and latest[name].get("head_sha") == source_sha
-                  and latest[name].get("status") == "completed"
-                  and latest[name].get("conclusion") == "success"
-                  for name in required_external
-              )
-              if external_complete:
-                  break
-              if attempt < 80:
-                  time.sleep(15)
-
-          if not external_complete and failure_reason is None:
-              failure_reason = "required exact-head workflows did not all reach success before the bounded decision timeout"
-
-          decision_value = (
-              "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING"
-              if external_complete
-              else "CLOUD_INCOMPLETE"
-          )
           decision = {
-              "decision": decision_value,
-              "stage": "C0-agent-metal-lab",
+              "decision": "HOSTED_EXACT_HEAD_PROOF_COMPLETE",
+              "proof_profile": "hosted.exact-head",
               "source_sha": source_sha,
-              "cloud_correctness": "pass",
-              "hosted_metal_activation": "pass",
-              "shipping_abi_gpu_execution": "pass",
-              "external_required_workflows": latest,
+              "local_hosted_proof": "pass",
+              "shipping_gpu_execution": shipping_status,
+              "capability_mode": mode,
+              "delegated_authority": delegated_authority,
+              "promotion_composition": "external-required-checks",
               "physical_acceptance": "pending",
               "default_enablement_allowed": False,
-              "next_cloud_stage_allowed_after_merge": external_complete,
-              "failure_reason": failure_reason,
           }
-          with open("agent-evidence/decision.json", "w", encoding="utf-8") as handle:
-              json.dump(decision, handle, indent=2, sort_keys=True)
-              handle.write("\n")
+
+          for path, data in (
+              ("agent-evidence/correctness.json", correctness),
+              ("agent-evidence/activation.json", activation),
+              ("agent-evidence/decision.json", decision),
+          ):
+              with open(path, "w", encoding="utf-8") as handle:
+                  json.dump(data, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
           print(json.dumps(decision, sort_keys=True))
-          if not external_complete:
-              raise SystemExit(failure_reason)
           PY
           python3 -m json.tool agent-evidence/correctness.json >/dev/null
           python3 -m json.tool agent-evidence/activation.json >/dev/null

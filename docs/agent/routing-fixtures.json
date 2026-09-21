@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "purpose": "Regression fixtures for the agent world model. They protect conservative ownership and proof routing as the repository evolves.",
+  "path_cases": [
+    {
+      "path": "src/main/java/com/metallum/client/metal/render/IrisMetalArgumentBindingRuntime.java",
+      "expected_changed_components": [
+        "render.execution"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/metal/render/IrisMetalComputeGroupingRuntime.java",
+      "expected_changed_components": [
+        "render.execution"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/metal/render/IrisMetalAdvancedOptimizationConfig.java",
+      "expected_changed_components": [
+        "render.plan"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/metal/render/IrisMetalAttachmentLifetimeCompiler.java",
+      "expected_changed_components": [
+        "render.plan"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java",
+      "expected_changed_components": [
+        "native.abi"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance",
+        "hosted.exact-head",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "path": "src/main/native/MetallumNative.swift",
+      "expected_changed_components": [
+        "native.execution"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance",
+        "hosted.exact-head",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/terrain/TerrainSchedulingController.java",
+      "expected_changed_components": [
+        "terrain.scene"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/client/validation/contract/RenderContractCore.java",
+      "expected_changed_components": [
+        "validation.contract"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "path": "scripts/agent/context.py",
+      "expected_changed_components": [
+        "evaluation.control"
+      ],
+      "must_execute": [
+        "repo.static",
+        "hosted.exact-head"
+      ]
+    },
+    {
+      "path": "src/main/java/com/metallum/mixin/ExampleMixin.java",
+      "expected_changed_components": [
+        "product.semantics"
+      ],
+      "must_execute": [
+        "repo.static",
+        "minecraft.conformance"
+      ]
+    }
+  ],
+  "task_cases": [
+    {
+      "task": "Iris BSL shader semantic divergence",
+      "expected_any_primary": [
+        "product.semantics",
+        "validation.contract"
+      ]
+    },
+    {
+      "task": "Swift FFM ABI bridge symbol",
+      "expected_any_primary": [
+        "native.abi",
+        "native.execution"
+      ]
+    },
+    {
+      "task": "Optimize proof planner performance and reduce CI cost",
+      "files": [
+        "scripts/agent/context.py"
+      ],
+      "expected_claim": "control"
+    }
+  ],
+  "execution_cases": [
+    {
+      "components": [
+        "render.execution"
+      ],
+      "claim": "performance",
+      "must_execute": [
+        "repo.static",
+        "hosted.exact-head",
+        "minecraft.e2e",
+        "performance.paired"
+      ],
+      "must_not_execute": [
+        "agent.control",
+        "render.synthetic",
+        "render.gpu",
+        "minecraft.conformance"
+      ]
+    }
+  ]
+}
