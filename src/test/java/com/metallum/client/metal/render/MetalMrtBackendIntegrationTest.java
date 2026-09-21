@@ -94,6 +94,9 @@ final class MetalMrtBackendIntegrationTest {
             device.waitForSubmittedGpuWork();
             assertEquals(1, MetalNativeBridge.metallum_metal4_main_renderer_enable(nativeDevice, MemorySegment.NULL),
                     "the shipping offscreen MTL4 command queue must activate");
+            if (Boolean.getBoolean("metallum.opt.asyncPresent")) {
+                assertTrue(MetalNativeBridge.configureMetal4AsyncPresentation(true));
+            }
         }
     }
 
@@ -101,6 +104,14 @@ final class MetalMrtBackendIntegrationTest {
     void closeDevice() {
         MetalFxManager.close();
         if (device != null) {
+            if (Boolean.getBoolean("metallum.opt.asyncPresent")) {
+                device.waitForSubmittedGpuWork();
+                long[] stats = MetalNativeBridge.metal4AsyncPresentationStats();
+                assertEquals(1, stats[0]);
+                assertEquals(stats[1], stats[2]);
+                assertEquals(0, stats[3]);
+                assertTrue(MetalNativeBridge.configureMetal4AsyncPresentation(false));
+            }
             device.close();
         }
     }

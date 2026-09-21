@@ -30,6 +30,8 @@ def main():
                         help="Enable Vanilla renderDebugLabels for diagnostic pass attribution")
     parser.add_argument("--presentation-metrics", action="store_true",
                         help="Sample native drawable wait once per frame; diagnostic, excluded from timing trials")
+    parser.add_argument("--async-present", action="store_true",
+                        help="Test bounded Metal 4 presentation/submission on a serial native worker")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
     args = parser.parse_args()
@@ -37,6 +39,8 @@ def main():
         parser.error("--capture-seconds must be between 1 and 120")
     if args.metrics_only and args.render_labels:
         parser.error("render labels are diagnostic-only; omit them for timing trials")
+    if args.async_present and args.presentation_metrics:
+        parser.error("latest drawable wait cannot be assigned to the current source frame with async presentation")
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -61,6 +65,7 @@ def main():
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
+               f"-PasyncPresent={str(args.async_present).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
@@ -80,6 +85,7 @@ def main():
                "captureSeconds": None if args.metrics_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
+               "asyncPresentation": args.async_present,
                "display": main_display,
                "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}

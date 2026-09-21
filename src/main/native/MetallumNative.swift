@@ -902,6 +902,7 @@ private final class Metal4MainCommandBufferLease {
     private var startTime = 0.0
     private var endTime = 0.0
     fileprivate var presentDrawable: CAMetalDrawable?
+    fileprivate var pendingPresentation: (layer: CAMetalLayer, source: MTLTexture)?
     fileprivate var presentationTelemetryID: UInt64?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
@@ -1051,6 +1052,34 @@ private final class Metal4MainQueueContext {
     private var begunCount: UInt64 = 0
     private var submittedCount: UInt64 = 0
 
+    // Opt-in transport change, admitted by Java at the terminal present boundary.
+    // The existing three slots bound queued work; the GPU queue and submission
+    // order remain unchanged, including command buffers without a drawable.
+    private var presentationQueue: DispatchQueue?
+    var asyncPresentationEnabled: Bool { presentationQueue != nil }
+    private var asyncQueued: UInt64 = 0
+    private var asyncCompleted: UInt64 = 0
+    private var asyncFailed: UInt64 = 0
+
+    func configureAsyncPresentation(_ enabled: Bool) -> Bool {
+        slotCondition.lock()
+        defer { slotCondition.unlock() }
+        guard slots.allSatisfy({ $0.state == .free }) else { return false }
+        presentationQueue = enabled
+            ? DispatchQueue(label: "com.metallum.main-presentation", qos: .userInteractive) : nil
+        return true
+    }
+
+    func drainPresentationEncoding() {
+        presentationQueue?.sync {}
+    }
+
+    func asyncPresentationStats() -> (UInt64, UInt64, UInt64) {
+        slotCondition.lock()
+        defer { slotCondition.unlock() }
+        return (asyncQueued, asyncCompleted, asyncFailed)
+    }
+
     init?(_ device: MTLDevice, layer: CAMetalLayer?) {
         guard let residencySet = NativeState.residencySetStorage as? MTLResidencySet else {
             NSLog("[metallum] Metal 4 main renderer requires the global residency set")
@@ -1186,13 +1215,52 @@ private final class Metal4MainQueueContext {
             return
         }
         slots[lease.slotIndex].state = .submitted
-        submittedCount += 1
+        if presentationQueue != nil { asyncQueued += 1 }
         slotCondition.unlock()
+        lease.markSubmitted()
+        if let presentationQueue {
+            presentationQueue.async { [self, lease] in
+                autoreleasepool { submitToGpu(lease, signal: semaphore) }
+            }
+        } else {
+            submitToGpu(lease, signal: semaphore)
+        }
+    }
+
+    private func complete(_ lease: Metal4MainCommandBufferLease, signal semaphore: DispatchSemaphore?,
+                          error: Error?, start: CFTimeInterval, end: CFTimeInterval) {
+        slotCondition.lock()
+        slots[lease.slotIndex].state = .free
+        if presentationQueue != nil {
+            if error == nil { asyncCompleted += 1 } else { asyncFailed += 1 }
+        }
+        // Publish retirement and counters before waking a lease waiter that
+        // may immediately tear down the surface or inspect completion stats.
+        let handlers = lease.markCompleted(error: error, gpuStartTime: start, gpuEndTime: end)
+        slotCondition.broadcast()
+        slotCondition.unlock()
+        semaphore?.signal()
+        for handler in handlers { handler(error, start, end) }
+    }
+
+    private func submitToGpu(_ lease: Metal4MainCommandBufferLease, signal semaphore: DispatchSemaphore?) {
+        if let request = lease.pendingPresentation {
+            lease.pendingPresentation = nil
+            _ = encodePresentTextureToDrawable(Unmanaged.passUnretained(lease).toOpaque(),
+                    request.layer, request.source, nil, allowDeferral: false)
+            guard lease.presentDrawable != nil else {
+                lease.commandBuffer.endCommandBuffer()
+                complete(lease, signal: semaphore,
+                         error: NSError(domain: "Metallum.Presentation", code: 1,
+                                        userInfo: [NSLocalizedDescriptionKey: "Deferred drawable encoding failed"]),
+                         start: 0, end: 0)
+                return
+            }
+        }
 
         residencyFlushBeforeSubmit()
         let commandBuffer = slots[lease.slotIndex].commandBuffer
         commandBuffer.endCommandBuffer()
-        lease.markSubmitted()
         if let drawable = lease.presentDrawable,
            lease.presentationTelemetryID == nil {
             // Metal 4 does not arrange the drawable present until this submit
@@ -1206,25 +1274,15 @@ private final class Metal4MainQueueContext {
             if let presentationTelemetryID, feedback.error != nil {
                 NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
             }
-            let completionHandlers = lease.markCompleted(
-                error: feedback.error,
-                gpuStartTime: feedback.gpuStartTime,
-                gpuEndTime: feedback.gpuEndTime
-            )
-            self.slotCondition.lock()
-            self.slots[lease.slotIndex].state = .free
-            self.slotCondition.broadcast()
-            self.slotCondition.unlock()
-            semaphore?.signal()
-            // A completion callback may start encoding the next unit of work.
-            // Run it only after the completed slot is visible to acquire.
-            for handler in completionHandlers {
-                handler(feedback.error, feedback.gpuStartTime, feedback.gpuEndTime)
-            }
+            self.complete(lease, signal: semaphore, error: feedback.error,
+                          start: feedback.gpuStartTime, end: feedback.gpuEndTime)
         }
         if let drawable = lease.presentDrawable {
             queue.waitForDrawable(drawable)
         }
+        slotCondition.lock()
+        submittedCount += 1
+        slotCondition.unlock()
         queue.commit([commandBuffer], options: options)
         for (event, value) in lease.postCommitSignals {
             queue.signalEvent(event, value: value)
@@ -8572,6 +8630,35 @@ public func metallum_metal4_main_renderer_stats(
     return 1
 }
 
+// Java opts in only when it can seal the command buffer at ordinary present.
+// An older Java/native pair therefore keeps synchronous presentation.
+@_cdecl("metallum_metal4_async_present_configure_v1")
+public func metallum_metal4_async_present_configure_v1(_ enabled: Int32) -> Int32 {
+    #if os(macOS)
+    guard #available(macOS 26.0, *),
+          let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else { return 0 }
+    context.drainPresentationEncoding()
+    return context.configureAsyncPresentation(enabled != 0) ? 1 : 0
+    #else
+    return 0
+    #endif
+}
+
+@_cdecl("metallum_metal4_async_present_stats_v1")
+public func metallum_metal4_async_present_stats_v1(
+    _ queued: UnsafeMutablePointer<UInt64>?,
+    _ completed: UnsafeMutablePointer<UInt64>?,
+    _ failed: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *),
+          let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else { return 0 }
+    let values = context.asyncPresentationStats()
+    queued?.pointee = values.0
+    completed?.pointee = values.1
+    failed?.pointee = values.2
+    return context.asyncPresentationEnabled ? 1 : 0
+}
+
 /// Bounded diagnostic for the shipping MTL4 upload/copy barrier path. The
 /// existing Java ABI deliberately remains unchanged; native regression tests
 /// can use this counter to prove that the encoded dependency was exercised.
@@ -12589,6 +12676,10 @@ public func metallum_MTLRenderCommandEncoder_clearDraw(
 
 @_cdecl("metallum_configure_layer")
 public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ height: Double, _ immediatePresentMode: Int32) {
+    if #available(macOS 26.0, iOS 26.0, *),
+       let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext {
+        context.drainPresentationEncoding()
+    }
     // The present shader writes display-referred sRGB code values into a plain UNORM drawable.
     // Tag those values for Core Animation color matching without selecting an _srgb attachment,
     // which would apply an additional linear-to-sRGB conversion on render writes.
@@ -12651,8 +12742,15 @@ private func encodePresentTextureToDrawable(
     _ pointer: UnsafeMutableRawPointer,
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
-    _ globalFence: MTLFence?
+    _ globalFence: MTLFence?,
+    allowDeferral: Bool = true
 ) -> Int64 {
+    if allowDeferral, #available(macOS 26.0, iOS 26.0, *),
+       let lease = metal4MainLease(pointer), lease.owner.asyncPresentationEnabled {
+        precondition(lease.pendingPresentation == nil, "A terminal present must seal its command buffer")
+        lease.pendingPresentation = (layer, sourceTexture)
+        return 0
+    }
     return autoreleasepool {
         let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
         let nextDrawable = layer.nextDrawable()

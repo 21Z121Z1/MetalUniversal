@@ -54,6 +54,7 @@ configurations {
 }
 
 tasks.withType(Test).configureEach {
+	systemProperty "metallum.opt.asyncPresent", providers.gradleProperty("metallum.opt.asyncPresent").orElse("false").get()
 	systemProperty "metallum.opt.reuseEncoderState", providers.gradleProperty("metallum.opt.reuseEncoderState").orElse("false").get()
 	if (noOptionalRenderMods) {
 		systemProperty "metallum.test.noOptionalMods", "true"

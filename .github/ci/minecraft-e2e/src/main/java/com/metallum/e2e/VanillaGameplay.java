@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.minecraft.core.BlockPos;
@@ -24,6 +25,7 @@ public final class VanillaGameplay {
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
     private static final int NATIVE_HEIGHT = Integer.getInteger("metallum.ci.nativeHeight", 0);
     private static final boolean PRESENTATION_METRICS = Boolean.getBoolean("metallum.ci.presentationMetrics");
+    private static final boolean ASYNC_PRESENT = Boolean.getBoolean("metallum.opt.asyncPresent");
     // Test-only bounded timestamps, with an opt-in scalar native wait getter.
     // No GPU readback or per-frame allocation.
     private static final long[] FRAME_TIMES = new long[131_072];
@@ -113,8 +115,8 @@ public final class VanillaGameplay {
         report.addProperty("reuseEncoderState", Boolean.getBoolean("metallum.opt.reuseEncoderState"));
         int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
         report.addProperty("initialVisibleSections", initialVisibleSections);
-        long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-        require(initialMetal4[0] == 1, "Gameplay profiling requires an active Metal 4 main renderer");
+        require(context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats()[0]) == 1,
+                "Gameplay profiling requires an active Metal 4 main renderer");
         report.addProperty("metal4MainRendererActive", true);
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
@@ -122,12 +124,18 @@ public final class VanillaGameplay {
             // The launcher releases this only after Instruments signals recording started.
             context.waitFor(client -> Files.exists(output.resolve("profiler-started")), 1200);
         }
-        context.runOnClient(client -> {
+        long[] initialMetal4 = context.computeOnClient(client -> {
+            awaitSubmittedWork();
+            long[] nativeStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+            if (ASYNC_PRESENT) {
+                require(MetalNativeBridge.metal4AsyncPresentationStats()[0] == 1, "Async presentation did not activate");
+            }
             frameCount = invalidSettingsFrames = throttledFrames = droppedSamples = 0;
             drawableWaitNanos = 0;
             drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
             recordingFrames = true;
+            return nativeStats;
         });
         try {
             phase(context, output, report, phases, "flight-new-chunks");
@@ -205,11 +213,30 @@ public final class VanillaGameplay {
                 context.waitTicks(30);
             }
             report.addProperty("status", "completed");
-            long[] finalMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-            require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
-                    "Metal 4 did not submit work during gameplay");
-            report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
-            report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
+            context.runOnClient(client -> {
+                report.add("sourceFrames", finishFrames());
+                long drainStart = System.nanoTime();
+                awaitSubmittedWork();
+                report.addProperty("finalGpuDrainNanos", System.nanoTime() - drainStart);
+                long[] finalMetal4 = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+                require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
+                        "Metal 4 did not submit work during gameplay");
+                long submissions = finalMetal4[2] - initialMetal4[2];
+                report.addProperty("metal4Submissions", submissions);
+                require(Math.abs(submissions - frameCount) <= 3,
+                        "Source frames must correspond to native submissions, allowing only boundary work");
+                if (ASYNC_PRESENT) {
+                    long[] async = MetalNativeBridge.metal4AsyncPresentationStats();
+                    require(async[0] == 1 && async[1] == async[2] && async[3] == 0,
+                            "Async submissions were not all completed successfully");
+                    JsonObject evidence = new JsonObject();
+                    evidence.addProperty("queued", async[1]);
+                    evidence.addProperty("gpuCompleted", async[2]);
+                    evidence.addProperty("failed", async[3]);
+                    evidence.addProperty("maxInFlight", 3);
+                    report.add("asyncPresentation", evidence);
+                }
+            });
             JsonObject finalSettings = context.computeOnClient(VanillaGameplay::settings);
             report.add("finalSettings", finalSettings);
             require(settings.equals(finalSettings), "Rendering settings changed during the route");
@@ -283,6 +310,12 @@ public final class VanillaGameplay {
         value.addProperty("vsync", client.options.enableVsync().get());
         value.addProperty("fpsLimitOption", client.options.framerateLimit().get());
         return value;
+    }
+
+    private static void awaitSubmittedWork() {
+        try (var fence = RenderSystem.getDevice().createCommandEncoder().createFence()) {
+            require(fence.awaitCompletion(-1L), "GPU submissions did not complete");
+        }
     }
 
     private static JsonObject finishFrames() {

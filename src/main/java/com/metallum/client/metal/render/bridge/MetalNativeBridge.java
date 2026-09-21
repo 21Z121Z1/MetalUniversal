@@ -800,6 +800,8 @@ public final class MetalNativeBridge {
             metal4MainQueuePilotValidate = downcall(lookup, "metallum_metal4_main_queue_pilot_validate", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metal4MainRendererEnable = downcall(lookup, "metallum_metal4_main_renderer_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            metal4AsyncPresentConfigure = optionalDowncall(lookup, "metallum_metal4_async_present_configure_v1", FunctionDescriptor.of(INT, INT));
+            metal4AsyncPresentStats = optionalDowncall(lookup, "metallum_metal4_async_present_stats_v1", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
@@ -1218,6 +1220,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metal4MainQueuePilotValidate;
     private static final MethodHandle metal4MainRendererEnable;
     private static final MethodHandle metal4MainRendererStats;
+    private static final MethodHandle metal4AsyncPresentConfigure;
+    private static final MethodHandle metal4AsyncPresentStats;
     private static final MethodHandle metal4MetalFxStats;
     private static final MethodHandle setMetal4CompilerEnabled;
     @Nullable
@@ -3689,6 +3693,27 @@ public final class MetalNativeBridge {
             return (int) metal4MainQueuePilotValidate.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_main_queue_pilot_validate", throwable);
+        }
+    }
+
+    public static boolean configureMetal4AsyncPresentation(boolean enabled) {
+        if (metal4AsyncPresentConfigure == null) return false;
+        try {
+            return (int) metal4AsyncPresentConfigure.invokeExact(enabled ? 1 : 0) == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal4_async_present_configure_v1", throwable);
+        }
+    }
+
+    public static long[] metal4AsyncPresentationStats() {
+        if (metal4AsyncPresentStats == null) return new long[]{-1, 0, 0, 0};
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment values = arena.allocate(3L * Long.BYTES, Long.BYTES);
+            int active = (int) metal4AsyncPresentStats.invokeExact(values,
+                    values.asSlice(Long.BYTES), values.asSlice(2L * Long.BYTES));
+            return new long[]{active, values.get(LONG, 0), values.get(LONG, Long.BYTES), values.get(LONG, 2L * Long.BYTES)};
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal4_async_present_stats_v1", throwable);
         }
     }
 
