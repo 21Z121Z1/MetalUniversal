@@ -152,12 +152,18 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
                 "packaged window lacks matching native build provenance")
     require(not require_comparable or delivery["comparisonEligibility"]["eligible"],
             "comparison prerequisites unavailable: " + ", ".join(delivery["comparisonEligibility"]["reasons"]))
+    abi_crossings = summary(crossings)
+    abi_exclusive = summary(abi_time)
+    if mode == "timing":
+        # Empty instrumentation is missing measurement, not zero native work.
+        abi_crossings = {**summary([]), "unavailableReason": "timing-mode-does-not-instrument-ABI"}
+        abi_exclusive = dict(abi_crossings)
     return {"status": "valid-observation-no-performance-decision", "sourceSha": expected_head,
             "instrumentationMode": mode, "frameDelivery": delivery,
             "legacyDiagnosticScope": "renderLevel scopes including nested scopes; CPU and GPU service are not presentation",
             "packagedJavaIdentity": packaged, "worldFrames": len(cpu),
-            "cpuFrameNs": summary(cpu), "renderThreadAbiCrossings": summary(crossings),
-            "renderThreadAbiExclusiveNs": summary(abi_time), "commandBufferGpuServiceNs": summary(gpu_service),
+            "cpuFrameNs": summary(cpu), "renderThreadAbiCrossings": abi_crossings,
+            "renderThreadAbiExclusiveNs": abi_exclusive, "commandBufferGpuServiceNs": summary(gpu_service),
             "unavailable": report["unavailable"]}
 
 
@@ -472,6 +478,10 @@ def self_test():
     assert abs(delivery["actualPresentEventSpanRateHz"] - 50) < .00001
     assert delivery["presentIntervalNs"]["p99.9"] is None
     assert delivery["physicalPerformanceAcceptance"] == "unverified"
+    timing = verify(windowed, head)
+    assert timing["renderThreadAbiCrossings"]["samples"] == 0
+    assert timing["renderThreadAbiExclusiveNs"]["p50"] is None
+    assert timing["renderThreadAbiCrossings"]["unavailableReason"] == "timing-mode-does-not-instrument-ABI"
     missing = copy.deepcopy(windowed)
     missing["frames"][1]["commandBuffers"][0].update(presentedTimeSeconds=None,
                                                     presentedUnavailableReason="callback-pending-at-export")
