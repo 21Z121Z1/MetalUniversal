@@ -1,0 +1,127 @@
+name: Agent integrate morning Metal modernization
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: "github.event.head_commit.message == 'chore(agent): integrate morning Metal modernization'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 32
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Guard source commit and current motion ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git log -1 --format=%s HEAD)" = "chore(agent): integrate morning Metal modernization"
+          git fetch --no-tags origin codex/metal-modernization-20260908
+          test "$(git rev-parse FETCH_HEAD)" = "70b8420fc946836f249c03e832c444fa10ae4af8"
+          git merge-base --is-ancestor 8ec91521be1b43d28ddec5fb1421e8aaf53f1359 HEAD
+
+      - name: Apply exact morning optimization commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git cherry-pick 70b8420fc946836f249c03e832c444fa10ae4af8
+
+      - name: Restore ShaderSource serialization boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java')
+          text = p.read_text()
+          old = '''        String rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);\n        String rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);\n'''
+          new = '''        // ShaderSource is a Minecraft functional interface with no concurrency contract.\n        // Some real callers close over ResourceProvider and open readers from get(); keep only\n        // hashing/disk JSON lookup parallel while serializing source acquisition per source object.\n        final String rawVertex;\n        final String rawFragment;\n        synchronized (shaderSource) {\n            rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);\n            rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);\n        }\n'''
+          if text.count(old) != 1:
+              raise SystemExit('MetalCrossShaderCompiler ShaderSource anchor changed')
+          p.write_text(text.replace(old, new, 1))
+
+          test = Path('src/test/java/com/metallum/client/metal/render/MetalPsoArtifactPrewarmContractTest.java')
+          t = test.read_text()
+          old_test = '''        int lookup = device.indexOf("MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource)");\n'''
+          new_test = '''        assertTrue(compiler.contains("synchronized (shaderSource)"));\n        assertTrue(compiler.contains("rawVertex = shaderSource.get"));\n        assertTrue(compiler.contains("rawFragment = shaderSource.get"));\n\n        int lookup = device.indexOf("MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource)");\n'''
+          if t.count(old_test) != 1:
+              raise SystemExit('MetalPsoArtifactPrewarmContractTest anchor changed')
+          test.write_text(t.replace(old_test, new_test, 1))
+          PY
+          git diff --check
+
+      - name: Verify pinned Minecraft ShaderSource contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/com/mojang/blaze3d/shaders/ShaderSource.java" -o /tmp/ShaderSource.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/GameRenderer.java" -o /tmp/GameRenderer.java
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('/tmp/ShaderSource.java').read_text()
+          renderer = Path('/tmp/GameRenderer.java').read_text()
+          for needle in [
+              '@FunctionalInterface',
+              'public interface ShaderSource',
+              'public @Nullable String get(Identifier var1, ShaderType var2);',
+          ]:
+              if needle not in source:
+                  raise SystemExit(f'Minecraft 26.2 ShaderSource contract changed: {needle}')
+          for needle in [
+              'ShaderSource shaderSource = (id, type) -> {',
+              'resourceProvider.getResourceOrThrow(location).openAsReader()',
+              'device.precompilePipeline(RenderPipelines.GUI, shaderSource);',
+          ]:
+              if needle not in renderer:
+                  raise SystemExit(f'Minecraft 26.2 UI shader-source contract changed: {needle}')
+          print('Pinned Minecraft 26.2 ShaderSource concurrency boundary: PASS')
+          PY
+
+      - name: Compile and test combined modernization plus motion branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalPsoArtifactPrewarmContractTest' \
+            --tests 'com.metallum.client.metal.render.MetalParticleBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify integration semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'prewarmLookupExecutor' src/main/java/com/metallum/client/metal/render/MetalDevice.java
+          grep -F 'synchronized (shaderSource)' src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java
+          grep -F 'IrisMetalPipelineOverrides.tryCompile' src/main/java/com/metallum/client/metal/render/MetalDevice.java
+          grep -F 'MetalFxMotionTelemetry' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'PARTICLE("core/particle_previous_motion"' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+
+      - name: Commit and push validated integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'fix(metal): serialize ShaderSource reads during parallel artifact prewarm'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2

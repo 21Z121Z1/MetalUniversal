@@ -1,0 +1,103 @@
+name: Agent MetalFX semantic contracts 20260911
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  semantic_contracts:
+    if: "github.event.head_commit.message == 'chore(agent): execute MetalFX semantic contracts v5'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 32
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Prove Minecraft 26.2 ItemStack lifetime contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262/net/minecraft/world/item/ItemStack.java'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$URL" -o /tmp/ItemStack.java
+          grep -F 'public static boolean matches(ItemStack a, ItemStack b)' /tmp/ItemStack.java
+          grep -F 'if (a.getCount() != b.getCount())' /tmp/ItemStack.java
+          grep -F 'return ItemStack.isSameItemSameComponents(a, b);' /tmp/ItemStack.java
+
+      - name: Apply bounded runtime patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_metalfx_semantic_contracts_20260911_v2.py
+
+      - name: Preserve production fail-closed gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(grep -Fc 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 2
+          ! grep -Fq 'descriptor.isAutoExposureEnabled = false' src/main/native/MetallumNative.swift
+          grep -Fq 'private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -Fq 'UNPROVEN_RGBA8_UNORM_SRGB_VIEW' src/main/java/com/metallum/client/metal/render/FrameSynthesisContract.java
+          grep -Fq 'MetalSyntheticExactMotion.beginFirstPerson(hand, itemStack);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+
+      - name: Compile product Java and JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon compileJava compileTestJava jar
+
+      - name: Run focused semantic tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon test \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxTemporalExposureContractTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+
+      - name: Remove one-shot semantic-contract scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/agent-metalfx-semantic-contracts-20260910.yml \
+            .github/scripts/apply_metalfx_semantic_contracts_20260910.py \
+            .github/scripts/apply_metalfx_semantic_contracts_20260910_v2.py \
+            .github/scripts/apply_metalfx_semantic_contracts_20260911.py \
+            .github/scripts/apply_metalfx_semantic_contracts_20260911_v2.py \
+            .github/agent-triggers/metalfx-semantic-contracts-20260910 \
+            .github/agent-triggers/metalfx-semantic-contracts-20260911 \
+            .github/agent-triggers/metalfx-semantic-contracts-20260911-v2 \
+            .github/agent-triggers/metalfx-semantic-contracts-registered-20260910 \
+            .github/agent-triggers/metalfx-semantic-contracts-registered-20260910-v2
+
+      - name: Commit verified runtime changes only
+        shell: bash
+        env:
+          BRANCH: agent/metalfx-motion-coverage-26.2
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git diff --cached -- src/main/native/MetallumNative.swift \
+            src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java \
+            src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java \
+            src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
+            src/test/java/com/metallum/client/metal/render/MetalSyntheticExactMotionTest.java \
+            src/test/java/com/metallum/client/metal/render/MetalFxTemporalExposureContractTest.java
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(metalfx): close exposure and first-person lifetime contracts'
+          git push origin "HEAD:${BRANCH}"

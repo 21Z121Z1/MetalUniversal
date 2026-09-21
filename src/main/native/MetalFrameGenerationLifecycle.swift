@@ -1,5 +1,49 @@
 import Foundation
 
+/// CPU reference for bounded Frame Generation input resampling.
+///
+/// The GPU pass uses the same candidate order (base, +x, +y, diagonal) and
+/// strict-greater comparison. This keeps depth and motion paired even when a
+/// footprint straddles an occlusion edge, and makes tie-breaking independently
+/// testable without relying on Metal readback.
+struct MetalFxBoundedInputCandidate: Equatable {
+    let sourceIndex: Int
+    let depth: Float
+    let motion: SIMD2<Float>
+}
+
+enum MetalFxBoundedInputOracle {
+    static func chooseReversedZ(
+        _ candidates: [MetalFxBoundedInputCandidate]
+    ) -> MetalFxBoundedInputCandidate? {
+        guard var best = candidates.first else { return nil }
+        for candidate in candidates.dropFirst() {
+            guard candidate.depth.isFinite else { continue }
+            if !best.depth.isFinite || candidate.depth > best.depth {
+                best = candidate
+            }
+        }
+        return best
+    }
+}
+
+
+/// Telemetry state for the scaler passed to a FrameInterpolator descriptor.
+/// A linked state is only reported after the factory accepted descriptor.scaler.
+enum MetalFxFrameInterpolatorScalerLinkStatus: Int32, Equatable {
+    case unavailable = 0
+    case metal3Linked = 1
+    case metal4Linked = 2
+    case metal3Standalone = 3
+    case metal3LinkRejected = 4
+    case metal4Standalone = 5
+    case metal4LinkRejected = 6
+
+    var isLinked: Bool {
+        self == .metal3Linked || self == .metal4Linked
+    }
+}
+
 enum MetalFrameGenerationAdmissionDecision: Equatable {
     case wait(until: CFTimeInterval)
     case supersede

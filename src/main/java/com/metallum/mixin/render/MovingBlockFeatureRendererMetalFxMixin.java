@@ -56,8 +56,12 @@ public abstract class MovingBlockFeatureRendererMetalFxMixin {
             final long seed,
             final Operation<Void> original
     ) {
-        // The level argument is the submit's MovingBlockRenderState, which is the
-        // key the submit constructor recorded the owner under.
+        // Falling blocks inherit an entity Sample through MovingBlockSubmitMetalFxMixin and already
+        // replay exact staged block geometry under the previous/current entity transform. Pistons and
+        // other non-entity moving blocks do not; reject frame interpolation instead of inventing motion.
+        if (!MetalEntityMotionCapture.hasMovingBlockOwner(level)) {
+            com.metallum.client.metal.render.MetalFxManager.observeUnownedMovingBlockMotion();
+        }
         MetalEntityMotionCapture.beginMovingBlockBuild(level);
         try {
             original.call(blockRenderer, output, x, y, z, level, pos, blockState, model, seed);

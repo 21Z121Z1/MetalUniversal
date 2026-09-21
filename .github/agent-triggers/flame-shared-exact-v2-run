@@ -1,0 +1,1 @@
+Run pinned Minecraft 26.2 Flame source-contract verification, apply the per-submit-span synthetic exact batch patch, compile, run exact-motion contracts, build the jar, verify fail-closed wiring, and only then push runtime files.

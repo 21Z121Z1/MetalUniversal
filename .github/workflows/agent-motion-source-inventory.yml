@@ -1,0 +1,177 @@
+name: Agent Minecraft 26.2 motion producer inventory
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: "github.event.head_commit.message == 'chore(agent): inventory Minecraft 26.2 motion producers'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Generate SHA-verified Minecraft 26.2 source reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+      - name: Inventory entity state coverage and scene submit producers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import json, re, sys
+
+          root = Path(sys.argv[1])
+          state_dir = root / 'net/minecraft/client/renderer/entity/state'
+          renderer_dir = root / 'net/minecraft/client/renderer/entity'
+
+          decl = re.compile(r'public\s+(?:(abstract)\s+)?class\s+(\w+)(?:<[^>{}]*>)?\s+extends\s+([\w.$]+)')
+          parents = {}
+          abstract = set()
+          source_path = {}
+          for p in sorted(state_dir.glob('*.java')):
+              text = p.read_text(errors='replace')
+              m = decl.search(text)
+              if not m:
+                  continue
+              is_abs, name, parent = m.groups()
+              parent = parent.split('.')[-1]
+              parents[name] = parent
+              source_path[name] = str(p.relative_to(root))
+              if is_abs:
+                  abstract.add(name)
+
+          def ancestry(name):
+              out=[]; seen=set()
+              while name in parents and name not in seen:
+                  seen.add(name); parent=parents[name]; out.append(parent); name=parent
+              return out
+
+          covered_bases = [
+              'LivingEntityRenderState', 'BoatRenderState', 'ItemEntityRenderState',
+              'MinecartRenderState', 'ArrowRenderState', 'FallingBlockRenderState',
+              'DisplayEntityRenderState'
+          ]
+          def coverage(name):
+              chain = [name] + ancestry(name)
+              for base in covered_bases:
+                  if base in chain:
+                      return base
+              return None
+
+          # Actual renderer factories are stronger evidence than merely existing state classes.
+          factories = {}
+          return_new = re.compile(r'return\s+new\s+(\w+RenderState)\s*\(')
+          for p in sorted(renderer_dir.rglob('*Renderer.java')):
+              if '/state/' in str(p).replace('\\','/'):
+                  continue
+              text = p.read_text(errors='replace')
+              states = sorted(set(return_new.findall(text)))
+              if states:
+                  factories[str(p.relative_to(root))] = states
+
+          actual_states = sorted({s for v in factories.values() for s in v})
+          unknown_actual = []
+          for s in actual_states:
+              if coverage(s) is None:
+                  unknown_actual.append({
+                      'state': s,
+                      'parent': parents.get(s),
+                      'ancestry': ancestry(s),
+                      'renderers': [p for p, states in factories.items() if s in states]
+                  })
+
+          all_concrete_unknown = []
+          for s in sorted(parents):
+              if s in abstract or s == 'EntityRenderState':
+                  continue
+              if 'EntityRenderState' not in ancestry(s) and parents.get(s) != 'EntityRenderState':
+                  continue
+              if coverage(s) is None:
+                  all_concrete_unknown.append({
+                      'state': s, 'parent': parents.get(s), 'ancestry': ancestry(s)
+                  })
+
+          ordered = (root/'net/minecraft/client/renderer/OrderedSubmitNodeCollector.java').read_text(errors='replace')
+          method_re = re.compile(r'\n\s*(?:default\s+)?public\s+(?:<[^>]+>\s+)?(?:void|[\w.$<>?, ]+)\s+(submit\w+)\s*\(([^;{]*)\)')
+          submit_methods=[]
+          for name,args in method_re.findall(ordered):
+              submit_methods.append({'method':name,'args':' '.join(args.split())})
+
+          collection = (root/'net/minecraft/client/renderer/SubmitNodeCollection.java').read_text(errors='replace')
+          submit_impl={}
+          for method in submit_methods:
+              name=method['method']
+              idx=collection.find(' '+name+'(')
+              if idx < 0: continue
+              body=collection[idx:idx+1800]
+              features=sorted(set(re.findall(r'new\s+(\w+(?:FeatureRenderer)?\.Submit)', body)))
+              phase_refs=sorted(set(re.findall(r'this\.(\w+)\.submit\(', body)))
+              submit_impl[name]={'featureSubmits':features,'phaseRefs':phase_refs[:12]}
+
+          level_state_dir = root/'net/minecraft/client/renderer/state/level'
+          level_states=[]
+          for p in sorted(level_state_dir.glob('*.java')):
+              text=p.read_text(errors='replace')
+              first=' '.join(text.split()[:120])
+              if ('RenderState' in p.name or 'Particle' in p.name) and any(k in text for k in [' submit(', 'buildLayer(', 'extract', 'VertexConsumer']):
+                  level_states.append(p.name)
+
+          print('=== METALLUM_MOTION_INVENTORY_JSON_BEGIN ===')
+          print(json.dumps({
+              'entityStateClassCount': len(parents),
+              'actualRendererStateCount': len(actual_states),
+              'actualRendererStates': [
+                  {'state':s,'coveredBy':coverage(s),'parent':parents.get(s),'ancestry':ancestry(s)}
+                  for s in actual_states
+              ],
+              'unknownActualRendererStates': unknown_actual,
+              'allConcreteUnknownEntityStates': all_concrete_unknown,
+              'submitMethods': submit_methods,
+              'submitImplementations': submit_impl,
+              'levelRenderStatesOfInterest': level_states,
+          }, indent=2, sort_keys=True))
+          print('=== METALLUM_MOTION_INVENTORY_JSON_END ===')
+          PY
+      - name: Scan level renderer for time-varying world producers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import json,re,sys
+          root=Path(sys.argv[1])
+          candidates=[]
+          patterns=('cloud','weather','rain','snow','sky','sun','moon','worldBorder','blockEntity','destroy','breaking','particle','entity')
+          for rel in [
+              'net/minecraft/client/renderer/LevelRenderer.java',
+              'net/minecraft/client/renderer/WeatherEffectRenderer.java',
+              'net/minecraft/client/renderer/CloudRenderer.java',
+              'net/minecraft/client/renderer/SkyRenderer.java',
+          ]:
+              p=root/rel
+              if not p.exists(): continue
+              text=p.read_text(errors='replace')
+              methods=[]
+              for m in re.finditer(r'(?:public|private|protected)\s+(?:static\s+)?[^\n{;]+\s+(\w+)\s*\([^;{]*\)\s*\{', text):
+                  name=m.group(1)
+                  if any(k.lower() in name.lower() for k in patterns):
+                      methods.append(name)
+              candidates.append({'file':rel,'motionRelevantMethods':sorted(set(methods))})
+          print('=== LEVEL_DYNAMIC_PRODUCERS_JSON_BEGIN ===')
+          print(json.dumps(candidates,indent=2))
+          print('=== LEVEL_DYNAMIC_PRODUCERS_JSON_END ===')
+          PY
