@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preserve only exact-version window/render-loop reference files for ownership review."""
+"""Preserve exact-version window, loop and shader-binding reference files."""
 import argparse
 import hashlib
 import json
@@ -7,7 +7,10 @@ from pathlib import Path
 import shutil
 
 NAMES = {"Minecraft.java", "Window.java", "RenderSystem.java", "Timer.java", "DeltaTracker.java",
-         "FramerateLimitTracker.java", "SdlWindow.java", "SDLWindow.java"}
+         "FramerateLimitTracker.java", "SdlWindow.java", "SDLWindow.java",
+         "PipelineBuilder.java", "SpvModule.java", "BindGroupLayout.java", "UniformType.java",
+         "BackendRenderPipeline.java", "FrontendRenderPipeline.java", "ShaderCompiler.java",
+         "ShaderSource.java", "RenderPipeline.java", "GpuBackend.java"}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
