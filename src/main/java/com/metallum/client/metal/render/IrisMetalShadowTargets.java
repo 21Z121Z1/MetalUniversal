@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.textures.AddressMode;
@@ -51,6 +52,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     private MetalGpuTexture shadowDepthNoTranslucents;
     private MetalGpuTextureView shadowDepthView;
     private MetalGpuTextureView shadowDepthNoTranslucentsView;
+    private @Nullable BorrowedRenderTarget terrainRenderTarget;
     private int resolution;
     private boolean closed;
 
@@ -228,6 +230,19 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.shadowDepthView = new MetalGpuTextureView(shadowDepth, 0, shadowDepth.getMipLevels());
         this.shadowDepthNoTranslucentsView = new MetalGpuTextureView(
                 shadowDepthNoTranslucents, 0, shadowDepthNoTranslucents.getMipLevels());
+        if (colorTargets.targetCount() > 0) {
+            this.terrainRenderTarget = new BorrowedRenderTarget(
+                    "iris-shadow-terrain",
+                    colorTargets.mainTexture(0),
+                    colorTargets.mainView(0),
+                    shadowDepth,
+                    shadowDepthView,
+                    newResolution,
+                    newResolution
+            );
+        } else {
+            this.terrainRenderTarget = null;
+        }
     }
 
     private static int mipLevels(final int extent, final boolean mipmapped) {
@@ -256,6 +271,19 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     MetalGpuTextureView shadowDepthNoTranslucentsView() {
         ensureOpen();
         return shadowDepthNoTranslucentsView;
+    }
+
+    /**
+     * Minecraft/Sodium compatibility target for shadow terrain submission.
+     * The object borrows the generation-owned Iris attachments; it does not
+     * allocate or own another color/depth texture.
+     */
+    RenderTarget terrainRenderTarget() {
+        ensureOpen();
+        if (terrainRenderTarget == null) {
+            throw new IllegalStateException("Iris shadow terrain requires shadowcolor0");
+        }
+        return terrainRenderTarget;
     }
 
     MetalGpuSampler depthSampler(final int index, final boolean comparison) {
@@ -288,6 +316,13 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         ensureOpen();
         int checked = checkColorIndex(index);
         return readsFromAlt.get(checked) ? colorAltViews[checked] : colorMainViews[checked];
+    }
+
+    /** Raw physical view for a shadow storage-image binding. */
+    MetalGpuTextureView storageView(final int index, final BitSet readsFromAlt) {
+        ensureOpen();
+        int checked = checkColorIndex(index);
+        return colorTargets.physicalView(checked, readsFromAlt.get(checked));
     }
 
     int resolution() {
@@ -511,6 +546,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
             return;
         }
         closed = true;
+        terrainRenderTarget = null;
         colorTargets.close();
         releaseDepthTextures();
         for (MetalGpuSampler sampler : colorSamplers) {
@@ -524,6 +560,47 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         }
         for (MetalGpuSampler sampler : depthCompareSamplers) {
             sampler.close();
+        }
+    }
+
+    /**
+     * A read-only Minecraft RenderTarget facade over Iris-owned shadow
+     * attachments. Sodium only needs its color/depth getters while opening a
+     * terrain pass; resize and destruction must never touch the borrowed GPU
+     * resources.
+     */
+    private static final class BorrowedRenderTarget extends RenderTarget {
+        private BorrowedRenderTarget(
+                final String label,
+                final MetalGpuTexture colorTexture,
+                final MetalGpuTextureView colorTextureView,
+                final MetalGpuTexture depthTexture,
+                final MetalGpuTextureView depthTextureView,
+                final int width,
+                final int height
+        ) {
+            super(label, true, colorTexture.getFormat());
+            this.width = width;
+            this.height = height;
+            this.colorTexture = colorTexture;
+            this.colorTextureView = colorTextureView;
+            this.depthTexture = depthTexture;
+            this.depthTextureView = depthTextureView;
+        }
+
+        @Override
+        public void resize(final int width, final int height) {
+            throw new UnsupportedOperationException("Iris shadow terrain target is generation-owned");
+        }
+
+        @Override
+        public void createBuffers(final int width, final int height) {
+            throw new UnsupportedOperationException("Iris shadow terrain target is generation-owned");
+        }
+
+        @Override
+        public void destroyBuffers() {
+            // The owning Iris shadow target set releases these resources.
         }
     }
 }

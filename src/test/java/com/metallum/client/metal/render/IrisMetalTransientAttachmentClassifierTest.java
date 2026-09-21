@@ -41,6 +41,39 @@ final class IrisMetalTransientAttachmentClassifierTest {
     }
 
     @Test
+    void admissionCarriesGenerationIdentityAndStableReason() {
+        var admission = IrisMetalTransientAttachmentClassifier.admitMemoryless(
+                IrisMetalOptimizationPlan.LoadAction.CLEAR,
+                IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
+                4,
+                lifetime(4, 4, 4, -1, "NONE"),
+                true
+        );
+        assertTrue(admission.admitted());
+        assertEquals(IrisMetalTransientAttachmentClassifier.Decision.ADMITTED, admission.decision());
+        assertEquals("allocation/7/generation/3/mip/0", admission.allocationKey());
+        assertEquals(7L, admission.allocationId());
+        assertEquals(3L, admission.allocationGeneration());
+        assertEquals("pass-local-lifetime", admission.reason());
+    }
+
+    @Test
+    void admissionRejectsUnknownGraphWithoutDroppingIdentity() {
+        var admission = IrisMetalTransientAttachmentClassifier.admitMemoryless(
+                IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
+                IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
+                1,
+                lifetime(1, 1, 1, -1, "NONE"),
+                false
+        );
+        assertFalse(admission.admitted());
+        assertEquals(IrisMetalTransientAttachmentClassifier.Decision.REJECTED, admission.decision());
+        assertEquals("graph-unresolved", admission.reason());
+        assertEquals(7L, admission.allocationId());
+        assertEquals(3L, admission.allocationGeneration());
+    }
+
+    @Test
     void loadStoreAndFutureConsumersStayPersistent() {
         assertEquals(
                 IrisMetalOptimizationPlan.LifetimeClassification.CONSERVATIVE_PERSISTENT,

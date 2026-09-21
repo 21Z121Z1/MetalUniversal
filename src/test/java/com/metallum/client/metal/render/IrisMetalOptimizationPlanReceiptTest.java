@@ -108,6 +108,26 @@ final class IrisMetalOptimizationPlanReceiptTest {
         assertTrue(IrisMetalExperimentalOptimizer.active() == null);
     }
 
+    @Test
+    void incompatibleAdjacentRenderAttachmentsAreSplitBeforeValidation() {
+        IrisMetalOptimizationPlan plan = buildPlan(List.of(
+                renderDescriptor("first", 0, "colortex0", "[0]"),
+                renderDescriptor("second", 1, "colortex1", "[1]")
+        ));
+
+        assertTrue(plan.renderMergeGroups().isEmpty());
+    }
+
+    @Test
+    void compatibleAdjacentRenderPassesRemainMergeable() {
+        IrisMetalOptimizationPlan plan = buildPlan(List.of(
+                renderDescriptor("first", 0, "colortex0", "[0]"),
+                renderDescriptor("second", 1, "colortex0", "[0]")
+        ));
+
+        assertEquals(1, plan.renderMergeGroups().size());
+    }
+
     private static IrisMetalOptimizationPlan buildPlan(
             final List<IrisMetalExperimentalOptimizer.PassDescriptor> descriptors
     ) {
@@ -148,6 +168,28 @@ final class IrisMetalOptimizationPlanReceiptTest {
                         IrisMetalOptimizationPlan.StoreAction.STORE
                 )),
                 "[0]"
+        );
+    }
+
+    private static IrisMetalExperimentalOptimizer.PassDescriptor renderDescriptor(
+            final String name,
+            final int ordinal,
+            final String resource,
+            final String attachmentKey
+    ) {
+        return new IrisMetalExperimentalOptimizer.PassDescriptor(
+                name,
+                IrisMetalExperimentalOptimizer.PassDescriptor.Kind.RENDER,
+                "COMPOSITE",
+                ordinal,
+                List.of(),
+                false,
+                List.of(new IrisMetalOptimizationPlan.AttachmentPolicy(
+                        resource,
+                        IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
+                        IrisMetalOptimizationPlan.StoreAction.STORE
+                )),
+                attachmentKey
         );
     }
 }

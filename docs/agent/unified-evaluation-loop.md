@@ -105,7 +105,8 @@ export METALLUM_EVAL_DISPLAY="<resolution, scale, refresh, HDR state>"
 export METALLUM_EVAL_POWER_STATE="<AC/battery and thermal preparation>"
 ```
 
-Source/native hashes, world, shader-pack/options, display mode and power state are part of trial identity.
+Source/native hashes, world, shader-pack/options, display mode and power state are part of trial identity. A run is not comparable when code/binary hashes, world, shader pack, options, resolution, render distance, display mode or power state differ.
+When `METALLUM_EVAL_SHADER_PACK_PATH` is supplied, the runner stages a content-addressed copy, temporarily pins `run/config/iris.properties` to it, and requires each client log to prove that exact pack was loaded. The original Iris configuration and any newly staged archive are restored/removed when the run exits.
 
 ## 5. Unified entry points
 

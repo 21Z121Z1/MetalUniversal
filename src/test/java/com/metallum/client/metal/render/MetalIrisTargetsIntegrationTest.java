@@ -236,6 +236,12 @@ final class MetalIrisTargetsIntegrationTest {
                 device, new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM}, 128);
              IrisMetalRenderTargets main = new IrisMetalRenderTargets(
                      device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT)) {
+            assertSame(shadow.colorTargets().mainView(0), shadow.terrainRenderTarget().getColorTextureView(),
+                    "Sodium shadow facade must expose Iris shadowcolor0 main");
+            assertSame(shadow.shadowDepthView(), shadow.terrainRenderTarget().getDepthTextureView(),
+                    "Sodium shadow facade must expose Iris shadow depth");
+            assertEquals(128, shadow.terrainRenderTarget().width);
+            assertEquals(128, shadow.terrainRenderTarget().height);
             registerConstantFragment("iris_main_red", "vec4(1.0, 0.0, 0.0, 1.0)");
             runColorPass(main, "iris_main_red", new int[]{0});
 
@@ -348,6 +354,30 @@ final class MetalIrisTargetsIntegrationTest {
             runColorPass(targets, "iris_resize_red", new int[]{0});
             color.flip(0);
             assertRgba(color.readTexture(0), 255, 0, 0, "post-resize render lands in fresh textures");
+        }
+    }
+
+    @Test
+    void resizeDiscardsDeferredClearsForRetiredTextures() {
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT)) {
+            MetalGpuTexture retired = targets.colorTargets().mainTexture(0);
+            encoder.clearColorTexture(retired, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F));
+            assertTrue(encoder.hasPendingClear(retired));
+
+            targets.resize(WIDTH * 2, HEIGHT * 2);
+
+            assertTrue(retired.isClosed(), "resize must retire the old texture");
+            assertFalse(
+                    encoder.hasPendingClear(retired),
+                    "retiring a texture must remove its deferred clear"
+            );
+            assertDoesNotThrow(() -> {
+                try (MetalComputePass ignored = encoder.createComputePass()) {
+                    // The original failure occurred while this boundary
+                    // flushed stale clears from the pre-resize generation.
+                }
+            });
         }
     }
 
@@ -480,6 +510,17 @@ final class MetalIrisTargetsIntegrationTest {
                 WIDTH,
                 HEIGHT
         )) {
+            assertSame(source.readView(0), source.storageReadView(0),
+                    "storage-image binding must use the unswizzled readable view");
+            assertNotSame(source.sampleReadView(0), source.storageReadView(0),
+                    "sampled RGB view must remain distinct from the storage-image view");
+            assertTrue(
+                    MetalPipelineSupport.sameHandle(
+                            source.storageReadView(0).nativeHandle(), source.mainTexture(0).nativeHandle()
+                    ),
+                    "storage-image view must retain the parent texture handle"
+            );
+
             RenderPipeline sourcePipeline = RenderPipeline.builder()
                     .withLocation("metallum_iris/iris_rgb_physical")
                     .withVertexShader("metallum_iris/fullscreen")

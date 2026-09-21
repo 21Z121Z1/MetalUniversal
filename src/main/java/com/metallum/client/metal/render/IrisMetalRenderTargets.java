@@ -436,6 +436,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             return;
         }
         long oldStamp = allocationStamp();
+        IrisMetalOptimizationBootstrap.onTargetsReallocationStarted();
         colorTargets.resize(newWidth, newHeight);
         releaseDepthTextures();
         createDepthTextures(newWidth, newHeight);

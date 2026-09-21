@@ -21,6 +21,7 @@ public final class IrisMetalOptimizationBootstrap {
 
     public static void onPostChainCreated(final Object chain) {
         if (chain == null) return;
+        IrisMetalTransientAllocationTelemetry.reset();
         try {
             List<IrisMetalExperimentalOptimizer.PassDescriptor> passes = new ArrayList<>();
             List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs = new ArrayList<>();
@@ -87,6 +88,17 @@ public final class IrisMetalOptimizationBootstrap {
 
     public static void onPostChainClosed() {
         IrisMetalExperimentalOptimizer.clear();
+        IrisMetalHeapAliasRuntime.clear();
+        IrisMetalTransientAllocationTelemetry.reset();
+    }
+
+    /**
+     * Clears the old physical recipe before a target resize starts. The resize
+     * itself may allocate replacement ping-pong textures; it must never consume
+     * an alias map whose allocation generations are about to be retired.
+     */
+    static void onTargetsReallocationStarted() {
+        IrisMetalHeapAliasRuntime.clear();
     }
 
     /** Returns whether a receipt was bound to the allocation set being reallocated. */
@@ -116,6 +128,7 @@ public final class IrisMetalOptimizationBootstrap {
                         receipt, newStamp, signature
                 )
         );
+        IrisMetalHeapAliasRuntime.clear();
     }
 
     /**
@@ -150,6 +163,8 @@ public final class IrisMetalOptimizationBootstrap {
             IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt =
                     IrisMetalAttachmentLifetimeCompiler.compile(plan, chain, targets);
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(plan, receipt);
+            IrisMetalHeapAliasRuntime.publish(receipt);
+            targets.colorTargets().adoptPublishedPlacementHeap();
         } catch (RuntimeException failure) {
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(
                     plan,
@@ -157,6 +172,7 @@ public final class IrisMetalOptimizationBootstrap {
                             plan.chainGeneration(), targetEpoch, signature, "compiler-failure"
                     )
             );
+            IrisMetalHeapAliasRuntime.clear();
             Metallum.LOGGER.warn(
                     "[metallum-iris] attachment lifetime receipt failed closed; execution remains conservative",
                     failure

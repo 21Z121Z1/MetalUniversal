@@ -1,0 +1,23 @@
+// Unified-evaluation fixed-workload override.
+//
+// The product validation task intentionally supports native Retina fullscreen,
+// but fullscreen backing size can change with WindowServer display/backing
+// state. Paired performance trials need a fixed amount of raster work instead.
+// Apply this init script only to minecraftNativeRenderEfficiencyValidation: it
+// leaves ordinary game, correctness, fullscreen-experience and FrameGen tasks
+// untouched, while reusing MetalValidationClient's existing 1708x960 pinned
+// windowed framebuffer gate.
+
+gradle.taskGraph.whenReady { graph ->
+    def performanceRequested = graph.allTasks.any {
+        it.name == "minecraftNativeRenderEfficiencyValidation"
+    }
+    if (!performanceRequested) {
+        return
+    }
+
+    def runClient = rootProject.tasks.named("runClient").get()
+    runClient.systemProperty "metallum.window.retinaFullscreen", "false"
+    runClient.systemProperty "metallum.validation.preserveFullscreen", "false"
+    runClient.systemProperty "metallum.validation.fixedDrawableProtocol", "1708x960-windowed-retina"
+}

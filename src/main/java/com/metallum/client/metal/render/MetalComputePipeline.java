@@ -154,28 +154,35 @@ final class MetalComputePipeline implements AutoCloseable {
             final int localSizeY,
             final int localSizeZ
     ) {
-        MemorySegment function = device.getOrCompileFunction(msl, entryPoint);
-        if (MetalNativeBridge.isNullHandle(function)) {
-            throw new IllegalStateException(
-                    "Failed to compile MSL kernel for compute shader " + label
-                            + " (entry " + entryPoint + ")"
+        String compileIdentity = label + "|entry=" + entryPoint + "|msl=sha256:" + sha256(msl);
+        try {
+            MemorySegment function = device.getOrCompileFunction(msl, entryPoint);
+            if (MetalNativeBridge.isNullHandle(function)) {
+                throw new IllegalStateException(
+                        "Failed to compile MSL kernel for compute shader " + label
+                                + " (entry " + entryPoint + ")"
+                );
+            }
+            MemorySegment pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
+                    device.metalDeviceHandle(), function
             );
+            if (MetalNativeBridge.isNullHandle(pipelineState)) {
+                throw new IllegalStateException("Failed to create MTLComputePipelineState for " + label);
+            }
+            MetalPipelineCompilationTelemetry.recordCompute(compileIdentity, true);
+            return new MetalComputePipeline(
+                    device,
+                    label,
+                    pipelineState,
+                    localSizeX,
+                    localSizeY,
+                    localSizeZ,
+                    sha256(msl)
+            );
+        } catch (RuntimeException | Error failure) {
+            MetalPipelineCompilationTelemetry.recordCompute(compileIdentity, false);
+            throw failure;
         }
-        MemorySegment pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
-                device.metalDeviceHandle(), function
-        );
-        if (MetalNativeBridge.isNullHandle(pipelineState)) {
-            throw new IllegalStateException("Failed to create MTLComputePipelineState for " + label);
-        }
-        return new MetalComputePipeline(
-                device,
-                label,
-                pipelineState,
-                localSizeX,
-                localSizeY,
-                localSizeZ,
-                sha256(msl)
-        );
     }
 
     String validationPipelineId() {

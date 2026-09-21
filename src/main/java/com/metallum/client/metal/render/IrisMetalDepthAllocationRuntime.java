@@ -90,8 +90,7 @@ public final class IrisMetalDepthAllocationRuntime {
     }
 
     private static boolean enabled() {
-        return IrisMetalOptimizationPlan.ENABLE_RESOURCE_PRUNING
-                || IrisMetalAdvancedOptimizationConfig.DEPTH_LIVENESS;
+        return IrisMetalOptimizationPlan.ENABLE_RESOURCE_PRUNING;
     }
 
     private static void prune(final Object targets) {

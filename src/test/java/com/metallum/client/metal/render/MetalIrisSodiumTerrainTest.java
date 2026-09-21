@@ -385,6 +385,67 @@ final class MetalIrisSodiumTerrainTest {
     }
 
     @Test
+    void programOwnedAlphaReferenceSurvivesIrisDynamicDrawMaterialization() {
+        float previous = net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                .getCurrentAlphaTest();
+        net.irisshaders.iris.uniforms.custom.CustomUniformFixedInputUniformsHolder fixedInputs =
+                new net.irisshaders.iris.uniforms.custom.CustomUniformFixedInputUniformsHolder.Builder()
+                        .build();
+        net.irisshaders.iris.uniforms.custom.CustomUniforms customUniforms =
+                new net.irisshaders.iris.uniforms.custom.CustomUniforms.Builder().build(fixedInputs);
+        IrisMetalDynamicUniforms dynamicUniforms = IrisMetalDynamicUniforms.create(() -> 0);
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0F,
+                customUniforms,
+                fixedInputs,
+                dynamicUniforms,
+                new net.irisshaders.iris.uniforms.FrameUpdateNotifier(),
+                () -> 0
+        );
+        GlslProgram program = new GlslProgram(
+                "cutout-alpha-reference-dynamic",
+                "",
+                "",
+                "",
+                "",
+                List.of(new UniformMember("float", "iris_currentAlphaTest", 0, 0, Float.BYTES)),
+                16,
+                List.of(),
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                OptionalDouble.of(0.5)
+        );
+        try {
+            net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                    .setCurrentAlphaTest(0.0F);
+            values.register(TerrainKind.CUTOUT, program);
+            values.prewarm(device);
+
+            java.nio.ByteBuffer draw = java.nio.ByteBuffer.allocateDirect(16)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            values.materializeDraw(TerrainKind.CUTOUT, draw, null, null);
+
+            assertEquals(
+                    0.5F,
+                    draw.getFloat(0),
+                    0.0F,
+                    "Iris dynamic alpha supplier overwrote the program-owned cutout threshold"
+            );
+            assertEquals(
+                    0L,
+                    dynamicUniforms.supplierCalls("iris_currentAlphaTest"),
+                    "program-owned terrain alpha must not be evaluated as a draw dynamic"
+            );
+        } finally {
+            values.close();
+            dynamicUniforms.close();
+            net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                    .setCurrentAlphaTest(previous);
+        }
+    }
+
+    @Test
     void translatedProgramsCarryFallbackAndPackOverrideAlphaReferences() throws IOException {
         Path packZip = Path.of(System.getProperty(
                 "metallum.iris.bsl.path", "run/shaderpacks/bsl-shaders.zip"
@@ -420,6 +481,31 @@ final class MetalIrisSodiumTerrainTest {
                 );
             } finally {
                 IrisMetalPipelineOverrides.deactivate();
+            }
+        }
+    }
+
+    @Test
+    void bslShadowProgramPreservesIrisDefaultDrawBuffer() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.bsl.path", "run/shaderpacks/bsl-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "BSL shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            try (IrisMetalShadowPipeline shadows = new IrisMetalShadowPipeline(device, set, 1)) {
+                IrisMetalShadowPipeline.ShadowProgram program = shadows
+                        .program(ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID)
+                        .orElseThrow(() -> new AssertionError("BSL shadow program did not resolve"));
+                assertEquals(
+                        List.of(0),
+                        Arrays.stream(program.drawBuffers()).boxed().toList(),
+                        "an absent BSL shadow DRAWBUFFERS directive must use Iris's effective default [0]"
+                );
             }
         }
     }

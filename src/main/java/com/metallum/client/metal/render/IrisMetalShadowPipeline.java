@@ -10,6 +10,7 @@ import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.UniformType;
@@ -531,6 +532,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         return targets;
     }
 
+    /** RenderTarget facade required by Sodium before its shadow pass redirect. */
+    RenderTarget terrainRenderTarget() {
+        requirePhase(Phase.OPAQUE, Phase.TRANSLUCENT);
+        return targets.terrainRenderTarget();
+    }
+
     List<ShadowCompositePass> compositePasses() {
         return compositePasses;
     }
@@ -743,7 +750,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                                                 + "' exceeds target count " + this.targetCount
                                 );
                             }
-                            image = this.targets.colorView(shadowTarget, pass.readsFromAlt());
+                            image = this.targets.storageView(shadowTarget, pass.readsFromAlt());
                         } else {
                             image = resources.storageImage(info, sampler.name());
                         }
@@ -925,7 +932,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                         "Shadow storage image '" + name + "' exceeds target count " + this.targetCount
                 );
             }
-            return this.targets.colorView(shadowTarget, compute.info.readsFromAlt());
+            return this.targets.storageView(shadowTarget, compute.info.readsFromAlt());
         }
         GpuTextureView view = resources.storageImage(compute.info, name);
         if (view == null) {
@@ -953,7 +960,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         if (target < 0 || target >= this.targetCount || this.targets == null) {
             return null;
         }
-        return this.targets.colorTargets().sampleReadView(target);
+        return this.targets.colorTargets().storageReadView(target);
     }
 
     private static GpuBufferSlice requireBuffer(
@@ -1515,7 +1522,14 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     }
 
     private static int[] shadowDrawBuffers(final ProgramDirectives directives) {
-        return directives.hasUnknownDrawBuffers() ? new int[]{0, 1} : directives.getDrawBuffers().clone();
+        // Iris represents an absent DRAWBUFFERS/RENDERTARGETS directive as
+        // the default single output [0] and marks it as "unknown" so callers
+        // can distinguish that default from an explicit directive. Unknown
+        // does not mean "all shadowcolor attachments": synthesizing [0, 1]
+        // creates a second framebuffer attachment that the shader did not
+        // declare and makes the Metal PSO signature diverge from the shadow
+        // render pass. Preserve Iris's effective layout verbatim.
+        return directives.getDrawBuffers().clone();
     }
 
     private static void validateDrawBuffers(final int[] drawBuffers, final int targetCount, final String label) {

@@ -295,6 +295,8 @@ final class IrisMetalExperimentalOptimizer {
         appendFlag(out, "finalColorFusion", IrisMetalOptimizationPlan.ENABLE_FINAL_COLOR_FUSION, true);
         appendFlag(out, "argumentTables", IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES, true);
         appendFlag(out, "icb", IrisMetalOptimizationPlan.ENABLE_ICB, true);
+        appendFlag(out, "memorylessAttachments", IrisMetalOptimizationPlan.ENABLE_MEMORYLESS_ATTACHMENTS, true);
+        appendFlag(out, "heapAliasing", IrisMetalOptimizationPlan.ENABLE_HEAP_ALIASING, true);
         out.append("  \"chainGeneration\": ").append(plan.chainGeneration()).append(",\n");
         out.append("  \"receiptStatus\": \"DIAGNOSTIC_ONLY\",\n");
         out.append("  \"diagnosticOnly\": true,\n");
@@ -312,6 +314,8 @@ final class IrisMetalExperimentalOptimizer {
         out.append("  \"argumentLayouts\": ").append(plan.argumentLayouts().size()).append(",\n");
         out.append("  \"indirectBatches\": ").append(plan.indirectBatches().size()).append(",\n");
         appendAttachmentLifetimeReceipt(out, plan.attachmentLifetimeReceipt());
+        appendTransientResourcePlan(out, plan.attachmentLifetimeReceipt());
+        appendHeapAliasRecipe(out, plan.attachmentLifetimeReceipt());
         out.append("  \"passes\": [\n");
         for (int index = 0; index < plan.passReceipt().size(); index++) {
             appendPlanPass(out, plan.passReceipt().get(index), index + 1 < plan.passReceipt().size());
@@ -365,6 +369,101 @@ final class IrisMetalExperimentalOptimizer {
         for (int index = 0; index < receipt.lifetimes().size(); index++) {
             appendLifetimeObject(out, receipt.lifetimes().get(index), "      ");
             if (index + 1 < receipt.lifetimes().size()) out.append(',');
+            out.append('\n');
+        }
+        out.append("    ]\n");
+        out.append("  },\n");
+    }
+
+    private static void appendTransientResourcePlan(
+            final StringBuilder out,
+            final IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt
+    ) {
+        out.append("  \"transientResourcePlan\": ");
+        if (receipt == null) {
+            out.append("null,\n");
+            return;
+        }
+        IrisMetalTransientResourcePlan.Plan plan = IrisMetalTransientResourcePlan.compile(receipt);
+        out.append("{\n");
+        out.append("    \"chainGeneration\": ").append(plan.chainGeneration()).append(",\n");
+        out.append("    \"targetEpoch\": ").append(plan.targetEpoch()).append(",\n");
+        out.append("    \"status\": ").append(jsonString(plan.status())).append(",\n");
+        out.append("    \"memorylessCount\": ").append(plan.memorylessCount()).append(",\n");
+        out.append("    \"rejectionReasons\": ").append(jsonStringArray(plan.rejectionReasons())).append(",\n");
+        out.append("    \"entries\": [");
+        for (int index = 0; index < plan.entries().size(); index++) {
+            IrisMetalTransientResourcePlan.Entry entry = plan.entries().get(index);
+            if (index > 0) out.append(',');
+            out.append("{\"resourceKey\":").append(jsonString(entry.resourceKey()))
+                    .append(",\"allocationId\":").append(entry.allocationId())
+                    .append(",\"allocationGeneration\":").append(entry.allocationGeneration())
+                    .append(",\"firstUse\":").append(entry.firstUse())
+                    .append(",\"lastUse\":").append(entry.lastUse())
+                    .append(",\"load\":").append(jsonString(entry.load().name()))
+                    .append(",\"store\":").append(jsonString(entry.store().name()))
+                    .append(",\"allocationMode\":").append(jsonString(entry.allocationMode()))
+                    .append(",\"decision\":").append(jsonString(entry.decision()))
+                    .append(",\"reason\":").append(jsonString(entry.reason()))
+                    .append('}');
+        }
+        out.append("]\n");
+        out.append("  },\n");
+    }
+
+    /**
+     * Emits the generation-owned placement-heap decision beside the transient
+     * allocation plan.  This is deliberately a receipt, not a claim that a
+     * native heap was allocated: the runtime publisher still requires the
+     * feature gate and a fully resolved, generation-matched recipe.
+     */
+    private static void appendHeapAliasRecipe(
+            final StringBuilder out,
+            final IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt
+    ) {
+        out.append("  \"heapAliasRecipe\": ");
+        if (receipt == null) {
+            out.append("null,\n");
+            return;
+        }
+        IrisMetalHeapAliasRecipe.Recipe recipe = IrisMetalHeapAliasRecipe.compile(receipt);
+        out.append("{\n");
+        out.append("    \"enabled\": ").append(IrisMetalOptimizationPlan.ENABLE_HEAP_ALIASING).append(",\n");
+        out.append("    \"executable\": ").append(recipe.executable()).append(",\n");
+        out.append("    \"chainGeneration\": ").append(recipe.chainGeneration()).append(",\n");
+        out.append("    \"status\": ").append(jsonString(recipe.status())).append(",\n");
+        out.append("    \"aliasSlotCount\": ").append(recipe.aliasSlots().size()).append(",\n");
+        out.append("    \"aliasedResourceCount\": ").append(recipe.aliasedResourceCount()).append(",\n");
+        out.append("    \"dedicatedCount\": ").append(recipe.dedicatedMembers().size()).append(",\n");
+        out.append("    \"rejectionReasons\": ").append(jsonStringArray(recipe.rejectedReasons())).append(",\n");
+        out.append("    \"slots\": [\n");
+        for (int slotIndex = 0; slotIndex < recipe.aliasSlots().size(); slotIndex++) {
+            IrisMetalHeapAliasRecipe.AliasSlot slot = recipe.aliasSlots().get(slotIndex);
+            out.append("      {\"slotIndex\":").append(slot.slotIndex()).append(",\"members\":[");
+            for (int memberIndex = 0; memberIndex < slot.members().size(); memberIndex++) {
+                if (memberIndex > 0) out.append(',');
+                IrisMetalHeapAliasRecipe.Member member = slot.members().get(memberIndex);
+                out.append("{\"resourceKey\":").append(jsonString(member.resourceKey()))
+                        .append(",\"sourceAllocationKey\":")
+                        .append(jsonString(member.sourceAllocationKey()))
+                        .append(",\"firstUse\":").append(member.firstUse())
+                        .append(",\"lastUse\":").append(member.lastUse())
+                        .append('}');
+            }
+            out.append("],\"handoffs\":[");
+            for (int handoffIndex = 0; handoffIndex < slot.handoffs().size(); handoffIndex++) {
+                if (handoffIndex > 0) out.append(',');
+                IrisMetalHeapAliasRecipe.Handoff handoff = slot.handoffs().get(handoffIndex);
+                out.append("{\"fromResourceKey\":")
+                        .append(jsonString(handoff.fromResourceKey()))
+                        .append(",\"toResourceKey\":")
+                        .append(jsonString(handoff.toResourceKey()))
+                        .append(",\"afterPass\":").append(handoff.afterPass())
+                        .append(",\"beforePass\":").append(handoff.beforePass())
+                        .append('}');
+            }
+            out.append("]}");
+            if (slotIndex + 1 < recipe.aliasSlots().size()) out.append(',');
             out.append('\n');
         }
         out.append("    ]\n");

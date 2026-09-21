@@ -56,6 +56,10 @@ final class IrisMetalAttachmentLifetimeCompilerTest {
         );
         assertEquals(2, jsonLifetime(json, 100L).get("lastUse").getAsInt());
         assertEquals(2, jsonLifetime(json, 101L).get("lastUse").getAsInt());
+        JsonParser.parseString(json).getAsJsonObject()
+                .getAsJsonObject("transientResourcePlan");
+        assertTrue(JsonParser.parseString(json).getAsJsonObject()
+                .getAsJsonObject("heapAliasRecipe").has("executable"));
     }
 
     @Test
