@@ -90,6 +90,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandBuffer commandBuffer;
     @Nullable
     private MTLCommandEncoder currentEncoder;
+    private boolean frameGenerationEncodeInCurrentCommandBuffer;
+    private long frameGenerationFrameId;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MetalGpuTexture[] renderColorTextures = new MetalGpuTexture[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
@@ -502,6 +504,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         List<SubmitCallback> callbacks = List.copyOf(currentSubmitCallbacks);
         currentSubmitCallbacks.clear();
+        boolean frameGenerationSubmit = frameGenerationEncodeInCurrentCommandBuffer;
+        long submittedFrameId = frameGenerationFrameId;
         commandBuffer.commitWithSignal(completedSemaphore);
         for (SubmitCallback callback : callbacks) {
             callback.committed.run();
@@ -512,14 +516,21 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         // recorder's current frame from the completion callback would pair a
         // command buffer with the wrong frame.
         long submissionFrameId = MetalGpuTimingRecorder.currentFrameId();
+        if (frameGenerationSubmit) {
+            MetalFxManager.recordFrameGenerationSubmitted(submittedFrameId);
+        }
         inFlight[slot] = new InFlight(
                 currentSubmitIndex,
                 submissionFrameId,
                 commandBuffer,
                 completedSemaphore,
-                callbacks
+                callbacks,
+                frameGenerationSubmit,
+                submittedFrameId
         );
         commandBuffer = null;
+        frameGenerationEncodeInCurrentCommandBuffer = false;
+        frameGenerationFrameId = 0L;
         currentSubmitIndex++;
 
         transientMemory.rotate();
@@ -1145,7 +1156,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     fence
             );
             if (queued) {
-                MetalFxManager.recordFrameGenerationQueued();
+                frameGenerationEncodeInCurrentCommandBuffer = true;
+                frameGenerationFrameId = frameInput.frameId();
+                MetalFxManager.recordFrameGenerationQueued(frameInput.frameId());
                 return;
             }
             MetalFxManager.disableFrameGeneration("native frame generation encode failed");
@@ -1227,6 +1240,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTexture color,
             final MetalGpuTexture depth,
             @Nullable final MetalGpuTexture handDepth,
+            final MetalGpuTexture handExactValidity,
             final float handReactiveBoost,
             final MetalGpuTexture cameraMotion,
             final MetalGpuTexture objectMotion,
@@ -1249,6 +1263,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClear(color);
         flushPendingClear(depth);
         if (handDepth != null) flushPendingClear(handDepth);
+        flushPendingClear(handExactValidity);
         flushPendingClear(cameraMotion);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
@@ -1264,6 +1279,36 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         motion.markContentsDirty();
         reactive.markContentsDirty();
         output.markContentsDirty();
+        if (MetalNativeBridge.metallum_metalfx_encode_v3_available()) {
+            return MetalNativeBridge.metallum_metalfx_encode_v3(
+                    commandBuffer().nativeHandle(),
+                    device.metalDeviceHandle(),
+                    color.nativeHandle(),
+                    depth.nativeHandle(),
+                    handDepth == null ? MemorySegment.NULL : handDepth.nativeHandle(),
+                    handExactValidity.nativeHandle(),
+                    cameraMotion.nativeHandle(),
+                    objectMotion.nativeHandle(),
+                    objectValidity.nativeHandle(),
+                    disocclusion.nativeHandle(),
+                    motion.nativeHandle(),
+                    reactive.nativeHandle(),
+                    output.nativeHandle(),
+                    currentViewProjection.get(currentViewProjectionBuffer),
+                    inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
+                    previousViewProjection.get(previousViewProjectionBuffer),
+                    pixelJitter.x,
+                    pixelJitter.y,
+                    handReactiveBoost,
+                    inputWidth,
+                    inputHeight,
+                    reset,
+                    depthReversed,
+                    preserveReactiveMask,
+                    emitMotionDiagnostics,
+                    fence
+            );
+        }
         return MetalNativeBridge.metallum_metalfx_encode_v2(
                 commandBuffer().nativeHandle(),
                 device.metalDeviceHandle(),
@@ -1354,6 +1399,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTexture handDepth,
             final MetalGpuTexture objectMotion,
             final MetalGpuTexture objectValidity,
+            final MetalGpuTexture handExactValidity,
             final MetalGpuTexture reactive,
             final int inputWidth,
             final int inputHeight,
@@ -1362,12 +1408,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClear(handDepth);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
+        flushPendingClear(handExactValidity);
         flushPendingClear(reactive);
         submitRenderPass();
         endEncoder();
         objectMotion.markContentsDirty();
         objectValidity.markContentsDirty();
         reactive.markContentsDirty();
+        if (MetalNativeBridge.metallum_metalfx_encode_hand_overlay_v2_available()) {
+            return MetalNativeBridge.metallum_metalfx_encode_hand_overlay_v2(
+                    commandBuffer().nativeHandle(),
+                    handDepth.nativeHandle(),
+                    objectMotion.nativeHandle(),
+                    objectValidity.nativeHandle(),
+                    handExactValidity.nativeHandle(),
+                    reactive.nativeHandle(),
+                    inputWidth,
+                    inputHeight,
+                    reactiveBoost,
+                    fence
+            );
+        }
         return MetalNativeBridge.metallum_metalfx_encode_hand_overlay(
                 commandBuffer().nativeHandle(),
                 handDepth.nativeHandle(),
@@ -1379,6 +1440,41 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 reactiveBoost,
                 fence
         );
+    }
+
+
+    boolean encodeMetalFxColorTransfer(
+            final MetalGpuTexture source,
+            final MetalGpuTexture destination,
+            final boolean encodeSrgb
+    ) {
+        if (!MetalNativeBridge.metallum_metalfx_color_transfer_available()) {
+            return false;
+        }
+        flushPendingClear(source);
+        submitRenderPass();
+        endEncoder();
+        destination.markContentsDirty();
+        boolean encoded = MetalNativeBridge.metallum_metalfx_color_transfer(
+                commandBuffer().nativeHandle(),
+                source.nativeHandle(),
+                destination.nativeHandle(),
+                encodeSrgb ? 1 : 0,
+                fence
+        );
+        if (RenderContractRuntime.enabled()) {
+            ResourceIdentity sourceIdentity = contractResource(source, 0);
+            ResourceIdentity destinationIdentity = contractResource(destination, 0);
+            RenderContractRuntime.recordTransfer(
+                    PassType.COMPUTE,
+                    encodeSrgb ? "metallum/metalfx-srgb-encode" : "metallum/metalfx-srgb-decode",
+                    ProducerType.COPY,
+                    List.of(destinationIdentity),
+                    Map.of("encoded", Boolean.toString(encoded)),
+                    Map.of("source", sourceIdentity.stableKey())
+            );
+        }
+        return encoded;
     }
 
     boolean encodeTextureCopy(final MetalGpuTexture source, final MetalGpuTexture destination, final boolean linear) {
@@ -1980,6 +2076,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         private final MTLCommandBuffer buffer;
         private final MemorySegment completedSemaphore;
         private final List<SubmitCallback> callbacks;
+        private final boolean frameGenerationSubmit;
+        private final long frameGenerationFrameId;
         private boolean completionHandled;
 
         private InFlight(
@@ -1987,13 +2085,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 final long frameId,
                 final MTLCommandBuffer buffer,
                 final MemorySegment completedSemaphore,
-                final List<SubmitCallback> callbacks
+                final List<SubmitCallback> callbacks,
+                final boolean frameGenerationSubmit,
+                final long frameGenerationFrameId
         ) {
             this.index = index;
             this.frameId = frameId;
             this.buffer = buffer;
             this.completedSemaphore = completedSemaphore;
             this.callbacks = callbacks;
+            this.frameGenerationSubmit = frameGenerationSubmit;
+            this.frameGenerationFrameId = frameGenerationFrameId;
         }
 
         private void complete() {
@@ -2002,7 +2104,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             completionHandled = true;
             MetalGpuTimingRecorder.record(index, frameId, buffer.gpuStartTime(), buffer.gpuEndTime());
-            if (!buffer.completedSuccessfully()) {
+            boolean success = buffer.completedSuccessfully();
+            if (frameGenerationSubmit) {
+                MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
+            }
+            if (!success) {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();
                 }

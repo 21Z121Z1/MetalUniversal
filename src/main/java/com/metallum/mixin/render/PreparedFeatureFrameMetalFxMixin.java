@@ -10,6 +10,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Flushes motion replays after feature execution while staged draw buffers remain valid. */
 @Mixin(FeatureRenderDispatcher.PreparedFrame.class)
 public abstract class PreparedFeatureFrameMetalFxMixin {
+    @Inject(method = "executeTranslucent", at = @At("HEAD"))
+    private void metallum$beginTranslucentReceiptPhase(final CallbackInfo ci) {
+        MetalFxManager.beginTransparencyPhase();
+    }
+
+    @Inject(method = "executeTranslucent", at = @At("RETURN"))
+    private void metallum$endTranslucentReceiptPhase(final CallbackInfo ci) {
+        MetalFxManager.endTransparencyPhase();
+    }
+
     @Inject(
             method = "close",
             at = @At(

@@ -1,0 +1,142 @@
+name: Agent living and first-person exact motion
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): apply living and first-person exact motion'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 8
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Guard exact transaction ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^^)" = "6194ba94bf2e8c487341582d90be76e18ebb2b64"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): rerun living exact after nullable fix"
+          test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
+          test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
+          test "$(git rev-parse HEAD^^:.github/scripts/fix_living_first_person_nullable.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/fix_living_first_person_nullable.py)"
+      - name: Verify pinned Minecraft 26.2 source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/entity/LivingEntityRenderer.java" -o /tmp/LivingEntityRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/feature/ModelFeatureRenderer.java" -o /tmp/ModelFeatureRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/ItemInHandRenderer.java" -o /tmp/ItemInHandRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
+          python3 - <<'PY'
+          from pathlib import Path
+
+          living = Path('/tmp/LivingEntityRenderer.java').read_text()
+          model_feature = Path('/tmp/ModelFeatureRenderer.java').read_text()
+          hand = Path('/tmp/ItemInHandRenderer.java').read_text()
+          pipelines = Path('/tmp/RenderPipelines.java').read_text()
+
+          for text in [
+              'submitNodeCollector.submitModel(this.model, state, poseStack',
+              '((Model)this.model).setupAnim(state);',
+              'float scale = ((LivingEntityRenderState)state).scale;',
+              'poseStack.scale(scale, scale, scale);',
+              'this.setupRotations(state, poseStack, ((LivingEntityRenderState)state).bodyRot, scale);',
+              'this.scale(state, poseStack);',
+          ]:
+              if text not in living:
+                  raise SystemExit(f'Minecraft 26.2 living staged-motion contract missing: {text}')
+
+          for text in [
+              'VertexConsumer buffer = this.getVertexBuilder(submit.renderType());',
+              'Model<S> model = submit.model();',
+              'model.setupAnim(submit.state());',
+              'model.renderToBuffer(this.poseStack, buffer,',
+          ]:
+              if text not in model_feature:
+                  raise SystemExit(f'Minecraft 26.2 ModelFeatureRenderer contract missing: {text}')
+
+          submit_start = hand.find('private void submitArmWithItem(')
+          if submit_start < 0:
+              raise SystemExit('Minecraft 26.2 submitArmWithItem missing')
+          submit = hand[submit_start:]
+          for text in [
+              'if (player.isScoping()) {',
+              'poseStack.pushPose();',
+              'this.renderPlayerArm(',
+              'this.renderItem(',
+          ]:
+              if text not in submit:
+                  raise SystemExit(f'Minecraft 26.2 first-person contract missing: {text}')
+          if submit.find('if (player.isScoping()) {') > submit.find('poseStack.pushPose();'):
+              raise SystemExit('Minecraft 26.2 first-person scoping/pushPose order changed')
+
+          for text in [
+              'withVertexShader("core/entity")',
+              'withVertexBinding(0, DefaultVertexFormat.ENTITY)',
+              'withVertexShader("core/item")',
+          ]:
+              if text not in pipelines:
+                  raise SystemExit(f'Minecraft 26.2 entity/item ABI changed: {text}')
+          print('Pinned Minecraft 26.2 living + first-person source contracts: PASS')
+          PY
+      - name: Apply living and first-person exact staged motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_living_first_person_exact_motion.py
+          python3 .github/scripts/fix_living_first_person_nullable.py
+          git diff --check
+      - name: Compile and test exact motion contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+      - name: Verify exact/fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'state instanceof LivingEntityRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'MetalEntityMotionCapture.requireExactState(state);' src/main/java/com/metallum/mixin/render/EntityRenderDispatcherMetalFxMixin.java
+          grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+          grep -F 'MetalSyntheticExactMotion.commitSubmittedFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
+          grep -F 'MetalEntityMotionCapture.@Nullable Sample beginFirstPerson' src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java
+          ! grep -F 'MetalFxManager.observeFirstPersonMotion();' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
+          grep -F 'observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
+      - name: Commit verified runtime implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add living and first-person exact staged motion'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2

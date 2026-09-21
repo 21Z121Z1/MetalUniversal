@@ -119,7 +119,23 @@ download() {
   local dest="$2"
   local tmp="${dest}.tmp.$$"
   rm -f "${tmp}"
-  curl --fail --location --retry 3 --retry-delay 1 --silent --show-error --output "${tmp}" "${url}"
+  # GitHub-hosted runners occasionally see transient TLS/connection resets from
+  # Mojang/CDN endpoints. --retry by itself does not retry every curl transport
+  # failure (for example CURLE_SSL_CONNECT_ERROR / CURLE_RECV_ERROR), so make
+  # the reference bootstrap resilient without weakening any integrity check.
+  # Every downloaded metadata/client payload is still verified immediately
+  # afterwards by its Mojang SHA-1 or the pinned Vineflower SHA-256.
+  curl \
+    --fail \
+    --location \
+    --retry 5 \
+    --retry-delay 2 \
+    --retry-all-errors \
+    --connect-timeout 20 \
+    --silent \
+    --show-error \
+    --output "${tmp}" \
+    "${url}"
   mv "${tmp}" "${dest}"
 }
 
