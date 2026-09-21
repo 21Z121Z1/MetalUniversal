@@ -47,9 +47,6 @@ import java.util.OptionalDouble;
 @Environment(EnvType.CLIENT)
 final class MetalCommandEncoder implements CommandEncoderBackend {
     public static final int MAX_SUBMITS_IN_FLIGHT = 3;
-    private static final MemorySegment[] NO_ATTACHMENTS = new MemorySegment[0];
-    private static final MetalGpuTexture[] NO_TEXTURES = new MetalGpuTexture[0];
-    private static final int[] NO_PIXEL_BYTES = new int[0];
     // Depth MAX_SUBMITS_IN_FLIGHT+1: an action queued during submit N runs at
     // submit N+3, whose semaphore wait has just confirmed submit N (the last
     // possible GPU consumer of the queued resource) completed. A depth of 3
@@ -98,11 +95,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandEncoder currentEncoder;
     private boolean frameGenerationEncodeInCurrentCommandBuffer;
     private long frameGenerationFrameId;
-    private MemorySegment[] renderColorAttachments = NO_ATTACHMENTS;
-    private MetalGpuTexture[] renderColorTextures = NO_TEXTURES;
+    private MemorySegment[] renderColorAttachments = new MemorySegment[0];
+    private MetalGpuTexture[] renderColorTextures = new MetalGpuTexture[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
+    private MemorySegment[] killedColorAttachments = new MemorySegment[0];
+    private MetalGpuTexture[] killedColorTextures = new MetalGpuTexture[0];
     private long deferredColorStorePixels;
-    private int[] deferredColorStorePixelBytes = NO_PIXEL_BYTES;
+    private int[] deferredColorStorePixelBytes = new int[0];
     // Bumped every time a fresh native encoder is installed. MetalRenderPass
     // compares generations to know its cached dirty-state no longer matches a
     // rebuilt encoder (a new MTLRenderCommandEncoder starts with no state).
@@ -299,7 +298,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     // predecessor's store dead, everything else keeps its
                     // contents alive. Accounting counts ONLY the slots whose
                     // evidence resolved them to dontCare.
-                    int[] killedPixelBytes = null;
+                    int[] killedPixelBytes = new int[renderEncoderDeferredColorStores.length];
                     int killedSlotCount = 0;
                     for (int index = 0; index < renderEncoderDeferredColorStores.length; index++) {
                         if (!renderEncoderDeferredColorStores[index]) {
@@ -312,9 +311,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                                 && deferredColorStorePixelBytes[index] > 0;
                         renderEncoder.setDeferredColorStore(index, !killed);
                         if (killed) {
-                            if (killedPixelBytes == null) {
-                                killedPixelBytes = new int[renderEncoderDeferredColorStores.length];
-                            }
                             killedPixelBytes[index] = deferredColorStorePixelBytes[index];
                             killedSlotCount++;
                         }
@@ -347,11 +343,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             currentEncoder = null;
         }
-        renderColorAttachments = NO_ATTACHMENTS;
-        renderColorTextures = NO_TEXTURES;
+        renderColorAttachments = new MemorySegment[0];
+        renderColorTextures = new MetalGpuTexture[0];
         renderDepthAttachment = MemorySegment.NULL;
+        killedColorAttachments = new MemorySegment[0];
+        killedColorTextures = new MetalGpuTexture[0];
         deferredColorStorePixels = 0;
-        deferredColorStorePixelBytes = NO_PIXEL_BYTES;
+        deferredColorStorePixelBytes = new int[0];
         renderDepthTexture = null;
         renderEncoderDeferredStore = false;
         renderEncoderDeferredColorStores = null;
@@ -533,34 +531,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         currentSubmitCallbacks.add(new SubmitCallback(committed, failed));
     }
 
-    /** Called only when the incoming pass has no pending attachment clears. */
-    @Nullable
-    MTLRenderCommandEncoder tryReuseRenderEncoder(
-            final GpuTextureView[] colorTextureViews,
-            @Nullable final GpuTextureView depthTextureView,
-            final String label
-    ) {
-        if (!(currentEncoder instanceof MTLRenderCommandEncoder encoder)
-                || renderColorAttachments.length != colorTextureViews.length) {
-            return null;
-        }
-        MemorySegment depthAttachment = depthTextureView == null
-                ? MemorySegment.NULL : ((MetalGpuTextureView) depthTextureView).nativeHandle();
-        if (!MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment)) {
-            return null;
-        }
-        for (int index = 0; index < colorTextureViews.length; index++) {
-            MemorySegment attachment = colorTextureViews[index] == null
-                    ? MemorySegment.NULL : ((MetalGpuTextureView) colorTextureViews[index]).nativeHandle();
-            if (!MetalPipelineSupport.sameHandle(renderColorAttachments[index], attachment)) {
-                return null;
-            }
-        }
-        RenderGraphTelemetry.onPassRequested(label);
-        RenderGraphTelemetry.onEncoderReused(label);
-        return encoder;
-    }
-
     MTLRenderCommandEncoder renderCommandEncoder(
             final MetalGpuTextureView[] colorTextureViews,
             @Nullable final MetalGpuTextureView depthTextureView,
@@ -583,12 +553,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             throw new IllegalArgumentException("Invalid Metal MRT attachment arrays");
         }
 
-        if (!clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
-            MTLRenderCommandEncoder reused = tryReuseRenderEncoder(colorTextureViews, depthTextureView, label);
-            if (reused != null) {
-                return reused;
-            }
-        }
         RenderGraphTelemetry.onPassRequested(label);
 
         MemorySegment[] colorAttachments = new MemorySegment[colorTextureViews.length];
@@ -598,6 +562,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     : colorTextureViews[index].nativeHandle();
         }
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
+        boolean sameAttachments = currentEncoder instanceof MTLRenderCommandEncoder
+                && sameAttachmentHandles(renderColorAttachments, colorAttachments)
+                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
+        if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
+            RenderGraphTelemetry.onEncoderReused(label);
+            return (MTLRenderCommandEncoder) currentEncoder;
+        }
+
         // The incoming pass clearing the same attachment proves that the
         // outgoing store is dead bandwidth. Resolve this evidence before
         // rebuilding the encoder, then emit concrete V3 actions.
@@ -678,6 +650,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
+        killedColorAttachments = colorAttachments.clone();
+        killedColorTextures = renderColorTextures.clone();
         renderColorTextures = new MetalGpuTexture[colorTextureViews.length];
         for (int index = 0; index < colorTextureViews.length; index++) {
             renderColorTextures[index] = colorTextureViews[index] == null
@@ -790,6 +764,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
         }
         return killed;
+    }
+
+    private static boolean sameAttachmentHandles(final MemorySegment[] first, final MemorySegment[] second) {
+        if (first.length != second.length) {
+            return false;
+        }
+        for (int index = 0; index < first.length; index++) {
+            if (!MetalPipelineSupport.sameHandle(first[index], second[index])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

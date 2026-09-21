@@ -71,7 +71,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final MemorySegment depthStencilState;
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
-    private final PipelineSignature[] attachmentSignatures;
+    private final List<MTLPixelFormat> colorFormatsView;
     private final Map<PipelineSignature, NativePipeline> pipelineStates;
 
     private record NativePipeline(MemorySegment handle, boolean supportsIcb) {
@@ -229,13 +229,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             ColorTargetState target = colorTargets.get(index);
             this.colorFormats[index] = target == null ? MTLPixelFormat.Invalid : MTLPixelFormat.from(target.format());
         }
-        List<MTLPixelFormat> colorFormatsView = List.of(this.colorFormats);
-        // Color formats and sample count are immutable for this pipeline.
-        // Keep the few supported keys instead of allocating one on every bind.
-        this.attachmentSignatures = supportedDepthStencilFormats().stream()
-                .map(formats -> new PipelineSignature(colorFormatsView,
-                        formats.depthFormat(), formats.stencilFormat(), 1))
-                .toArray(PipelineSignature[]::new);
+        this.colorFormatsView = List.of(this.colorFormats);
 
         this.device = device;
         this.info = info;
@@ -380,13 +374,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     }
 
     private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
-        for (PipelineSignature signature : this.attachmentSignatures) {
-            if (signature.depthFormat() == depthFormat && signature.stencilFormat() == stencilFormat) {
-                return signature;
-            }
-        }
-        throw new IllegalArgumentException("Unsupported Metal depth/stencil attachment signature: depth="
-                + depthFormat + ", stencil=" + stencilFormat);
+        return new PipelineSignature(this.colorFormatsView, depthFormat, stencilFormat, 1);
     }
 
     /**
