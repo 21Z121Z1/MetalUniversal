@@ -159,6 +159,7 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             terrain_slice_cache=False, reuse_encoder_state=True)
         self.assertEqual(baseline["pairKey"], candidate["pairKey"])
         self.assertFalse(baseline["reuseEncoderState"])
+        self.assertFalse(baseline["reuseNativeEncoderArguments"])
         self.assertTrue(candidate["reuseEncoderState"])
         with self.assertRaisesRegex(ValueError, "optimization-profile"):
             runner.resolve_optimization_profile(
@@ -175,6 +176,34 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
                 presentation_metrics=False, render_labels=False,
                 terrain_slice_cache=False, reuse_encoder_state=True)
 
+    def test_encoder_argument_candidate_is_independent_and_requires_no_other_reuse(self):
+        candidate = runner.resolve_optimization_profile(
+            runner.OPTIMIZATION_PROFILE_ARGUMENT_REUSE,
+            stationary_baseline=True, frame_evidence_phase="stationary",
+            frame_evidence="timing", metrics_only=True,
+            presentation_metrics=False, render_labels=False,
+            terrain_slice_cache=False, reuse_encoder_state=False,
+            reuse_native_encoder_arguments=True)
+        self.assertEqual(candidate["feature"], "encoder-native-argument-reuse")
+        self.assertFalse(candidate["reuseEncoderState"])
+        self.assertTrue(candidate["reuseNativeEncoderArguments"])
+        self.assertTrue(candidate["candidate"])
+        with self.assertRaisesRegex(ValueError, "requires --reuse-native-encoder-arguments"):
+            runner.resolve_optimization_profile(
+                runner.OPTIMIZATION_PROFILE_ARGUMENT_REUSE,
+                stationary_baseline=True, frame_evidence_phase="stationary",
+                frame_evidence="timing", metrics_only=True,
+                presentation_metrics=False, render_labels=False,
+                terrain_slice_cache=False, reuse_encoder_state=False)
+        with self.assertRaisesRegex(ValueError, "cannot enable encoder-state reuse"):
+            runner.resolve_optimization_profile(
+                runner.OPTIMIZATION_PROFILE_ARGUMENT_REUSE,
+                stationary_baseline=True, frame_evidence_phase="stationary",
+                frame_evidence="timing", metrics_only=True,
+                presentation_metrics=False, render_labels=False,
+                terrain_slice_cache=False, reuse_encoder_state=True,
+                reuse_native_encoder_arguments=True)
+
     def test_candidate_requires_runtime_activation_evidence(self):
         expected = runner.resolve_optimization_profile(
             runner.OPTIMIZATION_PROFILE_REUSE,
@@ -189,7 +218,7 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         runner.verify_gameplay_optimization(receipt, expected)
         self.assertEqual(receipt["optimizationActivation"]["packetStorageReuseHits"], 2)
         receipt["gameplay"]["optimizationActivation"]["active"] = False
-        with self.assertRaisesRegex(RuntimeError, "did not activate"):
+        with self.assertRaisesRegex(RuntimeError, "did not report active"):
             runner.verify_gameplay_optimization(receipt, expected)
 
     def test_completed_archive_must_repeat_gameplay_optimization_profile(self):

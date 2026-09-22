@@ -2,7 +2,7 @@ package com.metallum.client.metal.render.mtl;
 
 import java.util.concurrent.atomic.LongAdder;
 
-/** Optional counters for the negotiated render-state packet path. */
+/** Optional counters for negotiated render-state and encoder-argument paths. */
 public final class MetalRenderStatePacketTelemetry {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.hotpath.telemetry");
     /**
@@ -22,6 +22,7 @@ public final class MetalRenderStatePacketTelemetry {
     private static final LongAdder packetStorageReuseHits = new LongAdder();
     private static final LongAdder shadowAllocations = new LongAdder();
     private static final LongAdder shadowReuseHits = new LongAdder();
+    private static final LongAdder nativeEncoderArgumentReuseCalls = new LongAdder();
 
     private MetalRenderStatePacketTelemetry() {
     }
@@ -76,6 +77,13 @@ public final class MetalRenderStatePacketTelemetry {
         }
     }
 
+    /** Records a successful V3 bridge call that used the bounded argument scratch. */
+    public static void recordNativeEncoderArgumentReuse() {
+        if (REUSE_ACTIVATION_ENABLED) {
+            nativeEncoderArgumentReuseCalls.increment();
+        }
+    }
+
     public static boolean reuseActivationTelemetryEnabled() {
         return REUSE_ACTIVATION_ENABLED;
     }
@@ -91,7 +99,8 @@ public final class MetalRenderStatePacketTelemetry {
                 packetStorageAllocations.sum(),
                 packetStorageReuseHits.sum(),
                 shadowAllocations.sum(),
-                shadowReuseHits.sum()
+                shadowReuseHits.sum(),
+                nativeEncoderArgumentReuseCalls.sum()
         );
     }
 
@@ -106,6 +115,7 @@ public final class MetalRenderStatePacketTelemetry {
         packetStorageReuseHits.reset();
         shadowAllocations.reset();
         shadowReuseHits.reset();
+        nativeEncoderArgumentReuseCalls.reset();
     }
 
     public record Snapshot(
@@ -118,7 +128,8 @@ public final class MetalRenderStatePacketTelemetry {
             long packetStorageAllocations,
             long packetStorageReuseHits,
             long shadowAllocations,
-            long shadowReuseHits
+            long shadowReuseHits,
+            long nativeEncoderArgumentReuseCalls
     ) {
         public double averageEntriesPerPacket() {
             return packetCalls == 0L ? 0.0 : (double) packetEntries / packetCalls;

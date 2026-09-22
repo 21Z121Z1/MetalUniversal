@@ -32,10 +32,11 @@ def requireP1Metal4Evidence = p1Metal4Lane != "off"
 def gameplay = providers.gradleProperty('gameplay').orElse('false').get().toBoolean()
 def stationaryBaseline = providers.gradleProperty('stationaryBaseline').orElse('false').get().toBoolean()
 def reuseEncoderState = providers.gradleProperty('reuseEncoderState').orElse('false').get().toBoolean()
+def reuseNativeEncoderArguments = providers.gradleProperty('reuseNativeEncoderArguments').orElse('false').get().toBoolean()
 def optimizationProfile = providers.gradleProperty('optimizationProfile').orElse('baseline-v1').get().trim()
-def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1']
+def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'encoder-argument-reuse-v1']
 if (!(optimizationProfile in optimizationProfiles)) {
-    throw new GradleException("optimizationProfile must be baseline-v1 or reuse-encoder-state-v1 (got ${optimizationProfile})")
+    throw new GradleException("optimizationProfile must be one of ${optimizationProfiles} (got ${optimizationProfile})")
 }
 def frameEvidenceMode = providers.gradleProperty('frameEvidenceMode').orElse('off').get()
 if (!(frameEvidenceMode in ['off', 'timing', 'diagnostic'])) {
@@ -82,11 +83,22 @@ def terrainSliceCache = providers.gradleProperty('terrainSliceCache').orElse('fa
 if (gameplay && optimizationProfile == 'baseline-v1' && reuseEncoderState) {
     throw new GradleException('reuseEncoderState requires optimizationProfile=reuse-encoder-state-v1')
 }
+if (gameplay && optimizationProfile == 'baseline-v1' && reuseNativeEncoderArguments) {
+    throw new GradleException('reuseNativeEncoderArguments requires optimizationProfile=encoder-argument-reuse-v1')
+}
 if (gameplay && optimizationProfile == 'reuse-encoder-state-v1'
         && (!reuseEncoderState || !stationaryBaseline || frameEvidenceMode != 'timing'
         || frameEvidencePhase != 'stationary' || waitForProfiler || gameplayJfr
-        || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence)) {
+        || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
+        || reuseNativeEncoderArguments)) {
     throw new GradleException('reuse-encoder-state-v1 requires the stationary metrics-only timing route with segmented evidence')
+}
+if (gameplay && optimizationProfile == 'encoder-argument-reuse-v1'
+        && (!reuseNativeEncoderArguments || reuseEncoderState || !stationaryBaseline
+        || frameEvidenceMode != 'timing' || frameEvidencePhase != 'stationary'
+        || waitForProfiler || gameplayJfr || renderDebugLabels || presentationMetrics
+        || terrainSliceCache || !segmentedFrameEvidence)) {
+    throw new GradleException('encoder-argument-reuse-v1 requires the stationary metrics-only timing route with segmented evidence and no other optimization')
 }
 if (frameEvidencePhase == 'streaming'
         && (frameEvidenceWarmupSeconds != 5 || frameEvidenceSampleSeconds != 10)) {
@@ -197,6 +209,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // still required before any measurements are accepted.
         jvmArgs.add("-Dmetallum.validation.forceMetal=true")
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
+        jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
         jvmArgs.add("-Dmetallum.terrain.verifySliceCache=${providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.presentationMetrics=${presentationMetrics}")
