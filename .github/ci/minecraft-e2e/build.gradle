@@ -34,7 +34,7 @@ def stationaryBaseline = providers.gradleProperty('stationaryBaseline').orElse('
 def reuseEncoderState = providers.gradleProperty('reuseEncoderState').orElse('false').get().toBoolean()
 def reuseNativeEncoderArguments = providers.gradleProperty('reuseNativeEncoderArguments').orElse('false').get().toBoolean()
 def optimizationProfile = providers.gradleProperty('optimizationProfile').orElse('baseline-v1').get().trim()
-def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'encoder-argument-reuse-v1']
+def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'reuse-encoder-state-diagnostic-v1', 'encoder-argument-reuse-v1']
 if (!(optimizationProfile in optimizationProfiles)) {
     throw new GradleException("optimizationProfile must be one of ${optimizationProfiles} (got ${optimizationProfile})")
 }
@@ -92,6 +92,12 @@ if (gameplay && optimizationProfile == 'reuse-encoder-state-v1'
         || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
         || reuseNativeEncoderArguments)) {
     throw new GradleException('reuse-encoder-state-v1 requires the stationary metrics-only timing route with segmented evidence')
+}
+if (gameplay && optimizationProfile == 'reuse-encoder-state-diagnostic-v1'
+        && (!reuseEncoderState || frameEvidenceMode != 'diagnostic' || !gameplayJfr
+        || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
+        || reuseNativeEncoderArguments)) {
+    throw new GradleException('reuse-encoder-state-diagnostic-v1 requires diagnostic JFR with no other optimization')
 }
 if (gameplay && optimizationProfile == 'encoder-argument-reuse-v1'
         && (!reuseNativeEncoderArguments || reuseEncoderState || !stationaryBaseline

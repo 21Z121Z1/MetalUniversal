@@ -239,10 +239,15 @@ drives test ticks until shutdown before closing the world, avoiding Fabric's cli
 phase-barrier deadlock in 26.3 `IntegratedServer.halt`. The ordinary client/device shutdown
 and its existing GPU drain still own final evidence export.
 
-Before warmup, the fixed camera must have an empty compile queue and occlusion expected
-chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
-hash of section nodes and layer draw metadata must remain stable for at least 40 checks
-and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
+Before warmup, the fixed camera must have an empty compile queue and no active
+`SectionRenderDispatcher.runTask` invocation, plus an empty occlusion expected-chunk set,
+no uncompiled visible section, and uploaded/admissible layer draws. Readiness records the
+queue size, active task-invocation count, and `scheduledSectionWorkComplete`; the invocation
+counter covers the full existing dequeue/acquire/compile/release call, including exceptional
+exit. This covers already-scheduled section work, not hidden dirty sections that have not
+been scheduled. The queue and activity reads are an observed quiescence check, not a global
+barrier: work may be scheduled after either read. A canonical hash of section nodes and
+layer draw metadata must remain stable for at least 40 checks and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
 (to remove loading-order-dependent conservative accumulation), waits for the graph task
 and frustum update to finish without blocking, and repeats convergence. It is recorded
 again after sampling; section identity and draw admission must still match. Normal
@@ -436,6 +441,16 @@ reuse hits from the candidate. These counters are cumulative from client startup
 through gameplay completion, not a sample-window cost. This proves route
 activation, not comparable performance or physical acceptance.
 
+`--optimization-profile reuse-encoder-state-diagnostic-v1 --reuse-encoder-state --jfr-only` is a separate
+diagnostic profile for Java wait/stack diagnosis. It supports the existing stationary
+and normal input-driven streaming routes. Omit `--jfr-only` on the normal route to
+record both JFR and Xcode; `--jfr-only` records JFR without Xcode. It uses `diagnostic`
+frame evidence; its `pairKey` is null, so it is not a
+timing pair. Its archive may be structurally valid or `comparison-ready`, but JFR
+overhead and diagnostic instrumentation keep it outside timing, performance and
+promotion decisions. The existing reuse-encoder-state timing contract remains
+metrics-only and unchanged.
+
 The initial JFR flight profile identified state-shadow arrays and indexed-binding
 list iterators as allocation hot spots. Reusing stable objects follows Apple's
 [persistent objects guidance](https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/PersistentObjects.html).
@@ -454,6 +469,20 @@ cover the full route. Inspect exported timestamp coverage: a long trace can reta
 only its trailing GPU events even when its overall recording duration is complete.
 Labels use Vanilla's existing `--renderDebugLabels` option and are rejected with
 `--metrics-only` so diagnostic label work does not enter timing trials.
+
+The gameplay driver records paired `System.nanoTime`/`Instant` anchors around
+`FrameEvidenceRuntime.armWindow` and at the observed source-window end. These
+anchors calibrate Java monotonic time to host wall time for diagnostics only;
+`frame-evidence.json.window.startNs/endNs` remains the recorder authority, and
+native `presentedTime` is never mixed into that calibration. After a profiled run,
+the runner exports the Game Performance `ca-client-present-request` and
+`ca-client-presented-handler` tables for the attached client PID. Its
+`recording.json.traceCoverage` result is `unavailable` when the archive, clock,
+PID or table data cannot be mapped and `partial` when present events overlap the
+archive window or are otherwise only event samples. Event rows do not prove continuous coverage, so this report is
+kept separate from archive validity and performance conclusions. In `off` mode
+the source-frame declaration remains the workload authority and Xcode coverage is
+unavailable because there is no recorder window to join.
 
 `--presentation-metrics` optionally samples the existing native drawable-wait
 getter once after each ordinary source present. The report and phase boundaries

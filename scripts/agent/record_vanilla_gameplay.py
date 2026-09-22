@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Record the existing Fabric production client with Xcode's Game Performance template.
+"""Record the existing Fabric production client with Xcode or a JFR-only diagnostic.
 
 No verdict is inferred from profiler output. Gameplay reports and raw Instruments
 data remain separate from render correctness and controlled performance acceptance.
 """
 import argparse
 import ctypes
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -28,11 +30,16 @@ DEFAULT_GAMEPLAY_TIMEOUT_SECONDS = 300
 MAX_GAMEPLAY_TIMEOUT_SECONDS = MAX_WINDOW_SECONDS + GAMEPLAY_TIMEOUT_MARGIN_SECONDS
 OPTIMIZATION_PROFILE_BASELINE = "baseline-v1"
 OPTIMIZATION_PROFILE_REUSE = "reuse-encoder-state-v1"
+OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE = "reuse-encoder-state-diagnostic-v1"
 OPTIMIZATION_PROFILE_ARGUMENT_REUSE = "encoder-argument-reuse-v1"
 OPTIMIZATION_FEATURE = "encoder-cpu-state-reuse"
 OPTIMIZATION_ARGUMENT_FEATURE = "encoder-native-argument-reuse"
 OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE,
+                                OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
                                 OPTIMIZATION_PROFILE_ARGUMENT_REUSE)
+TRACE_PRESENT_SCHEMAS = ("ca-client-present-request", "ca-client-presented-handler")
+TRACE_PRESENT_XPATH = ('/trace-toc/run[@number="1"]/data/table['
+                       + " or ".join(f'@schema="{schema}"' for schema in TRACE_PRESENT_SCHEMAS) + ']')
 
 
 def validate_window(warmup_seconds, sample_seconds, phase):
@@ -57,13 +64,355 @@ def gameplay_timeout_seconds(window_seconds):
                max(DEFAULT_GAMEPLAY_TIMEOUT_SECONDS, window_seconds + GAMEPLAY_TIMEOUT_MARGIN_SECONDS))
 
 
+def _local_name(element):
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _integer(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _epoch_ns(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = parsed.astimezone(timezone.utc) - epoch
+    result = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+    fraction = re.search(r"\.(\d+)(?=[+-]\d\d:\d\d$)", normalized)
+    if fraction is not None:
+        fractional_ns = int(fraction.group(1).ljust(9, "0")[:9])
+        result += fractional_ns - parsed.microsecond * 1_000
+    return result
+
+
+def _element_text(element):
+    return " ".join(part.strip() for part in element.itertext() if part.strip())
+
+
+def _row_start_ns(row):
+    for element in row.iter():
+        tag = _local_name(element).lower().replace("_", "-")
+        if tag != "start-time":
+            continue
+        text = _element_text(element)
+        if re.fullmatch(r"-?\d+", text):
+            # xctrace's start-time engineering type stores raw relative ns;
+            # fmt is only the human-readable clock string.
+            return int(text)
+    return None
+
+
+def _row_pids(row, definitions=None):
+    values = set()
+    for element in row.iter():
+        for key, value in element.attrib.items():
+            if key.lower().rsplit("}", 1)[-1] == "pid":
+                parsed = _integer(value)
+                if parsed is not None:
+                    values.add(parsed)
+        if _local_name(element).lower() == "pid":
+            parsed = _integer(_element_text(element))
+            if parsed is not None:
+                values.add(parsed)
+        if definitions is not None:
+            reference = element.attrib.get("ref")
+            if reference in definitions:
+                values.update(definitions[reference])
+    return values
+
+
+def _trace_target_info(toc_path):
+    root = ET.parse(toc_path).getroot()
+    attached_pids = []
+    trace_start_ns = None
+    schemas = set()
+    table_schemas = {}
+    table_index = 0
+    for element in root.iter():
+        tag = _local_name(element).lower()
+        if tag == "process":
+            pid = _integer(element.attrib.get("pid"))
+            if pid is not None:
+                if element.attrib.get("type") == "attached":
+                    attached_pids.append(pid)
+        if tag == "start-date" and trace_start_ns is None:
+            trace_start_ns = _epoch_ns(_element_text(element))
+        if tag == "table" and element.attrib.get("schema"):
+            schemas.add(element.attrib["schema"])
+    for data in root.iter():
+        if _local_name(data).lower() != "data":
+            continue
+        for table in data:
+            if _local_name(table).lower() != "table":
+                continue
+            table_index += 1
+            if table.attrib.get("schema"):
+                table_schemas[table_index] = table.attrib["schema"]
+    return {
+        "traceTargetPids": sorted(set(attached_pids)),
+        "traceStartWallNs": trace_start_ns,
+        "declaredSchemas": sorted(schemas),
+        "tableSchemas": table_schemas,
+    }
+
+
+def _trace_present_rows(path, table_schemas=None):
+    root = ET.parse(path).getroot()
+    rows = {schema: [] for schema in TRACE_PRESENT_SCHEMAS}
+    definitions = {}
+    for element in root.iter():
+        identifier = element.attrib.get("id")
+        if identifier is not None:
+            pids = _row_pids(element)
+            if pids:
+                definitions[identifier] = pids
+    seen = set()
+    for element in root.iter():
+        schema = element.attrib.get("schema") or element.attrib.get("name")
+        if schema not in rows and _local_name(element).lower() in {"node", "table"}:
+            schema = next((child.attrib.get("name") or child.attrib.get("schema")
+                           for child in element.iter()
+                           if _local_name(child).lower() == "schema"
+                           and (child.attrib.get("name") or child.attrib.get("schema")) in rows), None)
+        if schema not in rows and _local_name(element).lower() == "node" and table_schemas:
+            table = re.search(r"/table\[(\d+)\]", element.attrib.get("xpath", ""))
+            schema = table_schemas.get(int(table.group(1))) if table else None
+        if schema not in rows:
+            continue
+        for row in element.iter():
+            if _local_name(row).lower() != "row" or id(row) in seen:
+                continue
+            seen.add(id(row))
+            rows[schema].append({"startNs": _row_start_ns(row),
+                                 "pids": sorted(_row_pids(row, definitions))})
+    return rows
+
+
+def _clock_pairs(value):
+    pairs = []
+    if isinstance(value, dict):
+        required = ("monoBeforeNs", "monoAfterNs", "wall")
+        if all(key in value for key in required):
+            mono_before = _integer(value.get("monoBeforeNs"))
+            mono_after = _integer(value.get("monoAfterNs"))
+            wall = _epoch_ns(value.get("wall"))
+            if None not in (mono_before, mono_after, wall):
+                pairs.append({"monoBeforeNs": mono_before, "monoAfterNs": mono_after,
+                              "wallNs": wall,
+                              "uncertaintyNs": max(0, mono_after - mono_before)})
+        for child in value.values():
+            pairs.extend(_clock_pairs(child))
+    elif isinstance(value, list):
+        for child in value:
+            pairs.extend(_clock_pairs(child))
+    return pairs
+
+
+def _archive_window(evidence_path=None, archive=None):
+    raw = archive
+    if raw is None and evidence_path is not None:
+        try:
+            raw = json.loads(Path(evidence_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("window"), dict):
+        return None
+    window = raw["window"]
+    start = _integer(window.get("startNs"))
+    end = _integer(window.get("endNs"))
+    if start is None or end is None or end <= start:
+        return None
+    return {"startNs": start, "endNs": end, "clock": window.get("clock")}
+
+
+def inspect_trace_coverage(toc_path, present_tables_path, gameplay=None, evidence_path=None, *, archive=None):
+    """Classify exported present events without claiming continuous window coverage."""
+    result = {
+        "schemaVersion": 1,
+        "source": "xctrace Game Performance present-table export",
+        "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+        "status": "unavailable",
+        "continuousCoverage": False,
+    }
+    toc_path = Path(toc_path)
+    present_tables_path = Path(present_tables_path)
+    if not toc_path.is_file():
+        result["reason"] = "trace-toc-missing"
+        return result
+    try:
+        trace = _trace_target_info(toc_path)
+    except (OSError, ET.ParseError) as failure:
+        result["reason"] = f"trace-toc-unreadable:{type(failure).__name__}"
+        return result
+    result.update({"traceTargetPids": trace["traceTargetPids"],
+                   "traceStartWallNs": trace["traceStartWallNs"]})
+    target_pid = _integer(gameplay.get("pid")) if isinstance(gameplay, dict) else None
+    result["targetPid"] = target_pid
+    if target_pid is None:
+        result["reason"] = "gameplay-target-pid-missing"
+        return result
+    if target_pid not in trace["traceTargetPids"]:
+        result["reason"] = "trace-target-pid-mismatch"
+        return result
+    missing_schemas = [schema for schema in TRACE_PRESENT_SCHEMAS if schema not in trace["declaredSchemas"]]
+    result["presentSchemas"] = [schema for schema in TRACE_PRESENT_SCHEMAS if schema in trace["declaredSchemas"]]
+    if missing_schemas:
+        result["missingPresentSchemas"] = missing_schemas
+        result["reason"] = "trace-toc-missing-present-schema"
+        return result
+    if not present_tables_path.is_file():
+        result["reason"] = "present-table-export-missing"
+        return result
+    try:
+        table_rows = _trace_present_rows(present_tables_path, trace["tableSchemas"])
+    except (OSError, ET.ParseError) as failure:
+        result["reason"] = f"present-table-export-unreadable:{type(failure).__name__}"
+        return result
+    result["eventCounts"] = {schema: len(rows) for schema, rows in table_rows.items()}
+    rows = [(schema, row) for schema, values in table_rows.items() for row in values]
+    timed_rows = [(schema, row) for schema, row in rows if row["startNs"] is not None]
+    result["rowsWithTargetPid"] = sum(target_pid in row["pids"] for _, row in timed_rows)
+    result["rowsWithUnknownPid"] = sum(not row["pids"] for _, row in timed_rows)
+    if not rows:
+        result["reason"] = "present-table-export-has-no-events"
+        return result
+    if len(timed_rows) != len(rows):
+        result["reason"] = "present-table-event-time-unit-missing-or-invalid"
+        return result
+    if result["rowsWithUnknownPid"]:
+        result["reason"] = "present-table-event-pid-missing"
+        return result
+    target_rows = [(schema, row) for schema, row in timed_rows if target_pid in row["pids"]]
+    if not target_rows:
+        result["reason"] = "present-table-has-no-target-pid-events"
+        return result
+    if trace["traceStartWallNs"] is None:
+        result["reason"] = "trace-start-wallclock-missing"
+        return result
+    window = _archive_window(evidence_path, archive)
+    if window is None:
+        result["reason"] = "archive-window-missing"
+        return result
+    result["archiveWindow"] = window
+    if window.get("clock") != "java-System.nanoTime":
+        result["reason"] = "archive-window-clock-is-not-java-system-nanotime"
+        return result
+    pairs = _clock_pairs(gameplay.get("windowClockAnchors")) if isinstance(gameplay, dict) else []
+    result["clockAnchorCount"] = len(pairs)
+    if not pairs:
+        result["reason"] = "java-wallclock-anchors-missing"
+        return result
+    if any(pair["monoAfterNs"] < pair["monoBeforeNs"] for pair in pairs):
+        result["reason"] = "java-clock-anchor-not-monotonic"
+        return result
+
+    if (min(pair["monoBeforeNs"] for pair in pairs) > window["startNs"]
+            or max(pair["monoAfterNs"] for pair in pairs) < window["endNs"]):
+        result["reason"] = "java-clock-anchors-do-not-bracket-window"
+        return result
+
+    offset_intervals = [{
+        "lowerNs": pair["wallNs"] - pair["monoAfterNs"],
+        "upperNs": pair["wallNs"] - pair["monoBeforeNs"],
+    } for pair in pairs]
+    common_lower = max(interval["lowerNs"] for interval in offset_intervals)
+    common_upper = min(interval["upperNs"] for interval in offset_intervals)
+    mapping = {"source": "Java System.nanoTime + java.time.Instant",
+               "nativePresentedTimeMixed": False,
+               "offsetIntervals": offset_intervals,
+               "commonOffsetIntervalNs": {"lowerNs": common_lower, "upperNs": common_upper}}
+    result["clockMapping"] = mapping
+    if common_lower > common_upper:
+        mapping["offsetsConsistent"] = False
+        result["reason"] = "java-clock-anchor-offsets-disagree"
+        return result
+    mapping["offsetsConsistent"] = True
+    mapping["limitation"] = "sampled offset consistency does not prove clock stability between anchors"
+    mapping["uncertaintyNs"] = max(common_upper - common_lower,
+                                    max(pair["uncertaintyNs"] for pair in pairs))
+    offset = (common_lower + common_upper) // 2
+    wall_start = window["startNs"] + offset
+    wall_end = window["endNs"] + offset
+    mapping["mode"] = "shared-offset-interval"
+    event_starts = [row["startNs"] for _, row in target_rows]
+    event_wall_start = trace["traceStartWallNs"] + min(event_starts)
+    event_wall_end = trace["traceStartWallNs"] + max(event_starts)
+    result["eventWallStartNs"] = round(event_wall_start)
+    result["eventWallEndNs"] = round(event_wall_end)
+    result["archiveWindowWallStartNs"] = wall_start
+    result["archiveWindowWallEndNs"] = wall_end
+    result["pidScope"] = "matched-row-pid"
+    result["status"] = "partial"
+    # Reject overlap only outside every offset allowed by the sampled anchors.
+    # TOC wall-clock accuracy remains uncalibrated; this is a diagnostic estimate.
+    result["windowWallBoundsNs"] = {"earliestStart": window["startNs"] + common_lower,
+                                    "latestEnd": window["endNs"] + common_upper}
+    result["traceClockAccuracy"] = "unavailable; TOC wall-clock precision is not a calibrated accuracy bound"
+    if (event_wall_end < window["startNs"] + common_lower
+            or event_wall_start >= window["endNs"] + common_upper):
+        result["reason"] = "present-events-do-not-overlap-archive-window"
+    else:
+        result["reason"] = "present-events-do-not-prove-continuous-window-coverage"
+    return result
+
+
+def export_trace_artifacts(output, receipt, run_command=None):
+    """Export the TOC and bounded present tables, then attach a conservative report."""
+    if run_command is None:
+        run_command = subprocess.run
+    trace = output / "gameplay.trace"
+    toc = output / "trace-toc.xml"
+    present = output / "trace-present-tables.xml"
+    toc_command = ["xcrun", "xctrace", "export", "--input", str(trace), "--toc", "--output", str(toc)]
+    present_command = ["xcrun", "xctrace", "export", "--input", str(trace), "--xpath",
+                       TRACE_PRESENT_XPATH, "--output", str(present)]
+    receipt["traceExport"] = {"tocCommand": toc_command, "presentTablesCommand": present_command,
+                               "tocPath": toc.name, "presentTablesPath": present.name}
+    try:
+        run_command(toc_command, check=True)
+    except (OSError, subprocess.CalledProcessError) as failure:
+        receipt["traceExport"]["status"] = "failed"
+        receipt["traceCoverage"] = {"schemaVersion": 1, "source": "xctrace Game Performance present-table export",
+                                     "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+                                     "status": "unavailable", "continuousCoverage": False,
+                                     "reason": f"trace-toc-export-failed:{type(failure).__name__}"}
+        raise
+    try:
+        run_command(present_command, check=True)
+    except (OSError, subprocess.CalledProcessError) as failure:
+        receipt["traceExport"]["status"] = "partial"
+        receipt["traceCoverage"] = {"schemaVersion": 1, "source": "xctrace Game Performance present-table export",
+                                     "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+                                     "status": "unavailable", "continuousCoverage": False,
+                                     "reason": f"present-table-export-failed:{type(failure).__name__}"}
+        return receipt["traceCoverage"]
+    receipt["traceExport"]["status"] = "success"
+    receipt["traceCoverage"] = inspect_trace_coverage(
+        toc, present, receipt.get("gameplay"), output / "frame-evidence.json")
+    return receipt["traceCoverage"]
+
+
 def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence_phase,
                                  frame_evidence, metrics_only, presentation_metrics,
                                  render_labels, terrain_slice_cache, reuse_encoder_state,
-                                 reuse_native_encoder_arguments=False):
+                                 reuse_native_encoder_arguments=False, jfr_only=False):
     """Resolve the explicit paired profile and reject an unpaired reuse request."""
     if profile not in OPTIMIZATION_PROFILE_CHOICES:
         raise ValueError(f"optimization profile must be one of {', '.join(OPTIMIZATION_PROFILE_CHOICES)}")
+    if jfr_only and profile != OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE:
+        raise ValueError("--jfr-only requires reuse-encoder-state-diagnostic-v1")
     if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_encoder_state:
         raise ValueError("--reuse-encoder-state requires --optimization-profile reuse-encoder-state-v1")
     if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_native_encoder_arguments:
@@ -79,6 +428,13 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
             raise ValueError("reuse-encoder-state-v1 excludes diagnostic getters and terrain cache experiments")
         if reuse_native_encoder_arguments:
             raise ValueError("reuse-encoder-state-v1 cannot enable native encoder argument reuse")
+    if profile == OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE:
+        if not reuse_encoder_state:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --reuse-encoder-state")
+        if frame_evidence_phase not in PHASE_SAMPLE or frame_evidence != "diagnostic" or metrics_only:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires diagnostic mode with JFR")
+        if presentation_metrics or render_labels or terrain_slice_cache or reuse_native_encoder_arguments:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 excludes other diagnostic or optimization flags")
     if profile == OPTIMIZATION_PROFILE_ARGUMENT_REUSE:
         if not reuse_native_encoder_arguments:
             raise ValueError("encoder-argument-reuse-v1 requires --reuse-native-encoder-arguments")
@@ -95,11 +451,12 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
                else OPTIMIZATION_FEATURE)
     return {
         "id": profile,
-        "pairKey": route if stationary_baseline else None,
+        "pairKey": None if profile == OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE else route if stationary_baseline else None,
         "feature": feature,
         "reuseEncoderState": bool(reuse_encoder_state),
         "reuseNativeEncoderArguments": bool(reuse_native_encoder_arguments),
-        "candidate": profile in (OPTIMIZATION_PROFILE_REUSE, OPTIMIZATION_PROFILE_ARGUMENT_REUSE),
+        "candidate": profile in (OPTIMIZATION_PROFILE_REUSE, OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
+                                  OPTIMIZATION_PROFILE_ARGUMENT_REUSE),
     }
 
 
@@ -246,7 +603,8 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
 def finalize_client_run(receipt, recording, client, output, root, source_sha,
                         frame_evidence_mode, run_command=None, *, expected_trial_id=None,
                         expected_phase=None, expected_warmup_seconds=None,
-                        expected_sample_seconds=None, expected_optimization_profile=None):
+                        expected_sample_seconds=None, expected_optimization_profile=None,
+                        jfr_only=False):
     """Close the profiler/client, then verify evidence emitted during client shutdown."""
     if recording is not None:
         if recording.poll() is None:
@@ -255,6 +613,11 @@ def finalize_client_run(receipt, recording, client, output, root, source_sha,
     receipt["clientExitCode"] = client.wait(timeout=180)
     if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
         raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
+    if jfr_only:
+        jfr = output / "gameplay.jfr"
+        if not jfr.is_file() or jfr.stat().st_size == 0:
+            raise RuntimeError("JFR-only diagnostic did not produce a non-empty gameplay.jfr")
+        receipt["jfr"] = {"path": jfr.name, "bytes": jfr.stat().st_size}
     if receipt.get("traceExitCode", 0) != 0:
         raise RuntimeError("Instruments recording failed; see instruments.log")
     receipt["frameEvidenceVerification"] = verify_frame_evidence(
@@ -285,6 +648,8 @@ def main():
                         help="Stable identity for this trial; defaults to the output directory name")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
+    parser.add_argument("--jfr-only", action="store_true",
+                        help="Run the diagnostic reuse profile with JFR and without an Xcode trace")
     parser.add_argument("--capture-seconds", type=int, default=120,
                         help="Instruments clip length; short clips avoid losing early GPU events in long traces")
     parser.add_argument("--render-labels", action="store_true",
@@ -309,6 +674,10 @@ def main():
         parser.error("timing frame evidence requires --metrics-only and no diagnostic presentation metrics or render labels")
     if args.metrics_only and args.render_labels:
         parser.error("render labels are diagnostic-only; omit them for timing trials")
+    if args.metrics_only and args.jfr_only:
+        parser.error("--metrics-only and --jfr-only are mutually exclusive")
+    if args.jfr_only and args.frame_evidence != "diagnostic":
+        parser.error("--jfr-only requires diagnostic frame evidence")
     if args.verify_terrain_cache and not args.terrain_slice_cache:
         parser.error("--verify-terrain-cache requires --terrain-slice-cache")
     if args.stationary_baseline and args.initial_world is None:
@@ -324,12 +693,14 @@ def main():
             render_labels=args.render_labels,
             terrain_slice_cache=args.terrain_slice_cache,
             reuse_encoder_state=args.reuse_encoder_state,
-            reuse_native_encoder_arguments=args.reuse_native_encoder_arguments)
+            reuse_native_encoder_arguments=args.reuse_native_encoder_arguments,
+            jfr_only=args.jfr_only)
     except ValueError as failure:
         parser.error(str(failure))
-    if args.stationary_baseline and (args.frame_evidence == "diagnostic" or args.frame_evidence_phase != "stationary" or not args.metrics_only
+    if args.stationary_baseline and ((args.frame_evidence == "diagnostic" and not args.jfr_only)
+            or args.frame_evidence_phase != "stationary" or (not args.metrics_only and not args.jfr_only)
             or args.presentation_metrics or args.terrain_slice_cache):
-        parser.error("stationary baseline requires stationary metrics-only without diagnostic getters or optimization experiments")
+        parser.error("stationary baseline requires stationary metrics-only or the explicit JFR-only diagnostic profile")
     try:
         window_seconds = validate_window(args.frame_evidence_warmup_seconds,
                                          args.frame_evidence_sample_seconds,
@@ -370,7 +741,7 @@ def main():
                f"-PframeEvidenceWarmupSeconds={args.frame_evidence_warmup_seconds}",
                f"-PframeEvidenceSampleSeconds={args.frame_evidence_sample_seconds}",
                f"-PframeEvidenceTrialId={trial_id}",
-               f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
+               f"-PwaitForProfiler={str(not args.metrics_only and not args.jfr_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
@@ -394,9 +765,11 @@ def main():
         raise RuntimeError("Cannot register Instruments recording notification")
     changed = ctypes.c_int()
     notify.notify_check(token, ctypes.byref(changed))
-    receipt = {"source": identity, "clientCommand": command, "template": None if args.metrics_only else args.template,
+    receipt = {"source": identity, "clientCommand": command,
+               "template": None if args.metrics_only or args.jfr_only else args.template,
                "profilingEnabled": not args.metrics_only,
-               "captureSeconds": None if args.metrics_only else args.capture_seconds,
+               "jfrOnly": args.jfr_only,
+               "captureSeconds": None if args.metrics_only or args.jfr_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
                "frameEvidenceMode": args.frame_evidence,
@@ -409,7 +782,11 @@ def main():
                "gameplayTimeoutSeconds": gameplay_timeout,
                "initialWorld": initial_world,
                "frameEvidenceVerification": None,
-               "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
+               "traceCoverage": None,
+               "frameEvidenceProfile": ("vanilla-stationary-60-diagnostic-v1"
+                                         if args.jfr_only and args.stationary_baseline
+                                         else "vanilla-stationary-60-v1" if args.stationary_baseline
+                                         else f"vanilla-normal-{args.frame_evidence_phase}-v1"),
                "optimizationProfile": optimization_profile,
                "warmupNanos": args.frame_evidence_warmup_seconds * 1_000_000_000,
                "sampleNanos": args.frame_evidence_sample_seconds * 1_000_000_000,
@@ -432,7 +809,7 @@ def main():
                     raise TimeoutError("Client did not reach gameplay readiness within 10 minutes")
                 time.sleep(0.5)
             pid = json.loads(ready.read_text())["pid"]
-            if not args.metrics_only:
+            if not args.metrics_only and not args.jfr_only:
                 trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
                                  "--attach", str(pid), "--output", str(output / "gameplay.trace"),
                                  "--time-limit", f"{args.capture_seconds}s",
@@ -466,7 +843,8 @@ def main():
                                 expected_phase=args.frame_evidence_phase,
                                 expected_warmup_seconds=args.frame_evidence_warmup_seconds,
                                 expected_sample_seconds=args.frame_evidence_sample_seconds,
-                                expected_optimization_profile=optimization_profile)
+                                expected_optimization_profile=optimization_profile,
+                                jfr_only=args.jfr_only)
         except BaseException as failure:
             receipt["failure"] = str(failure)
             raise
@@ -481,9 +859,22 @@ def main():
                 os.killpg(client.pid, signal.SIGTERM)
             notify.notify_cancel(token)
             (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    if not args.metrics_only:
-        subprocess.run(["xcrun", "xctrace", "export", "--input", str(output / "gameplay.trace"),
-                        "--toc", "--output", str(output / "trace-toc.xml")], check=True)
+    if not args.metrics_only and not args.jfr_only:
+        try:
+            export_trace_artifacts(output, receipt)
+        except BaseException:
+            (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
+            raise
+    else:
+        receipt["traceCoverage"] = {
+            "schemaVersion": 1,
+            "source": "xctrace Game Performance present-table export",
+            "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+            "status": "unavailable",
+            "continuousCoverage": False,
+            "reason": "profiling-disabled" if args.metrics_only else "jfr-only-no-xcode-trace",
+        }
+    (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "recording.json")
 
 

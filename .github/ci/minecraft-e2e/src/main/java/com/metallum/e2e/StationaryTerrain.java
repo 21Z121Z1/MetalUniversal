@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
+import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -38,6 +39,23 @@ final class StationaryTerrain {
 
     JsonObject evidence() { return evidence.deepCopy(); }
 
+    static JsonObject scheduledSectionWorkEvidence(int taskQueueSize, int activeTaskInvocations) {
+        boolean valid = taskQueueSize >= 0 && activeTaskInvocations >= 0;
+        JsonObject result = new JsonObject();
+        result.addProperty("taskQueueSize", taskQueueSize);
+        result.addProperty("activeTaskInvocations", activeTaskInvocations);
+        result.addProperty("scheduledSectionWorkComplete", valid && taskQueueSize == 0 && activeTaskInvocations == 0);
+        result.addProperty("authority", "SectionRenderDispatcher task queue and active runTask invocations; already-scheduled section work only");
+        return result;
+    }
+
+    private static JsonObject scheduledSectionWork(SectionRenderDispatcher dispatcher) {
+        int taskQueueSize = dispatcher.getCompileQueueSize();
+        int activeTaskInvocations = ((StationaryDispatcherActivityAccess) (Object) dispatcher)
+                .metallum$activeTaskInvocations();
+        return scheduledSectionWorkEvidence(taskQueueSize, activeTaskInvocations);
+    }
+
     static JsonObject capture(Minecraft client) {
         var renderer = client.levelRenderer;
         var dispatcher = renderer.sectionRenderDispatcher();
@@ -45,13 +63,18 @@ final class StationaryTerrain {
         var graphTask = graph.metallum$fullUpdateTask();
         if (graph.metallum$needsFullUpdate() || graph.metallum$needsFrustumUpdate().get()
                 || (graphTask != null && graphTask.state() != java.util.concurrent.Future.State.SUCCESS)) return null;
-        if (dispatcher == null || !renderer.hasRenderedAllSections()
+        if (dispatcher == null || !scheduledSectionWork(dispatcher).get("scheduledSectionWorkComplete").getAsBoolean()
+                || !renderer.hasRenderedAllSections()
                 || !renderer.sectionOcclusionGraph().expectedChunks().isEmpty()
                 || renderer.visibleSections().isEmpty()) return null;
         var rows = new ArrayList<String>();
         long indexCount = 0;
+        JsonObject sectionWork;
         dispatcher.lock();
         try {
+            sectionWork = scheduledSectionWork(dispatcher);
+            if (!sectionWork.get("scheduledSectionWorkComplete").getAsBoolean()
+                    || !renderer.hasRenderedAllSections()) return null;
             for (var section : renderer.visibleSections()) {
                 var mesh = section.getSectionMesh();
                 if (mesh == CompiledSectionMesh.UNCOMPILED) return null;
@@ -87,6 +110,7 @@ final class StationaryTerrain {
             result.addProperty("visibleDrawSha256", HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(String.join("\n", rows).getBytes(StandardCharsets.UTF_8))));
         } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+        result.add("scheduledSectionWork", sectionWork);
         result.addProperty("authority", "section nodes and admitted layer draw metadata; compiled/uploaded, queue and expected chunks empty; not pixel identity");
         return result;
     }
