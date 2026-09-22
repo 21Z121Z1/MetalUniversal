@@ -38,14 +38,14 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   return json.load(response)
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = '009a1c60ef174aedddb8ce103871c03103e713c4'
+          base = 'c81adfba4a6ef0e1a06f9f2230c8112f902b07b4'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
           if changed != ['.github/workflows/convergence-edit.yml']:
               raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          blob_shas = ['58590bd42e14fc949da8ea19f13a5049d8bd10b9',
-                       '6e111b3874929eed5ee4b66a3a100c6459362155',
-                       'fdaf9e4357055f50574df526f8699d3d2dc91e34',
-                       '7a94f8c200129cdfb31ef36f988da965ed5e2f27']
+          blob_shas = ['26a4a6154344bed6e5202cf14625b6d9ab1a826b',
+                       'f06bd6efdc0ce3cddc3e0b0ab59425af1ca6ce91',
+                       '8a2fc75f9f9e2f02dfe7d87184db33af30f8ed10',
+                       'd5539cf0251415b15e2f6faff796007a3e979039']
           parts = []
           for blob_sha in blob_shas:
               blob = api('/git/blobs/' + blob_sha)
@@ -54,7 +54,7 @@ jobs:
                   raise RuntimeError('Reviewed transport blob identity mismatch')
               parts.append(part)
           patch = gzip.decompress(b''.join(parts))
-          digest = '2dd7f613b6402176d501f0b7bb31d385f1996120c27f2fedfad90c176cd32fb7'
+          digest = '5cc7cdfe7c880d5ccf36ae08aaf732ac947cf9d0361aa28b8ed5744f321916d6'
           if hashlib.sha256(patch).hexdigest() != digest:
               raise RuntimeError('Reviewed patch digest mismatch')
           patch_path = output / 'change.patch'
@@ -64,16 +64,8 @@ jobs:
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
           if git('diff', '--binary', '--full-index', 'HEAD') != patch:
               raise RuntimeError('Applied patch differs from reviewed patch')
-          allowed = {
-              'src/main/java/com/metallum/client/terrain/TerrainPublicationGenerationGuard.java',
-              'src/main/java/com/metallum/client/terrain/VanillaTerrainGenerationRuntime.java',
-              'src/main/java/com/metallum/mixin/terrain/VanillaTerrainGenerationRuntime.java',
-              'src/main/java/com/metallum/mixin/terrain/CompileTaskTerrainGenerationMixin.java',
-              'src/main/java/com/metallum/mixin/terrain/LevelExtractorTerrainGenerationMixin.java',
-              'src/main/java/com/metallum/mixin/terrain/RenderSectionTerrainGenerationMixin.java',
-              'src/main/java/com/metallum/mixin/terrain/SectionTaskTerrainAdmissionAccessor.java',
-              'src/test/java/com/metallum/client/terrain/TerrainPublicationGenerationGuardTest.java',
-              'src/test/java/com/metallum/client/terrain/TerrainPublicationTransactionTest.java'}
+          allowed = {'.github/ci/HostedMetalGradle.init.gradle', '.github/ci/JvmPsoThreadingProbe.java',
+                     '.github/workflows/build.yml', 'build.gradle'}
           paths = git('diff', '--cached', '--no-renames', '--name-only', '-z').decode().rstrip('\0').split('\0')
           if set(paths) != allowed:
               raise RuntimeError('Unexpected patch paths: ' + repr(paths))
@@ -91,7 +83,7 @@ jobs:
           tree = api('/git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries})
           if tree['sha'] != git('write-tree').decode().strip():
               raise RuntimeError('Remote tree differs from reviewed local tree')
-          commit = api('/git/commits', {'message': 'fix(terrain): make generation admission and mesh exchange indivisible\n\nReimplement the valid ownership intents of mc26.3-spec-continuation without importing its competing telemetry. The only public publication API encloses the original exchange, preserving vanilla retirement ownership. Scope worker tokens with try/finally; ignore untracked dirtiness without weakening tracked invalidation or ABA protection. Move runtime state outside the reserved Mixin package. Exercise actual publication behavior in existing tests and add seven concurrent/exception/fallback regressions.', 'tree': tree['sha'], 'parents': [parent]})
+          commit = api('/git/commits', {'message': 'fix(ci): require JVM PSO and hosted GPU smoke without HUD confounding\n\nSame-binary controls at c81adfba (Actions 35791555328, artifact 10722441692) pass all cold/native/JVM sequences with HUD disabled and fail all three Java controls with HUD enabled. Do not misclassify an optional-overlay failure as an unsupported background-thread ABI. Require probe exit status and both native markers, remove environment-blocked test exclusions, keep all hosted GPU suites mandatory, preserve dedicated native HUD tests and Metal validation settings, and retain JVM crash artifacts. Local shell negative controls pass; Gradle validation remains for Actions.', 'tree': tree['sha'], 'parents': [parent]})
           result = {'parent_sha': parent, 'candidate_sha': commit['sha'], 'candidate_tree': tree['sha'],
               'patch_sha256': digest, 'changed_paths': paths, 'refs_updated': False, 'tests_claimed': False}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
