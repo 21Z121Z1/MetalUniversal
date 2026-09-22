@@ -21,6 +21,87 @@ def require(condition, message):
         raise ValueError(message)
 
 
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+                      parse_constant=lambda value: require(False, f"non-finite JSON value: {value}"))
+
+
+def load_report(path):
+    """Read v1 or validate and assemble the recorder's v2 bounded-segment archive.
+
+    Archive checkpoints are readable after a crash, but verify() still rejects
+    incomplete output. Hashes establish integrity, not truth or physical timing.
+    """
+    path = Path(path)
+    report = read_json(path)
+    if report.get("schemaVersion") != 2:
+        return report
+    archive = report["archive"]
+    require(archive.get("formatVersion") == 1, "unsupported frame archive format")
+    require(type(archive.get("complete")) is bool, "invalid archive completion state")
+    require(report.get("frames") == [], "archive index must not contain independent frame rows")
+    name = archive.get("directory")
+    require(name == path.name + ".segments", "archive directory is not the owning report's segment directory")
+    directory = path.parent.resolve() / name
+    require(directory.is_dir() and not directory.is_symlink(), "archive directory missing or symlinked")
+    count = integer(archive["committedSegments"])
+    require(count <= 65_536, "archive segment count exceeds recorder limit")
+    rows, previous, previous_frame, censored = [], "", 0, 0
+    for number in range(1, count + 1):
+        segment_path = directory / f"{number:08d}.json"
+        require(segment_path.is_file() and not segment_path.is_symlink(), "missing/symlinked frame segment")
+        data = segment_path.read_bytes()
+        segment = json.loads(data, object_pairs_hook=unique_object,
+                             parse_constant=lambda value: require(False, f"non-finite segment value: {value}"))
+        require(segment.get("schemaVersion") == 1, "unknown frame segment schema")
+        require(segment.get("identity") == report["identity"], "frame segment binary/source identity mismatch")
+        require(segment.get("scope") == report["scope"], "frame segment scope mismatch")
+        metadata = segment["segment"]
+        require(metadata["id"] == number and type(metadata["id"]) is int, "frame segment ID/order mismatch")
+        require(metadata["previousSha256"] == previous, "frame segment hash chain mismatch")
+        previous = hashlib.sha256(data).hexdigest()
+        frames = segment["frames"]
+        require(isinstance(frames, list) and len(frames) == integer(metadata["frameCount"], 1), "frame segment count mismatch")
+        require(metadata["firstFrameId"] == frames[0]["frameId"] and metadata["lastFrameId"] == frames[-1]["frameId"],
+                "frame segment endpoint identity mismatch")
+        require(metadata["censoringReason"] in ("", "shutdown-right-censored", "callback-retention-expired"),
+                "unknown frame segment censoring state")
+        censored += bool(metadata["censoringReason"])
+        for frame in frames:
+            frame_id = integer(frame["frameId"], 1)
+            require(frame_id > previous_frame, "reused/reordered source identity across frame segments")
+            previous_frame = frame_id
+            require(frame.get("exportCensoringReason") == metadata["censoringReason"], "frame/segment censoring mismatch")
+        if "window" in report:
+            require("window" in segment, "frame segment has no declared source window")
+            for key in ("epoch", "clock", "membership", "armed", "startNs", "endNs", "warmupNs", "profile"):
+                require(segment["window"].get(key) == report["window"].get(key), "frame segment window identity mismatch: " + key)
+        require(integer(segment["droppedFrames"]) <= integer(report["droppedFrames"]), "archive lost its overflow accounting")
+        rows.extend(frames)
+    require(archive["lastSegmentSha256"] == previous, "last frame segment digest mismatch")
+    require(integer(archive["committedFrames"]) == len(rows), "archive total frame count mismatch")
+    retention = report["retention"]
+    capacity = integer(retention["frameCapacityPerBuffer"], 1)
+    queue_limit = integer(retention["pendingSegmentLimit"], 1)
+    require(queue_limit <= 8, "unbounded frame segment queue")
+    require(integer(retention["segmentFrameTarget"], 1) <= capacity, "segment target exceeds frame capacity")
+    integer(retention["receiptRetentionNs"], 1)
+    require(integer(retention["retainedFrames"]) <= capacity * (queue_limit + 1), "unbounded retained frame state")
+    require(integer(retention["queuedSegments"]) <= queue_limit, "frame segment queue overflow")
+    require(integer(retention["censoredSegments"]) >= censored, "archive lost its censoring accounting")
+    for key in ("exportedSegments", "exportedFrames", "lateCompletionUpdates", "lateReceiptUpdates"):
+        integer(retention[key])
+    if archive["complete"]:
+        require(retention["retainedFrames"] == retention["queuedSegments"] == 0, "completed archive retains unpublished frames")
+        require(retention["exportedSegments"] == count and retention["exportedFrames"] == len(rows), "completed archive lost a detached segment")
+        expected_files = {f"{number:08d}.json" for number in range(1, count + 1)}
+        require({item.name for item in directory.iterdir()} == expected_files, "completed archive has orphan or partial files")
+    report["schemaVersion"] = 1
+    report["archiveSchemaVersion"] = 2
+    report["frames"] = rows
+    return report
+
 def verify(report, expected_head, require_packaged=False, require_comparable=False, artifact_root=None):
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "expected HEAD must be a full SHA")
     require(report["schemaVersion"] == 1, "unsupported schema")
@@ -38,6 +119,13 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
     require(packaged or (not require_packaged and identity["javaArtifactSha256"] == "unavailable-dev-classes"),
             "missing packaged Java artifact identity")
     require(report["scope"] == "Minecraft.renderFrame/render-thread/main-command-queue", "unknown observation scope")
+    if "archive" in report:
+        require(report.get("archiveSchemaVersion") == 2, "archive must be read through its hash-checked loader")
+        require(report["archive"]["complete"] is True, "incomplete frame archive checkpoint")
+        retention = report["retention"]
+        require(retention["censoredSegments"] == 0, "frame archive contains right-censored or retention-expired work")
+        require(retention["lateCompletionUpdates"] == retention["lateReceiptUpdates"] == 0,
+                "frame archive received updates after its retention boundary")
     require(report["shutdownDrained"] is True, "missing shutdown drain")
     require(report["validationStatus"] == "passed", "client validation did not pass")
     require(integer(report["droppedFrames"]) == 0, "bounded capture lost frames")
@@ -158,7 +246,10 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
         # Empty instrumentation is missing measurement, not zero native work.
         abi_crossings = {**summary([]), "unavailableReason": "timing-mode-does-not-instrument-ABI"}
         abi_exclusive = dict(abi_crossings)
-    return {"status": "valid-observation-no-performance-decision", "sourceSha": expected_head,
+    return {"status": "comparison-ready" if delivery["comparisonEligibility"]["eligible"] else "valid-observation",
+            "legacyStatus": "valid-observation-no-performance-decision",
+            "physicalPerformanceAcceptance": "physical-validation-required", "productPromotable": False,
+            "sourceSha": expected_head,
             "instrumentationMode": mode, "frameDelivery": delivery,
             "legacyDiagnosticScope": "renderLevel scopes including nested scopes; CPU and GPU service are not presentation",
             "packagedJavaIdentity": packaged, "worldFrames": len(cpu),
@@ -166,6 +257,79 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
             "renderThreadAbiExclusiveNs": abi_exclusive, "commandBufferGpuServiceNs": summary(gpu_service),
             "unavailable": report["unavailable"]}
 
+
+
+
+# This is a sample floor, not a confidence claim. It supplies ten nominal
+# observations in the 0.1% tail; correlated frames still require repeated trials.
+P999_MINIMUM_INTERVALS = 10_000
+
+
+def presentation_statistics(receipts, long_frame_ns):
+    """Analyze one epoch of actual receipts, never CPU/GPU completion times.
+
+    Input order is callback arrival order. Sorting by actual presentation time
+    restores event order without dropping coincident timestamps. The caller owns
+    the sampling-window/coverage contract; this function cannot promote evidence.
+    """
+    require(long_frame_ns is None or (type(long_frame_ns) in (int, float)
+            and math.isfinite(long_frame_ns) and long_frame_ns > 0), "invalid long-frame threshold")
+    seen = set()
+    epoch = None
+    for receipt in receipts:
+        ticket = integer(receipt["ticketId"], 1)
+        require(ticket not in seen, "duplicate presentation statistics ticket")
+        seen.add(ticket)
+        current_epoch = integer(receipt["epoch"], 1)
+        if epoch is None:
+            epoch = current_epoch
+        require(current_epoch == epoch, "presentation statistics mix epochs")
+        integer(receipt["sourceFrameId"], 1)
+        require(receipt["kind"] in ("original", "generated"), "unknown presentation kind")
+        timestamp = receipt["timeSeconds"]
+        require(type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp > 0,
+                "invalid presentation statistics timestamp")
+    ordered = sorted(receipts, key=lambda receipt: (receipt["timeSeconds"], receipt["ticketId"]))
+    sequence = []
+    for first, second in zip(ordered, ordered[1:]):
+        duration = (second["timeSeconds"] - first["timeSeconds"]) * 1e9
+        require(math.isfinite(duration) and duration >= 0, "invalid presentation interval")
+        sequence.append({"index": len(sequence), "epoch": epoch,
+                         "fromTicketId": first["ticketId"], "toTicketId": second["ticketId"],
+                         "fromSourceFrameId": first["sourceFrameId"], "toSourceFrameId": second["sourceFrameId"],
+                         "fromKind": first["kind"], "toKind": second["kind"],
+                         "startSeconds": first["timeSeconds"], "endSeconds": second["timeSeconds"],
+                         "intervalNs": duration})
+    values = sorted(row["intervalNs"] for row in sequence)
+    coincident = sum(value == 0 for value in values)
+    quantiles = {f"p{q}": values[math.ceil(q / 100 * len(values)) - 1] if values else None
+                 for q in (50, 95, 99)}
+    enough = len(values) >= P999_MINIMUM_INTERVALS
+    quantiles["p99.9"] = values[math.ceil(.999 * len(values)) - 1] if enough and not coincident else None
+    quantiles["p99.9UnavailableReason"] = ("non-unique-presented-timestamps" if coincident else
+                                           "" if enough else "insufficient-samples")
+    long_frames = [row for row in sequence if row["intervalNs"] > long_frame_ns] if long_frame_ns is not None else None
+    clusters = [] if long_frames is not None else None
+    for row in long_frames or []:
+        if not clusters or row["index"] != clusters[-1]["lastIntervalIndex"] + 1:
+            clusters.append({"firstIntervalIndex": row["index"], "lastIntervalIndex": row["index"],
+                             "fromTicketId": row["fromTicketId"], "toTicketId": row["toTicketId"],
+                             "startSeconds": row["startSeconds"], "endSeconds": row["endSeconds"],
+                             "intervalCount": 1, "durationNs": row["intervalNs"]})
+        else:
+            cluster = clusters[-1]
+            cluster.update(lastIntervalIndex=row["index"], toTicketId=row["toTicketId"],
+                           endSeconds=row["endSeconds"], intervalCount=cluster["intervalCount"] + 1,
+                           durationNs=cluster["durationNs"] + row["intervalNs"])
+    return {"samples": len(values), **quantiles, "quantileMethod": "nearest-rank",
+            "p99.9MinimumSamples": P999_MINIMUM_INTERVALS,
+            "coincidentTimestamps": coincident, "sequence": sequence,
+            "worstIntervals": sorted(sequence, key=lambda row: (-row["intervalNs"], row["index"]))[:10],
+            "longFrameThresholdNs": long_frame_ns,
+            "longFrameThresholdAuthority": "predeclared-application-intent-not-system-deadline" if long_frame_ns is not None else "unavailable",
+            "longFrameUnavailableReason": "" if long_frame_ns is not None else "application-threshold-unavailable",
+            "longFrameEvents": long_frames, "stutterClusters": clusters,
+            "stutterClusterRule": "consecutive above-threshold intervals in the same epoch"}
 
 
 def verify_window(report, packaged, artifact_root):
@@ -202,11 +366,13 @@ def verify_window(report, packaged, artifact_root):
     integer(window["warmupNs"])
     frames = {frame["frameId"]: frame for frame in report["frames"]}
     roots, crossing_end, requested, observed = [], 0, 0, []
+    receipts = []
     missing = {}
     baseline_context = None
     quality_keys = ("drawableWidth", "drawableHeight", "internalWidth", "internalHeight", "renderDistance",
                     "targetFps", "vsync")
     nested_presentations = False
+    previous_root_end = None
     for frame in report["frames"]:
         require(type(frame["epoch"]) is int and frame["epoch"] == window["epoch"], "cross-epoch frame")
         began = frame["sourceStartNs"]
@@ -214,8 +380,10 @@ def verify_window(report, packaged, artifact_root):
         parent_id = frame["parentFrameId"]
         if parent_id == 0:
             require(start <= began < end, "root frame outside declared sample window")
+            require(previous_root_end is None or began >= previous_root_end, "overlapping root source scopes")
+            previous_root_end = began + frame["cpuFrameNs"]
             roots.append(frame)
-            crossing_end += began + frame["cpuFrameNs"] > end
+            crossing_end += previous_root_end > end
         else:
             parent = frames[parent_id]
             require(parent["sourceStartNs"] <= began
@@ -245,19 +413,19 @@ def verify_window(report, packaged, artifact_root):
                 missing[reason] = missing.get(reason, 0) + 1
             else:
                 observed.append(stamp)
+                receipts.append({"ticketId": submission["nativePresentationId"], "sourceFrameId": frame["frameId"],
+                                 "epoch": frame["epoch"], "kind": "original", "timeSeconds": stamp})
     require(bool(roots), "window has no root source frames")
     require(all(frame["renderLevel"] is True for frame in roots), "window contains non-world root source frames")
     observed.sort()
     coincident = len(observed) - len(set(observed))
     if coincident:
         reasons.append("non-unique-presented-timestamps-cannot-count-distinct-display-events")
-    intervals = sorted((b - a) * 1e9 for a, b in zip(observed, observed[1:]))
-    require(all(math.isfinite(value) and value >= 0 for value in intervals), "invalid native presentation interval")
-    quantiles = {f"p{q}": intervals[math.ceil(q / 100 * len(intervals)) - 1] if intervals else None
-                 for q in (50, 95, 99)}
-    quantiles["p99.9"] = intervals[math.ceil(.999 * len(intervals)) - 1] if len(intervals) >= 1000 and not coincident else None
-    quantiles["p99.9UnavailableReason"] = ("non-unique-presented-timestamps" if coincident else
-            "" if len(intervals) >= 1000 else "fewer-than-predeclared-1000-intervals")
+    # Fixed before the trial by its application target, never this trial's median.
+    # Unlimited (260) is not a cadence intent and provides no stutter threshold.
+    target_fps = baseline_context.get("targetFps") if baseline_context is not None else None
+    threshold = 2e9 / target_fps if target_fps is not None and 0 < target_fps < 260 else None
+    statistics = presentation_statistics(receipts, threshold)
     if missing:
         reasons.append("incomplete-actual-presentation-coverage")
     if len(observed) < 2:
@@ -293,7 +461,12 @@ def verify_window(report, packaged, artifact_root):
                    "missingPresentationReasons": missing,
                    "actualPresentEventSpanRateHz": ((len(observed) - 1) / (observed[-1] - observed[0])) if len(observed) >= 2 and not coincident else None,
                    "actualPresentEventSpanRateScope": "first-to-last callback event span; not the Java source window or a display refresh rate",
-                   "presentIntervalNs": {"samples": len(intervals), **quantiles,
+                   "presentedFps": {"value": None, "unavailableReason": "native-half-open-presentation-window-not-recorded"},
+                   "generatedPresentedFps": {"value": None, "unavailableReason": "generated-receipts-use-separate-timeline"},
+                   "presentationCoverage": {"requested": requested, "received": len(observed),
+                                            "missing": requested - len(observed),
+                                            "fraction": len(observed) / requested if requested else None},
+                   "presentIntervalNs": {**statistics,
                                          "scope": "callback timestamp intervals including zeros; distinct display events ambiguous" if coincident else
                                          "complete cohort" if not missing else "observed callbacks only; missing events can merge intervals"}})
     result["comparisonEligibility"]["eligible"] = not reasons
@@ -542,9 +715,11 @@ def self_test():
     assert verify(later_epoch, head)["frameDelivery"]["epoch"] == 7
     enough = copy.deepcopy(windowed)
     enough["frames"] = []
-    for index in range(1001):
+    enough["window"]["endNs"] = 1000 + (P999_MINIMUM_INTERVALS + 1) * 200
+    enough["window"]["profile"]["route"]["sampleNs"] = enough["window"]["endNs"] - 1000
+    for index in range(P999_MINIMUM_INTERVALS + 1):
         row = copy.deepcopy(windowed["frames"][0])
-        row.update(frameId=index + 1)
+        row.update(frameId=index + 1, sourceStartNs=1000 + index * 200)
         row["commandBuffers"][0].update(submissionId=index + 1, nativePresentationId=index + 1,
                                         presentedTimeSeconds=100 + index * .02)
         enough["frames"].append(row)
@@ -557,6 +732,7 @@ def self_test():
         lambda x: x["identity"]["nativeBuild"].update(nativeSha256="f" * 64),
         lambda x: x["window"].update(epoch=0),
         lambda x: x["frames"][1].update(epoch=2),
+        lambda x: x["frames"][1].update(sourceStartNs=1050),
         lambda x: x["frames"][0].update(sourceStartNs=999),
         lambda x: x["frames"][-1].update(sourceStartNs=2000),
         lambda x: x["frames"][1]["context"].update(internalWidth=90),
@@ -598,9 +774,8 @@ if __name__ == "__main__":
         if args.report is None or args.expected_head is None:
             parser.error("report and --expected-head are required")
         try:
-            report = json.loads(args.report.read_text(), object_pairs_hook=unique_object,
-                                parse_constant=lambda value: require(False, f"non-finite JSON value: {value}"))
+            report = load_report(args.report)
             print(json.dumps(verify(report, args.expected_head, args.require_packaged, args.require_comparable, args.report.parent), indent=2))
         except (ValueError, KeyError, TypeError, OSError) as error:
-            print(json.dumps({"status": "rejected-frame-evidence", "reason": str(error)}))
+            print(json.dumps({"status": "invalid-evidence", "legacyStatus": "rejected-frame-evidence", "reason": str(error)}))
             raise SystemExit(1)

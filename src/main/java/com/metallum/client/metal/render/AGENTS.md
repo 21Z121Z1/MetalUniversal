@@ -12,10 +12,6 @@ Local invariants:
 - A Java descriptor or call-shape change that reaches `MetalNativeBridge` is an ABI-boundary change; inspect `native.abi` and `native.execution` before editing one side alone.
 - Metal 3/4 behavior must remain intentionally equivalent or explicitly capability-gated.
 
-Before broad tests, run the proof plan emitted by:
-
-```bash
-python3 scripts/agent/context.py --task "<task>"
-```
+Before broad tests, run the nearest behavior tests under `src/test/java/com/metallum/client/metal/render`. Use the root validation commands and the relevant tasks in `build.gradle`; `scripts/agent/context.py` is no longer part of this repository.
 
 For render behavior, the first independent oracle is the render-contract layer; compilation is not runtime correctness.

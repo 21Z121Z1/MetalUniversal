@@ -1072,6 +1072,10 @@ final class MetalIrisShaderCompiler {
         boolean hasUniformBlock() {
             return !uniformLayout.isEmpty();
         }
+
+        boolean hasRasterStorage() {
+            return !storageBuffers.isEmpty() || samplers.stream().anyMatch(SamplerDecl::isStorageImage);
+        }
     }
 
     /**

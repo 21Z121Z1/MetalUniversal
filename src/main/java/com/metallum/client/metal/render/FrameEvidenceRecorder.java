@@ -8,6 +8,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -21,7 +22,18 @@ public final class FrameEvidenceRecorder {
     };
     private final int capacity;
     private final LongSupplier clock;
-    private final List<Frame> frames = new ArrayList<>();
+    private List<Frame> frames = new ArrayList<>();
+    private final ArrayDeque<Segment> segments = new ArrayDeque<>();
+    private int segmentFrameLimit;
+    private int segmentQueueLimit;
+    private long receiptRetentionNs;
+    private long segmentSequence;
+    private long exportedSegments;
+    private long exportedFrames;
+    private long censoredSegments;
+    private long lateCompletionUpdates;
+    private long lateReceiptUpdates;
+    private boolean accepting = true;
     private final ThreadLocal<Frame> current = new ThreadLocal<>();
     private final Map<Long, Submission> presentations = new LinkedHashMap<>();
     private final LinkedHashSet<Long> pendingPresentations = new LinkedHashSet<>();
@@ -49,6 +61,114 @@ public final class FrameEvidenceRecorder {
         this.explicitWindow = explicitWindow;
     }
 
+    /** Optional bounded export; configure before recording. The recorder remains the only ID owner. */
+    public synchronized void enableSegments(int frameLimit, int queueLimit, long retentionNs) {
+        if (sequence != 0 || segmentFrameLimit != 0 || frameLimit < 1 || frameLimit > capacity
+                || queueLimit < 1 || queueLimit > 8 || retentionNs <= 0) {
+            throw new IllegalArgumentException("invalid bounded segment configuration");
+        }
+        segmentFrameLimit = frameLimit;
+        segmentQueueLimit = queueLimit;
+        receiptRetentionNs = retentionNs;
+    }
+
+    private void sealActive(long now) {
+        if (frames.isEmpty() || segments.size() >= segmentQueueLimit) return;
+        segmentSequence = Math.incrementExact(segmentSequence);
+        segments.addLast(new Segment(segmentSequence, now, frames));
+        frames = new ArrayList<>();
+    }
+
+    private static boolean settled(List<Frame> selected) {
+        for (Frame frame : selected) {
+            if (!frame.ended) return false;
+            for (Submission submission : frame.submissions) {
+                if (!submission.completed) return false;
+                if (submission.presentationRequested && submission.success && !submission.presentationResolved) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Detach a finished segment on the writer thread. Late callbacks remain joined while it
+     * waits in the bounded queue. Expired or shutdown-pending work is explicitly censored.
+     * No resource is retained, no GPU/display wait is introduced, and JSON rows are built
+     * only after detaching. Root/recursive scopes never cross a segment boundary.
+     */
+    public synchronized SegmentSnapshot pollSegment(JsonObject identity, boolean shutdown) {
+        if (segmentFrameLimit == 0) throw new IllegalStateException("segmented export is disabled");
+        if (shutdown) accepting = false;
+        if (segments.isEmpty() && shutdown) sealActive(clock.getAsLong());
+        Segment segment = segments.peekFirst();
+        if (segment == null) return null;
+        boolean complete = settled(segment.frames);
+        if (!complete && !shutdown && clock.getAsLong() - segment.sealedAt < receiptRetentionNs) return null;
+        segments.removeFirst();
+        String censoring = complete ? "" : shutdown ? "shutdown-right-censored" : "callback-retention-expired";
+        if (!complete) censoredSegments++;
+        for (Frame frame : segment.frames) {
+            frame.exported = true;
+            frame.exportCensoringReason = censoring;
+            for (Submission submission : frame.submissions) {
+                long id = submission.nativePresentationId;
+                if (id > 0) {
+                    presentations.remove(id, submission);
+                    pendingPresentations.remove(id);
+                }
+            }
+        }
+        exportedSegments++;
+        exportedFrames += segment.frames.size();
+        // A small immutable header is copied under the lock, not a per-frame JSON document.
+        JsonObject header = snapshotOf(identity, List.of());
+        JsonObject metadata = new JsonObject();
+        metadata.addProperty("id", segment.id);
+        metadata.addProperty("firstFrameId", segment.frames.getFirst().id);
+        metadata.addProperty("lastFrameId", segment.frames.getLast().id);
+        metadata.addProperty("frameCount", segment.frames.size());
+        metadata.addProperty("censoringReason", censoring);
+        header.add("segment", metadata);
+        return new SegmentSnapshot(header, segment.frames);
+    }
+
+    /** Constant-size checkpoint metadata; an archive never keeps a growing list of segment manifests. */
+    public synchronized JsonObject archiveState(JsonObject identity) {
+        if (segmentFrameLimit == 0) throw new IllegalStateException("segmented export is disabled");
+        JsonObject root = snapshotOf(identity, List.of());
+        JsonObject retention = new JsonObject();
+        retention.addProperty("frameCapacityPerBuffer", capacity);
+        retention.addProperty("segmentFrameTarget", segmentFrameLimit);
+        retention.addProperty("pendingSegmentLimit", segmentQueueLimit);
+        retention.addProperty("receiptRetentionNs", receiptRetentionNs);
+        retention.addProperty("queuedSegments", segments.size());
+        retention.addProperty("retainedFrames", frames.size() + segments.stream().mapToInt(x -> x.frames.size()).sum());
+        retention.addProperty("exportedSegments", exportedSegments);
+        retention.addProperty("exportedFrames", exportedFrames);
+        retention.addProperty("censoredSegments", censoredSegments);
+        retention.addProperty("lateCompletionUpdates", lateCompletionUpdates);
+        retention.addProperty("lateReceiptUpdates", lateReceiptUpdates);
+        root.add("retention", retention);
+        return root;
+    }
+
+    private record Segment(long id, long sealedAt, List<Frame> frames) { }
+
+    public static final class SegmentSnapshot {
+        private final JsonObject header;
+        private final List<Frame> frames;
+        private SegmentSnapshot(JsonObject header, List<Frame> frames) {
+            this.header = header;
+            this.frames = frames;
+        }
+        /** Writer-owned, detached data only. Never call this from a render or completion callback. */
+        public JsonObject toJson() {
+            JsonObject result = header.deepCopy();
+            addFrames(result, frames);
+            return result;
+        }
+    }
+
     /** One predeclared finite window per process; no reset across in-flight submissions. */
     public synchronized void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
         if (!explicitWindow || this.profile != null || (current.get() != null && current.get().retained)
@@ -74,8 +194,8 @@ public final class FrameEvidenceRecorder {
         long now = clock.getAsLong();
         if (profile != null && now >= windowEnd) windowClosed = true;
         // Nested scopes inherit membership: never capture a child without its parent.
-        boolean eligible = !explicitWindow || (previous != null ? previous.retained
-                : profile != null && now >= windowStart && now < windowEnd);
+        boolean eligible = accepting && (!explicitWindow || (previous != null ? previous.retained
+                : profile != null && now >= windowStart && now < windowEnd));
         boolean retained = eligible && frames.size() < capacity;
         if (eligible && !retained) {
             droppedFrames = Math.incrementExact(droppedFrames);
@@ -90,23 +210,31 @@ public final class FrameEvidenceRecorder {
     public synchronized void endFrame() {
         Frame frame = current.get();
         if (frame == null) return;
+        if (frame.exported) {
+            lateCompletionUpdates++;
+            if (frame.parent == null) current.remove();
+            else current.set(frame.parent);
+            return;
+        }
         frame.cpuNanos = Math.subtractExact(clock.getAsLong(), frame.start);
         frame.ended = true;
         if (profile != null && clock.getAsLong() >= windowEnd) windowClosed = true;
         if (frame.depth != 0) frame.failure = "open-abi-call-at-frame-end";
-        if (frame.parent == null) current.remove();
-        else current.set(frame.parent);
+        if (frame.parent == null) {
+            current.remove();
+            if (segmentFrameLimit > 0 && frames.size() >= segmentFrameLimit) sealActive(clock.getAsLong());
+        } else current.set(frame.parent);
     }
 
     public void producer(String producer) {
         Frame frame = current.get();
-        if (frame != null && frame.retained) frame.producers.add(producer);
+        if (frame != null && frame.retained && !frame.exported) frame.producers.add(producer);
     }
 
     /** Joins the terrain recorder's existing batch index to this source frame, never by time. */
     public void terrainBatchEncoded(long terrainFrameIndex) {
         Frame frame = current.get();
-        if (frame == null || !frame.retained) return;
+        if (frame == null || !frame.retained || frame.exported) return;
         if (terrainFrameIndex < 0) {
             frame.failure = "invalid-terrain-batch-index";
         } else if (frame.terrainBatchIndices.contains(terrainFrameIndex)) {
@@ -120,13 +248,13 @@ public final class FrameEvidenceRecorder {
 
     public void context(JsonObject context) {
         Frame frame = current.get();
-        if (frame != null && frame.retained) frame.context = context.deepCopy();
+        if (frame != null && frame.retained && !frame.exported) frame.context = context.deepCopy();
     }
 
     /** Identity is captured on first observed buffer use, never inferred from GPU sample order. */
     public synchronized Submission commandBuffer(long nativeSubmitIndex) {
         Frame frame = current.get();
-        if (frame == null || !frame.retained) return null;
+        if (frame == null || !frame.retained || frame.exported) return null;
         if (frame.submissions.size() >= 256) {
             frame.failure = "submission-evidence-overflow";
             return null;
@@ -139,6 +267,7 @@ public final class FrameEvidenceRecorder {
 
     public synchronized void submitted(Submission submission) {
         if (submission == null) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (submission.submitted) submission.frame.failure = "duplicate-submit";
         if (submission.frame != current.get()) submission.frame.failure = "cross-frame-command-buffer";
         submission.submitted = true;
@@ -147,6 +276,7 @@ public final class FrameEvidenceRecorder {
     /** The existing native ticket identifies scheduled presentation, not a displayed frame. */
     public synchronized void presentationRequested(Submission submission, long nativeId) {
         if (submission == null) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (submission.presentationRequested || submission.submitted || nativeId < 0) {
             submission.frame.failure = "invalid-presentation-request";
             return;
@@ -160,6 +290,7 @@ public final class FrameEvidenceRecorder {
     /** Completion can supply the Metal 4 ID, which does not exist at encode time. */
     public synchronized void nativePresentationId(Submission submission, long nativeId) {
         if (submission == null || nativeId == 0) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (nativeId < 0 || !submission.presentationRequested
                 || (submission.nativePresentationId > 0 && submission.nativePresentationId != nativeId)) {
             submission.frame.failure = "mismatched-native-presentation-id";
@@ -193,15 +324,19 @@ public final class FrameEvidenceRecorder {
         }
         for (var entry : byId.entrySet()) {
                 Submission submission = presentations.get(entry.getKey());
-                if (submission == null) continue;
+                if (submission == null) {
+                    if (entry.getValue() != 0) lateReceiptUpdates++;
+                    continue;
+                }
                 Frame frame = submission.frame;
                 double timestamp = entry.getValue();
-                if (submission.presentedTimeSeconds > 0) {
+                if (submission.presentationResolved) {
                     if (timestamp > 0 && Double.compare(timestamp, submission.presentedTimeSeconds) != 0)
                         frame.failure = "conflicting-presented-timestamp";
                     continue; // A later eviction/pending snapshot cannot erase an observed callback.
                 }
                 if (Double.isFinite(timestamp) && timestamp > 0) {
+                    submission.presentationResolved = true;
                     submission.presentedTimeSeconds = timestamp;
                     submission.presentedUnavailableReason = "";
                     pendingPresentations.remove(entry.getKey());
@@ -209,14 +344,19 @@ public final class FrameEvidenceRecorder {
                     submission.presentedUnavailableReason = timestamp == 0 ? "presented-callback-pending"
                             : timestamp == -1 ? "presentation-cancelled-or-failed"
                             : timestamp == -2 ? "invalid-presented-timestamp"
-                            : timestamp == -3 ? "native-evidence-not-retained" : "invalid-native-evidence";
-                    if (timestamp != 0) pendingPresentations.remove(entry.getKey());
+                            : timestamp == -3 ? "native-evidence-not-retained"
+                            : timestamp == -4 ? "drawable-not-presented" : "invalid-native-evidence";
+                    if (timestamp != 0) {
+                        submission.presentationResolved = true;
+                        pendingPresentations.remove(entry.getKey());
+                    }
                 }
         }
     }
 
     public synchronized void completed(Submission submission, boolean success, double start, double end) {
         if (submission == null) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (submission.completed || !submission.submitted) submission.frame.failure = "invalid-completion";
         submission.completed = true;
         submission.success = success;
@@ -227,6 +367,7 @@ public final class FrameEvidenceRecorder {
 
     public synchronized void nativeEncoding(Submission submission, long[] counters) {
         if (submission == null || counters == null) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (counters.length != NATIVE_COUNTER_NAMES.length || java.util.Arrays.stream(counters).anyMatch(n -> n < 0)) {
             submission.frame.failure = "invalid-native-encoding-counters";
             return;
@@ -236,6 +377,7 @@ public final class FrameEvidenceRecorder {
 
     public synchronized void drawableWait(Submission submission, long nanos) {
         if (submission == null || nanos == -1) return;
+        if (submission.frame.exported) { lateCompletionUpdates++; return; }
         if (nanos < -1) {
             submission.frame.failure = "invalid-drawable-wait";
             return;
@@ -262,7 +404,7 @@ public final class FrameEvidenceRecorder {
 
     private void enter(String symbol) {
         Frame frame = current.get();
-        if (frame == null || !frame.retained) return; // Worker/startup calls are outside this frame scope.
+        if (frame == null || !frame.retained || frame.exported) return; // Worker/startup calls are outside this frame scope.
         if (frame.depth == frame.started.length) {
             frame.failure = "abi-nesting-overflow";
             frame.depth++;
@@ -277,7 +419,7 @@ public final class FrameEvidenceRecorder {
 
     private void exit(Throwable failure) {
         Frame frame = current.get();
-        if (frame == null || !frame.retained) return;
+        if (frame == null || !frame.retained || frame.exported) return;
         int depth = --frame.depth;
         if (depth >= frame.started.length) return;
         long elapsed = Math.subtractExact(clock.getAsLong(), frame.started[depth]);
@@ -290,6 +432,11 @@ public final class FrameEvidenceRecorder {
     }
 
     public synchronized JsonObject snapshot(JsonObject identity) {
+        if (segmentFrameLimit != 0) throw new IllegalStateException("use the segmented archive, not a partial legacy snapshot");
+        return snapshotOf(identity, frames);
+    }
+
+    private JsonObject snapshotOf(JsonObject identity, List<Frame> selected) {
         JsonObject root = new JsonObject();
         root.addProperty("schemaVersion", 1);
         root.add("identity", identity.deepCopy());
@@ -309,8 +456,29 @@ public final class FrameEvidenceRecorder {
             window.add("profile", profile == null ? JsonNull.INSTANCE : profile.deepCopy());
             root.add("window", window);
         }
+        addFrames(root, selected);
+        root.addProperty("nativeEncodingScope", "partial: ordinary draw bridges, main render/blit/compute creation, clear helpers and ordinary presentation; excludes MetalFX and GPU-scene/ICB internal work");
+        JsonObject unavailable = new JsonObject();
+        unavailable.addProperty("gpuFrameNs", "per-command-buffer service durations are not frame critical-path time");
+        unavailable.addProperty("nativeEncodeNs", "ABI wall duration includes dispatch, waits and native work");
+        unavailable.addProperty("nativeInternalEncoderAndDrawCounts", "only the nativeEncodingScope paths are counted; uninstrumented helper/MetalFX/ICB work is not zero");
+        unavailable.addProperty("psoSwitchesAndResourceBindingChanges", "ABI calls do not prove effective native state changes");
+        unavailable.addProperty("workerAbiNs", "worker calls cannot be assigned to a render-thread frame");
+        root.addProperty("terrainScope", "terrainBatchIndices join TerrainWorkReport frameIndex only when vanillaWorkEvents is enabled; layer-return encoding evidence, not per-mesh GPU completion or visible presentation");
+        unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports joined by terrainBatchIndices; per-mesh GPU completion and presentation remain unavailable");
+        unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
+        unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
+        root.addProperty("presentationScope", "ordinary source cohort; exact native ID joined to CAMetalDrawable.presentedTime seconds; latest 65536 native tickets retained; copied callbacks survive eviction; pending at export remains unavailable");
+        unavailable.addProperty("generatedFrames", "MetalFX frame-generation presentation uses a separate timeline");
+        unavailable.addProperty("inputToPhotonNs", "drawable presentedTime is not an input or scanout measurement");
+        unavailable.addProperty("systemDeadline", "ordinary path has no authoritative DisplayLink deadline");
+        root.add("unavailable", unavailable);
+        return root;
+    }
+
+    private static void addFrames(JsonObject root, List<Frame> selected) {
         JsonArray rows = new JsonArray();
-        for (Frame frame : frames) {
+        for (Frame frame : selected) {
             JsonObject row = new JsonObject();
             row.addProperty("frameId", frame.id);
             row.addProperty("sourceStartNs", frame.start);
@@ -320,6 +488,7 @@ public final class FrameEvidenceRecorder {
             row.addProperty("cpuFrameNs", frame.cpuNanos);
             row.addProperty("ended", frame.ended);
             row.addProperty("failure", frame.failure);
+            row.addProperty("exportCensoringReason", frame.exportCensoringReason);
             row.add("context", frame.context.deepCopy());
             JsonArray producers = new JsonArray();
             frame.producers.forEach(producers::add);
@@ -351,6 +520,7 @@ public final class FrameEvidenceRecorder {
                         ? new JsonPrimitive(submission.presentedTimeSeconds) : JsonNull.INSTANCE);
                 value.addProperty("presentedUnavailableReason", !submission.presentationRequested ? "no-presentation-request"
                         : submission.nativePresentationId <= 0 ? "native-present-id-unavailable" : submission.presentedUnavailableReason);
+                value.addProperty("presentationResolved", submission.presentationResolved);
                 value.addProperty("submitted", submission.submitted);
                 value.addProperty("completed", submission.completed);
                 value.addProperty("success", submission.success);
@@ -378,23 +548,6 @@ public final class FrameEvidenceRecorder {
             rows.add(row);
         }
         root.add("frames", rows);
-        root.addProperty("nativeEncodingScope", "partial: ordinary draw bridges, main render/blit/compute creation, clear helpers and ordinary presentation; excludes MetalFX and GPU-scene/ICB internal work");
-        JsonObject unavailable = new JsonObject();
-        unavailable.addProperty("gpuFrameNs", "per-command-buffer service durations are not frame critical-path time");
-        unavailable.addProperty("nativeEncodeNs", "ABI wall duration includes dispatch, waits and native work");
-        unavailable.addProperty("nativeInternalEncoderAndDrawCounts", "only the nativeEncodingScope paths are counted; uninstrumented helper/MetalFX/ICB work is not zero");
-        unavailable.addProperty("psoSwitchesAndResourceBindingChanges", "ABI calls do not prove effective native state changes");
-        unavailable.addProperty("workerAbiNs", "worker calls cannot be assigned to a render-thread frame");
-        root.addProperty("terrainScope", "terrainBatchIndices join TerrainWorkReport frameIndex only when vanillaWorkEvents is enabled; layer-return encoding evidence, not per-mesh GPU completion or visible presentation");
-        unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports joined by terrainBatchIndices; per-mesh GPU completion and presentation remain unavailable");
-        unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
-        unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
-        root.addProperty("presentationScope", "ordinary source cohort; exact native ID joined to CAMetalDrawable.presentedTime seconds; latest 65536 native tickets retained; copied callbacks survive eviction; pending at export remains unavailable");
-        unavailable.addProperty("generatedFrames", "MetalFX frame-generation presentation uses a separate timeline");
-        unavailable.addProperty("inputToPhotonNs", "drawable presentedTime is not an input or scanout measurement");
-        unavailable.addProperty("systemDeadline", "ordinary path has no authoritative DisplayLink deadline");
-        root.add("unavailable", unavailable);
-        return root;
     }
 
     private static final class Frame {
@@ -414,6 +567,8 @@ public final class FrameEvidenceRecorder {
         int depth;
         long cpuNanos;
         boolean ended;
+        volatile boolean exported;
+        String exportCensoringReason = "";
         String failure = "";
         JsonObject context;
         Frame(long id, long start, boolean renderLevel, Frame parent, boolean retained, long epoch) {
@@ -448,6 +603,7 @@ public final class FrameEvidenceRecorder {
         private long gpuNanos;
         private long[] nativeEncoding;
         private boolean presentationRequested;
+        private boolean presentationResolved;
         private long nativePresentationId;
         private double presentedTimeSeconds;
         private long drawableWaitNanos = -1;

@@ -42,6 +42,11 @@ separate absence reasons. Every 64 source scopes the observer copies already-rec
 for unresolved captured tickets; successful copies survive native eviction. Export also queries
 after the existing GPU drain; neither operation waits for presentation. A late callback remains
 unavailable in that final snapshot. Eviction cannot resurrect or reassign a ticket.
+A callback with `presentedTime == 0` is `drawable-not-presented`: the SDK permits zero
+when a drawable was not presented or was skipped. Negative and non-finite callback times
+are `invalid-presented-timestamp`. Both close the ticket without creating a display event;
+GPU completion cannot replace either receipt. This classification does not resolve the
+physical cause of PR #72's missing presentation timestamps.
 Delayed/out-of-order completion cannot be assigned to the latest frame. Reused buffers
 crossing frame boundaries invalidate evidence. Existing `Metallum frame <submitIndex>`
 command labels allow inspection in GPU captures; they remain diagnostic labels.
@@ -153,7 +158,7 @@ The verifier checks exact source identity, clean build, native identity, validat
 completion, monotonic unique frame IDs, ABI timing invariants, loss, submission lifecycle
 and measurement availability. Legacy unwindowed P50/P95/P99 summaries include **all
 observed world frames**, including warmup, and remain diagnostic only.
-Passing returns `valid-observation-no-performance-decision`. Use the existing unified
+Passing returns `valid-observation`, with the previous status retained in `legacyStatus`. Use the existing unified
 correctness and paired-trial protocol for performance acceptance.
 
 Disabled instrumentation retains original downcall handles. `timing` mode also retains
@@ -239,18 +244,24 @@ scopes, including callbacks after the source window ends. It sorts actual drawab
 independently of callback arrival order. The actual-present event-span rate is `(N-1)/(last-first)`
 on that drawable clock; it is explicitly **not** a count divided by the Java window duration.
 Uncalibrated Java/native clocks are never subtracted. System DisplayLink deadline stays unavailable.
+The analyzer preserves the chronological interval sequence and ticket/source IDs, the ten
+worst intervals, fixed-target long-frame events, and clusters of adjacent long intervals.
+The long-frame threshold is twice the predeclared application target interval, not twice
+the observed median and not a system deadline. Unlimited cadence supplies no threshold.
+Without a native half-open presentation window, `presentedFps` remains unavailable; the
+legacy callback-cohort event-span rate is not renamed to formal presented FPS.
 Distinct native tickets can receive coincident presented timestamps. Keep every callback and
 the zero interval; do not deduplicate by time. Such captures are valid observations, but distinct
 display-event count/rate and P99.9 are unavailable and comparison eligibility fails closed.
 
 Missing/cancelled/evicted callbacks, native identity gaps, unfinished windows, epoch or quality
 changes, route failure and capacity loss cannot silently approve comparison. Observed partial
-distributions retain their coverage label. P99.9 requires at least 1,000 intervals; otherwise
+distributions retain their coverage label. P99.9 requires at least 10,000 intervals (ten nominal observations in the 0.1% tail, not a confidence guarantee); otherwise
 its value is unavailable with the sample-count reason. Nested presentations remain visible
 but need independent comparison proof. File export uses an atomic final rename; failed export
 logs the error and leaves no new successful final report (a `.partial` file is not evidence).
 
-`valid-observation-no-performance-decision` remains an integrity result. Comparison eligibility
+`valid-observation` remains an integrity result. `invalid-evidence` rejects malformed or incomplete evidence. `productPromotable` is always false in this verifier. Comparison eligibility
 adds replay, artifact, window and coverage prerequisites; it never asserts physical parity,
 accepted observer overhead, pacing, power, or an optimization win. Legacy median and per-trial
 `2 × median` stutter diagnostics cannot promote this result. Native pending-ID accounting is separately bounded to the latest 65,536 scheduled IDs,

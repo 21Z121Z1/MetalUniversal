@@ -106,6 +106,15 @@ public final class ValidationStorageBudget {
      * budget. The path must remain below the configured validation root.
      */
     public synchronized void writeBytes(final Path path, final byte[] bytes) throws IOException {
+        writeBytes(path, bytes, false);
+    }
+
+    /** Atomic checkpoint publication with the same byte accounting as other validation artifacts. */
+    public synchronized void writeAtomicBytes(final Path path, final byte[] bytes) throws IOException {
+        writeBytes(path, bytes, true);
+    }
+
+    private void writeBytes(final Path path, final byte[] bytes, final boolean atomic) throws IOException {
         Objects.requireNonNull(bytes, "bytes");
         Path normalized = checkedPath(path);
         if (exceeded) {
@@ -125,7 +134,16 @@ public final class ValidationStorageBudget {
             );
         }
         Files.createDirectories(normalized.getParent());
-        Files.write(normalized, bytes);
+        if (atomic) {
+            Path temporary = normalized.resolveSibling(normalized.getFileName() + ".partial");
+            Files.write(temporary, bytes, java.nio.file.StandardOpenOption.CREATE_NEW,
+                    java.nio.file.StandardOpenOption.WRITE);
+            // Fail closed when the file system cannot publish atomically. The partial file is diagnostic only.
+            Files.move(temporary, normalized, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } else {
+            Files.write(normalized, bytes);
+        }
         accountedFiles.put(normalized, (long) bytes.length);
         Long previousCritical = criticalFiles.remove(normalized);
         if (previousCritical != null) {

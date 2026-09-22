@@ -25,16 +25,35 @@ import net.minecraft.client.Minecraft;
 public final class FrameEvidenceRuntime {
     public static final boolean ENABLED = Boolean.getBoolean("metallum.frameEvidence.enabled");
     private static final String MODE = System.getProperty("metallum.frameEvidence.mode", "diagnostic");
-    private static final FrameEvidenceRecorder RECORDER = ENABLED
-            ? new FrameEvidenceRecorder(Integer.getInteger("metallum.frameEvidence.capacity", 16_384), System::nanoTime,
-                    Boolean.getBoolean("metallum.frameEvidence.windowed"))
-            : null;
+    private static final boolean SEGMENTED = ENABLED && Boolean.getBoolean("metallum.frameEvidence.segmented");
+    private static final FrameEvidenceRecorder RECORDER = createRecorder();
+    private static FrameEvidenceArchive archive;
     private static final JsonObject IDENTITY = new JsonObject();
     private static volatile String validationStatus = "unvalidated";
     private static long sourceScopes;
     private static Object observedLevel;
 
     private FrameEvidenceRuntime() { }
+
+    private static FrameEvidenceRecorder createRecorder() {
+        if (!ENABLED) return null;
+        if (!"timing".equals(MODE) && !"diagnostic".equals(MODE)) {
+            throw new IllegalArgumentException("unknown frame evidence observer mode: " + MODE);
+        }
+        int capacity = Integer.getInteger("metallum.frameEvidence.capacity", 16_384);
+        var result = new FrameEvidenceRecorder(capacity, System::nanoTime,
+                Boolean.getBoolean("metallum.frameEvidence.windowed"));
+        if (SEGMENTED) result.enableSegments(
+                Integer.getInteger("metallum.frameEvidence.segmentFrames", Math.min(1024, capacity)),
+                Integer.getInteger("metallum.frameEvidence.pendingSegments", 2),
+                Long.getLong("metallum.frameEvidence.receiptRetentionNs", 5_000_000_000L));
+        return result;
+    }
+
+    private static Path outputPath() {
+        return Path.of(System.getProperty("metallum.frameEvidence.output",
+                System.getProperty("metallum.validation.output", "build/frame-evidence") + "/frame-evidence.json"));
+    }
 
     public static MethodHandle instrument(String symbol, MethodHandle target) {
         // Disabled calls retain the original downcall handle: no per-ABI branch/timer/allocation.
@@ -50,6 +69,7 @@ public final class FrameEvidenceRuntime {
     public static void beginFrame(boolean advanceGameTime) {
         if (!ENABLED) return;
         if (!IDENTITY.has("build")) initializeIdentity();
+        if (SEGMENTED && archive == null) archive = new FrameEvidenceArchive(RECORDER, IDENTITY, outputPath());
         Minecraft client = Minecraft.getInstance();
         if (observedLevel != client.level) {
             observedLevel = client.level;
@@ -141,10 +161,15 @@ public final class FrameEvidenceRuntime {
     /** Called after the existing device shutdown drain, never adds a profiling-induced GPU wait. */
     public static void writeAfterDrain() {
         if (!ENABLED) return;
-        Path output = Path.of(System.getProperty("metallum.frameEvidence.output",
-                System.getProperty("metallum.validation.output", "build/frame-evidence") + "/frame-evidence.json"));
+        Path output = outputPath();
         try {
             collectPresented();
+            if (SEGMENTED) {
+                if (archive == null) throw new IOException("no source frame started the segmented evidence writer");
+                archive.finish(validationStatus,
+                        report -> writeTerrainEvidence(output.toAbsolutePath().getParent(), report));
+                return;
+            }
             JsonObject report = RECORDER.snapshot(IDENTITY);
             report.addProperty("validationStatus", validationStatus);
             report.addProperty("shutdownDrained", true);

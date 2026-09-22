@@ -90,6 +90,29 @@ final class ValidationStorageBudgetTest {
         }
     }
 
+    @Test
+    void atomicCheckpointRewritesCountOnlyCommittedBytes(@org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        var budget = ValidationStorageBudget.shared(root, 32L);
+        Path file = root.resolve("checkpoint.json");
+        budget.writeAtomicBytes(file, new byte[]{1, 2, 3});
+        budget.writeAtomicBytes(file, new byte[]{4, 5});
+        assertEquals(2L, budget.artifactBytes());
+        assertEquals(2L, Files.size(file));
+        assertFalse(Files.exists(root.resolve("checkpoint.json.partial")));
+    }
+
+    @Test
+    void failedAtomicCheckpointDoesNotReplacePriorEvidence(@org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        var budget = ValidationStorageBudget.shared(root, 32L);
+        Path file = root.resolve("checkpoint.json");
+        budget.writeAtomicBytes(file, new byte[]{1, 2, 3});
+        Files.writeString(root.resolve("checkpoint.json.partial"), "crash evidence");
+        assertThrows(java.io.IOException.class, () -> budget.writeAtomicBytes(file, new byte[]{4}));
+        assertEquals(3L, Files.size(file));
+        assertEquals(3L, budget.artifactBytes());
+        assertEquals("crash evidence", Files.readString(root.resolve("checkpoint.json.partial")));
+    }
+
     private static void restoreProperty(final String name, final String value) {
         if (value == null) {
             System.clearProperty(name);
