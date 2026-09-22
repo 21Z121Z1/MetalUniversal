@@ -21,7 +21,7 @@ jobs:
         shell: bash
         env:
           BASE_SHA: 969bf537d4ffd2b99a75f71f17e40fa2b58fd42c
-          START_SHA: de78dd9db9bf01baee16de4a3ed0141f521eb0d4
+          START_SHA: 289ede73cef93da7ab468f6603c36c20d5e133ba
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -75,7 +75,7 @@ jobs:
           (root / 'dag.txt').write_bytes(git('log', '--all', '--graph', '--decorate', '--format=%h %d %s'))
           print(f'Captured {len(branches)} branches. All remain UNCLASSIFIED; no deletion or semantic acceptance is inferred.')
           PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@043fb46d1a93c77ae656e7c1c64a875d1fc6a0a # v7
         with:
           name: convergence-audit-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/convergence-audit/
