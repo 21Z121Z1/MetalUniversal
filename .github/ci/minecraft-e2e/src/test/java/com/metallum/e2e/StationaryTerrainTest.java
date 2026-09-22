@@ -25,4 +25,19 @@ class StationaryTerrainTest {
         for (int i = 0; i < 100; i++) assertFalse(gate.observe(state("a"), i));
         assertTrue(gate.observe(state("a"), 2_000_000_000L));
     }
+
+    @Test void inFlightSectionTaskCannotPassScheduledWorkGate() {
+        var idle = StationaryTerrain.scheduledSectionWorkEvidence(0, 4, 4);
+        assertTrue(idle.get("scheduledSectionWorkComplete").getAsBoolean());
+        assertEquals(0, idle.get("tasksInFlight").getAsInt());
+
+        var running = StationaryTerrain.scheduledSectionWorkEvidence(0, 4, 3);
+        assertFalse(running.get("scheduledSectionWorkComplete").getAsBoolean());
+        assertEquals(1, running.get("tasksInFlight").getAsInt());
+
+        assertFalse(StationaryTerrain.scheduledSectionWorkEvidence(1, 4, 4)
+                .get("scheduledSectionWorkComplete").getAsBoolean());
+        assertFalse(StationaryTerrain.scheduledSectionWorkEvidence(0, 0, 0)
+                .get("scheduledSectionWorkComplete").getAsBoolean());
+    }
 }
