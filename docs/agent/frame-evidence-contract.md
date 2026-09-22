@@ -158,8 +158,11 @@ The verifier checks exact source identity, clean build, native identity, validat
 completion, monotonic unique frame IDs, ABI timing invariants, loss, submission lifecycle
 and measurement availability. Legacy unwindowed P50/P95/P99 summaries include **all
 observed world frames**, including warmup, and remain diagnostic only.
-Passing returns `valid-observation`, with the previous status retained in `legacyStatus`. Use the existing unified
-correctness and paired-trial protocol for performance acceptance.
+Passing returns `valid-observation` when integrity holds but comparison prerequisites
+are incomplete; a complete packaged replay may return `comparison-ready`, with the
+previous status retained in `legacyStatus`. `comparison-ready` is still only a
+prerequisite result: use the existing unified correctness and paired-trial protocol
+for performance acceptance.
 
 Disabled instrumentation retains original downcall handles. `timing` mode also retains
 original ABI handles and omits Java per-submission encoding/wait diagnostic reads; it
@@ -172,12 +175,18 @@ overhead budget until matched physical off/on measurements pass.
 The existing production gameplay launcher supports `--frame-evidence off|timing|diagnostic`.
 The fixed `vanilla-normal-stationary-v1` profile uses the existing normal-world route,
 native output/internal dimensions, FABULOUS/render distance 32, requested 260 fps with
-vsync disabled, and MetalFX off. Optional mods are absent. It declares 5 seconds warmup
-and 10 seconds sample **before running**; these are an engineering observation window,
-not the thermal/performance acceptance protocol. Full existing flight, input, block
+vsync disabled, and MetalFX off. Optional mods are absent. It declares a stationary
+warmup and sample window **before running**, defaulting to 5 seconds and 10 seconds.
+The stationary route accepts `--frame-evidence-warmup-seconds` and
+`--frame-evidence-sample-seconds`; each is bounded to 1–300 seconds and their sum
+must not exceed 300 seconds. Off and timing runs use the same configured window.
+Streaming keeps its existing route contract and accepts only the default 5-second
+warmup and 10-second sample. These are engineering observation windows, not the
+thermal/performance acceptance protocol. Full existing flight, input, block
 placement/break and quality assertions must subsequently finish successfully.
-`--frame-evidence-phase streaming` arms the same format and durations at the existing
-input-driven flight phase, rather than adding another driver or changing the route.
+`--frame-evidence-phase streaming` arms the same format at the existing input-driven
+flight phase with the declared default durations; it does not add another driver or
+change the route.
 
 Before warmup the test driver flushes and copies a disposable world's initial content,
 with a sorted path/file-hash manifest. `--initial-world` replays a verified snapshot into
@@ -206,18 +215,24 @@ snapshot manifest before launch and requires the runtime replay hash to match it
 use one immutable snapshot and distinct `--trial-id` values for each A/A or off/on
 run. It waits for normal client exit, including the existing device shutdown
 drain, before requiring a complete archive and invoking the verifier. Mode,
-phase and trial identity are checked against the exported archive. This verifies
-evidence integrity only (`valid-observation` or `invalid-evidence`); it does not
-make a run comparison-ready or establish physical performance acceptance.
+phase and trial identity are checked against the exported archive. The verifier
+may return `valid-observation`, `invalid-evidence`, or `comparison-ready` when
+packaged replay prerequisites are complete; the latter still does not establish
+physical performance acceptance.
 `off` runs do not require a frame-evidence archive, but their `recording.json`
 still records the trial and replay identity for pairing.
+
+For a bounded multi-segment stationary observation, keep the same command and add
+for example `--frame-evidence-warmup-seconds 5 --frame-evidence-sample-seconds 40`.
+The runner receipt, gameplay profile and archive window must all carry that same
+declaration; the fixed source timestamp storage remains bounded and reports overflow.
 
 For a controlled fixed-view physical baseline, add `--stationary-baseline` to the
 existing launcher with `--metrics-only --initial-world <snapshot>` and `off` or `timing`.
 `vanilla-stationary-60-v1` requests 60 FPS and VSync through the existing Minecraft
 options; it does not alter production scheduling or claim a system deadline. The
 native-max profile above remains a headroom workload. The stationary route ends after
-its 5-second warmup and 10-second sample, retaining pose, native dimensions, quality,
+its configured warmup and sample (5 seconds and 10 seconds by default), retaining pose, native dimensions, quality,
 Metal 4 activation and sample-completion checks; it does not run the movement route.
 After measurement, it requests normal integrated-server halt on the server thread and
 drives test ticks until shutdown before closing the world, avoiding Fabric's client/server
@@ -274,9 +289,11 @@ its value is unavailable with the sample-count reason. Nested presentations rema
 but need independent comparison proof. File export uses an atomic final rename; failed export
 logs the error and leaves no new successful final report (a `.partial` file is not evidence).
 
-`valid-observation` remains an integrity result. `invalid-evidence` rejects malformed or incomplete evidence. `productPromotable` is always false in this verifier. Comparison eligibility
-adds replay, artifact, window and coverage prerequisites; it never asserts physical parity,
-accepted observer overhead, pacing, power, or an optimization win. Legacy median and per-trial
+`valid-observation` remains an integrity result and `invalid-evidence` rejects malformed
+or incomplete evidence. A `comparison-ready` status means only that the verifier's
+replay, artifact, window and coverage prerequisites passed. `productPromotable` is
+always false in this verifier; no status asserts physical parity, accepted observer
+overhead, pacing, power, or an optimization win. Legacy median and per-trial
 `2 × median` stutter diagnostics cannot promote this result. Native pending-ID accounting is separately bounded to the latest 65,536 scheduled IDs,
 even with the evidence observer off. Expiring an unresolved ID makes aggregate frames-in-flight
 permanently unavailable (`-1`); later schedules/completions cannot manufacture a recovered count.

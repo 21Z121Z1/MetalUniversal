@@ -54,6 +54,10 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             "identity": {"instrumentationMode": mode, "trialId": trial_id},
             "window": {"profile": {"route": {
                 "samplePhase": "stationary-full-view" if phase == "stationary" else "flight-new-chunks",
+                "warmupSeconds": 5,
+                "sampleSeconds": 10,
+                "warmupNs": 5_000_000_000,
+                "sampleNs": 10_000_000_000,
             }}},
             "archive": {"complete": complete},
         }
@@ -63,7 +67,8 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         receipt = {"gameplay": {"status": "completed"}}
         runner.finalize_client_run(receipt, None, client, self.output, self.root,
                                    self.identity, mode, verifier or self.fake_verifier,
-                                   expected_trial_id=trial_id, expected_phase=phase)
+                                   expected_trial_id=trial_id, expected_phase=phase,
+                                   expected_warmup_seconds=5, expected_sample_seconds=10)
         return receipt
 
     def test_archive_written_during_client_wait_is_verified_after_wait(self):
@@ -86,6 +91,9 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             (self.archive_fixture(mode="diagnostic"), "mode"),
             (self.archive_fixture(trial_id="trial-B"), "trial"),
             (self.archive_fixture(phase="streaming"), "phase"),
+            ({**self.archive_fixture(), "window": {"profile": {"route": {
+                "samplePhase": "stationary-full-view", "warmupNs": 6_000_000_000, "sampleNs": 10_000_000_000,
+            }}}}, "window"),
         )
         for archive, label in cases:
             with self.subTest(label=label):
@@ -121,6 +129,18 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "differs"):
             runner.record_snapshot_identity(
                 {"gameplay": {"world": {"replaySourceSnapshotSha256": "e" * 64}}}, supplied)
+
+    def test_window_contract_bounds_stationary_and_rejects_long_streaming_route(self):
+        self.assertEqual(runner.validate_window(5, 10, "stationary"), 15)
+        self.assertEqual(runner.validate_window(60, 120, "stationary"), 180)
+        self.assertEqual(runner.gameplay_timeout_seconds(15), 300)
+        self.assertEqual(runner.gameplay_timeout_seconds(240), 420)
+        with self.assertRaisesRegex(ValueError, "streaming"):
+            runner.validate_window(5, 11, "streaming")
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            runner.validate_window(181, 120, "stationary")
+        with self.assertRaisesRegex(ValueError, "phase"):
+            runner.validate_window(5, 10, "unknown")
 
 
 if __name__ == "__main__":
