@@ -239,11 +239,8 @@ drives test ticks until shutdown before closing the world, avoiding Fabric's cli
 phase-barrier deadlock in 26.3 `IntegratedServer.halt`. The ordinary client/device shutdown
 and its existing GPU drain still own final evidence export.
 
-Before warmup, the fixed camera must have an empty section-task queue and all existing
-section-task buffer packs free, plus an empty occlusion expected-chunk set, no uncompiled
-visible section, and uploaded/admissible layer draws. Readiness records the queue size,
-buffer capacity/free count, and `scheduledSectionWorkComplete`; this covers already
-scheduled section work, not hidden dirty sections that have not been scheduled. A canonical
+Before warmup, the fixed camera must have an empty compile queue and occlusion expected
+chunk set, no uncompiled visible section, and uploaded/admissible layer draws. A canonical
 hash of section nodes and layer draw metadata must remain stable for at least 40 checks
 and 2 seconds. The harness then requests Vanilla's existing full occlusion rebuild
 (to remove loading-order-dependent conservative accumulation), waits for the graph task

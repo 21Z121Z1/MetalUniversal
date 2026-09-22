@@ -4,9 +4,7 @@
   "compatibilityLevel": "JAVA_25",
   "client": [
     "GameplayFrameMixin",
-    "StationaryOcclusionAccessor",
-    "StationaryDispatcherAccessor",
-    "StationaryBufferPoolAccessor"
+    "StationaryOcclusionAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
