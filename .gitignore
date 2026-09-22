@@ -48,3 +48,7 @@ dist/
 
 # local Minecraft client/reference sources
 .minecraft-reference/
+
+# Python validation tooling
+__pycache__/
+*.py[cod]

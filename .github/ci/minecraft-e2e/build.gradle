@@ -44,6 +44,17 @@ def frameEvidencePhase = providers.gradleProperty('frameEvidencePhase').orElse('
 if (!(frameEvidencePhase in ['stationary', 'streaming'])) {
     throw new GradleException('frameEvidencePhase must be stationary or streaming')
 }
+def frameWorkload = providers.gradleProperty('frameWorkload').orElse('').get()
+def frameCampaign = !frameWorkload.isEmpty()
+def trialProducer = providers.gradleProperty('trialProducer').orElse(noOptionalRenderMods ? 'vanilla' : 'iris').get()
+def trialBackend = providers.gradleProperty('trialBackend').orElse('metal3').get()
+if (frameCampaign && (!(frameWorkload in ['P0','T0','C0','G0','I0','I1','X0'])
+        || !(trialProducer in ['vanilla','sodium','iris']) || !(trialBackend in ['metal3','metal4']))) {
+    throw new GradleException('Unknown frame workload/producer/backend contract')
+}
+if (frameCampaign && noOptionalRenderMods != (trialProducer == 'vanilla')) {
+    throw new GradleException('trialProducer and metallum.noOptionalMods disagree')
+}
 def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
 
 dependencies {
@@ -63,7 +74,7 @@ dependencies {
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     if (!noOptionalRenderMods) {
         productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-        productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+        if (!frameCampaign || trialProducer == 'iris') productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
     }
 }
 
@@ -118,7 +129,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Compatibility seam for older invocations while P1 switches to the
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
-    jvmArgs.add("-Dmetallum.iris.semantic=${!noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
@@ -127,6 +138,18 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (gameplay) {
         jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
+        if (frameCampaign) {
+            jvmArgs.add("-Dmetallum.ci.workload=${frameWorkload}")
+            jvmArgs.add("-Dmetallum.ci.producer=${trialProducer}")
+            jvmArgs.add("-Dmetallum.ci.gameplayBackend=${trialBackend}")
+            jvmArgs.add("-Dmetallum.ci.workloadSha256=${providers.gradleProperty('workloadSha256').get()}")
+            jvmArgs.add("-Dmetallum.ci.prepareScene=${providers.gradleProperty('prepareScene').orElse('false').get()}")
+            jvmArgs.add("-Dmetallum.ci.warmupNs=${providers.gradleProperty('warmupNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.sampleNs=${providers.gradleProperty('sampleNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.targetFps=${providers.gradleProperty('targetFps').get()}")
+            jvmArgs.add("-Dmetallum.ci.shaderPackName=${providers.gradleProperty('shaderPackName').orElse('').get()}")
+            jvmArgs.add("-Dmetallum.frameEvidence.segmented=${providers.gradleProperty('frameEvidenceSegmented').orElse('true').get()}")
+        }
         jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
         jvmArgs.add("-Dmetallum.ci.stationaryBaseline=${providers.gradleProperty('stationaryBaseline').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
@@ -152,7 +175,15 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         }
     }
 
-    if (requireP1Metal4Evidence) {
+    if (frameCampaign) {
+        // A full Metal 3/4 lowering comparison, not the legacy main-queue-only P1 experiment.
+        def metal4 = trialBackend == 'metal4'
+        for (String feature : ['metal4', 'metal4Compiler', 'metal4Present', 'metal4MainRenderer', 'residencySet']) {
+            jvmArgs.add("-Dmetallum.opt.${feature}=${metal4}")
+        }
+        jvmArgs.add('-Dmetallum.opt.metal4MainQueuePilot=false')
+        jvmArgs.add('-Dmetallum.opt.renderStatePacket=false')
+    } else if (requireP1Metal4Evidence) {
         // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
         // presentation, and explicit residency identical. The only intended
         // execution-model difference is whether the main renderer is enabled.
@@ -183,7 +214,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
     // device; authoritative evidence is read from Metal textures, not scan-out.
     useXVFB = false
-    runDir = file("${buildDir}/run/clientGameTest")
+    runDir = file(providers.gradleProperty('clientRunDir').orElse("${buildDir}/run/clientGameTest").get())
 }
 
 tasks.named("test") { useJUnitPlatform() }

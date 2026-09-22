@@ -27,18 +27,23 @@ import java.time.Instant;
 public final class VanillaGameplay {
     private static final String EVIDENCE_PHASE = System.getProperty("metallum.ci.frameEvidencePhase", "stationary");
     private static final boolean STATIONARY_BASELINE = Boolean.getBoolean("metallum.ci.stationaryBaseline");
-    private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
-    private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static final boolean STABLE_SCENE = STATIONARY_BASELINE || (FrameWorkloads.ID.equals("P0") && FrameWorkloads.PRODUCER.equals("vanilla"));
+    private static final int TARGET_FPS = FrameWorkloads.ENABLED ? Integer.getInteger("metallum.ci.targetFps", 60) : STATIONARY_BASELINE ? 60 : 260;
+    private static final boolean VSYNC = FrameWorkloads.ENABLED || STATIONARY_BASELINE;
+    private static final String ROUTE = FrameWorkloads.ENABLED ? "frame-workload-" + FrameWorkloads.ID + "-v1" :
+            STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static final boolean EXPECT_METAL4 = !FrameWorkloads.ENABLED || "metal4".equals(System.getProperty("metallum.ci.gameplayBackend", "metal3"));
+    private static SourceWindow.Accumulator sourceWindow;
     private static long sampleStartNanos;
     private static int stationaryVisibleSections;
-    private static final long WARMUP_NS = 5_000_000_000L;
-    private static final long SAMPLE_NS = 10_000_000_000L;
+    private static final long WARMUP_NS = FrameWorkloads.ENABLED ? Long.getLong("metallum.ci.warmupNs", 30_000_000_000L) : 5_000_000_000L;
+    private static final long SAMPLE_NS = FrameWorkloads.ENABLED ? Long.getLong("metallum.ci.sampleNs", 120_000_000_000L) : 10_000_000_000L;
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
     private static final int NATIVE_HEIGHT = Integer.getInteger("metallum.ci.nativeHeight", 0);
     private static final boolean PRESENTATION_METRICS = Boolean.getBoolean("metallum.ci.presentationMetrics");
     // Test-only bounded timestamps, with an opt-in scalar native wait getter.
     // No GPU readback or per-frame allocation.
-    private static final long[] FRAME_TIMES = new long[131_072];
+    private static final long[] FRAME_TIMES = new long[FrameWorkloads.ENABLED ? 0 : 131_072];
     private static boolean recordingFrames;
     private static int frameCount;
     private static long startedNanos;
@@ -54,7 +59,10 @@ public final class VanillaGameplay {
         lastPresentedConfiguration = presented;
         if (!recordingFrames) return;
         long now = System.nanoTime();
-        if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
+        if (FrameWorkloads.ENABLED) {
+            frameCount++;
+            sourceWindow.record(now);
+        } else if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
         else droppedSamples++;
         if (PRESENTATION_METRICS) {
             long wait = MetalNativeBridge.metallum_presentation_latest_drawable_wait_nanos();
@@ -64,16 +72,17 @@ public final class VanillaGameplay {
             }
         }
         var target = client.gameRenderer.mainRenderTarget();
-        if (client.getWindow().getWidth() != NATIVE_WIDTH || client.getWindow().getHeight() != NATIVE_HEIGHT
-                || target.width != NATIVE_WIDTH || target.height != NATIVE_HEIGHT
-                || presented == null || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT
-                || client.options.getEffectiveRenderDistance() != 32) invalidSettingsFrames++;
+        if (presented == null || client.options.getEffectiveRenderDistance() != 32
+                || (!FrameWorkloads.TRANSITIONS && (client.getWindow().getWidth() != NATIVE_WIDTH
+                || client.getWindow().getHeight() != NATIVE_HEIGHT || target.width != NATIVE_WIDTH
+                || target.height != NATIVE_HEIGHT || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT)))
+            invalidSettingsFrames++;
         for (var check : qualityChecks) {
             if (!check.getAsBoolean()) { invalidSettingsFrames++; break; }
         }
-        if (STATIONARY_BASELINE && client.levelRenderer.visibleSections().size() != stationaryVisibleSections)
+        if (STABLE_SCENE && client.levelRenderer.visibleSections().size() != stationaryVisibleSections)
             invalidSettingsFrames++;
-        if (STATIONARY_BASELINE && (client.player == null
+        if (STABLE_SCENE && (client.player == null
                 || Math.abs(client.player.getX() - 160.5) > 0.001 || Math.abs(client.player.getY() - 140) > 0.001
                 || Math.abs(client.player.getZ() - 160.5) > 0.001
                 || Math.abs(net.minecraft.util.Mth.wrapDegrees(client.player.getYRot() + 65)) > 0.001 || Math.abs(client.player.getXRot() - 15) > 0.001))
@@ -94,6 +103,12 @@ public final class VanillaGameplay {
 
     static void run(ClientGameTestContext context, TestSingleplayerContext world,
                     Path output, JsonObject worldEvidence) {
+        if (FrameWorkloads.ENABLED) {
+            FrameWorkloads.validate();
+            require(TARGET_FPS >= 15 && TARGET_FPS < 260 && WARMUP_NS >= 0 && SAMPLE_NS > 0,
+                    "Invalid fixed cadence/window contract");
+            require(!FrameWorkloads.ID.equals("T0") || SAMPLE_NS >= 50_000_000_000L, "T0 needs at least a 50-second route window");
+        }
         require(EVIDENCE_PHASE.equals("stationary") || EVIDENCE_PHASE.equals("streaming"), "Unknown frame evidence phase");
         require(!STATIONARY_BASELINE || EVIDENCE_PHASE.equals("stationary"), "Stationary baseline requires stationary phase");
         require(!STATIONARY_BASELINE || worldEvidence.has("replaySourceSnapshotSha256"), "Stationary baseline requires a verified initial snapshot");
@@ -109,7 +124,7 @@ public final class VanillaGameplay {
             client.options.pauseOnLostFocus = false;
             client.options.graphicsPreset().set(GraphicsPreset.FABULOUS);
             client.options.renderDistance().set(32);
-            client.options.enableVsync().set(STATIONARY_BASELINE);
+            client.options.enableVsync().set(VSYNC);
             client.options.framerateLimit().set(TARGET_FPS);
             client.getWindow().setPreferredFullscreenVideoMode(java.util.Optional.empty());
             client.options.fullscreen().set(true);
@@ -163,6 +178,7 @@ public final class VanillaGameplay {
         terrainReady.addProperty("waitNanos", System.nanoTime() - terrainWaitStart);
         terrainReady.addProperty("scope", "Vanilla server sending footprint at the starting camera; normal generation");
         report.add("initialTerrainReadiness", terrainReady);
+        FrameWorkloads.prepare(context, world);
         JsonObject settings = context.computeOnClient(VanillaGameplay::settings);
         report.add("settings", settings);
         require(settings.get("effectiveRenderDistance").getAsInt() == 32, "Maximum view distance did not activate");
@@ -182,8 +198,9 @@ public final class VanillaGameplay {
         int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
         report.addProperty("initialVisibleSections", initialVisibleSections);
         long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-        require(initialMetal4[0] == 1, "Gameplay profiling requires an active Metal 4 main renderer");
-        report.addProperty("metal4MainRendererActive", true);
+        require(initialMetal4[0] == (EXPECT_METAL4 ? 1 : 0), "Requested Metal lowering did not activate");
+        report.addProperty("metal4MainRendererActive", initialMetal4[0] == 1);
+        report.addProperty("backendRequested", EXPECT_METAL4 ? "metal4" : "metal3");
         JsonObject initialContent = world.getServer().computeOnServer(server -> {
             server.saveEverything(false, true, true);
             return WorldSnapshot.capture(world.getWorldSave().getSaveDirectory(),
@@ -196,7 +213,7 @@ public final class VanillaGameplay {
             initialContent.addProperty("snapshotDirectory", "initial-world");
         }
         JsonObject stationaryTerrain = null;
-        if (STATIONARY_BASELINE) {
+        if (STABLE_SCENE) {
             var readiness = new StationaryTerrain();
             context.waitFor(readiness::ready, 1200);
             // Incremental loading can leave a conservative graph dependent on arrival order.
@@ -211,23 +228,33 @@ public final class VanillaGameplay {
             report.add("stationaryTerrain", stationaryTerrain);
         }
         JsonObject profile = new JsonObject();
-        profile.addProperty("profileId", STATIONARY_BASELINE ? ROUTE : "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        profile.addProperty("profileId", FrameWorkloads.ENABLED || STATIONARY_BASELINE ? ROUTE : "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        if (FrameWorkloads.ENABLED) {
+            profile.addProperty("workloadId", FrameWorkloads.ID);
+            profile.addProperty("protocolVersion", 1);
+            profile.addProperty("producer", FrameWorkloads.PRODUCER);
+            profile.addProperty("transitionWindow", FrameWorkloads.TRANSITIONS);
+            profile.addProperty("workloadSha256", System.getProperty("metallum.ci.workloadSha256", "unavailable"));
+            profile.add("producerReceipt", context.computeOnClient(client -> FrameWorkloads.producerReceipt()));
+        }
         profile.add("initialContent", initialContent);
         profile.add("quality", settings.deepCopy());
         if (stationaryTerrain != null) profile.add("stationaryTerrain", stationaryTerrain.deepCopy());
         JsonObject targetIntent = new JsonObject();
         targetIntent.addProperty("fpsLimit", TARGET_FPS);
-        targetIntent.addProperty("vsync", STATIONARY_BASELINE);
+        targetIntent.addProperty("vsync", VSYNC);
         targetIntent.addProperty("authority", "requested-options-not-system-deadline");
         profile.add("targetIntent", targetIntent);
         JsonObject route = new JsonObject();
         route.addProperty("id", ROUTE);
         route.addProperty("inputAuthority", "Fabric client GameTest input driver");
-        route.addProperty("samplePhase", EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
+        route.addProperty("samplePhase", FrameWorkloads.ENABLED ? "workload-" + FrameWorkloads.ID :
+                EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
         route.addProperty("camera", "160.5,140,160.5 yaw=-65 pitch=15; creative flight fixed view");
         route.addProperty("warmupNs", WARMUP_NS);
         route.addProperty("sampleNs", SAMPLE_NS);
-        route.addProperty("completion", STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
+        route.addProperty("completion", FrameWorkloads.ENABLED ? "fixed window, complete versioned action sequence, verified producer/scene/settings; transitions are not steady-state comparisons" :
+                STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
                 : "selected window duration and all existing flight/place-break/quality assertions");
         profile.add("route", route);
         profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
@@ -260,13 +287,30 @@ public final class VanillaGameplay {
             drawableWaitNanos = 0;
             drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
+            long start = startedNanos;
+            sampleStartNanos = Math.addExact(start, WARMUP_NS);
+            if (FrameWorkloads.ENABLED) sourceWindow = new SourceWindow.Accumulator(sampleStartNanos, Math.addExact(sampleStartNanos, SAMPLE_NS));
+            if (FrameWorkloads.ENABLED || EVIDENCE_PHASE.equals("stationary"))
+                FrameEvidenceRuntime.armWindowAt(profile, start, WARMUP_NS, SAMPLE_NS);
             recordingFrames = true;
-            if (EVIDENCE_PHASE.equals("stationary")) FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
-            long start = System.nanoTime();
-            sampleStartNanos = start + WARMUP_NS;
             return start;
         });
         try {
+            if (FrameWorkloads.ENABLED) {
+                report.add("workload", FrameWorkloads.run(context, world, sampleStartNanos,
+                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT));
+                report.add("sourceSampleWindow", context.computeOnClient(client -> sourceWindow.finish()));
+                if (STABLE_SCENE) {
+                    JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
+                    report.add("finalStationaryTerrain", finalTerrain);
+                    require(finalTerrain != null && finalTerrain.get("visibleSectionSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleSectionSha256")),
+                            "P0 visible section identity changed across the window");
+                    report.addProperty("stationaryGeometryChanged", !finalTerrain.get("visibleDrawSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")));
+                }
+                require(!FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(), "Frame evidence window is incomplete");
+            } else {
             phase(context, output, report, phases, "stationary-full-view");
             // Identical off/on workload clock: observer presence never controls the route.
             context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS, 1200);
@@ -365,10 +409,11 @@ public final class VanillaGameplay {
                     context.waitTicks(30);
                 }
             }
+            }
             report.addProperty("status", "completed");
             long[] finalMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-            require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
-                    "Metal 4 did not submit work during gameplay");
+            require(finalMetal4[0] == (EXPECT_METAL4 ? 1 : 0)
+                    && (!EXPECT_METAL4 || finalMetal4[2] > initialMetal4[2]), "Metal lowering changed or submitted no work");
             report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
             report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
             JsonObject cacheEvidence = context.computeOnClient(client -> {
@@ -407,7 +452,7 @@ public final class VanillaGameplay {
             input.releaseKey(options -> options.keyAttack);
             input.releaseKey(options -> options.keyUse);
         }
-        if (STATIONARY_BASELINE) {
+        if (STATIONARY_BASELINE || FrameWorkloads.ENABLED) {
             // 26.3 IntegratedServer.halt executes server work synchronously. Calling it
             // first from client disconnect can deadlock Fabric's tick phase barrier.
             // Request the normal halt on its owning thread, then keep driving test ticks
@@ -475,6 +520,14 @@ public final class VanillaGameplay {
     private static JsonObject finishFrames() {
         recordingFrames = false;
         long elapsed = System.nanoTime() - startedNanos;
+        if (FrameWorkloads.ENABLED) {
+            JsonObject value = sourceWindow.finish();
+            value.addProperty("invalidSettingsFrames", invalidSettingsFrames);
+            value.addProperty("throttledFrames", throttledFrames);
+            value.addProperty("droppedSamples", droppedSamples);
+            value.addProperty("instrumentation", "constant-memory source-return histogram, identical in OFF/timing/diagnostic");
+            return value;
+        }
         long[] intervals = new long[Math.max(0, frameCount - 1)];
         for (int i = 1; i < frameCount; i++) intervals[i - 1] = FRAME_TIMES[i] - FRAME_TIMES[i - 1];
         java.util.Arrays.sort(intervals);

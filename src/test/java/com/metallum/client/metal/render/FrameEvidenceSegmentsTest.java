@@ -159,4 +159,16 @@ class FrameEvidenceSegmentsTest {
         assertThrows(java.io.IOException.class, () -> archive.finish("passed", value -> { }));
         assertEquals("previous evidence", Files.readString(output));
     }
+    @Test void predeclaredAnchorMatchesOffOnClockAndInvalidInputsDoNotPartiallyArm() {
+        var recorder = new FrameEvidenceRecorder(8, clock::get, true);
+        assertThrows(IllegalStateException.class, () -> recorder.armWindowAt(new JsonObject(), 101, 0, 20));
+        assertThrows(ArithmeticException.class, () -> recorder.armWindowAt(new JsonObject(), 90, Long.MAX_VALUE, 20));
+        recorder.armWindowAt(new JsonObject(), 90, 20, 100);
+        assertEquals(110, recorder.snapshot(new JsonObject()).getAsJsonObject("window").get("startNs").getAsLong());
+        assertEquals(210, recorder.snapshot(new JsonObject()).getAsJsonObject("window").get("endNs").getAsLong());
+        clock.set(109); recorder.beginFrame(true); recorder.endFrame();
+        assertTrue(recorder.snapshot(new JsonObject()).getAsJsonArray("frames").isEmpty());
+        clock.set(110); recorder.beginFrame(true); clock.incrementAndGet(); recorder.endFrame();
+        assertEquals(1, recorder.snapshot(new JsonObject()).getAsJsonArray("frames").size());
+    }
 }

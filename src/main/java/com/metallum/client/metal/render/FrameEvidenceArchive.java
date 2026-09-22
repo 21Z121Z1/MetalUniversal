@@ -28,6 +28,7 @@ final class FrameEvidenceArchive {
     private String previousDigest = "";
     private volatile boolean stopping;
     private volatile IOException failure;
+    private volatile boolean cleanWriterExit;
 
     FrameEvidenceArchive(FrameEvidenceRecorder recorder, JsonObject identity, Path output) {
         this.recorder = recorder;
@@ -55,6 +56,7 @@ final class FrameEvidenceArchive {
                 }
             }
             flush(true);
+            cleanWriterExit = true;
         } catch (IOException exception) {
             failure = exception;
         } catch (RuntimeException exception) {
@@ -97,6 +99,7 @@ final class FrameEvidenceArchive {
             // Do not replace a prior session or turn a failed export into a completed archive.
             throw failure;
         }
+        if (!cleanWriterExit) throw new IOException("frame evidence writer terminated without a complete flush");
         checkpoint(true, validationStatus, completionMetadata);
     }
 

@@ -64,6 +64,10 @@ public final class FrameEvidenceRuntime {
         if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
     }
 
+    public static void armWindowAt(JsonObject profile, long armedAtNs, long warmupNs, long sampleNs) {
+        if (ENABLED) RECORDER.armWindowAt(profile, armedAtNs, warmupNs, sampleNs);
+    }
+
     public static boolean windowComplete() { return ENABLED && RECORDER.windowComplete(); }
 
     public static void beginFrame(boolean advanceGameTime) {

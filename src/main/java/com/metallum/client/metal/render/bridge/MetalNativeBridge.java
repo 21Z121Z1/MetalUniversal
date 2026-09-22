@@ -25,6 +25,12 @@ public final class MetalNativeBridge {
     private static final ValueLayout.OfFloat FLOAT = ValueLayout.JAVA_FLOAT;
     private static final ValueLayout.OfDouble DOUBLE = ValueLayout.JAVA_DOUBLE;
     private static final Linker LINKER = Linker.nativeLinker();
+    // Set only after successful file-based loading. iOS embedded/symbol lookup stays unavailable.
+    private static @Nullable Path loadedLibraryFile;
+
+    public static @Nullable Path loadedLibraryFileForDiagnostics() {
+        return loadedLibraryFile;
+    }
     // Reuse native matrix storage on the render thread. JDK 25 rejects heap
     // segments in native downcalls, but the matrices themselves are updated
     // every frame and do not need a new arena allocation each time.
@@ -1075,6 +1081,7 @@ public final class MetalNativeBridge {
             Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
         }
         SymbolLookup loaded = SymbolLookup.libraryLookup(tempLib, Arena.global());
+        loadedLibraryFile = tempLib;
         FrameEvidenceRuntime.nativeLoaded(tempLib);
         return loaded;
     }

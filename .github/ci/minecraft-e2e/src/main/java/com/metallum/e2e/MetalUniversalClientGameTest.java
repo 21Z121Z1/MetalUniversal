@@ -88,8 +88,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         require(metallumLoaded, "MetalUniversal mod was not loaded in the production client");
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
-        require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
-        require(irisLoaded == !vanillaOnly, "Iris runtime presence disagrees with the requested lane");
+        if (FrameWorkloads.ENABLED) FrameWorkloads.validateProducer(FrameWorkloads.PRODUCER, sodiumLoaded, irisLoaded);
+        else {
+            require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
+            require(irisLoaded == !vanillaOnly, "Iris runtime presence disagrees with the requested lane");
+        }
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly);
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
@@ -465,7 +468,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             Path jar = Path.of(backend.getProtectionDomain().getCodeSource().getLocation().toURI());
             require(Files.isRegularFile(jar), "Production test loaded development classes instead of a JAR: " + jar);
             JsonObject report = new JsonObject();
-            report.addProperty("rendererMode", vanillaOnly ? "vanilla" : "sodium-iris");
+            report.addProperty("rendererMode", FrameWorkloads.ENABLED ? FrameWorkloads.PRODUCER : vanillaOnly ? "vanilla" : "sodium-iris");
             report.addProperty("loadedJavaArtifact", jar.toString());
             try (var input = Files.newInputStream(jar)) {
                 report.addProperty("javaArtifactSha256", sha256(input));
@@ -484,6 +487,17 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     // This is the bundled artifact hash; it does not claim an independently observed load path.
                     report.addProperty("packagedNativeSha256", sha256(input));
                 }
+            }
+            // Resolve the successfully loaded file, not a caller-provided path or the archive entry.
+            // Hash before the workload window, identically for OFF/timing/diagnostic.
+            Class<?> bridge = Class.forName("com.metallum.client.metal.render.bridge.MetalNativeBridge");
+            Path loadedNative = (Path) bridge.getMethod("loadedLibraryFileForDiagnostics").invoke(null);
+            if (loadedNative == null) {
+                report.addProperty("loadedNativeUnavailableReason", "loader-does-not-expose-a-file");
+            } else try (var input = Files.newInputStream(loadedNative)) {
+                String actual = sha256(input);
+                report.addProperty("loadedNativeSha256", actual);
+                require(actual.equals(report.get("packagedNativeSha256").getAsString()), "Actually loaded native file differs from the packaged binary");
             }
             JsonObject mods = new JsonObject();
             FabricLoader.getInstance().getAllMods().stream()

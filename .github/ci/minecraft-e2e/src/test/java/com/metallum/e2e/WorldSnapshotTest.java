@@ -48,4 +48,14 @@ class WorldSnapshotTest {
         Files.writeString(manifest, Files.readString(manifest).replace("level.dat", "../world/level.dat"));
         assertThrows(IllegalStateException.class, () -> WorldSnapshot.verify(snapshot));
     }
+    @Test void parentSymlinksAndExistingOutputFailBeforeCopy() throws Exception {
+        Path snapshot = capture();
+        Path outside = temporary.resolve("outside");
+        Files.move(snapshot.resolve("region"), outside);
+        Files.createSymbolicLink(snapshot.resolve("region"), outside);
+        assertThrows(IllegalStateException.class, () -> WorldSnapshot.verify(snapshot));
+        assertThrows(IllegalStateException.class, () -> WorldSnapshot.copyVerified(snapshot, temporary.resolve("replay")));
+        assertFalse(Files.exists(temporary.resolve("replay")));
+        assertThrows(IllegalStateException.class, () -> WorldSnapshot.capture(temporary.resolve("world"), snapshot, new JsonObject()));
+    }
 }
