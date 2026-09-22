@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -80,6 +81,7 @@ def main():
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true",
                f"-PframeEvidenceMode={args.frame_evidence}",
+               f"-PframeEvidenceSegmented={str(args.frame_evidence != 'off').lower()}",
                f"-PstationaryBaseline={str(args.stationary_baseline).lower()}",
                f"-PframeEvidencePhase={args.frame_evidence_phase}",
                f"-PframeEvidenceTrialId={output.name}",
@@ -111,6 +113,8 @@ def main():
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
                "frameEvidenceMode": args.frame_evidence,
+               "frameEvidenceSegmented": args.frame_evidence != "off",
+               "frameEvidenceVerification": None,
                "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
                "warmupNanos": 5_000_000_000, "sampleNanos": 10_000_000_000,
                "terrainSliceCache": args.terrain_slice_cache,
@@ -159,6 +163,28 @@ def main():
                     raise TimeoutError("Gameplay exceeded five minutes")
                 time.sleep(0.5)
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
+            if args.frame_evidence != "off":
+                evidence = output / "frame-evidence.json"
+                if not evidence.is_file():
+                    raise RuntimeError("Frame evidence was requested but the production client did not export frame-evidence.json")
+                raw_evidence = json.loads(evidence.read_text())
+                if raw_evidence.get("schemaVersion") != 2 or "archive" not in raw_evidence:
+                    raise RuntimeError("Frame evidence did not use the required bounded archive schema")
+                verification = subprocess.run(
+                    [sys.executable, str(root / "scripts/agent/verify_frame_evidence.py"), str(evidence),
+                     "--expected-head", identity["sourceSha"], "--require-packaged"],
+                    cwd=root, capture_output=True, text=True)
+                verification_path = output / "frame-evidence-verification.json"
+                verification_path.write_text(verification.stdout)
+                if verification.returncode != 0:
+                    detail = verification.stderr.strip() or verification.stdout.strip()
+                    raise RuntimeError(f"Frame evidence verification failed: {detail}")
+                verification_result = json.loads(verification.stdout)
+                receipt["frameEvidenceVerification"] = {
+                    "status": verification_result.get("status"),
+                    "physicalPerformanceAcceptance": verification_result.get("physicalPerformanceAcceptance"),
+                    "path": verification_path.name,
+                }
             if recording is not None:
                 if recording.poll() is None:
                     recording.send_signal(signal.SIGINT)

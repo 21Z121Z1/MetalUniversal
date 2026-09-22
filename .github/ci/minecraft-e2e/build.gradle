@@ -34,6 +34,10 @@ def frameEvidenceMode = providers.gradleProperty('frameEvidenceMode').orElse('of
 if (!(frameEvidenceMode in ['off', 'timing', 'diagnostic'])) {
     throw new GradleException('frameEvidenceMode must be off, timing, or diagnostic')
 }
+def segmentedFrameEvidence = providers.gradleProperty('frameEvidenceSegmented')
+        .map { it.toBoolean() }
+        .orElse(frameEvidenceMode != 'off')
+        .get()
 if (frameEvidenceMode == 'timing' && (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()
         || providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()
         || providers.gradleProperty('presentationMetrics').orElse('false').get().toBoolean()
@@ -128,6 +132,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     if (gameplay) {
         jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
         jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
+        // M0 evidence runs use the bounded archive so a long/terminated client
+        // cannot silently fall back to the legacy fixed-size in-memory snapshot.
+        jvmArgs.add("-Dmetallum.frameEvidence.segmented=${segmentedFrameEvidence}")
         jvmArgs.add("-Dmetallum.ci.stationaryBaseline=${providers.gradleProperty('stationaryBaseline').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
         jvmArgs.add("-Dmetallum.ci.initialWorld=${providers.gradleProperty('initialWorld').orElse('').get()}")
