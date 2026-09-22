@@ -21,6 +21,87 @@ def require(condition, message):
         raise ValueError(message)
 
 
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+                      parse_constant=lambda value: require(False, f"non-finite JSON value: {value}"))
+
+
+def load_report(path):
+    """Read v1 or validate and assemble the recorder's v2 bounded-segment archive.
+
+    Archive checkpoints are readable after a crash, but verify() still rejects
+    incomplete output. Hashes establish integrity, not truth or physical timing.
+    """
+    path = Path(path)
+    report = read_json(path)
+    if report.get("schemaVersion") != 2:
+        return report
+    archive = report["archive"]
+    require(archive.get("formatVersion") == 1, "unsupported frame archive format")
+    require(type(archive.get("complete")) is bool, "invalid archive completion state")
+    require(report.get("frames") == [], "archive index must not contain independent frame rows")
+    name = archive.get("directory")
+    require(name == path.name + ".segments", "archive directory is not the owning report's segment directory")
+    directory = path.parent.resolve() / name
+    require(directory.is_dir() and not directory.is_symlink(), "archive directory missing or symlinked")
+    count = integer(archive["committedSegments"])
+    require(count <= 65_536, "archive segment count exceeds recorder limit")
+    rows, previous, previous_frame, censored = [], "", 0, 0
+    for number in range(1, count + 1):
+        segment_path = directory / f"{number:08d}.json"
+        require(segment_path.is_file() and not segment_path.is_symlink(), "missing/symlinked frame segment")
+        data = segment_path.read_bytes()
+        segment = json.loads(data, object_pairs_hook=unique_object,
+                             parse_constant=lambda value: require(False, f"non-finite segment value: {value}"))
+        require(segment.get("schemaVersion") == 1, "unknown frame segment schema")
+        require(segment.get("identity") == report["identity"], "frame segment binary/source identity mismatch")
+        require(segment.get("scope") == report["scope"], "frame segment scope mismatch")
+        metadata = segment["segment"]
+        require(metadata["id"] == number and type(metadata["id"]) is int, "frame segment ID/order mismatch")
+        require(metadata["previousSha256"] == previous, "frame segment hash chain mismatch")
+        previous = hashlib.sha256(data).hexdigest()
+        frames = segment["frames"]
+        require(isinstance(frames, list) and len(frames) == integer(metadata["frameCount"], 1), "frame segment count mismatch")
+        require(metadata["firstFrameId"] == frames[0]["frameId"] and metadata["lastFrameId"] == frames[-1]["frameId"],
+                "frame segment endpoint identity mismatch")
+        require(metadata["censoringReason"] in ("", "shutdown-right-censored", "callback-retention-expired"),
+                "unknown frame segment censoring state")
+        censored += bool(metadata["censoringReason"])
+        for frame in frames:
+            frame_id = integer(frame["frameId"], 1)
+            require(frame_id > previous_frame, "reused/reordered source identity across frame segments")
+            previous_frame = frame_id
+            require(frame.get("exportCensoringReason") == metadata["censoringReason"], "frame/segment censoring mismatch")
+        if "window" in report:
+            require("window" in segment, "frame segment has no declared source window")
+            for key in ("epoch", "clock", "membership", "armed", "startNs", "endNs", "warmupNs", "profile"):
+                require(segment["window"].get(key) == report["window"].get(key), "frame segment window identity mismatch: " + key)
+        require(integer(segment["droppedFrames"]) <= integer(report["droppedFrames"]), "archive lost its overflow accounting")
+        rows.extend(frames)
+    require(archive["lastSegmentSha256"] == previous, "last frame segment digest mismatch")
+    require(integer(archive["committedFrames"]) == len(rows), "archive total frame count mismatch")
+    retention = report["retention"]
+    capacity = integer(retention["frameCapacityPerBuffer"], 1)
+    queue_limit = integer(retention["pendingSegmentLimit"], 1)
+    require(queue_limit <= 8, "unbounded frame segment queue")
+    require(integer(retention["segmentFrameTarget"], 1) <= capacity, "segment target exceeds frame capacity")
+    integer(retention["receiptRetentionNs"], 1)
+    require(integer(retention["retainedFrames"]) <= capacity * (queue_limit + 1), "unbounded retained frame state")
+    require(integer(retention["queuedSegments"]) <= queue_limit, "frame segment queue overflow")
+    require(integer(retention["censoredSegments"]) >= censored, "archive lost its censoring accounting")
+    for key in ("exportedSegments", "exportedFrames", "lateCompletionUpdates", "lateReceiptUpdates"):
+        integer(retention[key])
+    if archive["complete"]:
+        require(retention["retainedFrames"] == retention["queuedSegments"] == 0, "completed archive retains unpublished frames")
+        require(retention["exportedSegments"] == count and retention["exportedFrames"] == len(rows), "completed archive lost a detached segment")
+        expected_files = {f"{number:08d}.json" for number in range(1, count + 1)}
+        require({item.name for item in directory.iterdir()} == expected_files, "completed archive has orphan or partial files")
+    report["schemaVersion"] = 1
+    report["archiveSchemaVersion"] = 2
+    report["frames"] = rows
+    return report
+
 def verify(report, expected_head, require_packaged=False, require_comparable=False, artifact_root=None):
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "expected HEAD must be a full SHA")
     require(report["schemaVersion"] == 1, "unsupported schema")
@@ -38,6 +119,13 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
     require(packaged or (not require_packaged and identity["javaArtifactSha256"] == "unavailable-dev-classes"),
             "missing packaged Java artifact identity")
     require(report["scope"] == "Minecraft.renderFrame/render-thread/main-command-queue", "unknown observation scope")
+    if "archive" in report:
+        require(report.get("archiveSchemaVersion") == 2, "archive must be read through its hash-checked loader")
+        require(report["archive"]["complete"] is True, "incomplete frame archive checkpoint")
+        retention = report["retention"]
+        require(retention["censoredSegments"] == 0, "frame archive contains right-censored or retention-expired work")
+        require(retention["lateCompletionUpdates"] == retention["lateReceiptUpdates"] == 0,
+                "frame archive received updates after its retention boundary")
     require(report["shutdownDrained"] is True, "missing shutdown drain")
     require(report["validationStatus"] == "passed", "client validation did not pass")
     require(integer(report["droppedFrames"]) == 0, "bounded capture lost frames")
@@ -158,7 +246,8 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
         # Empty instrumentation is missing measurement, not zero native work.
         abi_crossings = {**summary([]), "unavailableReason": "timing-mode-does-not-instrument-ABI"}
         abi_exclusive = dict(abi_crossings)
-    return {"status": "valid-observation", "legacyStatus": "valid-observation-no-performance-decision",
+    return {"status": "comparison-ready" if delivery["comparisonEligibility"]["eligible"] else "valid-observation",
+            "legacyStatus": "valid-observation-no-performance-decision",
             "physicalPerformanceAcceptance": "physical-validation-required", "productPromotable": False,
             "sourceSha": expected_head,
             "instrumentationMode": mode, "frameDelivery": delivery,
@@ -685,8 +774,7 @@ if __name__ == "__main__":
         if args.report is None or args.expected_head is None:
             parser.error("report and --expected-head are required")
         try:
-            report = json.loads(args.report.read_text(), object_pairs_hook=unique_object,
-                                parse_constant=lambda value: require(False, f"non-finite JSON value: {value}"))
+            report = load_report(args.report)
             print(json.dumps(verify(report, args.expected_head, args.require_packaged, args.require_comparable, args.report.parent), indent=2))
         except (ValueError, KeyError, TypeError, OSError) as error:
             print(json.dumps({"status": "invalid-evidence", "legacyStatus": "rejected-frame-evidence", "reason": str(error)}))
