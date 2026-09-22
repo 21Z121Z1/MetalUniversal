@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -73,13 +74,20 @@ final class MetalNativeBridgeArgumentScratchTest {
         assertTrue(scratch.tryAcquire());
         MemorySegment first;
         try {
+            scratch.copy(new MemorySegment[] {MemorySegment.NULL}, new int[] {1}, new int[] {2},
+                    new float[] {1.0F, 2.0F, 3.0F, 4.0F});
             first = scratch.textureArray(1);
         } finally {
             scratch.release();
         }
         assertTrue(scratch.tryAcquire());
         try {
+            scratch.copy(new MemorySegment[] {MemorySegment.NULL}, new int[] {7}, new int[] {8},
+                    new float[] {9.0F, 10.0F, 11.0F, 12.0F});
             assertSame(first, scratch.textureArray(1));
+            assertEquals(7, scratch.loadArray(1).getAtIndex(ValueLayout.JAVA_INT, 0));
+            assertEquals(8, scratch.storeArray(1).getAtIndex(ValueLayout.JAVA_INT, 0));
+            assertEquals(12.0F, scratch.clearColorArray(1).getAtIndex(ValueLayout.JAVA_FLOAT, 3));
         } finally {
             scratch.release();
         }
@@ -128,9 +136,18 @@ final class MetalNativeBridgeArgumentScratchTest {
         MetalNativeBridge.RenderEncoderArgumentScratch caller =
                 MetalNativeBridge.RENDER_ENCODER_ARGUMENT_SCRATCH.get();
         AtomicReference<MetalNativeBridge.RenderEncoderArgumentScratch> other = new AtomicReference<>();
-        Thread thread = new Thread(() -> other.set(MetalNativeBridge.RENDER_ENCODER_ARGUMENT_SCRATCH.get()));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread thread = new Thread(() -> {
+            try {
+                other.set(MetalNativeBridge.RENDER_ENCODER_ARGUMENT_SCRATCH.get());
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        });
         thread.start();
         thread.join();
+        assertNull(failure.get(), "child render thread scratch lookup failed");
+        assertNotNull(other.get(), "child render thread did not publish a scratch");
         assertNotSame(caller, other.get());
     }
 }
