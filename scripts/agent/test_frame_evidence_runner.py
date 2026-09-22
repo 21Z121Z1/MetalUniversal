@@ -220,11 +220,13 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             resolve(runner.OPTIMIZATION_PROFILE_BASELINE, reuse_encoder_state=False, jfr_only=True)
         with self.assertRaisesRegex(ValueError, "requires reuse-encoder-state-diagnostic-v1"):
             resolve(runner.OPTIMIZATION_PROFILE_REUSE, frame_evidence="timing", jfr_only=True)
-        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
-            resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, jfr_only=False)
-        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
+        moving = resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
+                         stationary_baseline=False, frame_evidence_phase="streaming", jfr_only=False)
+        self.assertIsNone(moving["pairKey"])
+        self.assertTrue(moving["candidate"])
+        with self.assertRaisesRegex(ValueError, "diagnostic mode with JFR"):
             resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, metrics_only=True, jfr_only=True)
-        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
+        with self.assertRaisesRegex(ValueError, "diagnostic mode with JFR"):
             resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, frame_evidence="timing", jfr_only=True)
         with self.assertRaisesRegex(ValueError, "other diagnostic or optimization"):
             resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,

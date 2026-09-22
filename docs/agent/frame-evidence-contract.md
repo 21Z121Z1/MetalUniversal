@@ -442,8 +442,10 @@ through gameplay completion, not a sample-window cost. This proves route
 activation, not comparable performance or physical acceptance.
 
 `--optimization-profile reuse-encoder-state-diagnostic-v1 --reuse-encoder-state --jfr-only` is a separate
-stationary diagnostic profile for Java wait/stack diagnosis. It uses `diagnostic`
-frame evidence with JFR and no Xcode trace; its `pairKey` is null, so it is not a
+diagnostic profile for Java wait/stack diagnosis. It supports the existing stationary
+and normal input-driven streaming routes. Omit `--jfr-only` on the normal route to
+record both JFR and Xcode; `--jfr-only` records JFR without Xcode. It uses `diagnostic`
+frame evidence; its `pairKey` is null, so it is not a
 timing pair. Its archive may be structurally valid or `comparison-ready`, but JFR
 overhead and diagnostic instrumentation keep it outside timing, performance and
 promotion decisions. The existing reuse-encoder-state timing contract remains

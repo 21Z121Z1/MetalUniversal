@@ -431,10 +431,8 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
     if profile == OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE:
         if not reuse_encoder_state:
             raise ValueError("reuse-encoder-state-diagnostic-v1 requires --reuse-encoder-state")
-        if not stationary_baseline:
-            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --stationary-baseline")
-        if frame_evidence_phase != "stationary" or frame_evidence != "diagnostic" or metrics_only or not jfr_only:
-            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --jfr-only diagnostic mode")
+        if frame_evidence_phase not in PHASE_SAMPLE or frame_evidence != "diagnostic" or metrics_only:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires diagnostic mode with JFR")
         if presentation_metrics or render_labels or terrain_slice_cache or reuse_native_encoder_arguments:
             raise ValueError("reuse-encoder-state-diagnostic-v1 excludes other diagnostic or optimization flags")
     if profile == OPTIMIZATION_PROFILE_ARGUMENT_REUSE:

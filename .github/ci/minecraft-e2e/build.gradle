@@ -94,11 +94,10 @@ if (gameplay && optimizationProfile == 'reuse-encoder-state-v1'
     throw new GradleException('reuse-encoder-state-v1 requires the stationary metrics-only timing route with segmented evidence')
 }
 if (gameplay && optimizationProfile == 'reuse-encoder-state-diagnostic-v1'
-        && (!reuseEncoderState || !stationaryBaseline || frameEvidenceMode != 'diagnostic'
-        || frameEvidencePhase != 'stationary' || !gameplayJfr || waitForProfiler
+        && (!reuseEncoderState || frameEvidenceMode != 'diagnostic' || !gameplayJfr
         || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
         || reuseNativeEncoderArguments)) {
-    throw new GradleException('reuse-encoder-state-diagnostic-v1 requires stationary diagnostic JFR with no other optimization')
+    throw new GradleException('reuse-encoder-state-diagnostic-v1 requires diagnostic JFR with no other optimization')
 }
 if (gameplay && optimizationProfile == 'encoder-argument-reuse-v1'
         && (!reuseNativeEncoderArguments || reuseEncoderState || !stationaryBaseline

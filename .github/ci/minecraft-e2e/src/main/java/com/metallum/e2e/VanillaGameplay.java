@@ -125,8 +125,8 @@ public final class VanillaGameplay {
                 "Optimization profile and reuseEncoderState property disagree");
         require(ENCODER_ARGUMENT_CANDIDATE == REUSE_NATIVE_ENCODER_ARGUMENTS,
                 "Optimization profile and reuseNativeEncoderArguments property disagree");
-        require(!REUSE_CANDIDATE || STATIONARY_BASELINE,
-                "Reuse candidates require the stationary route");
+        require(!REUSE_CANDIDATE || DIAGNOSTIC_REUSE_CANDIDATE || STATIONARY_BASELINE,
+                "Timing reuse candidates require the stationary route");
         var input = context.getInput();
         JsonObject report = new JsonObject();
         report.addProperty("scenario", ROUTE);
