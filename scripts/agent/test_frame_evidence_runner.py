@@ -255,6 +255,104 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
                 expected_warmup_seconds=5, expected_sample_seconds=10,
                 expected_optimization_profile=expected)
 
+    def trace_fixture(self, event_seconds=(5.5, 6.0), *, include_units=True):
+        toc = self.output / "trace-toc.xml"
+        present = self.output / "trace-present-tables.xml"
+        schemas = "".join(f'<table schema="{schema}" documentation="Denotes CAMetalDrawable events."/>'
+                           for schema in runner.TRACE_PRESENT_SCHEMAS)
+        toc.write_text(f"""<?xml version="1.0"?>
+<trace-toc><run number="1"><info><target>
+<process type="attached" name="java" pid="42"/>
+<summary><start-date>2026-09-22T12:00:00+00:00</start-date><duration>30</duration></summary>
+</target></info><data>{schemas}</data></run></trace-toc>""")
+        rows = []
+        for index, seconds in enumerate(event_seconds):
+            raw = str(round(seconds * 1_000_000_000)) if include_units else f"{seconds:.3f}"
+            fmt = f"00:{seconds:06.3f}"
+            process = ('<process id="8"><pid id="9" fmt="42">42</pid></process>'
+                       if index == 0 else '<process ref="8"/>')
+            rows.append(f'<row><start-time id="{index * 4 + 1}" fmt="{fmt}">{raw}</start-time>'
+                        f"{process}</row>")
+        schema_one = (f'<schema name="{runner.TRACE_PRESENT_SCHEMAS[0]}" documentation="Denotes CAMetalDrawable presented handlers.">'
+                      '<col><mnemonic>timestamp</mnemonic><engineering-type>start-time</engineering-type></col></schema>')
+        schema_two = (f'<schema name="{runner.TRACE_PRESENT_SCHEMAS[1]}" documentation="Denotes CAMetalDrawable present requests.">'
+                      '<col><mnemonic>timestamp</mnemonic><engineering-type>start-time</engineering-type></col></schema>')
+        present.write_text("<trace-query-result>"
+                           + f'<node xpath="//trace-toc/run[1]/data/table[1]">{schema_one}{"".join(rows)}</node>'
+                           + f'<node xpath="//trace-toc/run[1]/data/table[2]">{schema_two}{"".join(rows)}</node>'
+                           + "</trace-query-result>")
+        return toc, present
+
+    def trace_gameplay(self):
+        return {
+            "pid": 42,
+            "windowClockAnchors": {"events": [{
+                "before": {"monoBeforeNs": 0, "monoAfterNs": 100,
+                            "wall": "2026-09-22T12:00:00+00:00"},
+                "after": {"monoBeforeNs": 10_000_000_000, "monoAfterNs": 10_000_000_100,
+                           "wall": "2026-09-22T12:00:10+00:00"},
+            }]},
+        }
+
+    def trace_archive(self, *, clock="java-System.nanoTime"):
+        return {"window": {"clock": clock, "startNs": 5_000_000_000, "endNs": 6_000_000_000}}
+
+    def test_trace_present_events_are_partial_not_continuous_coverage(self):
+        toc, present = self.trace_fixture()
+        coverage = runner.inspect_trace_coverage(toc, present, self.trace_gameplay(),
+                                                 archive=self.trace_archive())
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["reason"], "present-events-do-not-prove-continuous-window-coverage")
+        self.assertFalse(coverage["continuousCoverage"])
+        self.assertEqual(coverage["pidScope"], "matched-row-pid")
+
+    def test_trace_nonoverlap_and_missing_or_bad_clock_fail_closed(self):
+        toc, present = self.trace_fixture(event_seconds=(20.0, 21.0))
+        coverage = runner.inspect_trace_coverage(toc, present, self.trace_gameplay(),
+                                                 archive=self.trace_archive())
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["reason"], "present-events-do-not-overlap-archive-window")
+        missing = runner.inspect_trace_coverage(toc, self.output / "missing.xml", self.trace_gameplay(),
+                                                archive=self.trace_archive())
+        self.assertEqual(missing["status"], "unavailable")
+        self.assertEqual(missing["reason"], "present-table-export-missing")
+        bad_clock = runner.inspect_trace_coverage(toc, present, self.trace_gameplay(),
+                                                   archive=self.trace_archive(clock="native-presented-time"))
+        self.assertEqual(bad_clock["status"], "unavailable")
+        self.assertEqual(bad_clock["reason"], "archive-window-clock-is-not-java-system-nanotime")
+        jumped = self.trace_gameplay()
+        jumped["windowClockAnchors"]["events"][0]["after"]["wall"] = "2026-09-22T12:00:20+00:00"
+        jump = runner.inspect_trace_coverage(toc, present, jumped, archive=self.trace_archive())
+        self.assertEqual(jump["status"], "unavailable")
+        self.assertEqual(jump["reason"], "java-clock-anchor-offsets-disagree")
+
+    def test_trace_event_time_without_units_is_unavailable(self):
+        toc, present = self.trace_fixture(include_units=False)
+        coverage = runner.inspect_trace_coverage(toc, present, self.trace_gameplay(),
+                                                 archive=self.trace_archive())
+        self.assertEqual(coverage["status"], "unavailable")
+        self.assertEqual(coverage["reason"], "present-table-event-time-unit-missing-or-invalid")
+
+    def test_trace_exports_attach_conservative_coverage_to_receipt(self):
+        toc, present = self.trace_fixture()
+        (self.output / "gameplay.trace").write_bytes(b"trace")
+        (self.output / "frame-evidence.json").write_text(json.dumps(self.trace_archive()))
+        calls = []
+
+        def export(command, **kwargs):
+            calls.append(command)
+            self.assertTrue(kwargs["check"])
+            return SimpleNamespace(returncode=0)
+
+        receipt = {"gameplay": self.trace_gameplay()}
+        coverage = runner.export_trace_artifacts(self.output, receipt, export)
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(receipt["traceCoverage"]["reason"],
+                         "present-events-do-not-prove-continuous-window-coverage")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--toc", calls[0])
+        self.assertIn("--xpath", calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

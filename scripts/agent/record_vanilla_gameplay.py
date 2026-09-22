@@ -6,6 +6,7 @@ data remain separate from render correctness and controlled performance acceptan
 """
 import argparse
 import ctypes
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -33,6 +35,9 @@ OPTIMIZATION_FEATURE = "encoder-cpu-state-reuse"
 OPTIMIZATION_ARGUMENT_FEATURE = "encoder-native-argument-reuse"
 OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE,
                                 OPTIMIZATION_PROFILE_ARGUMENT_REUSE)
+TRACE_PRESENT_SCHEMAS = ("ca-client-present-request", "ca-client-presented-handler")
+TRACE_PRESENT_XPATH = ('/trace-toc/run[@number="1"]/data/table['
+                       + " or ".join(f'@schema="{schema}"' for schema in TRACE_PRESENT_SCHEMAS) + ']')
 
 
 def validate_window(warmup_seconds, sample_seconds, phase):
@@ -55,6 +60,334 @@ def gameplay_timeout_seconds(window_seconds):
     """Leave bounded route/shutdown headroom without a fixed short-session deadline."""
     return min(MAX_GAMEPLAY_TIMEOUT_SECONDS,
                max(DEFAULT_GAMEPLAY_TIMEOUT_SECONDS, window_seconds + GAMEPLAY_TIMEOUT_MARGIN_SECONDS))
+
+
+def _local_name(element):
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _integer(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _epoch_ns(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = parsed.astimezone(timezone.utc) - epoch
+    result = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+    fraction = re.search(r"\.(\d+)(?=[+-]\d\d:\d\d$)", normalized)
+    if fraction is not None:
+        fractional_ns = int(fraction.group(1).ljust(9, "0")[:9])
+        result += fractional_ns - parsed.microsecond * 1_000
+    return result
+
+
+def _element_text(element):
+    return " ".join(part.strip() for part in element.itertext() if part.strip())
+
+
+def _row_start_ns(row):
+    for element in row.iter():
+        tag = _local_name(element).lower().replace("_", "-")
+        if tag != "start-time":
+            continue
+        text = _element_text(element)
+        if re.fullmatch(r"-?\d+", text):
+            # xctrace's start-time engineering type stores raw relative ns;
+            # fmt is only the human-readable clock string.
+            return int(text)
+    return None
+
+
+def _row_pids(row, definitions=None):
+    values = set()
+    for element in row.iter():
+        for key, value in element.attrib.items():
+            if key.lower().rsplit("}", 1)[-1] == "pid":
+                parsed = _integer(value)
+                if parsed is not None:
+                    values.add(parsed)
+        if _local_name(element).lower() == "pid":
+            parsed = _integer(_element_text(element))
+            if parsed is not None:
+                values.add(parsed)
+        if definitions is not None:
+            reference = element.attrib.get("ref")
+            if reference in definitions:
+                values.update(definitions[reference])
+    return values
+
+
+def _trace_target_info(toc_path):
+    root = ET.parse(toc_path).getroot()
+    attached_pids = []
+    trace_start_ns = None
+    schemas = set()
+    table_schemas = {}
+    table_index = 0
+    for element in root.iter():
+        tag = _local_name(element).lower()
+        if tag == "process":
+            pid = _integer(element.attrib.get("pid"))
+            if pid is not None:
+                if element.attrib.get("type") == "attached":
+                    attached_pids.append(pid)
+        if tag == "start-date" and trace_start_ns is None:
+            trace_start_ns = _epoch_ns(_element_text(element))
+        if tag == "table" and element.attrib.get("schema"):
+            schemas.add(element.attrib["schema"])
+    for data in root.iter():
+        if _local_name(data).lower() != "data":
+            continue
+        for table in data:
+            if _local_name(table).lower() != "table":
+                continue
+            table_index += 1
+            if table.attrib.get("schema"):
+                table_schemas[table_index] = table.attrib["schema"]
+    return {
+        "traceTargetPids": sorted(set(attached_pids)),
+        "traceStartWallNs": trace_start_ns,
+        "declaredSchemas": sorted(schemas),
+        "tableSchemas": table_schemas,
+    }
+
+
+def _trace_present_rows(path, table_schemas=None):
+    root = ET.parse(path).getroot()
+    rows = {schema: [] for schema in TRACE_PRESENT_SCHEMAS}
+    definitions = {}
+    for element in root.iter():
+        identifier = element.attrib.get("id")
+        if identifier is not None:
+            pids = _row_pids(element)
+            if pids:
+                definitions[identifier] = pids
+    seen = set()
+    for element in root.iter():
+        schema = element.attrib.get("schema") or element.attrib.get("name")
+        if schema not in rows and _local_name(element).lower() in {"node", "table"}:
+            schema = next((child.attrib.get("name") or child.attrib.get("schema")
+                           for child in element.iter()
+                           if _local_name(child).lower() == "schema"
+                           and (child.attrib.get("name") or child.attrib.get("schema")) in rows), None)
+        if schema not in rows and _local_name(element).lower() == "node" and table_schemas:
+            table = re.search(r"/table\[(\d+)\]", element.attrib.get("xpath", ""))
+            schema = table_schemas.get(int(table.group(1))) if table else None
+        if schema not in rows:
+            continue
+        for row in element.iter():
+            if _local_name(row).lower() != "row" or id(row) in seen:
+                continue
+            seen.add(id(row))
+            rows[schema].append({"startNs": _row_start_ns(row),
+                                 "pids": sorted(_row_pids(row, definitions))})
+    return rows
+
+
+def _clock_pairs(value):
+    pairs = []
+    if isinstance(value, dict):
+        required = ("monoBeforeNs", "monoAfterNs", "wall")
+        if all(key in value for key in required):
+            mono_before = _integer(value.get("monoBeforeNs"))
+            mono_after = _integer(value.get("monoAfterNs"))
+            wall = _epoch_ns(value.get("wall"))
+            if None not in (mono_before, mono_after, wall):
+                pairs.append({"monoBeforeNs": mono_before, "monoAfterNs": mono_after,
+                              "wallNs": wall,
+                              "uncertaintyNs": max(0, mono_after - mono_before)})
+        for child in value.values():
+            pairs.extend(_clock_pairs(child))
+    elif isinstance(value, list):
+        for child in value:
+            pairs.extend(_clock_pairs(child))
+    return pairs
+
+
+def _archive_window(evidence_path=None, archive=None):
+    raw = archive
+    if raw is None and evidence_path is not None:
+        try:
+            raw = json.loads(Path(evidence_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("window"), dict):
+        return None
+    window = raw["window"]
+    start = _integer(window.get("startNs"))
+    end = _integer(window.get("endNs"))
+    if start is None or end is None or end <= start:
+        return None
+    return {"startNs": start, "endNs": end, "clock": window.get("clock")}
+
+
+def inspect_trace_coverage(toc_path, present_tables_path, gameplay=None, evidence_path=None, *, archive=None):
+    """Classify exported present events without claiming continuous window coverage."""
+    result = {
+        "schemaVersion": 1,
+        "source": "xctrace Game Performance present-table export",
+        "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+        "status": "unavailable",
+        "continuousCoverage": False,
+    }
+    toc_path = Path(toc_path)
+    present_tables_path = Path(present_tables_path)
+    if not toc_path.is_file():
+        result["reason"] = "trace-toc-missing"
+        return result
+    try:
+        trace = _trace_target_info(toc_path)
+    except (OSError, ET.ParseError) as failure:
+        result["reason"] = f"trace-toc-unreadable:{type(failure).__name__}"
+        return result
+    result.update({"traceTargetPids": trace["traceTargetPids"],
+                   "traceStartWallNs": trace["traceStartWallNs"]})
+    target_pid = _integer(gameplay.get("pid")) if isinstance(gameplay, dict) else None
+    result["targetPid"] = target_pid
+    if target_pid is None:
+        result["reason"] = "gameplay-target-pid-missing"
+        return result
+    if target_pid not in trace["traceTargetPids"]:
+        result["reason"] = "trace-target-pid-mismatch"
+        return result
+    missing_schemas = [schema for schema in TRACE_PRESENT_SCHEMAS if schema not in trace["declaredSchemas"]]
+    result["presentSchemas"] = [schema for schema in TRACE_PRESENT_SCHEMAS if schema in trace["declaredSchemas"]]
+    if missing_schemas:
+        result["missingPresentSchemas"] = missing_schemas
+        result["reason"] = "trace-toc-missing-present-schema"
+        return result
+    if not present_tables_path.is_file():
+        result["reason"] = "present-table-export-missing"
+        return result
+    try:
+        table_rows = _trace_present_rows(present_tables_path, trace["tableSchemas"])
+    except (OSError, ET.ParseError) as failure:
+        result["reason"] = f"present-table-export-unreadable:{type(failure).__name__}"
+        return result
+    result["eventCounts"] = {schema: len(rows) for schema, rows in table_rows.items()}
+    rows = [(schema, row) for schema, values in table_rows.items() for row in values]
+    timed_rows = [(schema, row) for schema, row in rows if row["startNs"] is not None]
+    result["rowsWithTargetPid"] = sum(target_pid in row["pids"] for _, row in timed_rows)
+    result["rowsWithUnknownPid"] = sum(not row["pids"] for _, row in timed_rows)
+    if not rows:
+        result["reason"] = "present-table-export-has-no-events"
+        return result
+    if len(timed_rows) != len(rows):
+        result["reason"] = "present-table-event-time-unit-missing-or-invalid"
+        return result
+    if result["rowsWithUnknownPid"]:
+        result["reason"] = "present-table-event-pid-missing"
+        return result
+    target_rows = [(schema, row) for schema, row in timed_rows if target_pid in row["pids"]]
+    if not target_rows:
+        result["reason"] = "present-table-has-no-target-pid-events"
+        return result
+    if trace["traceStartWallNs"] is None:
+        result["reason"] = "trace-start-wallclock-missing"
+        return result
+    window = _archive_window(evidence_path, archive)
+    if window is None:
+        result["reason"] = "archive-window-missing"
+        return result
+    result["archiveWindow"] = window
+    if window.get("clock") != "java-System.nanoTime":
+        result["reason"] = "archive-window-clock-is-not-java-system-nanotime"
+        return result
+    pairs = _clock_pairs(gameplay.get("windowClockAnchors")) if isinstance(gameplay, dict) else []
+    result["clockAnchorCount"] = len(pairs)
+    if not pairs:
+        result["reason"] = "java-wallclock-anchors-missing"
+        return result
+    if any(pair["monoAfterNs"] < pair["monoBeforeNs"] for pair in pairs):
+        result["reason"] = "java-clock-anchor-not-monotonic"
+        return result
+
+    offset_intervals = [{
+        "lowerNs": pair["wallNs"] - pair["monoAfterNs"],
+        "upperNs": pair["wallNs"] - pair["monoBeforeNs"],
+    } for pair in pairs]
+    common_lower = max(interval["lowerNs"] for interval in offset_intervals)
+    common_upper = min(interval["upperNs"] for interval in offset_intervals)
+    mapping = {"source": "Java System.nanoTime + java.time.Instant",
+               "nativePresentedTimeMixed": False,
+               "offsetIntervals": offset_intervals,
+               "commonOffsetIntervalNs": {"lowerNs": common_lower, "upperNs": common_upper}}
+    result["clockMapping"] = mapping
+    if common_lower > common_upper:
+        mapping["wallclockJumpDetected"] = True
+        result["reason"] = "java-clock-anchor-offsets-disagree"
+        return result
+    mapping["wallclockJumpDetected"] = False
+    mapping["uncertaintyNs"] = max(common_upper - common_lower,
+                                    max(pair["uncertaintyNs"] for pair in pairs))
+    offset = (common_lower + common_upper) // 2
+    wall_start = window["startNs"] + offset
+    wall_end = window["endNs"] + offset
+    mapping["mode"] = "shared-offset-interval"
+    event_starts = [row["startNs"] for _, row in target_rows]
+    event_wall_start = trace["traceStartWallNs"] + min(event_starts)
+    event_wall_end = trace["traceStartWallNs"] + max(event_starts)
+    result["eventWallStartNs"] = round(event_wall_start)
+    result["eventWallEndNs"] = round(event_wall_end)
+    result["archiveWindowWallStartNs"] = wall_start
+    result["archiveWindowWallEndNs"] = wall_end
+    result["pidScope"] = "matched-row-pid"
+    result["status"] = "partial"
+    if event_wall_end < wall_start or event_wall_start > wall_end:
+        result["reason"] = "present-events-do-not-overlap-archive-window"
+    else:
+        result["reason"] = "present-events-do-not-prove-continuous-window-coverage"
+    return result
+
+
+def export_trace_artifacts(output, receipt, run_command=None):
+    """Export the TOC and bounded present tables, then attach a conservative report."""
+    if run_command is None:
+        run_command = subprocess.run
+    trace = output / "gameplay.trace"
+    toc = output / "trace-toc.xml"
+    present = output / "trace-present-tables.xml"
+    toc_command = ["xcrun", "xctrace", "export", "--input", str(trace), "--toc", "--output", str(toc)]
+    present_command = ["xcrun", "xctrace", "export", "--input", str(trace), "--xpath",
+                       TRACE_PRESENT_XPATH, "--output", str(present)]
+    receipt["traceExport"] = {"tocCommand": toc_command, "presentTablesCommand": present_command,
+                               "tocPath": toc.name, "presentTablesPath": present.name}
+    try:
+        run_command(toc_command, check=True)
+    except (OSError, subprocess.CalledProcessError) as failure:
+        receipt["traceExport"]["status"] = "failed"
+        receipt["traceCoverage"] = {"schemaVersion": 1, "source": "xctrace Game Performance present-table export",
+                                     "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+                                     "status": "unavailable", "continuousCoverage": False,
+                                     "reason": f"trace-toc-export-failed:{type(failure).__name__}"}
+        raise
+    try:
+        run_command(present_command, check=True)
+    except (OSError, subprocess.CalledProcessError) as failure:
+        receipt["traceExport"]["status"] = "partial"
+        receipt["traceCoverage"] = {"schemaVersion": 1, "source": "xctrace Game Performance present-table export",
+                                     "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+                                     "status": "unavailable", "continuousCoverage": False,
+                                     "reason": f"present-table-export-failed:{type(failure).__name__}"}
+        return receipt["traceCoverage"]
+    receipt["traceExport"]["status"] = "success"
+    receipt["traceCoverage"] = inspect_trace_coverage(
+        toc, present, receipt.get("gameplay"), output / "frame-evidence.json")
+    return receipt["traceCoverage"]
 
 
 def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence_phase,
@@ -409,6 +742,7 @@ def main():
                "gameplayTimeoutSeconds": gameplay_timeout,
                "initialWorld": initial_world,
                "frameEvidenceVerification": None,
+               "traceCoverage": None,
                "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
                "optimizationProfile": optimization_profile,
                "warmupNanos": args.frame_evidence_warmup_seconds * 1_000_000_000,
@@ -482,8 +816,21 @@ def main():
             notify.notify_cancel(token)
             (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if not args.metrics_only:
-        subprocess.run(["xcrun", "xctrace", "export", "--input", str(output / "gameplay.trace"),
-                        "--toc", "--output", str(output / "trace-toc.xml")], check=True)
+        try:
+            export_trace_artifacts(output, receipt)
+        except BaseException:
+            (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
+            raise
+    else:
+        receipt["traceCoverage"] = {
+            "schemaVersion": 1,
+            "source": "xctrace Game Performance present-table export",
+            "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
+            "status": "unavailable",
+            "continuousCoverage": False,
+            "reason": "profiling-disabled",
+        }
+    (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "recording.json")
 
 

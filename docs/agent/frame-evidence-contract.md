@@ -455,6 +455,20 @@ only its trailing GPU events even when its overall recording duration is complet
 Labels use Vanilla's existing `--renderDebugLabels` option and are rejected with
 `--metrics-only` so diagnostic label work does not enter timing trials.
 
+The gameplay driver records paired `System.nanoTime`/`Instant` anchors around
+`FrameEvidenceRuntime.armWindow` and at the observed source-window end. These
+anchors calibrate Java monotonic time to host wall time for diagnostics only;
+`frame-evidence.json.window.startNs/endNs` remains the recorder authority, and
+native `presentedTime` is never mixed into that calibration. After a profiled run,
+the runner exports the Game Performance `ca-client-present-request` and
+`ca-client-presented-handler` tables for the attached client PID. Its
+`recording.json.traceCoverage` result is `unavailable` when the archive, clock,
+PID or table data cannot be mapped and `partial` when present events overlap the
+archive window or are otherwise only event samples. Event rows do not prove continuous coverage, so this report is
+kept separate from archive validity and performance conclusions. In `off` mode
+the source-frame declaration remains the workload authority and Xcode coverage is
+unavailable because there is no recorder window to join.
+
 `--presentation-metrics` optionally samples the existing native drawable-wait
 getter once after each ordinary source present. The report and phase boundaries
 include cumulative `drawableWaitNanos` and `drawableWaitSamples`. This measures

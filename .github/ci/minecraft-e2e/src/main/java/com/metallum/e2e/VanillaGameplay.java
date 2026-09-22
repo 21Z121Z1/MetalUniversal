@@ -268,6 +268,8 @@ public final class VanillaGameplay {
         profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
         profile.add("optimizationProfile", optimizationProfile());
         report.add("frameEvidenceProfile", profile);
+        JsonObject windowClockAnchors = windowClockAnchors();
+        report.add("windowClockAnchors", windowClockAnchors);
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
         if (Boolean.getBoolean("metallum.ci.waitForProfiler")) {
@@ -275,7 +277,7 @@ public final class VanillaGameplay {
             context.waitFor(client -> Files.exists(output.resolve("profiler-started")), 1200);
         }
         input.lookAt(-65, 15);
-        long stationaryStart = context.computeOnClient(client -> {
+        JsonObject stationaryWindow = context.computeOnClient(client -> {
             // Loading the full view can exceed Vanilla's AFK threshold. The
             // route starts with synthetic camera input, just like each flight leg.
             client.getFramerateLimitTracker().onInputReceived();
@@ -297,11 +299,22 @@ public final class VanillaGameplay {
             drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
             recordingFrames = true;
-            if (EVIDENCE_PHASE.equals("stationary")) FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
+            JsonObject timing = new JsonObject();
+            timing.addProperty("event", "source-route-start");
+            timing.addProperty("routeStartNs", startedNanos);
+            timing.add("routeStart", clockPair("source-route-start"));
+            if (EVIDENCE_PHASE.equals("stationary")) {
+                timing.add("armWindow", armWindowWithClockAnchors(profile, "stationary"));
+            }
             long start = System.nanoTime();
             sampleStartNanos = start + WARMUP_NS;
-            return start;
+            if (EVIDENCE_PHASE.equals("stationary")) {
+                timing.add("declaredSourceWindow", declaredSourceWindow(sampleStartNanos));
+            }
+            return timing;
         });
+        long stationaryStart = stationaryWindow.get("routeStartNs").getAsLong();
+        windowClockAnchors.getAsJsonArray("events").add(stationaryWindow);
         try {
             phase(context, output, report, phases, "stationary-full-view");
             // Identical off/on workload clock: observer presence never controls the route.
@@ -310,6 +323,10 @@ public final class VanillaGameplay {
             context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
             require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
                     "Frame evidence did not finish the predeclared stationary window");
+            if (EVIDENCE_PHASE.equals("stationary")) {
+                JsonObject endAnchor = context.computeOnClient(client -> clockPair("source-window-end-observed"));
+                windowClockAnchors.getAsJsonArray("events").add(endAnchor);
+            }
             JsonObject stationarySourceFrames = context.computeOnClient(client ->
                     SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS));
             stationarySourceFrames.addProperty("storageCapacity", FRAME_TIME_CAPACITY);
@@ -327,7 +344,12 @@ public final class VanillaGameplay {
             if (!STATIONARY_BASELINE) {
                 phase(context, output, report, phases, "flight-new-chunks");
                 if (EVIDENCE_PHASE.equals("streaming")) {
-                    context.runOnClient(client -> FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS));
+                    JsonObject streamingWindow = context.computeOnClient(client -> {
+                        JsonObject timing = armWindowWithClockAnchors(profile, "streaming");
+                        timing.add("declaredSourceWindow", declaredSourceWindow(System.nanoTime() + WARMUP_NS));
+                        return timing;
+                    });
+                    windowClockAnchors.getAsJsonArray("events").add(streamingWindow);
                 }
                 double startX = context.computeOnClient(client -> client.player.getX());
                 double startZ = context.computeOnClient(client -> client.player.getZ());
@@ -346,6 +368,10 @@ public final class VanillaGameplay {
                         client.player.getX() - startX, client.player.getZ() - startZ));
                 require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
                         "Frame evidence did not finish the predeclared streaming window");
+                if (EVIDENCE_PHASE.equals("streaming")) {
+                    JsonObject endAnchor = context.computeOnClient(client -> clockPair("source-window-end-observed"));
+                    windowClockAnchors.getAsJsonArray("events").add(endAnchor);
+                }
                 report.addProperty("flightDistanceBlocks", distance);
                 require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
 
@@ -467,6 +493,59 @@ public final class VanillaGameplay {
         });
         phases.add(phase);
         write(output.resolve("gameplay-progress.json"), report);
+    }
+
+    /**
+     * Java-side wall/monotonic calibration only. Native presentedTime is on a
+     * separate clock and is deliberately absent from this record.
+     */
+    private static JsonObject clockPair(String label) {
+        long monoBefore = System.nanoTime();
+        Instant wall = Instant.now();
+        long monoAfter = System.nanoTime();
+        JsonObject value = new JsonObject();
+        value.addProperty("label", label);
+        value.addProperty("source", "Java System.nanoTime + java.time.Instant");
+        value.addProperty("nativePresentedTimeMixed", false);
+        value.addProperty("monoBeforeNs", monoBefore);
+        value.addProperty("monoAfterNs", monoAfter);
+        value.addProperty("wall", wall.toString());
+        value.addProperty("uncertaintyNs", Math.max(0L, monoAfter - monoBefore));
+        return value;
+    }
+
+    private static JsonObject windowClockAnchors() {
+        JsonObject value = new JsonObject();
+        value.addProperty("schemaVersion", 1);
+        value.addProperty("clock", "java-System.nanoTime");
+        value.addProperty("wallClock", "java.time.Instant");
+        value.addProperty("source", "VanillaGameplay driver; Java-side calibration only");
+        value.addProperty("nativePresentedTimeMixed", false);
+        value.addProperty("archiveWindowAuthority", "frame-evidence.json.window.startNs/endNs");
+        value.addProperty("coverageClaim", "anchors estimate a Java-to-wall mapping; they do not prove continuous Xcode coverage");
+        value.add("events", new JsonArray());
+        return value;
+    }
+
+    private static JsonObject armWindowWithClockAnchors(JsonObject profile, String route) {
+        JsonObject value = new JsonObject();
+        value.addProperty("event", "FrameEvidenceRuntime.armWindow");
+        value.addProperty("route", route);
+        value.add("before", clockPair("before-arm-window"));
+        FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
+        value.add("after", clockPair("after-arm-window"));
+        return value;
+    }
+
+    private static JsonObject declaredSourceWindow(long startNs) {
+        JsonObject value = new JsonObject();
+        value.addProperty("clock", "java-System.nanoTime");
+        value.addProperty("startNs", startNs);
+        value.addProperty("endNs", Math.addExact(startNs, SAMPLE_NS));
+        value.addProperty("warmupNs", WARMUP_NS);
+        value.addProperty("sampleNs", SAMPLE_NS);
+        value.addProperty("authority", "route declaration; archive.window.startNs/endNs is recorder authority");
+        return value;
     }
 
     private static JsonObject optimizationProfile() {
