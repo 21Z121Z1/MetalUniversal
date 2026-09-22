@@ -171,13 +171,24 @@ public final class FrameEvidenceRecorder {
 
     /** One predeclared finite window per process; no reset across in-flight submissions. */
     public synchronized void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
-        if (!explicitWindow || this.profile != null || (current.get() != null && current.get().retained)
-                || warmupNs < 0 || sampleNs <= 0) throw new IllegalStateException("invalid window declaration");
-        this.profile = profile.deepCopy();
+        armWindowAt(profile, warmupNs, sampleNs, clock.getAsLong());
+    }
+
+    /** Share one sampled clock anchor with other observers; publish no partial declaration. */
+    public synchronized void armWindowAt(JsonObject profile, long warmupNs, long sampleNs, long anchorNs) {
+        if (!explicitWindow || this.profile != null || profile == null
+                || (current.get() != null && current.get().retained) || warmupNs < 0 || sampleNs <= 0) {
+            throw new IllegalStateException("invalid window declaration");
+        }
+        long start = Math.addExact(anchorNs, warmupNs);
+        long end = Math.addExact(start, sampleNs);
+        JsonObject declaredProfile = profile.deepCopy();
+        // All potentially failing work precedes publication under this monitor.
         windowEpoch = epoch;
         warmupNanos = warmupNs;
-        windowStart = Math.addExact(clock.getAsLong(), warmupNs);
-        windowEnd = Math.addExact(windowStart, sampleNs);
+        windowStart = start;
+        windowEnd = end;
+        this.profile = declaredProfile;
     }
 
     public synchronized boolean windowComplete() { return windowClosed; }

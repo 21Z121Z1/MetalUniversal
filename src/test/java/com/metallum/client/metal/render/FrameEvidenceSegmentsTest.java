@@ -159,4 +159,38 @@ class FrameEvidenceSegmentsTest {
         assertThrows(java.io.IOException.class, () -> archive.finish("passed", value -> { }));
         assertEquals("previous evidence", Files.readString(output));
     }
+
+    @Test void fatalWriterExitCannotPublishACompletedArchive(@TempDir Path directory) throws Exception {
+        var fatal = new AssertionError("injected final-flush failure");
+        var uncaught = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var recorder = new FrameEvidenceRecorder(2, () -> {
+            // No frame is recorded, so the first clock read occurs in the real
+            // writer's final drain. No production injection or worker access is needed.
+            Thread.currentThread().setUncaughtExceptionHandler((thread, failure) -> uncaught.set(failure));
+            throw fatal;
+        });
+        recorder.enableSegments(1, 1, 1000);
+        Path output = directory.resolve("frames.json");
+        var archive = new FrameEvidenceArchive(recorder, new JsonObject(), output);
+        var failure = assertThrows(java.io.IOException.class,
+                () -> archive.finish("passed", value -> fail("completion metadata must not run")));
+        assertSame(fatal, failure.getCause());
+        assertSame(fatal, uncaught.get());
+        var checkpoint = JsonParser.parseString(Files.readString(output)).getAsJsonObject();
+        assertFalse(checkpoint.getAsJsonObject("archive").get("complete").getAsBoolean());
+        assertFalse(checkpoint.get("shutdownDrained").getAsBoolean());
+        assertEquals("unvalidated", checkpoint.get("validationStatus").getAsString());
+    }
+
+    @Test void failedFinalMetadataLeavesTheExistingCheckpointIncomplete(@TempDir Path directory) throws Exception {
+        Path output = directory.resolve("frames.json");
+        var archive = new FrameEvidenceArchive(recorder(2, 1, 1), new JsonObject(), output);
+        var fatal = new AssertionError("injected metadata failure");
+        assertSame(fatal, assertThrows(AssertionError.class,
+                () -> archive.finish("passed", value -> { throw fatal; })));
+        var checkpoint = JsonParser.parseString(Files.readString(output)).getAsJsonObject();
+        assertFalse(checkpoint.getAsJsonObject("archive").get("complete").getAsBoolean());
+        assertFalse(checkpoint.get("shutdownDrained").getAsBoolean());
+    }
+
 }
