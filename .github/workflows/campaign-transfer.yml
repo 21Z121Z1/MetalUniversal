@@ -1,0 +1,113 @@
+# Temporary source transfer. The verified candidate tree removes this file.
+name: Campaign source transfer
+on:
+  push:
+    branches: [codex/vision-cloud-convergence-20260922]
+    paths: [.github/workflows/campaign-transfer.yml]
+permissions:
+  contents: read
+concurrency:
+  group: campaign-source-transfer-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  transfer:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/codex/vision-cloud-convergence-20260922'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the exact candidate tree without updating a ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: b7b57a621b8f3a0033ad34f51b07e4d6663f3c24
+          EXPECTED_TREE: d88d73acc2fcd30b7e5d0180f7b40d5fe32a90e9
+          PATCH_BLOB: 94a5400673af8113206cb63740ba9f2779c96cfc
+          PATCH_SHA256: c5b8a7b585aeee54555f3afb146894e7a0da146fe930c3bf737df9b5b2acb4b6
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, re, subprocess, urllib.request
+          from pathlib import Path
+          repo = os.environ['GITHUB_REPOSITORY']
+          if repo != '21Z121Z1/MetalUniversal' or os.environ['GITHUB_REF'] != 'refs/heads/codex/vision-cloud-convergence-20260922':
+              raise SystemExit('unauthorized transfer target')
+          def git(*args, data=None):
+              return subprocess.check_output(['git', *args], input=data)
+          def api(path, payload=None):
+              request = urllib.request.Request('https://api.github.com/repos/' + repo + path,
+                  data=json.dumps(payload).encode() if payload is not None else None,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+                           'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          base, expected = os.environ['BASE_SHA'], os.environ['EXPECTED_TREE']
+          parent = git('rev-parse', 'HEAD').decode().strip()
+          if git('rev-parse', 'HEAD^').decode().strip() != base:
+              raise SystemExit('base changed; refuse to rewrite history')
+          blob = os.environ['PATCH_BLOB']
+          if re.fullmatch('[0-9a-f]{40}', blob) is None:
+              raise SystemExit('invalid patch object')
+          encoded = base64.b64decode(api('/git/blobs/' + blob)['content'])
+          if hashlib.sha1(b'blob ' + str(len(encoded)).encode() + b'\0' + encoded).hexdigest() != blob:
+              raise SystemExit('patch object digest mismatch')
+          patch = gzip.decompress(encoded)
+          if hashlib.sha256(patch).hexdigest() != os.environ['PATCH_SHA256']:
+              raise SystemExit('expanded patch digest mismatch')
+          git('rm', '--', '.github/workflows/campaign-transfer.yml')
+          git('apply', '--index', '--unidiff-zero', '--binary', '-', data=patch)
+          if git('write-tree').decode().strip() != expected:
+              raise SystemExit('candidate differs from the locally tested tree')
+          git('diff', '--cached', '--check')
+          subprocess.run(['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test'], check=True)
+          subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'], check=True)
+          def entries(ref):
+              result = {}
+              for row in git('ls-tree', '-rz', ref).split(b'\0'):
+                  if row:
+                      info, path = row.split(b'\t', 1)
+                      mode, kind, sha = info.decode().split()
+                      result[path.decode()] = (mode, kind, sha)
+              return result
+          old, new = entries(base), entries(expected)
+          changes = []
+          for path in sorted(old.keys() | new.keys()):
+              if old.get(path) == new.get(path):
+                  continue
+              mode, kind, sha = new.get(path, old.get(path))
+              if kind != 'blob' or mode not in ('100644', '100755'):
+                  raise SystemExit('unsupported transfer object')
+              if path in new:
+                  content = base64.b64encode(git('cat-file', 'blob', sha)).decode()
+                  if api('/git/blobs', {'content': content, 'encoding': 'base64'})['sha'] != sha:
+                      raise SystemExit('uploaded source digest mismatch')
+              changes.append({'path': path, 'mode': mode, 'type': kind, 'sha': sha if path in new else None})
+          created = api('/git/trees', {'base_tree': git('rev-parse', base + '^{tree}').decode().strip(), 'tree': changes})
+          if created['sha'] != expected:
+              raise SystemExit('remote tree differs from local tree')
+          commit = api('/git/commits', {'message': 'evidence: add bounded asynchronous archives and strict hash-chain verification',
+                                       'tree': expected, 'parents': [parent]})
+          output = Path('build/agent-evidence/transfer')
+          output.mkdir(parents=True, exist_ok=True)
+          result = {'baseSha': base, 'transferSha': parent, 'headSha': commit['sha'], 'tree': expected,
+                    'refUpdated': False, 'files': [row['path'] for row in changes]}
+          (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result))
+          git('fetch', 'origin', commit['sha'])
+          git('update-ref', 'refs/heads/transfer-output', commit['sha'])
+          git('bundle', 'create', str(output / 'source.bundle'), 'refs/heads/transfer-output')
+          PY
+      - name: Preserve exact source and transfer diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: campaign-source-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/agent-evidence/transfer/
+          retention-days: 7
+          if-no-files-found: warn
