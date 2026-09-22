@@ -7,7 +7,6 @@ on:
     paths: [.github/workflows/convergence-edit.yml]
 permissions:
   contents: write
-  actions: read
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -24,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, re, subprocess, urllib.request, urllib.error
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
@@ -39,68 +38,42 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   return json.load(response)
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = '91daaa994b5e5dbc8c34a6b2a3dcdcf7f3c01503'
+          base = 'f980021b23496b49d1f5b35a6074a75511eb0a70'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
           if changed != ['.github/workflows/convergence-edit.yml']:
               raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          permissions = {}
-          for endpoint in ['/actions/runners?per_page=100', '/branches/master/protection', '/rulesets']:
-              try:
-                  permissions[endpoint] = {'status': 200, 'response': api(endpoint)}
-              except urllib.error.HTTPError as failure:
-                  permissions[endpoint] = {'status': failure.code, 'message': failure.read().decode()}
-          (output / 'permission-observations.json').write_text(json.dumps(permissions, indent=2) + '\n')
-          flags = {'ENABLE_PASS_FUSION':'RENDER_PASS_FUSION','ENABLE_LOAD_STORE':'ATTACHMENT_LIVENESS',
-              'ENABLE_COMPUTE_GROUPING':'COMPUTE_GROUPING','ENABLE_RESOURCE_PRUNING':'DEPTH_LIVENESS',
-              'ENABLE_FINAL_COLOR_FUSION':'FINAL_COLOR_FUSION','ENABLE_ARGUMENT_TABLES':'ARGUMENT_TABLES',
-              'ENABLE_ICB':'INDIRECT_SUBMISSION'}
-          for path in (root / 'src/main/java').rglob('*.java'):
-              original = source = path.read_text()
-              if path.name == 'IrisMetalOptimizationPlan.java':
-                  source = re.sub(r'^    static final boolean ENABLE_[A-Z_]+ = Boolean.getBoolean\("metallum.iris.experimental.[^"\n]+"\);\n', '', source, flags=re.M)
-                  source = source.replace(' * Generation-owned optimization plan. All switches are opt-in and default to\n * false so the local agent can enable one transformation at a time.', ' * Generation-owned optimization plan. Process-wide admission switches live in\n * {@link IrisMetalAdvancedOptimizationConfig}; this plan owns no second policy.')
-              for old, new in flags.items():
-                  source = source.replace('IrisMetalOptimizationPlan.' + old, 'IrisMetalAdvancedOptimizationConfig.' + new)
-              source = re.sub(r'(IrisMetalAdvancedOptimizationConfig\.[A-Z_]+)\n\s+\|\| \1', r'\1', source)
-              if path.name == 'IrisMetalDepthLivenessMixin.java':
-                  source = source.replace('import com.metallum.client.metal.render.IrisMetalOptimizationBootstrap;', 'import com.metallum.client.metal.render.IrisMetalOptimizationBootstrap;\nimport com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig;')
-                  source = source.replace('Boolean.getBoolean("metallum.iris.experimental.resourcePruning")', 'IrisMetalAdvancedOptimizationConfig.DEPTH_LIVENESS')
-              if path.name == 'MetalValidationClient.java':
-                  source = source.replace('import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;', 'import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;\nimport com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig;')
-                  source = source.replace('Boolean.getBoolean("metallum.iris.experimental.argumentTables")\n                            || Boolean.getBoolean("metallum.iris.argumentTables")', 'IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES')
-              if path.name == 'IrisMetalAdvancedOptimizationConfig.java':
-                  source = source.replace(' * independent so local validation can bisect regressions without changing the\n * conservative fallback.</p>', ' * independent so local validation can bisect regressions without changing the\n * conservative fallback. An explicitly supplied stable property, including\n * {@code false}, overrides its legacy alias. Values are resolved once per\n * process and shared by planning, execution and evidence reporting.</p>')
-              if source != original:
-                  path.write_text(source)
-          test_path = root / 'src/test/java/com/metallum/client/metal/render/IrisMetalFeatureGateAuthorityTest.java'
-          if test_path.exists():
-              raise RuntimeError('Test already exists; refusing overwrite')
-          blob_sha = '694c08a11ea81c8de8f42de1202409b9b2e0f115'
+          blob_sha = '5ef100e3b059530baa2569fb2c63cdd25d870f1f'
+          expected_patch_digest = '20422322e5cfc35656061f9bd885fb007d56899d75df22c5dd9b34baac6f3d0a'
           blob = api('/git/blobs/' + blob_sha)
-          content = base64.b64decode(blob['content'])
-          if hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() != blob_sha:
-              raise RuntimeError('Test blob identity mismatch')
-          test_path.write_bytes(content)
-          subprocess.run(['git', 'add', '--', 'src/main/java', str(test_path.relative_to(root))], check=True)
+          patch = base64.b64decode(blob['content'])
+          if hashlib.sha1(b'blob ' + str(len(patch)).encode() + b'\0' + patch).hexdigest() != blob_sha:
+              raise RuntimeError('Reviewed blob identity mismatch')
+          if hashlib.sha256(patch).hexdigest() != expected_patch_digest:
+              raise RuntimeError('Reviewed patch digest mismatch')
+          patch_path = output / 'change.patch'
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(patch_path)], check=True)
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
-          patch = git('diff', '--binary', '--full-index', 'HEAD')
-          digest = hashlib.sha256(patch).hexdigest()
-          if digest != '2ee9eb568f03802f3f7d5251736bf46b8d1d09ec17bdf4d7c177eb6b1e77af7b':
-              raise RuntimeError('Reviewed patch identity mismatch: ' + digest)
-          (output / 'change.patch').write_bytes(patch)
+          if git('diff', '--binary', '--full-index', 'HEAD') != patch:
+              raise RuntimeError('Applied patch differs from reviewed patch')
+          allowed = {'src/main/java/com/metallum/client/metal/render/FrameEvidenceArchive.java',
+                     'src/main/java/com/metallum/client/metal/render/FrameEvidenceRecorder.java',
+                     'src/test/java/com/metallum/client/metal/render/FrameEvidenceRecorderTest.java',
+                     'src/test/java/com/metallum/client/metal/render/FrameEvidenceSegmentsTest.java'}
+          paths = git('diff', '--cached', '--name-only', '-z').decode().rstrip('\0').split('\0')
+          if set(paths) != allowed:
+              raise RuntimeError('Unexpected patch paths')
           entries = []
-          for path in git('diff', '--cached', '--name-only', '-z').decode().split('\0'):
-              if not path:
-                  continue
+          for path in paths:
               mode = git('ls-files', '--stage', '--', path).decode().split()[0]
               entries.append({'path': path, 'mode': mode, 'type': 'blob', 'content': (root / path).read_text()})
           tree = api('/git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries})
-          expected_tree = git('write-tree').decode().strip()
-          if tree['sha'] != expected_tree:
+          if tree['sha'] != git('write-tree').decode().strip():
               raise RuntimeError('Remote tree differs from reviewed local tree')
-          commit = api('/git/commits', {'message': 'fix(iris): centralize feature admission and honor explicit disable\n\nReimplement the valid property-precedence intent of frame-window-clock-coverage across all seven gates, including execution and evidence reporting. Remove redundant planner policy. Add isolated-JVM precedence, independent-admission, unsafe-transform and single-authority regression tests.', 'tree': tree['sha'], 'parents': [parent]})
+          commit = api('/git/commits', {'message': 'fix(evidence): publish windows and completed archives atomically\n\nRetain the valid shared-clock and abnormal-writer-exit intents of vision-cloud-convergence-20260922 without reverting subsequent segmented capture and readiness fixes. Reject failed declarations before mutation; require a positive final-flush receipt; preserve fatal writer causes. Add overflow, defensive-copy, shared-anchor and fatal-export regression tests.', 'tree': tree['sha'], 'parents': [parent]})
           result = {'parent_sha': parent, 'candidate_sha': commit['sha'], 'candidate_tree': tree['sha'],
-              'patch_sha256': digest, 'changed_paths': [entry['path'] for entry in entries],
+              'patch_sha256': expected_patch_digest, 'changed_paths': paths,
               'refs_updated': False, 'tests_claimed': False}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
