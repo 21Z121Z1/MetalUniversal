@@ -40,11 +40,18 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             "physicalPerformanceAcceptance": "unverified",
         }), stderr="")
 
-    def run_completed(self, client, mode="timing"):
+    def rejecting_verifier(self, command, **kwargs):
+        self.verifier_calls += 1
+        return SimpleNamespace(returncode=1, stdout=json.dumps({
+            "status": "invalid-evidence",
+            "reason": "hash chain mismatch",
+        }), stderr="")
+
+    def run_completed(self, client, mode="timing", verifier=None):
         self.verifier_calls = 0
         receipt = {"gameplay": {"status": "completed"}}
         runner.finalize_client_run(receipt, None, client, self.output, self.root,
-                                   self.identity, mode, self.fake_verifier)
+                                   self.identity, mode, verifier or self.fake_verifier)
         return receipt
 
     def test_archive_written_during_client_wait_is_verified_after_wait(self):
@@ -60,6 +67,15 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             self.run_completed(DeferredClient(self.output))
         with self.assertRaisesRegex(RuntimeError, "bounded archive schema"):
             self.run_completed(DeferredClient(self.output, {"schemaVersion": 1}))
+
+    def test_verifier_rejection_fails_and_preserves_invalid_report(self):
+        with self.assertRaisesRegex(RuntimeError, "verification failed"):
+            self.run_completed(DeferredClient(self.output, {
+                "schemaVersion": 2, "archive": {"complete": True},
+            }), verifier=self.rejecting_verifier)
+        self.assertEqual(self.verifier_calls, 1)
+        self.assertEqual(json.loads((self.output / "frame-evidence-verification.json").read_text())["status"],
+                         "invalid-evidence")
 
     def test_off_mode_does_not_require_archive_or_invoke_verifier(self):
         receipt = self.run_completed(DeferredClient(self.output), mode="off")

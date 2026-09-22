@@ -199,6 +199,14 @@ python3 scripts/agent/verify_frame_evidence.py build/frame-on/frame-evidence.jso
   --expected-head "$(git rev-parse HEAD)" --require-packaged --require-comparable
 ```
 
+For the production gameplay launcher, non-`off` runs pass the bounded segmented
+archive setting and record both the evidence mode and segmented setting in
+`recording.json`. The launcher waits for normal client exit, including the
+existing device shutdown drain, before invoking the verifier. This verifies
+evidence integrity only (`valid-observation` or `invalid-evidence`); it does not
+make a run comparison-ready or establish physical performance acceptance.
+`off` runs do not require a frame-evidence archive.
+
 For a controlled fixed-view physical baseline, add `--stationary-baseline` to the
 existing launcher with `--metrics-only --initial-world <snapshot>` and `off` or `timing`.
 `vanilla-stationary-60-v1` requests 60 FPS and VSync through the existing Minecraft
