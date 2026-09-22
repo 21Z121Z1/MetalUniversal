@@ -274,7 +274,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
-                        formats.stencilFormat()
+                        formats.stencilFormat(),
+                        this.validationPipelineId,
+                        "base-eager"
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
                     states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), NativePipeline.of(pipeline));
@@ -408,7 +410,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                         vertexDescriptor,
                         this.colorFormats,
                         depthFormat,
-                        stencilFormat
+                        stencilFormat,
+                        this.validationPipelineId,
+                        "attachment-variant"
                 );
             }
             if (MetalNativeBridge.isNullHandle(pipeline)) {
@@ -486,7 +490,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat[] colorFormats,
             final MTLPixelFormat depthFormat,
-            final MTLPixelFormat stencilFormat
+            final MTLPixelFormat stencilFormat,
+            final String validationPipelineId,
+            final String creationKind
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
@@ -530,10 +536,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 pipelineDesc.setSupportIndirectCommandBuffers(true);
             }
 
-            return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
-                    device.metalDeviceHandle(),
-                    pipelineDesc.handle()
-            );
+            var attempt = FrameEvidenceRuntime.pipelineCreationStarted();
+            MemorySegment state = MemorySegment.NULL;
+            try {
+                state = MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
+                        device.metalDeviceHandle(), pipelineDesc.handle());
+                return state;
+            } finally {
+                FrameEvidenceRuntime.pipelineCreationFinished(attempt, validationPipelineId,
+                        info.getLocation(), creationKind, colorFormats, depthFormat,
+                        stencilFormat, 1, !MetalNativeBridge.isNullHandle(state));
+            }
         }
     }
 

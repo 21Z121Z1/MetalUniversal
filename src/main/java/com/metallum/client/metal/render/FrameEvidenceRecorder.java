@@ -17,6 +17,7 @@ import java.util.function.LongSupplier;
 
 /** Bounded, opt-in observations. Frame IDs are diagnostic joins, never render semantics. */
 public final class FrameEvidenceRecorder {
+    private static final int MAX_PIPELINE_CREATIONS = 64;
     private static final String[] NATIVE_COUNTER_NAMES = {
             "renderEncoders", "computeEncoders", "blitEncoders", "directDraws", "indirectDraws"
     };
@@ -231,6 +232,7 @@ public final class FrameEvidenceRecorder {
         frame.ended = true;
         if (profile != null && clock.getAsLong() >= windowEnd) windowClosed = true;
         if (frame.depth != 0) frame.failure = "open-abi-call-at-frame-end";
+        if (frame.pipelineCreationsInFlight != 0) frame.failure = "open-pipeline-creation-at-frame-end";
         if (frame.parent == null) {
             current.remove();
             if (segmentFrameLimit > 0 && frames.size() >= segmentFrameLimit) sealActive(clock.getAsLong());
@@ -240,6 +242,57 @@ public final class FrameEvidenceRecorder {
     public void producer(String producer) {
         Frame frame = current.get();
         if (frame != null && frame.retained && !frame.exported) frame.producers.add(producer);
+    }
+
+    /** Diagnostic token binds completion to the issuing source scope, not whichever frame is current later. */
+    public synchronized PipelineCreation pipelineCreationStarted() {
+        Frame frame = current.get();
+        if (frame == null || !frame.retained || frame.ended || frame.exported) return null;
+        int completed = frame.pipelineCreations == null ? 0 : frame.pipelineCreations.size();
+        if (completed + frame.pipelineCreationsInFlight >= MAX_PIPELINE_CREATIONS) {
+            frame.failure = "pipeline-creation-evidence-overflow";
+            return null;
+        }
+        frame.pipelineCreationsInFlight++;
+        return new PipelineCreation(this, frame, clock.getAsLong());
+    }
+
+    /** ABI counters remain the aggregate authority; this row identifies one actual PSO attempt. */
+    public synchronized void pipelineCreationFinished(PipelineCreation attempt, long completedNs, String pipelineId,
+            String location, String kind, JsonObject signature, boolean succeeded) {
+        if (attempt == null) return;
+        if (attempt.owner != this) throw new IllegalArgumentException("foreign pipeline observation");
+        Frame frame = attempt.frame;
+        if (frame.exported) { lateCompletionUpdates++; return; }
+        if (attempt.finished) { frame.failure = "duplicate-pipeline-creation-completion"; return; }
+        attempt.finished = true;
+        frame.pipelineCreationsInFlight--;
+        long durationNs = completedNs - attempt.started;
+        if (frame.ended || durationNs < 0 || pipelineId == null || pipelineId.isBlank()
+                || location == null || location.isBlank() || kind == null || kind.isBlank() || signature == null) {
+            frame.failure = "invalid-pipeline-creation-evidence";
+            return;
+        }
+        JsonObject event = new JsonObject();
+        event.addProperty("nativeCall", "metallum_MTLDevice_makeRenderPipelineState");
+        event.addProperty("validationPipelineId", pipelineId);
+        event.addProperty("pipelineLocation", location);
+        event.addProperty("creationKind", kind);
+        event.add("signature", signature.deepCopy());
+        event.addProperty("durationNs", durationNs);
+        event.addProperty("succeeded", succeeded);
+        if (frame.pipelineCreations == null) frame.pipelineCreations = new ArrayList<>();
+        frame.pipelineCreations.add(event);
+    }
+
+    public static final class PipelineCreation {
+        private final FrameEvidenceRecorder owner;
+        private final Frame frame;
+        private final long started;
+        private boolean finished;
+        private PipelineCreation(FrameEvidenceRecorder owner, Frame frame, long started) {
+            this.owner = owner; this.frame = frame; this.started = started;
+        }
     }
 
     /** Joins the terrain recorder's existing batch index to this source frame, never by time. */
@@ -479,6 +532,7 @@ public final class FrameEvidenceRecorder {
         unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports joined by terrainBatchIndices; per-mesh GPU completion and presentation remain unavailable");
         unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
         unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
+        root.addProperty("pipelineCreationScope", "diagnostic-only source-frame native render-PSO attempts; excludes startup/worker calls, Java shader translation, cache work and effective PSO switches");
         root.addProperty("presentationScope", "ordinary source cohort; exact native ID joined to CAMetalDrawable.presentedTime seconds; latest 65536 native tickets retained; copied callbacks survive eviction; pending at export remains unavailable");
         unavailable.addProperty("generatedFrames", "MetalFX frame-generation presentation uses a separate timeline");
         unavailable.addProperty("inputToPhotonNs", "drawable presentedTime is not an input or scanout measurement");
@@ -507,6 +561,11 @@ public final class FrameEvidenceRecorder {
             JsonArray terrainBatches = new JsonArray();
             frame.terrainBatchIndices.forEach(terrainBatches::add);
             row.add("terrainBatchIndices", terrainBatches);
+            JsonArray pipelineCreations = new JsonArray();
+            if (frame.pipelineCreations != null) {
+                frame.pipelineCreations.forEach(event -> pipelineCreations.add(event.deepCopy()));
+            }
+            row.add("pipelineCreations", pipelineCreations);
             JsonObject abi = new JsonObject();
             frame.abi.forEach((symbol, counter) -> {
                 JsonObject value = new JsonObject();
@@ -572,6 +631,8 @@ public final class FrameEvidenceRecorder {
         final LinkedHashSet<String> producers;
         final LinkedHashSet<Long> terrainBatchIndices;
         final List<Submission> submissions;
+        List<JsonObject> pipelineCreations;
+        int pipelineCreationsInFlight;
         final long[] started;
         final long[] children;
         final Counter[] calls;
