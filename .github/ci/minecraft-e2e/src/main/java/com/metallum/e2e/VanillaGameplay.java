@@ -440,17 +440,6 @@ public final class VanillaGameplay {
             input.releaseKey(options -> options.keyAttack);
             input.releaseKey(options -> options.keyUse);
         }
-        if (STATIONARY_BASELINE) {
-            // 26.3 IntegratedServer.halt executes server work synchronously. Calling it
-            // first from client disconnect can deadlock Fabric's tick phase barrier.
-            // Request the normal halt on its owning thread, then keep driving test ticks
-            // until normal server shutdown completes. All measurement has already ended.
-            var server = world.getServer().computeOnServer(instance -> {
-                instance.halt(false);
-                return instance;
-            });
-            context.waitFor(client -> server.isShutdown(), 1200);
-        }
     }
 
     private static void phase(ClientGameTestContext context, Path output, JsonObject report,
