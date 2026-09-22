@@ -1,5 +1,5 @@
 # Temporary convergence machinery. Remove before final main acceptance.
-# This job prepares content blobs only; publication uses the connected GitHub app.
+# This job prepares reviewed content blobs only; the connected app publishes refs.
 name: Convergence edit
 on:
   push:
@@ -27,13 +27,15 @@ jobs:
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
+          if os.environ['GITHUB_REPOSITORY'] != '21Z121Z1/MetalUniversal':
+              raise RuntimeError('Unexpected repository')
           def git(*args):
               return subprocess.check_output(['git', *args])
           def api(path, data=None):
               request = urllib.request.Request('https://api.github.com/repos/21Z121Z1/MetalUniversal' + path,
                   data=None if data is None else json.dumps(data).encode(),
                   headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10'},
+                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
                   method='GET' if data is None else 'POST')
               try:
                   with urllib.request.urlopen(request, timeout=60) as response:
@@ -42,23 +44,17 @@ jobs:
                   print('GitHub API failure:', request.method, path, error.code, error.read().decode())
                   raise
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = 'c81adfba4a6ef0e1a06f9f2230c8112f902b07b4'
+          base = '14964d953f629329795f3229a2cc1fce46f75566'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
           if changed != ['.github/workflows/convergence-edit.yml']:
               raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          blob_shas = ['26a4a6154344bed6e5202cf14625b6d9ab1a826b',
-                       'f06bd6efdc0ce3cddc3e0b0ab59425af1ca6ce91',
-                       '8a2fc75f9f9e2f02dfe7d87184db33af30f8ed10',
-                       'd5539cf0251415b15e2f6faff796007a3e979039']
-          parts = []
-          for blob_sha in blob_shas:
-              blob = api('/git/blobs/' + blob_sha)
-              part = base64.b64decode(blob['content'])
-              if hashlib.sha1(b'blob ' + str(len(part)).encode() + b'\0' + part).hexdigest() != blob_sha:
-                  raise RuntimeError('Reviewed transport blob identity mismatch')
-              parts.append(part)
-          patch = gzip.decompress(b''.join(parts))
-          digest = '5cc7cdfe7c880d5ccf36ae08aaf732ac947cf9d0361aa28b8ed5744f321916d6'
+          blob_sha = 'c7f9103139e5df83e17dc87bb413ad5c5a08cbf1'
+          blob = api('/git/blobs/' + blob_sha)
+          compressed = base64.b64decode(blob['content'])
+          if hashlib.sha1(b'blob ' + str(len(compressed)).encode() + b'\0' + compressed).hexdigest() != blob_sha:
+              raise RuntimeError('Reviewed transport blob identity mismatch')
+          patch = gzip.decompress(compressed)
+          digest = '9b0f586641bbaef40bec0e1cb9d0e169d3658536926ed7c2a96c7ae132a38602'
           if hashlib.sha256(patch).hexdigest() != digest:
               raise RuntimeError('Reviewed patch digest mismatch')
           patch_path = output / 'change.patch'
@@ -68,11 +64,22 @@ jobs:
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
           if git('diff', '--binary', '--full-index', 'HEAD') != patch:
               raise RuntimeError('Applied patch differs from reviewed patch')
-          allowed = {'.github/ci/HostedMetalGradle.init.gradle', '.github/ci/JvmPsoThreadingProbe.java',
-                     '.github/workflows/build.yml', 'build.gradle'}
+          allowed = {'src/main/java/com/metallum/client/metal/render/FrameEvidenceRecorder.java',
+              'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java',
+              'src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java',
+              'src/test/java/com/metallum/client/metal/render/FramePipelineCreationEvidenceTest.java',
+              'scripts/agent/verify_frame_evidence.py', 'scripts/agent/test_frame_pipeline_creations.py'}
           paths = git('diff', '--cached', '--no-renames', '--name-only', '-z').decode().rstrip('\0').split('\0')
           if set(paths) != allowed:
               raise RuntimeError('Unexpected patch paths: ' + repr(paths))
+          tests = [
+              ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'],
+              ['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test']]
+          with (output / 'python-tests.log').open('w') as log:
+              for command in tests:
+                  log.write('$ ' + ' '.join(command) + '\n')
+                  log.flush()
+                  subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
           entries = []
           for path in paths:
               mode, expected_sha = git('ls-files', '--stage', '--', path).decode().split()[:2]
@@ -84,7 +91,8 @@ jobs:
               entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': blob['sha']})
           result = {'parent_sha': parent, 'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
               'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest,
-              'entries': entries, 'refs_updated': False, 'tests_claimed': False}
+              'entries': entries, 'refs_updated': False, 'tests_executed': tests,
+              'java_native_validation': 'not executed; required after connector publication'}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
