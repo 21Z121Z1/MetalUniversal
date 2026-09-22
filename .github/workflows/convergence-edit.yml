@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
@@ -38,17 +38,24 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   return json.load(response)
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = 'f980021b23496b49d1f5b35a6074a75511eb0a70'
+          base = '009a1c60ef174aedddb8ce103871c03103e713c4'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
           if changed != ['.github/workflows/convergence-edit.yml']:
               raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          blob_sha = '5ef100e3b059530baa2569fb2c63cdd25d870f1f'
-          expected_patch_digest = '20422322e5cfc35656061f9bd885fb007d56899d75df22c5dd9b34baac6f3d0a'
-          blob = api('/git/blobs/' + blob_sha)
-          patch = base64.b64decode(blob['content'])
-          if hashlib.sha1(b'blob ' + str(len(patch)).encode() + b'\0' + patch).hexdigest() != blob_sha:
-              raise RuntimeError('Reviewed blob identity mismatch')
-          if hashlib.sha256(patch).hexdigest() != expected_patch_digest:
+          blob_shas = ['58590bd42e14fc949da8ea19f13a5049d8bd10b9',
+                       '6e111b3874929eed5ee4b66a3a100c6459362155',
+                       'fdaf9e4357055f50574df526f8699d3d2dc91e34',
+                       '7a94f8c200129cdfb31ef36f988da965ed5e2f27']
+          parts = []
+          for blob_sha in blob_shas:
+              blob = api('/git/blobs/' + blob_sha)
+              part = base64.b64decode(blob['content'])
+              if hashlib.sha1(b'blob ' + str(len(part)).encode() + b'\0' + part).hexdigest() != blob_sha:
+                  raise RuntimeError('Reviewed transport blob identity mismatch')
+              parts.append(part)
+          patch = gzip.decompress(b''.join(parts))
+          digest = '2dd7f613b6402176d501f0b7bb31d385f1996120c27f2fedfad90c176cd32fb7'
+          if hashlib.sha256(patch).hexdigest() != digest:
               raise RuntimeError('Reviewed patch digest mismatch')
           patch_path = output / 'change.patch'
           patch_path.write_bytes(patch)
@@ -57,24 +64,36 @@ jobs:
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
           if git('diff', '--binary', '--full-index', 'HEAD') != patch:
               raise RuntimeError('Applied patch differs from reviewed patch')
-          allowed = {'src/main/java/com/metallum/client/metal/render/FrameEvidenceArchive.java',
-                     'src/main/java/com/metallum/client/metal/render/FrameEvidenceRecorder.java',
-                     'src/test/java/com/metallum/client/metal/render/FrameEvidenceRecorderTest.java',
-                     'src/test/java/com/metallum/client/metal/render/FrameEvidenceSegmentsTest.java'}
-          paths = git('diff', '--cached', '--name-only', '-z').decode().rstrip('\0').split('\0')
+          allowed = {
+              'src/main/java/com/metallum/client/terrain/TerrainPublicationGenerationGuard.java',
+              'src/main/java/com/metallum/client/terrain/VanillaTerrainGenerationRuntime.java',
+              'src/main/java/com/metallum/mixin/terrain/VanillaTerrainGenerationRuntime.java',
+              'src/main/java/com/metallum/mixin/terrain/CompileTaskTerrainGenerationMixin.java',
+              'src/main/java/com/metallum/mixin/terrain/LevelExtractorTerrainGenerationMixin.java',
+              'src/main/java/com/metallum/mixin/terrain/RenderSectionTerrainGenerationMixin.java',
+              'src/main/java/com/metallum/mixin/terrain/SectionTaskTerrainAdmissionAccessor.java',
+              'src/test/java/com/metallum/client/terrain/TerrainPublicationGenerationGuardTest.java',
+              'src/test/java/com/metallum/client/terrain/TerrainPublicationTransactionTest.java'}
+          paths = git('diff', '--cached', '--no-renames', '--name-only', '-z').decode().rstrip('\0').split('\0')
           if set(paths) != allowed:
-              raise RuntimeError('Unexpected patch paths')
+              raise RuntimeError('Unexpected patch paths: ' + repr(paths))
           entries = []
           for path in paths:
-              mode = git('ls-files', '--stage', '--', path).decode().split()[0]
-              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'content': (root / path).read_text()})
+              entry = {'path': path, 'mode': '100644', 'type': 'blob'}
+              if (root / path).exists():
+                  mode = git('ls-files', '--stage', '--', path).decode().split()[0]
+                  if mode != '100644':
+                      raise RuntimeError('Unexpected file mode')
+                  entry['content'] = (root / path).read_text()
+              else:
+                  entry['sha'] = None
+              entries.append(entry)
           tree = api('/git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries})
           if tree['sha'] != git('write-tree').decode().strip():
               raise RuntimeError('Remote tree differs from reviewed local tree')
-          commit = api('/git/commits', {'message': 'fix(evidence): publish windows and completed archives atomically\n\nRetain the valid shared-clock and abnormal-writer-exit intents of vision-cloud-convergence-20260922 without reverting subsequent segmented capture and readiness fixes. Reject failed declarations before mutation; require a positive final-flush receipt; preserve fatal writer causes. Add overflow, defensive-copy, shared-anchor and fatal-export regression tests.', 'tree': tree['sha'], 'parents': [parent]})
+          commit = api('/git/commits', {'message': 'fix(terrain): make generation admission and mesh exchange indivisible\n\nReimplement the valid ownership intents of mc26.3-spec-continuation without importing its competing telemetry. The only public publication API encloses the original exchange, preserving vanilla retirement ownership. Scope worker tokens with try/finally; ignore untracked dirtiness without weakening tracked invalidation or ABA protection. Move runtime state outside the reserved Mixin package. Exercise actual publication behavior in existing tests and add seven concurrent/exception/fallback regressions.', 'tree': tree['sha'], 'parents': [parent]})
           result = {'parent_sha': parent, 'candidate_sha': commit['sha'], 'candidate_tree': tree['sha'],
-              'patch_sha256': expected_patch_digest, 'changed_paths': paths,
-              'refs_updated': False, 'tests_claimed': False}
+              'patch_sha256': digest, 'changed_paths': paths, 'refs_updated': False, 'tests_claimed': False}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
