@@ -4338,11 +4338,11 @@ public final class MetalNativeBridge {
         private final MemorySegment textureArray =
                 arena.allocate(ValueLayout.ADDRESS, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
         private final MemorySegment loadArray =
-                arena.allocate(INT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
+                arena.allocate(ValueLayout.JAVA_INT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
         private final MemorySegment storeArray =
-                arena.allocate(INT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
+                arena.allocate(ValueLayout.JAVA_INT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
         private final MemorySegment clearColorArray =
-                arena.allocate(FLOAT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS * 4);
+                arena.allocate(ValueLayout.JAVA_FLOAT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS * 4);
         private final MemorySegment labelArray = arena.allocate(MAX_LABEL_BYTES, 1L);
         private boolean inUse;
 
@@ -4373,11 +4373,11 @@ public final class MetalNativeBridge {
         ) {
             for (int index = 0; index < colorTextures.length; index++) {
                 textureArray.setAtIndex(ValueLayout.ADDRESS, index, segmentForScratch(colorTextures[index]));
-                loadArray.setAtIndex(INT, index, colorLoadActions[index]);
-                storeArray.setAtIndex(INT, index, colorStoreActions[index]);
+                loadArray.setAtIndex(ValueLayout.JAVA_INT, index, colorLoadActions[index]);
+                storeArray.setAtIndex(ValueLayout.JAVA_INT, index, colorStoreActions[index]);
             }
             for (int index = 0; index < clearColors.length; index++) {
-                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+                clearColorArray.setAtIndex(ValueLayout.JAVA_FLOAT, index, clearColors[index]);
             }
         }
 
