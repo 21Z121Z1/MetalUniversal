@@ -188,24 +188,29 @@ Use the same saved snapshot for off/on runs; preserve the snapshot and manifest 
 ./gradlew --no-daemon jar -x buildIOSNative -x buildIOSSpvc
 # First run preserves a snapshot; all runs must use a clean committed JAR.
 python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
-  --output build/frame-seed --metrics-only --frame-evidence off
+  --output build/frame-seed --trial-id seed --metrics-only --frame-evidence off
 python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
-  --output build/frame-off --metrics-only --frame-evidence off \
+  --output build/frame-off --trial-id off-A --metrics-only --frame-evidence off \
   --initial-world build/frame-seed/initial-world
 python3 scripts/agent/record_vanilla_gameplay.py --jar build/libs/metallum-1.0.3.jar \
-  --output build/frame-on --metrics-only --frame-evidence timing \
+  --output build/frame-on --trial-id on-A --metrics-only --frame-evidence timing \
   --initial-world build/frame-seed/initial-world
 python3 scripts/agent/verify_frame_evidence.py build/frame-on/frame-evidence.json \
   --expected-head "$(git rev-parse HEAD)" --require-packaged --require-comparable
 ```
 
 For the production gameplay launcher, non-`off` runs pass the bounded segmented
-archive setting and record both the evidence mode and segmented setting in
-`recording.json`. The launcher waits for normal client exit, including the
-existing device shutdown drain, before invoking the verifier. This verifies
+archive setting and record the evidence mode, phase, segmented setting and
+explicit trial identity in `recording.json`. The launcher checks the supplied
+snapshot manifest before launch and requires the runtime replay hash to match it;
+use one immutable snapshot and distinct `--trial-id` values for each A/A or off/on
+run. It waits for normal client exit, including the existing device shutdown
+drain, before requiring a complete archive and invoking the verifier. Mode,
+phase and trial identity are checked against the exported archive. This verifies
 evidence integrity only (`valid-observation` or `invalid-evidence`); it does not
 make a run comparison-ready or establish physical performance acceptance.
-`off` runs do not require a frame-evidence archive.
+`off` runs do not require a frame-evidence archive, but their `recording.json`
+still records the trial and replay identity for pairing.
 
 For a controlled fixed-view physical baseline, add `--stationary-baseline` to the
 existing launcher with `--metrics-only --initial-world <snapshot>` and `off` or `timing`.

@@ -18,7 +18,53 @@ import uuid
 import zipfile
 
 
-def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_command=None):
+TRIAL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
+PHASE_SAMPLE = {"stationary": "stationary-full-view", "streaming": "flight-new-chunks"}
+
+
+def snapshot_identity(initial_world):
+    """Read the immutable snapshot identity without changing the supplied world."""
+    if initial_world.is_symlink():
+        raise RuntimeError(f"Initial world snapshot must not be a symlink: {initial_world}")
+    snapshot = initial_world.resolve()
+    manifest_path = snapshot.with_name(snapshot.name + "-manifest.json")
+    if not snapshot.is_dir() or snapshot.is_symlink():
+        raise RuntimeError(f"Initial world snapshot is not a real directory: {snapshot}")
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise RuntimeError(f"Initial world snapshot manifest is missing: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as failure:
+        raise RuntimeError(f"Initial world snapshot manifest is unreadable: {manifest_path}") from failure
+    identity = manifest.get("identity") if isinstance(manifest, dict) else None
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    snapshot_sha = identity.get("snapshotSha256") if isinstance(identity, dict) else None
+    paths = {entry.get("path") for entry in files if isinstance(entry, dict)} if isinstance(files, list) else set()
+    if (not isinstance(snapshot_sha, str) or re.fullmatch(r"[0-9a-f]{64}", snapshot_sha) is None
+            or not isinstance(identity, dict) or identity.get("snapshotDirectory") != snapshot.name
+            or "level.dat" not in paths):
+        raise RuntimeError(f"Initial world snapshot manifest has no valid immutable identity: {manifest_path}")
+    return {"path": str(snapshot), "manifest": str(manifest_path), "snapshotSha256": snapshot_sha}
+
+
+def record_snapshot_identity(receipt, supplied_snapshot):
+    """Bind the runtime replay report to the caller-selected snapshot, if any."""
+    gameplay = receipt["gameplay"]
+    world = gameplay.get("world", {}) if isinstance(gameplay, dict) else {}
+    runtime_sha = world.get("replaySourceSnapshotSha256") if isinstance(world, dict) else None
+    if supplied_snapshot is not None:
+        if runtime_sha != supplied_snapshot["snapshotSha256"]:
+            raise RuntimeError("Gameplay replay snapshot identity differs from the supplied immutable snapshot")
+        supplied_snapshot["runtimeSnapshotSha256"] = runtime_sha
+        receipt["initialWorld"] = supplied_snapshot
+        return
+    initial_content = gameplay.get("frameEvidenceProfile", {}).get("initialContent", {})
+    if isinstance(initial_content, dict) and isinstance(initial_content.get("snapshotSha256"), str):
+        receipt["generatedInitialContentSnapshotSha256"] = initial_content["snapshotSha256"]
+
+
+def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_command=None,
+                          *, expected_trial_id=None, expected_phase=None):
     """Verify the final bounded archive after the client has exited normally."""
     if frame_evidence_mode == "off":
         return None
@@ -26,8 +72,23 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
     if not evidence.is_file():
         raise RuntimeError("Frame evidence was requested but the production client did not export frame-evidence.json")
     raw_evidence = json.loads(evidence.read_text())
-    if raw_evidence.get("schemaVersion") != 2 or "archive" not in raw_evidence:
+    archive = raw_evidence.get("archive")
+    if raw_evidence.get("schemaVersion") != 2 or not isinstance(archive, dict):
         raise RuntimeError("Frame evidence did not use the required bounded archive schema")
+    if archive.get("complete") is not True:
+        raise RuntimeError("Frame evidence archive was not complete after client shutdown")
+    identity = raw_evidence.get("identity")
+    if not isinstance(identity, dict):
+        raise RuntimeError("Frame evidence archive is missing runtime identity")
+    if identity.get("instrumentationMode") != frame_evidence_mode:
+        raise RuntimeError("Frame evidence archive mode differs from the requested runner mode")
+    if expected_trial_id is not None and identity.get("trialId") != expected_trial_id:
+        raise RuntimeError("Frame evidence archive trial identity differs from the requested trial")
+    if expected_phase is not None:
+        profile = raw_evidence.get("window", {}).get("profile", {})
+        actual_phase = profile.get("route", {}).get("samplePhase") if isinstance(profile, dict) else None
+        if actual_phase != PHASE_SAMPLE[expected_phase]:
+            raise RuntimeError("Frame evidence archive phase differs from the requested runner phase")
     if run_command is None:
         run_command = subprocess.run
     verification = run_command(
@@ -40,15 +101,20 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
         detail = verification.stderr.strip() or verification.stdout.strip()
         raise RuntimeError(f"Frame evidence verification failed: {detail}")
     verification_result = json.loads(verification.stdout)
+    if verification_result.get("instrumentationMode") != frame_evidence_mode:
+        raise RuntimeError("Frame evidence verifier returned a mode different from the requested runner mode")
     return {
         "status": verification_result.get("status"),
+        "instrumentationMode": verification_result.get("instrumentationMode"),
+        "trialId": identity.get("trialId"),
         "physicalPerformanceAcceptance": verification_result.get("physicalPerformanceAcceptance"),
         "path": verification_path.name,
     }
 
 
 def finalize_client_run(receipt, recording, client, output, root, source_sha,
-                        frame_evidence_mode, run_command=None):
+                        frame_evidence_mode, run_command=None, *, expected_trial_id=None,
+                        expected_phase=None):
     """Close the profiler/client, then verify evidence emitted during client shutdown."""
     if recording is not None:
         if recording.poll() is None:
@@ -60,7 +126,8 @@ def finalize_client_run(receipt, recording, client, output, root, source_sha,
     if receipt.get("traceExitCode", 0) != 0:
         raise RuntimeError("Instruments recording failed; see instruments.log")
     receipt["frameEvidenceVerification"] = verify_frame_evidence(
-        output, frame_evidence_mode, source_sha, root, run_command)
+        output, frame_evidence_mode, source_sha, root, run_command,
+        expected_trial_id=expected_trial_id, expected_phase=expected_phase)
 
 
 def main():
@@ -75,6 +142,8 @@ def main():
                         help="Select the predeclared stationary or existing input-driven streaming window")
     parser.add_argument("--frame-evidence", choices=("off", "timing", "diagnostic"), default="off",
                         help="Bounded 5s warmup/10s source-to-present observation; use --metrics-only for timing")
+    parser.add_argument("--trial-id",
+                        help="Stable identity for this trial; defaults to the output directory name")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
     parser.add_argument("--capture-seconds", type=int, default=120,
@@ -105,6 +174,10 @@ def main():
         parser.error("stationary baseline requires stationary metrics-only without diagnostic getters or optimization experiments")
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
+    trial_id = args.trial_id or output.name
+    if TRIAL_ID_PATTERN.fullmatch(trial_id) is None:
+        parser.error("--trial-id and the output directory name must be 1-160 ASCII letters, digits, '.', '_' or '-'")
+    initial_world = snapshot_identity(args.initial_world) if args.initial_world is not None else None
     output.mkdir(parents=True, exist_ok=False)
     jar = args.jar.resolve()
     with zipfile.ZipFile(jar) as archive:
@@ -129,7 +202,7 @@ def main():
                f"-PframeEvidenceSegmented={str(args.frame_evidence != 'off').lower()}",
                f"-PstationaryBaseline={str(args.stationary_baseline).lower()}",
                f"-PframeEvidencePhase={args.frame_evidence_phase}",
-               f"-PframeEvidenceTrialId={output.name}",
+               f"-PframeEvidenceTrialId={trial_id}",
                f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
@@ -159,6 +232,9 @@ def main():
                "presentationMetrics": args.presentation_metrics,
                "frameEvidenceMode": args.frame_evidence,
                "frameEvidenceSegmented": args.frame_evidence != "off",
+               "frameEvidencePhase": args.frame_evidence_phase,
+               "frameEvidenceTrialId": trial_id,
+               "initialWorld": initial_world,
                "frameEvidenceVerification": None,
                "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
                "warmupNanos": 5_000_000_000, "sampleNanos": 10_000_000_000,
@@ -208,8 +284,10 @@ def main():
                     raise TimeoutError("Gameplay exceeded five minutes")
                 time.sleep(0.5)
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
+            record_snapshot_identity(receipt, initial_world)
             finalize_client_run(receipt, recording, client, output, root, identity["sourceSha"],
-                                args.frame_evidence)
+                                args.frame_evidence, expected_trial_id=trial_id,
+                                expected_phase=args.frame_evidence_phase)
         except BaseException as failure:
             receipt["failure"] = str(failure)
             raise

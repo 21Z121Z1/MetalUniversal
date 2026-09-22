@@ -38,6 +38,7 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         return SimpleNamespace(returncode=0, stdout=json.dumps({
             "status": "valid-observation",
             "physicalPerformanceAcceptance": "unverified",
+            "instrumentationMode": "timing",
         }), stderr="")
 
     def rejecting_verifier(self, command, **kwargs):
@@ -47,19 +48,29 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             "reason": "hash chain mismatch",
         }), stderr="")
 
-    def run_completed(self, client, mode="timing", verifier=None):
+    def archive_fixture(self, mode="timing", trial_id="trial-A", phase="stationary", complete=True):
+        return {
+            "schemaVersion": 2,
+            "identity": {"instrumentationMode": mode, "trialId": trial_id},
+            "window": {"profile": {"route": {
+                "samplePhase": "stationary-full-view" if phase == "stationary" else "flight-new-chunks",
+            }}},
+            "archive": {"complete": complete},
+        }
+
+    def run_completed(self, client, mode="timing", verifier=None, trial_id="trial-A", phase="stationary"):
         self.verifier_calls = 0
         receipt = {"gameplay": {"status": "completed"}}
         runner.finalize_client_run(receipt, None, client, self.output, self.root,
-                                   self.identity, mode, verifier or self.fake_verifier)
+                                   self.identity, mode, verifier or self.fake_verifier,
+                                   expected_trial_id=trial_id, expected_phase=phase)
         return receipt
 
     def test_archive_written_during_client_wait_is_verified_after_wait(self):
-        receipt = self.run_completed(DeferredClient(self.output, {
-            "schemaVersion": 2, "archive": {"complete": True},
-        }))
+        receipt = self.run_completed(DeferredClient(self.output, self.archive_fixture()))
         self.assertEqual(self.verifier_calls, 1)
         self.assertEqual(receipt["frameEvidenceVerification"]["status"], "valid-observation")
+        self.assertEqual(receipt["frameEvidenceVerification"]["trialId"], "trial-A")
         self.assertTrue((self.output / "frame-evidence-verification.json").is_file())
 
     def test_missing_or_invalid_final_archive_fails(self):
@@ -67,12 +78,23 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             self.run_completed(DeferredClient(self.output))
         with self.assertRaisesRegex(RuntimeError, "bounded archive schema"):
             self.run_completed(DeferredClient(self.output, {"schemaVersion": 1}))
+        with self.assertRaisesRegex(RuntimeError, "not complete"):
+            self.run_completed(DeferredClient(self.output, self.archive_fixture(complete=False)))
+
+    def test_archive_identity_matches_requested_mode_trial_and_phase(self):
+        cases = (
+            (self.archive_fixture(mode="diagnostic"), "mode"),
+            (self.archive_fixture(trial_id="trial-B"), "trial"),
+            (self.archive_fixture(phase="streaming"), "phase"),
+        )
+        for archive, label in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(RuntimeError, "differs"):
+                    self.run_completed(DeferredClient(self.output, archive))
 
     def test_verifier_rejection_fails_and_preserves_invalid_report(self):
         with self.assertRaisesRegex(RuntimeError, "verification failed"):
-            self.run_completed(DeferredClient(self.output, {
-                "schemaVersion": 2, "archive": {"complete": True},
-            }), verifier=self.rejecting_verifier)
+            self.run_completed(DeferredClient(self.output, self.archive_fixture()), verifier=self.rejecting_verifier)
         self.assertEqual(self.verifier_calls, 1)
         self.assertEqual(json.loads((self.output / "frame-evidence-verification.json").read_text())["status"],
                          "invalid-evidence")
@@ -81,6 +103,24 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         receipt = self.run_completed(DeferredClient(self.output), mode="off")
         self.assertEqual(self.verifier_calls, 0)
         self.assertIsNone(receipt["frameEvidenceVerification"])
+
+    def test_initial_world_identity_is_verified_and_recorded(self):
+        snapshot = self.output / "initial-world"
+        snapshot.mkdir()
+        (snapshot / "level.dat").write_bytes(b"snapshot")
+        digest = "d" * 64
+        manifest = snapshot.with_name("initial-world-manifest.json")
+        manifest.write_text(json.dumps({
+            "identity": {"snapshotDirectory": "initial-world", "snapshotSha256": digest},
+            "files": [{"path": "level.dat", "sha256": "f" * 64, "bytes": 8}],
+        }))
+        supplied = runner.snapshot_identity(snapshot)
+        receipt = {"gameplay": {"world": {"replaySourceSnapshotSha256": digest}}}
+        runner.record_snapshot_identity(receipt, supplied)
+        self.assertEqual(receipt["initialWorld"]["runtimeSnapshotSha256"], digest)
+        with self.assertRaisesRegex(RuntimeError, "differs"):
+            runner.record_snapshot_identity(
+                {"gameplay": {"world": {"replaySourceSnapshotSha256": "e" * 64}}}, supplied)
 
 
 if __name__ == "__main__":
