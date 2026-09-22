@@ -7,7 +7,7 @@ import org.spongepowered.asm.mixin.gen.Accessor;
 
 /** Read-only terminal-state access needed to compact work vanilla would discard in poll(). */
 @Mixin(SectionRenderDispatcher.RenderSection.SectionTask.class)
-interface SectionTaskTerrainAdmissionAccessor {
+public interface SectionTaskTerrainAdmissionAccessor {
     @Accessor("isCancelled")
     AtomicBoolean metallum$isCancelled();
 

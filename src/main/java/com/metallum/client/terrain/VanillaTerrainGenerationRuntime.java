@@ -1,10 +1,11 @@
-package com.metallum.mixin.terrain;
+package com.metallum.client.terrain;
 
-import com.metallum.client.terrain.TerrainPublicationGenerationGuard;
+import com.metallum.mixin.terrain.SectionTaskTerrainAdmissionAccessor;
+import java.util.function.Supplier;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 
 /** Minecraft-facing adapter for the pure T1b generation guard. */
-final class VanillaTerrainGenerationRuntime {
+public final class VanillaTerrainGenerationRuntime {
     static final String ENABLE_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
     static final String TRACKED_CAPACITY_PROPERTY = "metallum.terrain.vanillaGenerationTrackedCapacity";
     private static final int DEFAULT_TRACKED_CAPACITY = 32768;
@@ -38,11 +39,11 @@ final class VanillaTerrainGenerationRuntime {
     private VanillaTerrainGenerationRuntime() {
     }
 
-    static void markDirty(final long sectionId) {
+    public static void markDirty(final long sectionId) {
         GUARD.markDirty(sectionId);
     }
 
-    static void onLevelChanged(final Object level) {
+    public static void onLevelChanged(final Object level) {
         synchronized (LEVEL_LOCK) {
             if (observedLevel == level) {
                 return;
@@ -52,45 +53,42 @@ final class VanillaTerrainGenerationRuntime {
         GUARD.advanceWorldEpoch();
     }
 
-    static void onFullGeometryInvalidation() {
+    public static void onFullGeometryInvalidation() {
         GUARD.advanceMaterialGeneration();
     }
 
-    static void invalidateSectionLifetime(final long sectionId) {
+    public static void invalidateSectionLifetime(final long sectionId) {
         GUARD.invalidateSectionLifetime(sectionId);
     }
 
-    static void registerTask(
+    public static void registerTask(
             final SectionRenderDispatcher.RenderSection.SectionTask task,
             final long sectionId
     ) {
         GUARD.registerTask(task, sectionId);
     }
 
-    static boolean enterTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
-        return GUARD.enterTask(task);
+    public static <R> R runTask(
+            final SectionRenderDispatcher.RenderSection.SectionTask task,
+            final R cancelledResult,
+            final Supplier<R> original
+    ) {
+        return GUARD.runTask(task, cancelledResult, original);
     }
 
-    static void exitTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
-        GUARD.exitTask(task);
-    }
-
-    static void bindMeshFromActiveTask(final Object mesh) {
+    public static void bindMeshFromActiveTask(final Object mesh) {
         GUARD.bindMeshFromActiveTask(mesh);
     }
 
-    static TerrainPublicationGenerationGuard.PublicationDecision publicationDecision(
-            final long sectionId,
-            final Object mesh
-    ) {
-        return GUARD.publicationDecision(sectionId, mesh);
+    public static <M> M publish(final long sectionId, final M candidate, final Supplier<M> original) {
+        return GUARD.publish(sectionId, candidate, original);
     }
 
-    static void forgetMesh(final Object mesh) {
+    public static void forgetMesh(final Object mesh) {
         GUARD.forgetMesh(mesh);
     }
 
-    static TerrainPublicationGenerationGuard.Snapshot snapshot() {
+    public static TerrainPublicationGenerationGuard.Snapshot snapshot() {
         return GUARD.snapshot();
     }
 

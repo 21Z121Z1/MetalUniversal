@@ -8,23 +8,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Generation-aware publication guard for vanilla 26.3 terrain work.
  *
- * <p>The guard never builds meshes or publishes game state. It captures immutable content versions
+ * <p>The guard never builds meshes or replaces the original game publisher. It captures immutable content versions
  * when vanilla creates a compile task, cancels work when those versions become obsolete, and
- * answers the single question needed at RenderSection.setSectionMesh: may this exact result still
- * replace the section's current mesh? Unknown state fails open to vanilla behavior and permanently
+ * admits the original synchronous RenderSection.setSectionMesh exchange under the same monitor
+ * as content invalidation. Unknown state fails open to vanilla behavior and permanently
  * disables mutation for the current guard instance.</p>
  */
 public final class TerrainPublicationGenerationGuard<T> {
-    public enum PublicationDecision {
-        BASELINE_ALLOW,
-        ALLOW_CURRENT,
-        REJECT_STALE
-    }
-
     public enum FailOpenReason {
         NONE,
         SECTION_CAPACITY,
@@ -168,11 +163,24 @@ public final class TerrainPublicationGenerationGuard<T> {
         }
     }
 
+    /** Compile outside the guard monitor, but never leave a worker token behind on any exit. */
+    public <R> R runTask(final T task, final R cancelledResult, final Supplier<R> original) {
+        Objects.requireNonNull(original, "original");
+        if (!enterTask(task)) {
+            return cancelledResult;
+        }
+        try {
+            return original.get();
+        } finally {
+            exitTask(task);
+        }
+    }
+
     /**
      * Starts execution for a registered task. False means the caller should return vanilla's
      * CANCELLED result before expensive compilation.
      */
-    public boolean enterTask(final T task) {
+    boolean enterTask(final T task) {
         Objects.requireNonNull(task, "task");
         // A previous task that terminated exceptionally must never donate its token to later work
         // on the same worker thread. Normal exits also clear this slot.
@@ -206,7 +214,7 @@ public final class TerrainPublicationGenerationGuard<T> {
         return current;
     }
 
-    public void exitTask(final T task) {
+    void exitTask(final T task) {
         Objects.requireNonNull(task, "task");
         WorkToken<T> token = activeTask.get();
         if (token != null && token.task() == task) {
@@ -242,38 +250,44 @@ public final class TerrainPublicationGenerationGuard<T> {
     }
 
     /**
-     * Checks the only vanilla publication boundary. Direct empty/block-entity-only work uses the
-     * active task token; callback-driven mesh publication uses the mesh token captured at staging.
+     * Check and exchange are indivisible relative to every content invalidation. The original
+     * publisher must be a synchronous mesh exchange, not compilation, GPU work or a blocking wait.
+     * On rejection return the candidate itself: vanilla then releases exactly that rejected mesh,
+     * through its existing retired-mesh path, without touching the currently displayed mesh.
+     * Null candidates are supported for direct empty/block-entity-only work.
      */
-    public PublicationDecision publicationDecision(final long sectionId, final Object mesh) {
-        synchronized (this) {
-            if (!config.requested() || failOpen) {
-                baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
-                return PublicationDecision.BASELINE_ALLOW;
-            }
+    public synchronized <M> M publish(final long sectionId, final M candidate, final Supplier<M> original) {
+        Objects.requireNonNull(original, "original");
+        return allowPublicationLocked(sectionId, candidate) ? original.get() : candidate;
+    }
 
-            WorkToken<T> token = mesh == null ? null : meshTokens.get(mesh);
-            WorkToken<T> active = activeTask.get();
-            if (token == null && active != null) {
-                token = active;
-            }
-            if (token == null) {
-                failOpenLocked(FailOpenReason.UNKNOWN_PUBLICATION);
-                baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
-                return PublicationDecision.BASELINE_ALLOW;
-            }
-
-            boolean current = token.version().sectionId() == sectionId
-                    && isCurrentLocked(token)
-                    && !taskOps.isCancelled(token.task());
-            consumeTokenLocked(token, mesh);
-            if (!current) {
-                rejectedStalePublications = saturatedIncrement(rejectedStalePublications);
-                return PublicationDecision.REJECT_STALE;
-            }
-            allowedPublications = saturatedIncrement(allowedPublications);
-            return PublicationDecision.ALLOW_CURRENT;
+    private boolean allowPublicationLocked(final long sectionId, final Object mesh) {
+        if (!config.requested() || failOpen) {
+            baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
+            return true;
         }
+
+        WorkToken<T> token = mesh == null ? null : meshTokens.get(mesh);
+        WorkToken<T> active = activeTask.get();
+        if (token == null && active != null) {
+            token = active;
+        }
+        if (token == null) {
+            failOpenLocked(FailOpenReason.UNKNOWN_PUBLICATION);
+            baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
+            return true;
+        }
+
+        boolean current = token.version().sectionId() == sectionId
+                && isCurrentLocked(token)
+                && !taskOps.isCancelled(token.task());
+        consumeTokenLocked(token, mesh);
+        if (!current) {
+            rejectedStalePublications = saturatedIncrement(rejectedStalePublications);
+            return false;
+        }
+        allowedPublications = saturatedIncrement(allowedPublications);
+        return true;
     }
 
     /** Forget ownership after vanilla releases a candidate or retired mesh. */
@@ -345,23 +359,23 @@ public final class TerrainPublicationGenerationGuard<T> {
     }
 
     private void invalidateSection(final long sectionId, final boolean bothRevisions) {
-        final List<T> cancel = new ArrayList<>();
+        final List<T> cancel;
         synchronized (this) {
             if (!active()) {
                 return;
             }
             SectionVersion version = sectionVersions.get(sectionId);
             if (version == null) {
-                if (!ensureSectionSlotLocked(sectionId)) {
-                    return;
-                }
-                version = newSectionVersionLocked();
-                sectionVersions.put(sectionId, version);
+                // Dirtiness cannot invalidate work which has never been captured. Do not allocate
+                // metadata (or evict/fail-open live ownership) for off-screen dirty notifications.
+                // Registration assigns globally fresh revisions, including after an eviction.
+                return;
             }
             version.geometryRevision = nextSectionRevisionLocked();
             if (bothRevisions) {
                 version.lightingRevision = nextSectionRevisionLocked();
             }
+            cancel = new ArrayList<>();
             var iterator = taskTokens.entrySet().iterator();
             while (iterator.hasNext()) {
                 var entry = iterator.next();

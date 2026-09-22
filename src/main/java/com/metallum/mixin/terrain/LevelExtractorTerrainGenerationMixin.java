@@ -1,5 +1,6 @@
 package com.metallum.mixin.terrain;
 
+import com.metallum.client.terrain.VanillaTerrainGenerationRuntime;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.extract.LevelExtractor;
 import net.minecraft.core.SectionPos;
