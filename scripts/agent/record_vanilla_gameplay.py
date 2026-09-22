@@ -316,6 +316,11 @@ def inspect_trace_coverage(toc_path, present_tables_path, gameplay=None, evidenc
         result["reason"] = "java-clock-anchor-not-monotonic"
         return result
 
+    if (min(pair["monoBeforeNs"] for pair in pairs) > window["startNs"]
+            or max(pair["monoAfterNs"] for pair in pairs) < window["endNs"]):
+        result["reason"] = "java-clock-anchors-do-not-bracket-window"
+        return result
+
     offset_intervals = [{
         "lowerNs": pair["wallNs"] - pair["monoAfterNs"],
         "upperNs": pair["wallNs"] - pair["monoBeforeNs"],
@@ -328,10 +333,11 @@ def inspect_trace_coverage(toc_path, present_tables_path, gameplay=None, evidenc
                "commonOffsetIntervalNs": {"lowerNs": common_lower, "upperNs": common_upper}}
     result["clockMapping"] = mapping
     if common_lower > common_upper:
-        mapping["wallclockJumpDetected"] = True
+        mapping["offsetsConsistent"] = False
         result["reason"] = "java-clock-anchor-offsets-disagree"
         return result
-    mapping["wallclockJumpDetected"] = False
+    mapping["offsetsConsistent"] = True
+    mapping["limitation"] = "sampled offset consistency does not prove clock stability between anchors"
     mapping["uncertaintyNs"] = max(common_upper - common_lower,
                                     max(pair["uncertaintyNs"] for pair in pairs))
     offset = (common_lower + common_upper) // 2
@@ -347,7 +353,13 @@ def inspect_trace_coverage(toc_path, present_tables_path, gameplay=None, evidenc
     result["archiveWindowWallEndNs"] = wall_end
     result["pidScope"] = "matched-row-pid"
     result["status"] = "partial"
-    if event_wall_end < wall_start or event_wall_start > wall_end:
+    # Reject overlap only outside every offset allowed by the sampled anchors.
+    # TOC wall-clock accuracy remains uncalibrated; this is a diagnostic estimate.
+    result["windowWallBoundsNs"] = {"earliestStart": window["startNs"] + common_lower,
+                                    "latestEnd": window["endNs"] + common_upper}
+    result["traceClockAccuracy"] = "unavailable; TOC wall-clock precision is not a calibrated accuracy bound"
+    if (event_wall_end < window["startNs"] + common_lower
+            or event_wall_start >= window["endNs"] + common_upper):
         result["reason"] = "present-events-do-not-overlap-archive-window"
     else:
         result["reason"] = "present-events-do-not-prove-continuous-window-coverage"

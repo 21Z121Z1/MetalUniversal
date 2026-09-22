@@ -301,12 +301,12 @@ public final class VanillaGameplay {
             recordingFrames = true;
             JsonObject timing = new JsonObject();
             timing.addProperty("event", "source-route-start");
-            timing.addProperty("routeStartNs", startedNanos);
             timing.add("routeStart", clockPair("source-route-start"));
             if (EVIDENCE_PHASE.equals("stationary")) {
                 timing.add("armWindow", armWindowWithClockAnchors(profile, "stationary"));
             }
             long start = System.nanoTime();
+            timing.addProperty("routeStartNs", start);
             sampleStartNanos = start + WARMUP_NS;
             if (EVIDENCE_PHASE.equals("stationary")) {
                 timing.add("declaredSourceWindow", declaredSourceWindow(sampleStartNanos));

@@ -306,6 +306,15 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         self.assertFalse(coverage["continuousCoverage"])
         self.assertEqual(coverage["pidScope"], "matched-row-pid")
 
+    def test_trace_requires_bracketing_anchors_and_preserves_boundary_uncertainty(self):
+        toc, present = self.trace_fixture(event_seconds=(4.999999925,))
+        gameplay = self.trace_gameplay()
+        coverage = runner.inspect_trace_coverage(toc, present, gameplay, archive=self.trace_archive())
+        self.assertEqual(coverage["reason"], "present-events-do-not-prove-continuous-window-coverage")
+        del gameplay["windowClockAnchors"]["events"][0]["after"]
+        coverage = runner.inspect_trace_coverage(toc, present, gameplay, archive=self.trace_archive())
+        self.assertEqual(coverage["reason"], "java-clock-anchors-do-not-bracket-window")
+
     def test_trace_nonoverlap_and_missing_or_bad_clock_fail_closed(self):
         toc, present = self.trace_fixture(event_seconds=(20.0, 21.0))
         coverage = runner.inspect_trace_coverage(toc, present, self.trace_gameplay(),
