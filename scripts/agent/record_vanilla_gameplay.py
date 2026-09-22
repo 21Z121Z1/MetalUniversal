@@ -26,6 +26,10 @@ MAX_WINDOW_SECONDS = 300
 GAMEPLAY_TIMEOUT_MARGIN_SECONDS = 180
 DEFAULT_GAMEPLAY_TIMEOUT_SECONDS = 300
 MAX_GAMEPLAY_TIMEOUT_SECONDS = MAX_WINDOW_SECONDS + GAMEPLAY_TIMEOUT_MARGIN_SECONDS
+OPTIMIZATION_PROFILE_BASELINE = "baseline-v1"
+OPTIMIZATION_PROFILE_REUSE = "reuse-encoder-state-v1"
+OPTIMIZATION_FEATURE = "encoder-cpu-state-reuse"
+OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE)
 
 
 def validate_window(warmup_seconds, sample_seconds, phase):
@@ -48,6 +52,33 @@ def gameplay_timeout_seconds(window_seconds):
     """Leave bounded route/shutdown headroom without a fixed short-session deadline."""
     return min(MAX_GAMEPLAY_TIMEOUT_SECONDS,
                max(DEFAULT_GAMEPLAY_TIMEOUT_SECONDS, window_seconds + GAMEPLAY_TIMEOUT_MARGIN_SECONDS))
+
+
+def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence_phase,
+                                 frame_evidence, metrics_only, presentation_metrics,
+                                 render_labels, terrain_slice_cache, reuse_encoder_state):
+    """Resolve the explicit paired profile and reject an unpaired reuse request."""
+    if profile not in OPTIMIZATION_PROFILE_CHOICES:
+        raise ValueError(f"optimization profile must be one of {', '.join(OPTIMIZATION_PROFILE_CHOICES)}")
+    if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_encoder_state:
+        raise ValueError("--reuse-encoder-state requires --optimization-profile reuse-encoder-state-v1")
+    if profile == OPTIMIZATION_PROFILE_REUSE:
+        if not reuse_encoder_state:
+            raise ValueError("reuse-encoder-state-v1 requires --reuse-encoder-state")
+        if not stationary_baseline:
+            raise ValueError("reuse-encoder-state-v1 requires --stationary-baseline")
+        if frame_evidence_phase != "stationary" or frame_evidence != "timing" or not metrics_only:
+            raise ValueError("reuse-encoder-state-v1 requires the stationary metrics-only timing route")
+        if presentation_metrics or render_labels or terrain_slice_cache:
+            raise ValueError("reuse-encoder-state-v1 excludes diagnostic getters and terrain cache experiments")
+    route = "vanilla-stationary-60-v1" if stationary_baseline else f"vanilla-normal-{frame_evidence_phase}-v1"
+    return {
+        "id": profile,
+        "pairKey": route if stationary_baseline else None,
+        "feature": OPTIMIZATION_FEATURE,
+        "reuseEncoderState": bool(reuse_encoder_state),
+        "candidate": profile == OPTIMIZATION_PROFILE_REUSE,
+    }
 
 
 def snapshot_identity(initial_world):
@@ -89,6 +120,23 @@ def record_snapshot_identity(receipt, supplied_snapshot):
     initial_content = gameplay.get("frameEvidenceProfile", {}).get("initialContent", {})
     if isinstance(initial_content, dict) and isinstance(initial_content.get("snapshotSha256"), str):
         receipt["generatedInitialContentSnapshotSha256"] = initial_content["snapshotSha256"]
+
+
+def verify_gameplay_optimization(receipt, expected_profile):
+    """Bind the client report to the requested pair and require candidate activation."""
+    gameplay = receipt.get("gameplay", {})
+    actual = gameplay.get("optimizationProfile") if isinstance(gameplay, dict) else None
+    if not isinstance(actual, dict):
+        raise RuntimeError("Gameplay report is missing optimization profile identity")
+    for key in ("id", "pairKey", "reuseEncoderState", "candidate"):
+        if actual.get(key) != expected_profile.get(key):
+            raise RuntimeError(f"Gameplay optimization profile differs for {key}")
+    activation = gameplay.get("optimizationActivation")
+    if not isinstance(activation, dict):
+        raise RuntimeError("Gameplay report is missing optimization activation evidence")
+    receipt["optimizationActivation"] = activation
+    if expected_profile["candidate"] and activation.get("active") is not True:
+        raise RuntimeError("Reuse candidate did not activate both encoder-state reuse paths")
 
 
 def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_command=None,
@@ -203,7 +251,10 @@ def main():
     parser.add_argument("--presentation-metrics", action="store_true",
                         help="Sample native drawable wait once per frame; diagnostic, excluded from timing trials")
     parser.add_argument("--reuse-encoder-state", action="store_true",
-                        help="Enable the candidate CPU state/scratch reuse; off is the rollback path")
+                        help="Enable reuse for the explicit reuse-encoder-state-v1 candidate profile")
+    parser.add_argument("--optimization-profile", choices=OPTIMIZATION_PROFILE_CHOICES,
+                        default=OPTIMIZATION_PROFILE_BASELINE,
+                        help="Explicit paired identity; baseline-v1 keeps encoder-state reuse off")
     parser.add_argument("--terrain-slice-cache", action="store_true",
                         help="Reuse mesh-owned terrain allocation metadata until allocation mutation")
     parser.add_argument("--verify-terrain-cache", action="store_true",
@@ -219,8 +270,21 @@ def main():
         parser.error("--verify-terrain-cache requires --terrain-slice-cache")
     if args.stationary_baseline and args.initial_world is None:
         parser.error("stationary baseline requires --initial-world with its verified immutable snapshot")
+    try:
+        optimization_profile = resolve_optimization_profile(
+            args.optimization_profile,
+            stationary_baseline=args.stationary_baseline,
+            frame_evidence_phase=args.frame_evidence_phase,
+            frame_evidence=args.frame_evidence,
+            metrics_only=args.metrics_only,
+            presentation_metrics=args.presentation_metrics,
+            render_labels=args.render_labels,
+            terrain_slice_cache=args.terrain_slice_cache,
+            reuse_encoder_state=args.reuse_encoder_state)
+    except ValueError as failure:
+        parser.error(str(failure))
     if args.stationary_baseline and (args.frame_evidence == "diagnostic" or args.frame_evidence_phase != "stationary" or not args.metrics_only
-            or args.presentation_metrics or args.reuse_encoder_state or args.terrain_slice_cache):
+            or args.presentation_metrics or args.terrain_slice_cache):
         parser.error("stationary baseline requires stationary metrics-only without diagnostic getters or optimization experiments")
     try:
         window_seconds = validate_window(args.frame_evidence_warmup_seconds,
@@ -268,6 +332,7 @@ def main():
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
+               f"-PoptimizationProfile={optimization_profile['id']}",
                f"-PterrainSliceCache={str(args.terrain_slice_cache).lower()}",
                f"-PverifyTerrainSliceCache={str(args.verify_terrain_cache).lower()}",
                f"-PnativeWidth={width}", f"-PnativeHeight={height}",
@@ -300,6 +365,7 @@ def main():
                "initialWorld": initial_world,
                "frameEvidenceVerification": None,
                "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
+               "optimizationProfile": optimization_profile,
                "warmupNanos": args.frame_evidence_warmup_seconds * 1_000_000_000,
                "sampleNanos": args.frame_evidence_sample_seconds * 1_000_000_000,
                "terrainSliceCache": args.terrain_slice_cache,
@@ -349,6 +415,7 @@ def main():
                 time.sleep(0.5)
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
             record_snapshot_identity(receipt, initial_world)
+            verify_gameplay_optimization(receipt, optimization_profile)
             finalize_client_run(receipt, recording, client, output, root, identity["sourceSha"],
                                 args.frame_evidence, expected_trial_id=trial_id,
                                 expected_phase=args.frame_evidence_phase,

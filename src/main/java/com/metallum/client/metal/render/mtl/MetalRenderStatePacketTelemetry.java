@@ -5,12 +5,23 @@ import java.util.concurrent.atomic.LongAdder;
 /** Optional counters for the negotiated render-state packet path. */
 public final class MetalRenderStatePacketTelemetry {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.hotpath.telemetry");
+    /**
+     * Narrow, opt-in activation evidence for the paired encoder-state route.
+     * This is kept separate from the broad hot-path counters so a gameplay
+     * trial can prove reuse without enabling diagnostic telemetry wholesale.
+     */
+    private static final boolean REUSE_ACTIVATION_ENABLED = Boolean.getBoolean(
+            "metallum.ci.reuseActivationTelemetry");
     private static final LongAdder packetCalls = new LongAdder();
     private static final LongAdder packetEntries = new LongAdder();
     private static final LongAdder legacyReplays = new LongAdder();
     private static final LongAdder legacyReplayEntries = new LongAdder();
     private static final LongAdder singleEntryBypasses = new LongAdder();
     private static final LongAdder capacityFlushes = new LongAdder();
+    private static final LongAdder packetStorageAllocations = new LongAdder();
+    private static final LongAdder packetStorageReuseHits = new LongAdder();
+    private static final LongAdder shadowAllocations = new LongAdder();
+    private static final LongAdder shadowReuseHits = new LongAdder();
 
     private MetalRenderStatePacketTelemetry() {
     }
@@ -41,6 +52,34 @@ public final class MetalRenderStatePacketTelemetry {
         }
     }
 
+    static void recordPacketStorageAllocation() {
+        if (REUSE_ACTIVATION_ENABLED) {
+            packetStorageAllocations.increment();
+        }
+    }
+
+    static void recordPacketStorageReuse() {
+        if (REUSE_ACTIVATION_ENABLED) {
+            packetStorageReuseHits.increment();
+        }
+    }
+
+    static void recordShadowAllocation() {
+        if (REUSE_ACTIVATION_ENABLED) {
+            shadowAllocations.increment();
+        }
+    }
+
+    static void recordShadowReuse() {
+        if (REUSE_ACTIVATION_ENABLED) {
+            shadowReuseHits.increment();
+        }
+    }
+
+    public static boolean reuseActivationTelemetryEnabled() {
+        return REUSE_ACTIVATION_ENABLED;
+    }
+
     public static Snapshot snapshot() {
         return new Snapshot(
                 packetCalls.sum(),
@@ -48,7 +87,11 @@ public final class MetalRenderStatePacketTelemetry {
                 legacyReplays.sum(),
                 legacyReplayEntries.sum(),
                 singleEntryBypasses.sum(),
-                capacityFlushes.sum()
+                capacityFlushes.sum(),
+                packetStorageAllocations.sum(),
+                packetStorageReuseHits.sum(),
+                shadowAllocations.sum(),
+                shadowReuseHits.sum()
         );
     }
 
@@ -59,6 +102,10 @@ public final class MetalRenderStatePacketTelemetry {
         legacyReplayEntries.reset();
         singleEntryBypasses.reset();
         capacityFlushes.reset();
+        packetStorageAllocations.reset();
+        packetStorageReuseHits.reset();
+        shadowAllocations.reset();
+        shadowReuseHits.reset();
     }
 
     public record Snapshot(
@@ -67,7 +114,11 @@ public final class MetalRenderStatePacketTelemetry {
             long legacyReplays,
             long legacyReplayEntries,
             long singleEntryBypasses,
-            long capacityFlushes
+            long capacityFlushes,
+            long packetStorageAllocations,
+            long packetStorageReuseHits,
+            long shadowAllocations,
+            long shadowReuseHits
     ) {
         public double averageEntriesPerPacket() {
             return packetCalls == 0L ? 0.0 : (double) packetEntries / packetCalls;

@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.FrameEvidenceRuntime;
+import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.minecraft.core.BlockPos;
@@ -27,6 +28,10 @@ import java.time.Instant;
 public final class VanillaGameplay {
     private static final String EVIDENCE_PHASE = System.getProperty("metallum.ci.frameEvidencePhase", "stationary");
     private static final boolean STATIONARY_BASELINE = Boolean.getBoolean("metallum.ci.stationaryBaseline");
+    private static final String OPTIMIZATION_PROFILE = System.getProperty(
+            "metallum.ci.optimizationProfile", "baseline-v1");
+    private static final boolean REUSE_ENCODER_STATE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    private static final boolean REUSE_CANDIDATE = "reuse-encoder-state-v1".equals(OPTIMIZATION_PROFILE);
     private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
     private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
     private static final int DEFAULT_WARMUP_SECONDS = 5;
@@ -106,6 +111,12 @@ public final class VanillaGameplay {
         require(EVIDENCE_PHASE.equals("stationary") || EVIDENCE_PHASE.equals("streaming"), "Unknown frame evidence phase");
         require(!STATIONARY_BASELINE || EVIDENCE_PHASE.equals("stationary"), "Stationary baseline requires stationary phase");
         require(!STATIONARY_BASELINE || worldEvidence.has("replaySourceSnapshotSha256"), "Stationary baseline requires a verified initial snapshot");
+        require(OPTIMIZATION_PROFILE.equals("baseline-v1") || REUSE_CANDIDATE,
+                "Unknown optimization profile: " + OPTIMIZATION_PROFILE);
+        require(REUSE_CANDIDATE == REUSE_ENCODER_STATE,
+                "Optimization profile and reuseEncoderState property disagree");
+        require(!REUSE_CANDIDATE || STATIONARY_BASELINE,
+                "reuse-encoder-state-v1 requires the stationary route");
         var input = context.getInput();
         JsonObject report = new JsonObject();
         report.addProperty("scenario", ROUTE);
@@ -185,7 +196,8 @@ public final class VanillaGameplay {
                 && settings.get("presentWidth").getAsInt() == NATIVE_WIDTH
                 && settings.get("presentHeight").getAsInt() == NATIVE_HEIGHT,
                 "Native window/present dimensions differ from the physical display: " + settings);
-        report.addProperty("reuseEncoderState", Boolean.getBoolean("metallum.opt.reuseEncoderState"));
+        report.addProperty("reuseEncoderState", REUSE_ENCODER_STATE);
+        report.add("optimizationProfile", optimizationProfile());
         boolean terrainSliceCache = Boolean.getBoolean("metallum.opt.terrainSliceCache");
         boolean verifyTerrainSliceCache = Boolean.getBoolean("metallum.terrain.verifySliceCache");
         report.addProperty("terrainSliceCache", terrainSliceCache);
@@ -246,6 +258,7 @@ public final class VanillaGameplay {
                 : "selected window duration and all existing flight/place-break/quality assertions");
         profile.add("route", route);
         profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
+        profile.add("optimizationProfile", optimizationProfile());
         report.add("frameEvidenceProfile", profile);
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
@@ -404,6 +417,7 @@ public final class VanillaGameplay {
                     "Terrain slice differential oracle did not activate");
             JsonObject finalSettings = context.computeOnClient(VanillaGameplay::settings);
             report.add("finalSettings", finalSettings);
+            report.add("optimizationActivation", context.computeOnClient(client -> optimizationActivation()));
             require(settings.equals(finalSettings), "Rendering settings changed during the route");
             require(invalidSettingsFrames == 0 && droppedSamples == 0 && throttledFrames == 0,
                     "Source frame measurements failed the full-resolution, maximum-distance or cadence gate");
@@ -456,6 +470,34 @@ public final class VanillaGameplay {
         });
         phases.add(phase);
         write(output.resolve("gameplay-progress.json"), report);
+    }
+
+    private static JsonObject optimizationProfile() {
+        JsonObject value = new JsonObject();
+        value.addProperty("id", OPTIMIZATION_PROFILE);
+        value.addProperty("pairKey", STATIONARY_BASELINE ? ROUTE : null);
+        value.addProperty("feature", "encoder-cpu-state-reuse");
+        value.addProperty("reuseEncoderState", REUSE_ENCODER_STATE);
+        value.addProperty("candidate", REUSE_CANDIDATE);
+        value.addProperty("activationTelemetry", MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled());
+        return value;
+    }
+
+    private static JsonObject optimizationActivation() {
+        var snapshot = MetalRenderStatePacketTelemetry.snapshot();
+        boolean packetReuse = snapshot.packetStorageReuseHits() > 0;
+        boolean shadowReuse = snapshot.shadowReuseHits() > 0;
+        boolean active = REUSE_ENCODER_STATE && packetReuse && shadowReuse;
+        JsonObject value = new JsonObject();
+        value.addProperty("requested", REUSE_ENCODER_STATE);
+        value.addProperty("active", active);
+        value.addProperty("status", !REUSE_ENCODER_STATE ? "not-requested" : active ? "active" : "inactive");
+        value.addProperty("telemetryEnabled", MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled());
+        value.addProperty("packetStorageAllocations", snapshot.packetStorageAllocations());
+        value.addProperty("packetStorageReuseHits", snapshot.packetStorageReuseHits());
+        value.addProperty("shadowAllocations", snapshot.shadowAllocations());
+        value.addProperty("shadowReuseHits", snapshot.shadowReuseHits());
+        return value;
     }
 
     private static JsonObject settings(Minecraft client) {

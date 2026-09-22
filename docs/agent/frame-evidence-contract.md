@@ -424,6 +424,17 @@ native-handle closure invalidate/release it. GPU objects and resources are not
 pooled by this change. The production default remains off pending paired evidence.
 Pipeline binding indices use an immutable lookup built at pipeline creation.
 
+The controlled stationary pair makes this opt-in explicit: the baseline uses
+`--optimization-profile baseline-v1` with reuse off, while the candidate uses
+`--optimization-profile reuse-encoder-state-v1 --reuse-encoder-state`. Both keep
+the same `vanilla-stationary-60-v1` route, native quality, cadence, immutable
+initial-world snapshot and bounded window; only the encoder-state reuse feature
+changes. `gameplay.json`, `recording.json` and the frame profile record that
+pair identity. The gameplay route enables only the narrow reuse activation
+counters for both pair members and the runner requires packet and state-shadow
+reuse hits from the candidate. This proves route activation, not comparable
+performance or physical acceptance.
+
 The initial JFR flight profile identified state-shadow arrays and indexed-binding
 list iterators as allocation hot spots. Reusing stable objects follows Apple's
 [persistent objects guidance](https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/PersistentObjects.html).

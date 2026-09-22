@@ -142,6 +142,54 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "phase"):
             runner.validate_window(5, 10, "unknown")
 
+    def test_reuse_candidate_requires_explicit_stationary_pair(self):
+        baseline = runner.resolve_optimization_profile(
+            runner.OPTIMIZATION_PROFILE_BASELINE,
+            stationary_baseline=True, frame_evidence_phase="stationary",
+            frame_evidence="timing", metrics_only=True,
+            presentation_metrics=False, render_labels=False,
+            terrain_slice_cache=False, reuse_encoder_state=False)
+        candidate = runner.resolve_optimization_profile(
+            runner.OPTIMIZATION_PROFILE_REUSE,
+            stationary_baseline=True, frame_evidence_phase="stationary",
+            frame_evidence="timing", metrics_only=True,
+            presentation_metrics=False, render_labels=False,
+            terrain_slice_cache=False, reuse_encoder_state=True)
+        self.assertEqual(baseline["pairKey"], candidate["pairKey"])
+        self.assertFalse(baseline["reuseEncoderState"])
+        self.assertTrue(candidate["reuseEncoderState"])
+        with self.assertRaisesRegex(ValueError, "optimization-profile"):
+            runner.resolve_optimization_profile(
+                runner.OPTIMIZATION_PROFILE_BASELINE,
+                stationary_baseline=True, frame_evidence_phase="stationary",
+                frame_evidence="timing", metrics_only=True,
+                presentation_metrics=False, render_labels=False,
+                terrain_slice_cache=False, reuse_encoder_state=True)
+        with self.assertRaisesRegex(ValueError, "stationary"):
+            runner.resolve_optimization_profile(
+                runner.OPTIMIZATION_PROFILE_REUSE,
+                stationary_baseline=False, frame_evidence_phase="streaming",
+                frame_evidence="timing", metrics_only=True,
+                presentation_metrics=False, render_labels=False,
+                terrain_slice_cache=False, reuse_encoder_state=True)
+
+    def test_candidate_requires_runtime_activation_evidence(self):
+        expected = runner.resolve_optimization_profile(
+            runner.OPTIMIZATION_PROFILE_REUSE,
+            stationary_baseline=True, frame_evidence_phase="stationary",
+            frame_evidence="timing", metrics_only=True,
+            presentation_metrics=False, render_labels=False,
+            terrain_slice_cache=False, reuse_encoder_state=True)
+        receipt = {"gameplay": {"optimizationProfile": expected,
+                                "optimizationActivation": {"active": True,
+                                                            "packetStorageReuseHits": 2,
+                                                            "shadowReuseHits": 2}}}
+        runner.verify_gameplay_optimization(receipt, expected)
+        self.assertEqual(receipt["optimizationActivation"]["packetStorageReuseHits"], 2)
+        receipt["gameplay"]["optimizationActivation"]["active"] = False
+        with self.assertRaisesRegex(RuntimeError, "did not activate"):
+            runner.verify_gameplay_optimization(receipt, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
