@@ -73,6 +73,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
             // Native packet decoding is synchronous. Only CPU scratch storage
             // is reused; no GPU-visible resource or native encoder is pooled.
             storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE, Long.BYTES);
+            MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
+        } else {
+            MetalRenderStatePacketTelemetry.recordPacketStorageReuse();
         }
         return new MetalRenderStatePacket(storage);
     }
@@ -94,6 +97,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE)),
                 Long.BYTES
         );
+        MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
         resetHeader();

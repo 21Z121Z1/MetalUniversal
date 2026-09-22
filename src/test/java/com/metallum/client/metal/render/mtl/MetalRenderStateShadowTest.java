@@ -19,6 +19,7 @@ final class MetalRenderStateShadowTest {
 
     @Test
     void recycledEncoderStateIsEmptyAndNeverSharedWithAnActiveEncoder() {
+        MetalRenderStatePacketTelemetry.Snapshot before = MetalRenderStatePacketTelemetry.snapshot();
         MetalRenderStateShadow first = MetalRenderStateShadow.acquire();
         first.setPipeline(BUFFER_A);
         first.recordBuffer(BUFFER_A, 64, 0, 3);
@@ -38,6 +39,16 @@ final class MetalRenderStateShadowTest {
         } finally {
             next.recycle();
             concurrent.recycle();
+        }
+        if (MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
+            MetalRenderStatePacketTelemetry.Snapshot after = MetalRenderStatePacketTelemetry.snapshot();
+            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) {
+                assertTrue(after.shadowReuseHits() > before.shadowReuseHits());
+                assertTrue(after.shadowAllocations() > before.shadowAllocations());
+            } else {
+                assertEquals(before.shadowReuseHits(), after.shadowReuseHits());
+                assertEquals(before.shadowAllocations() + 3, after.shadowAllocations());
+            }
         }
     }
 

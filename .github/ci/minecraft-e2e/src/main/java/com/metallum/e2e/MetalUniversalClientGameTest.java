@@ -38,6 +38,18 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
 
+    private static void requestStationaryServerHalt(TestSingleplayerContext singleplayer) {
+        // Fabric's TestSingleplayerContext.close() disconnects the client and then
+        // calls IntegratedServer.halt() from the client thread. In 26.3 that halt
+        // executes server work synchronously and can deadlock the GameTest phase
+        // barrier. Request it on the server owner immediately before the resource
+        // close; the Fabric close remains the sole client disconnect/wait owner.
+        singleplayer.getServer().computeOnServer(instance -> {
+            instance.halt(false);
+            return null;
+        });
+    }
+
     private static TestSingleplayerContext openGameplayWorld(ClientGameTestContext context, Path output) {
         TestSingleplayerContext created = context.worldBuilder()
                 .setUseConsistentSettings(false)
@@ -117,6 +129,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             worldEvidence.add("waypoints", waypoints);
             if (Boolean.getBoolean("metallum.ci.gameplay")) {
                 VanillaGameplay.run(context, singleplayer, evidenceDir, worldEvidence);
+                if (Boolean.getBoolean("metallum.ci.stationaryBaseline")) {
+                    requestStationaryServerHalt(singleplayer);
+                }
                 return;
             }
             singleplayer.getServer().runCommand("gamemode spectator @a");

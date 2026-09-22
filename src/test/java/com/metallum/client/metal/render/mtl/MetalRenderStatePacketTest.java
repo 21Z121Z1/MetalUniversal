@@ -50,6 +50,17 @@ final class MetalRenderStatePacketTest {
     }
 
     @Test
+    void successfulConfinedAllocationIsCountedWhenActivationTelemetryIsEnabled() {
+        MetalRenderStatePacketTelemetry.Snapshot before = MetalRenderStatePacketTelemetry.snapshot();
+        try (MetalRenderStatePacket ignored = new MetalRenderStatePacket(8)) {
+            if (MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
+                MetalRenderStatePacketTelemetry.Snapshot after = MetalRenderStatePacketTelemetry.snapshot();
+                assertEquals(before.packetStorageAllocations() + 1, after.packetStorageAllocations());
+            }
+        }
+    }
+
+    @Test
     void encodesFloatBitsAndScissorWithoutObjects() {
         try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
             packet.appendDepthBias(ENCODER, 1.25F, -0.5F, 0.125F);
@@ -86,6 +97,7 @@ final class MetalRenderStatePacketTest {
 
     @Test
     void reusedScratchHasExclusiveLeaseAndResetsThePacket() {
+        MetalRenderStatePacketTelemetry.Snapshot before = MetalRenderStatePacketTelemetry.snapshot();
         MetalRenderStatePacket first = MetalRenderStatePacket.acquireReusable();
         long address = first.storageForTest().address();
         first.appendPipeline(ENCODER, MemorySegment.ofAddress(0x2000L));
@@ -102,6 +114,11 @@ final class MetalRenderStatePacketTest {
                     () -> first.appendPipeline(ENCODER, MemorySegment.ofAddress(0x3000L)));
             assertTrue(next.appendPipeline(ENCODER, MemorySegment.ofAddress(0x4000L)));
             assertEquals(0, concurrent.entryCount());
+        }
+        if (MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
+            MetalRenderStatePacketTelemetry.Snapshot after = MetalRenderStatePacketTelemetry.snapshot();
+            assertTrue(after.packetStorageReuseHits() > before.packetStorageReuseHits());
+            assertTrue(after.packetStorageAllocations() >= before.packetStorageAllocations());
         }
     }
 }
