@@ -18,6 +18,51 @@ import uuid
 import zipfile
 
 
+def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_command=None):
+    """Verify the final bounded archive after the client has exited normally."""
+    if frame_evidence_mode == "off":
+        return None
+    evidence = output / "frame-evidence.json"
+    if not evidence.is_file():
+        raise RuntimeError("Frame evidence was requested but the production client did not export frame-evidence.json")
+    raw_evidence = json.loads(evidence.read_text())
+    if raw_evidence.get("schemaVersion") != 2 or "archive" not in raw_evidence:
+        raise RuntimeError("Frame evidence did not use the required bounded archive schema")
+    if run_command is None:
+        run_command = subprocess.run
+    verification = run_command(
+        [sys.executable, str(root / "scripts/agent/verify_frame_evidence.py"), str(evidence),
+         "--expected-head", expected_head, "--require-packaged"],
+        cwd=root, capture_output=True, text=True)
+    verification_path = output / "frame-evidence-verification.json"
+    verification_path.write_text(verification.stdout)
+    if verification.returncode != 0:
+        detail = verification.stderr.strip() or verification.stdout.strip()
+        raise RuntimeError(f"Frame evidence verification failed: {detail}")
+    verification_result = json.loads(verification.stdout)
+    return {
+        "status": verification_result.get("status"),
+        "physicalPerformanceAcceptance": verification_result.get("physicalPerformanceAcceptance"),
+        "path": verification_path.name,
+    }
+
+
+def finalize_client_run(receipt, recording, client, output, root, source_sha,
+                        frame_evidence_mode, run_command=None):
+    """Close the profiler/client, then verify evidence emitted during client shutdown."""
+    if recording is not None:
+        if recording.poll() is None:
+            recording.send_signal(signal.SIGINT)
+        receipt["traceExitCode"] = recording.wait(timeout=600)
+    receipt["clientExitCode"] = client.wait(timeout=180)
+    if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
+        raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
+    if receipt.get("traceExitCode", 0) != 0:
+        raise RuntimeError("Instruments recording failed; see instruments.log")
+    receipt["frameEvidenceVerification"] = verify_frame_evidence(
+        output, frame_evidence_mode, source_sha, root, run_command)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jar", required=True, type=Path)
@@ -163,37 +208,8 @@ def main():
                     raise TimeoutError("Gameplay exceeded five minutes")
                 time.sleep(0.5)
             receipt["gameplay"] = json.loads((output / "gameplay.json").read_text())
-            if args.frame_evidence != "off":
-                evidence = output / "frame-evidence.json"
-                if not evidence.is_file():
-                    raise RuntimeError("Frame evidence was requested but the production client did not export frame-evidence.json")
-                raw_evidence = json.loads(evidence.read_text())
-                if raw_evidence.get("schemaVersion") != 2 or "archive" not in raw_evidence:
-                    raise RuntimeError("Frame evidence did not use the required bounded archive schema")
-                verification = subprocess.run(
-                    [sys.executable, str(root / "scripts/agent/verify_frame_evidence.py"), str(evidence),
-                     "--expected-head", identity["sourceSha"], "--require-packaged"],
-                    cwd=root, capture_output=True, text=True)
-                verification_path = output / "frame-evidence-verification.json"
-                verification_path.write_text(verification.stdout)
-                if verification.returncode != 0:
-                    detail = verification.stderr.strip() or verification.stdout.strip()
-                    raise RuntimeError(f"Frame evidence verification failed: {detail}")
-                verification_result = json.loads(verification.stdout)
-                receipt["frameEvidenceVerification"] = {
-                    "status": verification_result.get("status"),
-                    "physicalPerformanceAcceptance": verification_result.get("physicalPerformanceAcceptance"),
-                    "path": verification_path.name,
-                }
-            if recording is not None:
-                if recording.poll() is None:
-                    recording.send_signal(signal.SIGINT)
-                receipt["traceExitCode"] = recording.wait(timeout=600)
-            receipt["clientExitCode"] = client.wait(timeout=180)
-            if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
-                raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
-            if receipt.get("traceExitCode", 0) != 0:
-                raise RuntimeError("Instruments recording failed; see instruments.log")
+            finalize_client_run(receipt, recording, client, output, root, identity["sourceSha"],
+                                args.frame_evidence)
         except BaseException as failure:
             receipt["failure"] = str(failure)
             raise
