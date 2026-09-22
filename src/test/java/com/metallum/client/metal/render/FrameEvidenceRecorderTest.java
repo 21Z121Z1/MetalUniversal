@@ -201,6 +201,22 @@ class FrameEvidenceRecorderTest {
         assertEquals(73, frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("drawableWaitNs").getAsLong());
     }
 
+    @Test void pipelineCreationIdentityIsBoundToItsSourceFrame() {
+        recorder.beginFrame(true);
+        JsonObject signature = new JsonObject();
+        signature.addProperty("depthFormat", "Depth32Float");
+        recorder.pipelineCreation("sha256:pipeline", "minecraft:test", "attachment-variant", signature, 348_092_958L);
+        recorder.endFrame();
+
+        JsonObject event = frame(0).getAsJsonArray("pipelineCreations").get(0).getAsJsonObject();
+        assertEquals("metallum_MTLDevice_makeRenderPipelineState", event.get("nativeCall").getAsString());
+        assertEquals("sha256:pipeline", event.get("validationPipelineId").getAsString());
+        assertEquals("minecraft:test", event.get("pipelineLocation").getAsString());
+        assertEquals("attachment-variant", event.get("creationKind").getAsString());
+        assertEquals(348_092_958L, event.get("durationNs").getAsLong());
+        assertEquals("Depth32Float", event.getAsJsonObject("signature").get("depthFormat").getAsString());
+    }
+
     private JsonObject frame(int index) {
         return recorder.snapshot(new JsonObject()).getAsJsonArray("frames").get(index).getAsJsonObject();
     }

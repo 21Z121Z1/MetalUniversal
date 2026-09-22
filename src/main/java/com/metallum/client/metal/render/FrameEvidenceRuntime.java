@@ -8,6 +8,7 @@ import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.terrain.VanillaTerrainWorkTelemetry;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.systems.RenderSystem;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -20,6 +21,7 @@ import java.security.MessageDigest;
 import java.util.HexFormat;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import net.minecraft.resources.Identifier;
 
 /** Optional observer; no alternate renderer, native module, wait, or per-frame file I/O. */
 public final class FrameEvidenceRuntime {
@@ -32,6 +34,7 @@ public final class FrameEvidenceRuntime {
     private static volatile String validationStatus = "unvalidated";
     private static long sourceScopes;
     private static Object observedLevel;
+    private static final long PIPELINE_CREATION_NOT_OBSERVED = Long.MIN_VALUE;
 
     private FrameEvidenceRuntime() { }
 
@@ -116,6 +119,44 @@ public final class FrameEvidenceRuntime {
 
     public static void terrainBatchEncoded(long terrainFrameIndex) {
         if (ENABLED) RECORDER.terrainBatchEncoded(terrainFrameIndex);
+    }
+
+    /** Diagnostic-only timing around one real native render-pipeline creation. */
+    public static long pipelineCreationStart() {
+        return ENABLED && "diagnostic".equals(MODE) && RECORDER.retainingCurrentFrame()
+                ? System.nanoTime() : PIPELINE_CREATION_NOT_OBSERVED;
+    }
+
+    /**
+     * Records identity beside the existing ABI counter. Worker/startup calls are
+     * intentionally ignored by the recorder because they have no source frame.
+     */
+    public static void pipelineCreationEnd(
+            long started,
+            String validationPipelineId,
+            Identifier pipelineLocation,
+            String creationKind,
+            MTLPixelFormat[] colorFormats,
+            MTLPixelFormat depthFormat,
+            MTLPixelFormat stencilFormat,
+            int sampleCount
+    ) {
+        if (started == PIPELINE_CREATION_NOT_OBSERVED) return;
+        long durationNs = System.nanoTime() - started;
+        JsonObject signature = new JsonObject();
+        JsonArray colors = new JsonArray();
+        for (MTLPixelFormat colorFormat : colorFormats) colors.add(colorFormat.name());
+        signature.add("colorFormats", colors);
+        signature.addProperty("depthFormat", depthFormat.name());
+        signature.addProperty("stencilFormat", stencilFormat.name());
+        signature.addProperty("sampleCount", sampleCount);
+        RECORDER.pipelineCreation(
+                validationPipelineId,
+                pipelineLocation.toString(),
+                creationKind,
+                signature,
+                durationNs
+        );
     }
 
     public static FrameEvidenceRecorder.Submission commandBuffer(long submitIndex) {
