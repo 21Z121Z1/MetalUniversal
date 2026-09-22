@@ -33,7 +33,10 @@ public final class VanillaGameplay {
     private static final boolean REUSE_ENCODER_STATE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
     private static final boolean REUSE_NATIVE_ENCODER_ARGUMENTS =
             Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments");
-    private static final boolean REUSE_STATE_CANDIDATE = "reuse-encoder-state-v1".equals(OPTIMIZATION_PROFILE);
+    private static final boolean REUSE_STATE_CANDIDATE = "reuse-encoder-state-v1".equals(OPTIMIZATION_PROFILE)
+            || "reuse-encoder-state-diagnostic-v1".equals(OPTIMIZATION_PROFILE);
+    private static final boolean DIAGNOSTIC_REUSE_CANDIDATE =
+            "reuse-encoder-state-diagnostic-v1".equals(OPTIMIZATION_PROFILE);
     private static final boolean ENCODER_ARGUMENT_CANDIDATE =
             "encoder-argument-reuse-v1".equals(OPTIMIZATION_PROFILE);
     private static final boolean REUSE_CANDIDATE = REUSE_STATE_CANDIDATE || ENCODER_ARGUMENT_CANDIDATE;
@@ -551,7 +554,7 @@ public final class VanillaGameplay {
     private static JsonObject optimizationProfile() {
         JsonObject value = new JsonObject();
         value.addProperty("id", OPTIMIZATION_PROFILE);
-        value.addProperty("pairKey", STATIONARY_BASELINE ? ROUTE : null);
+        value.addProperty("pairKey", DIAGNOSTIC_REUSE_CANDIDATE ? null : STATIONARY_BASELINE ? ROUTE : null);
         value.addProperty("feature", ENCODER_ARGUMENT_CANDIDATE
                 ? "encoder-native-argument-reuse" : "encoder-cpu-state-reuse");
         value.addProperty("reuseEncoderState", REUSE_ENCODER_STATE);

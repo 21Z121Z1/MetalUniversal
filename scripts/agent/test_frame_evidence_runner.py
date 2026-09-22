@@ -204,6 +204,32 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
                 terrain_slice_cache=False, reuse_encoder_state=True,
                 reuse_native_encoder_arguments=True)
 
+    def test_jfr_only_reuse_profile_is_diagnostic_and_unpaired(self):
+        base = dict(stationary_baseline=True, frame_evidence_phase="stationary",
+                    frame_evidence="diagnostic", metrics_only=False,
+                    presentation_metrics=False, render_labels=False,
+                    terrain_slice_cache=False, reuse_encoder_state=True,
+                    reuse_native_encoder_arguments=False)
+        resolve = lambda profile, **changes: runner.resolve_optimization_profile(
+            profile, **{**base, **changes})
+        candidate = resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, jfr_only=True)
+        self.assertIsNone(candidate["pairKey"])
+        self.assertEqual(candidate["feature"], "encoder-cpu-state-reuse")
+        self.assertTrue(candidate["candidate"])
+        with self.assertRaisesRegex(ValueError, "requires reuse-encoder-state-diagnostic-v1"):
+            resolve(runner.OPTIMIZATION_PROFILE_BASELINE, reuse_encoder_state=False, jfr_only=True)
+        with self.assertRaisesRegex(ValueError, "requires reuse-encoder-state-diagnostic-v1"):
+            resolve(runner.OPTIMIZATION_PROFILE_REUSE, frame_evidence="timing", jfr_only=True)
+        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
+            resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, jfr_only=False)
+        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
+            resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, metrics_only=True, jfr_only=True)
+        with self.assertRaisesRegex(ValueError, "jfr-only diagnostic"):
+            resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE, frame_evidence="timing", jfr_only=True)
+        with self.assertRaisesRegex(ValueError, "other diagnostic or optimization"):
+            resolve(runner.OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
+                    reuse_native_encoder_arguments=True, jfr_only=True)
+
     def test_candidate_requires_runtime_activation_evidence(self):
         expected = runner.resolve_optimization_profile(
             runner.OPTIMIZATION_PROFILE_REUSE,
@@ -220,6 +246,33 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         receipt["gameplay"]["optimizationActivation"]["active"] = False
         with self.assertRaisesRegex(RuntimeError, "did not report active"):
             runner.verify_gameplay_optimization(receipt, expected)
+
+    def test_jfr_only_requires_and_records_nonempty_jfr(self):
+        archive = self.archive_fixture(mode="diagnostic")
+        def diagnostic_verifier(command, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=json.dumps({
+                "status": "valid-observation",
+                "physicalPerformanceAcceptance": "unverified",
+                "instrumentationMode": "diagnostic",
+            }), stderr="")
+
+        with self.assertRaisesRegex(RuntimeError, "non-empty gameplay.jfr"):
+            runner.finalize_client_run(
+                {"gameplay": {"status": "completed"}}, None,
+                DeferredClient(self.output, archive), self.output, self.root,
+                self.identity, "diagnostic", diagnostic_verifier,
+                expected_trial_id="trial-A", expected_phase="stationary",
+                expected_warmup_seconds=5, expected_sample_seconds=10,
+                jfr_only=True)
+        (self.output / "gameplay.jfr").write_bytes(b"jfr")
+        receipt = {"gameplay": {"status": "completed"}}
+        runner.finalize_client_run(
+            receipt, None, DeferredClient(self.output, archive), self.output, self.root,
+            self.identity, "diagnostic", diagnostic_verifier,
+            expected_trial_id="trial-A", expected_phase="stationary",
+            expected_warmup_seconds=5, expected_sample_seconds=10,
+            jfr_only=True)
+        self.assertEqual(receipt["jfr"], {"path": "gameplay.jfr", "bytes": 3})
 
     def test_completed_archive_must_repeat_gameplay_optimization_profile(self):
         expected = runner.resolve_optimization_profile(

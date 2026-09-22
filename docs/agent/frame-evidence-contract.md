@@ -441,6 +441,14 @@ reuse hits from the candidate. These counters are cumulative from client startup
 through gameplay completion, not a sample-window cost. This proves route
 activation, not comparable performance or physical acceptance.
 
+`--optimization-profile reuse-encoder-state-diagnostic-v1 --reuse-encoder-state --jfr-only` is a separate
+stationary diagnostic profile for Java wait/stack diagnosis. It uses `diagnostic`
+frame evidence with JFR and no Xcode trace; its `pairKey` is null, so it is not a
+timing pair. Its archive may be structurally valid or `comparison-ready`, but JFR
+overhead and diagnostic instrumentation keep it outside timing, performance and
+promotion decisions. The existing reuse-encoder-state timing contract remains
+metrics-only and unchanged.
+
 The initial JFR flight profile identified state-shadow arrays and indexed-binding
 list iterators as allocation hot spots. Reusing stable objects follows Apple's
 [persistent objects guidance](https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/PersistentObjects.html).

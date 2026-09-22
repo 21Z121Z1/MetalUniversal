@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record the existing Fabric production client with Xcode's Game Performance template.
+"""Record the existing Fabric production client with Xcode or a JFR-only diagnostic.
 
 No verdict is inferred from profiler output. Gameplay reports and raw Instruments
 data remain separate from render correctness and controlled performance acceptance.
@@ -30,10 +30,12 @@ DEFAULT_GAMEPLAY_TIMEOUT_SECONDS = 300
 MAX_GAMEPLAY_TIMEOUT_SECONDS = MAX_WINDOW_SECONDS + GAMEPLAY_TIMEOUT_MARGIN_SECONDS
 OPTIMIZATION_PROFILE_BASELINE = "baseline-v1"
 OPTIMIZATION_PROFILE_REUSE = "reuse-encoder-state-v1"
+OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE = "reuse-encoder-state-diagnostic-v1"
 OPTIMIZATION_PROFILE_ARGUMENT_REUSE = "encoder-argument-reuse-v1"
 OPTIMIZATION_FEATURE = "encoder-cpu-state-reuse"
 OPTIMIZATION_ARGUMENT_FEATURE = "encoder-native-argument-reuse"
 OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE,
+                                OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
                                 OPTIMIZATION_PROFILE_ARGUMENT_REUSE)
 TRACE_PRESENT_SCHEMAS = ("ca-client-present-request", "ca-client-presented-handler")
 TRACE_PRESENT_XPATH = ('/trace-toc/run[@number="1"]/data/table['
@@ -405,10 +407,12 @@ def export_trace_artifacts(output, receipt, run_command=None):
 def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence_phase,
                                  frame_evidence, metrics_only, presentation_metrics,
                                  render_labels, terrain_slice_cache, reuse_encoder_state,
-                                 reuse_native_encoder_arguments=False):
+                                 reuse_native_encoder_arguments=False, jfr_only=False):
     """Resolve the explicit paired profile and reject an unpaired reuse request."""
     if profile not in OPTIMIZATION_PROFILE_CHOICES:
         raise ValueError(f"optimization profile must be one of {', '.join(OPTIMIZATION_PROFILE_CHOICES)}")
+    if jfr_only and profile != OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE:
+        raise ValueError("--jfr-only requires reuse-encoder-state-diagnostic-v1")
     if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_encoder_state:
         raise ValueError("--reuse-encoder-state requires --optimization-profile reuse-encoder-state-v1")
     if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_native_encoder_arguments:
@@ -424,6 +428,15 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
             raise ValueError("reuse-encoder-state-v1 excludes diagnostic getters and terrain cache experiments")
         if reuse_native_encoder_arguments:
             raise ValueError("reuse-encoder-state-v1 cannot enable native encoder argument reuse")
+    if profile == OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE:
+        if not reuse_encoder_state:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --reuse-encoder-state")
+        if not stationary_baseline:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --stationary-baseline")
+        if frame_evidence_phase != "stationary" or frame_evidence != "diagnostic" or metrics_only or not jfr_only:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 requires --jfr-only diagnostic mode")
+        if presentation_metrics or render_labels or terrain_slice_cache or reuse_native_encoder_arguments:
+            raise ValueError("reuse-encoder-state-diagnostic-v1 excludes other diagnostic or optimization flags")
     if profile == OPTIMIZATION_PROFILE_ARGUMENT_REUSE:
         if not reuse_native_encoder_arguments:
             raise ValueError("encoder-argument-reuse-v1 requires --reuse-native-encoder-arguments")
@@ -440,11 +453,12 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
                else OPTIMIZATION_FEATURE)
     return {
         "id": profile,
-        "pairKey": route if stationary_baseline else None,
+        "pairKey": None if profile == OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE else route if stationary_baseline else None,
         "feature": feature,
         "reuseEncoderState": bool(reuse_encoder_state),
         "reuseNativeEncoderArguments": bool(reuse_native_encoder_arguments),
-        "candidate": profile in (OPTIMIZATION_PROFILE_REUSE, OPTIMIZATION_PROFILE_ARGUMENT_REUSE),
+        "candidate": profile in (OPTIMIZATION_PROFILE_REUSE, OPTIMIZATION_PROFILE_DIAGNOSTIC_REUSE,
+                                  OPTIMIZATION_PROFILE_ARGUMENT_REUSE),
     }
 
 
@@ -591,7 +605,8 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
 def finalize_client_run(receipt, recording, client, output, root, source_sha,
                         frame_evidence_mode, run_command=None, *, expected_trial_id=None,
                         expected_phase=None, expected_warmup_seconds=None,
-                        expected_sample_seconds=None, expected_optimization_profile=None):
+                        expected_sample_seconds=None, expected_optimization_profile=None,
+                        jfr_only=False):
     """Close the profiler/client, then verify evidence emitted during client shutdown."""
     if recording is not None:
         if recording.poll() is None:
@@ -600,6 +615,11 @@ def finalize_client_run(receipt, recording, client, output, root, source_sha,
     receipt["clientExitCode"] = client.wait(timeout=180)
     if receipt["gameplay"]["status"] != "completed" or receipt["clientExitCode"] != 0:
         raise RuntimeError("Gameplay/client failed; recorded trace is diagnostic only")
+    if jfr_only:
+        jfr = output / "gameplay.jfr"
+        if not jfr.is_file() or jfr.stat().st_size == 0:
+            raise RuntimeError("JFR-only diagnostic did not produce a non-empty gameplay.jfr")
+        receipt["jfr"] = {"path": jfr.name, "bytes": jfr.stat().st_size}
     if receipt.get("traceExitCode", 0) != 0:
         raise RuntimeError("Instruments recording failed; see instruments.log")
     receipt["frameEvidenceVerification"] = verify_frame_evidence(
@@ -630,6 +650,8 @@ def main():
                         help="Stable identity for this trial; defaults to the output directory name")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Run the identical route without Instruments/JFR, retaining source-frame metrics")
+    parser.add_argument("--jfr-only", action="store_true",
+                        help="Run the diagnostic reuse profile with JFR and without an Xcode trace")
     parser.add_argument("--capture-seconds", type=int, default=120,
                         help="Instruments clip length; short clips avoid losing early GPU events in long traces")
     parser.add_argument("--render-labels", action="store_true",
@@ -654,6 +676,10 @@ def main():
         parser.error("timing frame evidence requires --metrics-only and no diagnostic presentation metrics or render labels")
     if args.metrics_only and args.render_labels:
         parser.error("render labels are diagnostic-only; omit them for timing trials")
+    if args.metrics_only and args.jfr_only:
+        parser.error("--metrics-only and --jfr-only are mutually exclusive")
+    if args.jfr_only and args.frame_evidence != "diagnostic":
+        parser.error("--jfr-only requires diagnostic frame evidence")
     if args.verify_terrain_cache and not args.terrain_slice_cache:
         parser.error("--verify-terrain-cache requires --terrain-slice-cache")
     if args.stationary_baseline and args.initial_world is None:
@@ -669,12 +695,14 @@ def main():
             render_labels=args.render_labels,
             terrain_slice_cache=args.terrain_slice_cache,
             reuse_encoder_state=args.reuse_encoder_state,
-            reuse_native_encoder_arguments=args.reuse_native_encoder_arguments)
+            reuse_native_encoder_arguments=args.reuse_native_encoder_arguments,
+            jfr_only=args.jfr_only)
     except ValueError as failure:
         parser.error(str(failure))
-    if args.stationary_baseline and (args.frame_evidence == "diagnostic" or args.frame_evidence_phase != "stationary" or not args.metrics_only
+    if args.stationary_baseline and ((args.frame_evidence == "diagnostic" and not args.jfr_only)
+            or args.frame_evidence_phase != "stationary" or (not args.metrics_only and not args.jfr_only)
             or args.presentation_metrics or args.terrain_slice_cache):
-        parser.error("stationary baseline requires stationary metrics-only without diagnostic getters or optimization experiments")
+        parser.error("stationary baseline requires stationary metrics-only or the explicit JFR-only diagnostic profile")
     try:
         window_seconds = validate_window(args.frame_evidence_warmup_seconds,
                                          args.frame_evidence_sample_seconds,
@@ -715,7 +743,7 @@ def main():
                f"-PframeEvidenceWarmupSeconds={args.frame_evidence_warmup_seconds}",
                f"-PframeEvidenceSampleSeconds={args.frame_evidence_sample_seconds}",
                f"-PframeEvidenceTrialId={trial_id}",
-               f"-PwaitForProfiler={str(not args.metrics_only).lower()}",
+               f"-PwaitForProfiler={str(not args.metrics_only and not args.jfr_only).lower()}",
                f"-PgameplayJfr={str(not args.metrics_only).lower()}",
                f"-PrenderDebugLabels={str(args.render_labels).lower()}",
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
@@ -739,9 +767,11 @@ def main():
         raise RuntimeError("Cannot register Instruments recording notification")
     changed = ctypes.c_int()
     notify.notify_check(token, ctypes.byref(changed))
-    receipt = {"source": identity, "clientCommand": command, "template": None if args.metrics_only else args.template,
+    receipt = {"source": identity, "clientCommand": command,
+               "template": None if args.metrics_only or args.jfr_only else args.template,
                "profilingEnabled": not args.metrics_only,
-               "captureSeconds": None if args.metrics_only else args.capture_seconds,
+               "jfrOnly": args.jfr_only,
+               "captureSeconds": None if args.metrics_only or args.jfr_only else args.capture_seconds,
                "renderDebugLabels": args.render_labels,
                "presentationMetrics": args.presentation_metrics,
                "frameEvidenceMode": args.frame_evidence,
@@ -755,7 +785,10 @@ def main():
                "initialWorld": initial_world,
                "frameEvidenceVerification": None,
                "traceCoverage": None,
-               "frameEvidenceProfile": "vanilla-stationary-60-v1" if args.stationary_baseline else f"vanilla-normal-{args.frame_evidence_phase}-v1",
+               "frameEvidenceProfile": ("vanilla-stationary-60-diagnostic-v1"
+                                         if args.jfr_only and args.stationary_baseline
+                                         else "vanilla-stationary-60-v1" if args.stationary_baseline
+                                         else f"vanilla-normal-{args.frame_evidence_phase}-v1"),
                "optimizationProfile": optimization_profile,
                "warmupNanos": args.frame_evidence_warmup_seconds * 1_000_000_000,
                "sampleNanos": args.frame_evidence_sample_seconds * 1_000_000_000,
@@ -778,7 +811,7 @@ def main():
                     raise TimeoutError("Client did not reach gameplay readiness within 10 minutes")
                 time.sleep(0.5)
             pid = json.loads(ready.read_text())["pid"]
-            if not args.metrics_only:
+            if not args.metrics_only and not args.jfr_only:
                 trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
                                  "--attach", str(pid), "--output", str(output / "gameplay.trace"),
                                  "--time-limit", f"{args.capture_seconds}s",
@@ -812,7 +845,8 @@ def main():
                                 expected_phase=args.frame_evidence_phase,
                                 expected_warmup_seconds=args.frame_evidence_warmup_seconds,
                                 expected_sample_seconds=args.frame_evidence_sample_seconds,
-                                expected_optimization_profile=optimization_profile)
+                                expected_optimization_profile=optimization_profile,
+                                jfr_only=args.jfr_only)
         except BaseException as failure:
             receipt["failure"] = str(failure)
             raise
@@ -827,7 +861,7 @@ def main():
                 os.killpg(client.pid, signal.SIGTERM)
             notify.notify_cancel(token)
             (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    if not args.metrics_only:
+    if not args.metrics_only and not args.jfr_only:
         try:
             export_trace_artifacts(output, receipt)
         except BaseException:
@@ -840,7 +874,7 @@ def main():
             "authority": "diagnostic trace coverage only; frame archive and performance conclusions remain separate",
             "status": "unavailable",
             "continuousCoverage": False,
-            "reason": "profiling-disabled",
+            "reason": "profiling-disabled" if args.metrics_only else "jfr-only-no-xcode-trace",
         }
     (output / "recording.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "recording.json")
