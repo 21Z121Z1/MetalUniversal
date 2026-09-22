@@ -1,7 +1,6 @@
 package com.metallum.e2e;
 
 import com.google.gson.JsonObject;
-import com.metallum.e2e.mixin.StationaryDispatcherActivityAccess;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;

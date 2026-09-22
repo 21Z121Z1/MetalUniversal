@@ -3,6 +3,7 @@ package com.metallum.e2e.mixin;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.metallum.e2e.StationaryTaskActivity;
+import com.metallum.e2e.StationaryDispatcherActivityAccess;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
