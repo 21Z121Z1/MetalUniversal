@@ -6,6 +6,8 @@ on:
     paths: [.github/workflows/convergence-audit.yml]
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 jobs:
   inventory:
     runs-on: ubuntu-latest
@@ -19,6 +21,8 @@ jobs:
         shell: bash
         env:
           BASE_SHA: 969bf537d4ffd2b99a75f71f17e40fa2b58fd42c
+          START_SHA: de78dd9db9bf01baee16de4a3ed0141f521eb0d4
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git fetch origin '+refs/heads/*:refs/remotes/origin/*' --tags
@@ -27,6 +31,9 @@ jobs:
           git ls-remote --heads origin > "$AUDIT_DIR/remote-heads.tsv"
           git bundle create "$AUDIT_DIR/source.bundle" --all
           git bundle verify "$AUDIT_DIR/source.bundle"
+          gh api "repos/$GITHUB_REPOSITORY" > "$AUDIT_DIR/repository.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls?state=all&per_page=100" > "$AUDIT_DIR/pull-requests.pages.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" > "$AUDIT_DIR/recent-actions.json"
           python3 - <<'PY'
           import hashlib, json, os, pathlib, subprocess
           root = pathlib.Path(os.environ['AUDIT_DIR'])
@@ -63,6 +70,7 @@ jobs:
                        'deletion_eligibility': False}
               branches.append(entry)
           (root / 'inventory.json').write_text(json.dumps({'schema_version': 1, 'base_sha': base,
+              'task_start_sha': os.environ['START_SHA'],
               'workflow_commit': git('rev-parse', 'HEAD').decode().strip(), 'branches': branches}, indent=2) + '\n')
           (root / 'dag.txt').write_bytes(git('log', '--all', '--graph', '--decorate', '--format=%h %d %s'))
           print(f'Captured {len(branches)} branches. All remain UNCLASSIFIED; no deletion or semantic acceptance is inferred.')
