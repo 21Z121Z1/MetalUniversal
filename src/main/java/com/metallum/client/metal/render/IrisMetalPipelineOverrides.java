@@ -1361,7 +1361,7 @@ public final class IrisMetalPipelineOverrides {
                         "[metallum-iris] compiling terrain override {} for {} via {}",
                         kind, pipeline.getLocation(), compilePipeline.getLocation()
                 );
-                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(compilePipeline, source);
+                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(compilePipeline, source, program.hasRasterStorage());
                 if (!(compiledPipeline instanceof MetalCompiledRenderPipeline compiled)) {
                     throw new IllegalStateException("Terrain override did not produce a Metal pipeline");
                 }
@@ -1407,7 +1407,7 @@ public final class IrisMetalPipelineOverrides {
                         "[metallum-iris] compiling core override {} via {}",
                         key, pipeline.getLocation()
                 );
-                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(pipeline, source);
+                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(pipeline, source, program.hasRasterStorage());
                 if (!(compiledPipeline instanceof MetalCompiledRenderPipeline compiled)) {
                     throw new IllegalStateException("Core override did not produce a Metal pipeline");
                 }

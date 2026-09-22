@@ -355,7 +355,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                         pass, this::buildCompositePipeline
                 );
                 ShaderSource source = MetalShaderSourceAdapters.overlay(this.generatedSources, fallback);
-                CompiledRenderPipeline compiled = device.precompilePipeline(pipeline, source);
+                CompiledRenderPipeline compiled = device.precompilePipeline(pipeline, source, translatedComposite(pass).hasRasterStorage());
                 if (!device.asyncPrewarmEnabled()
                         && compiled instanceof MetalCompiledRenderPipeline metal
                         && !metal.isValid()) {

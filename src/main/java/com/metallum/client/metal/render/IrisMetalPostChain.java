@@ -820,7 +820,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 if (pass.pipeline == null) {
                     pass.pipeline = buildPipeline(pass, targets, resources);
                 }
-                verifyPrecompile(device, device.precompilePipeline(pass.pipeline, source), pass.info.name());
+                verifyPrecompile(device, device.precompilePipeline(pass.pipeline, source, pass.program.hasRasterStorage()), pass.info.name());
             }
         }
         if (this.finalPass != null) {
@@ -829,7 +829,7 @@ final class IrisMetalPostChain implements AutoCloseable {
             }
             verifyPrecompile(
                     device,
-                    device.precompilePipeline(this.finalPass.pipeline, source),
+                    device.precompilePipeline(this.finalPass.pipeline, source, this.finalPass.program.hasRasterStorage()),
                     this.finalPass.name
             );
         }
@@ -846,7 +846,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 }
                 verifyPrecompile(
                         device,
-                        device.precompilePipeline(pass.pipeline, source),
+                        device.precompilePipeline(pass.pipeline, source, pass.program.hasRasterStorage()),
                         pass.info.name()
                 );
             }
@@ -1783,7 +1783,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                                     + "' has no typed format binding"
                     );
                 }
-                bindings.withUniform(sampler.name(), UniformType.UNIFORM_BUFFER, format);
+                bindings.withUniform(sampler.name(), UniformType.TEXEL_BUFFER, format);
                 continue;
             }
             bindings.withUniform(sampler.name(), UniformType.COMBINED_IMAGE_SAMPLER);

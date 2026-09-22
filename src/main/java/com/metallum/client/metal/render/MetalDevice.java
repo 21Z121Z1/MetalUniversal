@@ -81,6 +81,7 @@ final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private ShaderSource activeShaderSource;
     private final PipelineBuilder pipelineBuilder;
+    private StorageRasterPipelineCompiler rasterStorageCompiler;
     private int pendingExtraTextureUsage;
     private static final boolean PSO_ARCHIVE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.psoArchive", "true"));
@@ -645,6 +646,12 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
+        return precompilePipeline(pipeline, shaderSource, false);
+    }
+
+    /** Storage is an explicit adapter admission, never inferred from a pipeline name or optional-mod presence. */
+    @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline,
+            @Nullable final ShaderSource shaderSource, final boolean rasterStorage) {
         if (this.closed) throw new IllegalStateException("Metal device is closed");
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
         if (effectiveSource == null) {
@@ -667,8 +674,13 @@ final class MetalDevice implements GpuDeviceBackend {
             this.activeShaderSource = effectiveSource;
             CompiledRenderPipeline frontend;
             try {
-                frontend = this.pipelineBuilder.compilePipeline(pipeline, effectiveSource, Runnable::run)
-                        .join().finishCompile();
+                if (rasterStorage) {
+                    if (this.rasterStorageCompiler == null) this.rasterStorageCompiler = new StorageRasterPipelineCompiler(this);
+                    frontend = this.rasterStorageCompiler.compile(pipeline, effectiveSource);
+                } else {
+                    frontend = this.pipelineBuilder.compilePipeline(pipeline, effectiveSource, Runnable::run)
+                            .join().finishCompile();
+                }
             } catch (java.util.concurrent.CompletionException failure) {
                 // This helper is synchronous even when backend work finishes in
                 // RenderPearl's preparation stage. Preserve its original error contract.
@@ -773,6 +785,7 @@ final class MetalDevice implements GpuDeviceBackend {
         }
         this.clearPipelineCache();
         this.pipelineBuilder.close();
+        if (this.rasterStorageCompiler != null) this.rasterStorageCompiler.close();
         this.drainBufferPool();
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
