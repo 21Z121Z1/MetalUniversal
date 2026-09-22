@@ -10,7 +10,8 @@ NAMES = {"Minecraft.java", "Window.java", "RenderSystem.java", "Timer.java", "De
          "FramerateLimitTracker.java", "SdlWindow.java", "SDLWindow.java",
          "PipelineBuilder.java", "SpvModule.java", "BindGroupLayout.java", "UniformType.java",
          "BackendRenderPipeline.java", "FrontendRenderPipeline.java", "ShaderCompiler.java",
-         "ShaderSource.java", "RenderPipeline.java", "GpuBackend.java"}
+         "ShaderSource.java", "RenderPipeline.java", "GpuBackend.java", "GlslCompiler.java",
+         "SpvUtil.java", "SpvReflection.java", "ShadercSpvModule.java"}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
