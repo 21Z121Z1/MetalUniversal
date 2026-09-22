@@ -75,7 +75,7 @@ jobs:
           (root / 'dag.txt').write_bytes(git('log', '--all', '--graph', '--decorate', '--format=%h %d %s'))
           print(f'Captured {len(branches)} branches. All remain UNCLASSIFIED; no deletion or semantic acceptance is inferred.')
           PY
-      - uses: actions/upload-artifact@043fb46d1a93c77ae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: convergence-audit-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/convergence-audit/
