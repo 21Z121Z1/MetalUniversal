@@ -17,6 +17,7 @@ import java.util.function.LongSupplier;
 
 /** Bounded, opt-in observations. Frame IDs are diagnostic joins, never render semantics. */
 public final class FrameEvidenceRecorder {
+    private static final int MAX_PIPELINE_CREATION_EVENTS = 64;
     private static final String[] NATIVE_COUNTER_NAMES = {
             "renderEncoders", "computeEncoders", "blitEncoders", "directDraws", "indirectDraws"
     };
@@ -229,6 +230,37 @@ public final class FrameEvidenceRecorder {
     public void producer(String producer) {
         Frame frame = current.get();
         if (frame != null && frame.retained && !frame.exported) frame.producers.add(producer);
+    }
+
+    /**
+     * Binds a diagnostic pipeline creation to the source frame that issued it.
+     * The native ABI counter remains authoritative for aggregate timing; this
+     * bounded row only supplies the pipeline identity and attachment signature.
+     */
+    public void pipelineCreation(
+            String validationPipelineId,
+            String creationKind,
+            JsonObject signature,
+            long durationNs
+    ) {
+        Frame frame = current.get();
+        if (frame == null || !frame.retained || frame.exported) return;
+        if (durationNs < 0 || validationPipelineId == null || creationKind == null || signature == null) {
+            frame.failure = "invalid-pipeline-creation-evidence";
+            return;
+        }
+        if (frame.pipelineCreations != null && frame.pipelineCreations.size() >= MAX_PIPELINE_CREATION_EVENTS) {
+            frame.failure = "pipeline-creation-evidence-overflow";
+            return;
+        }
+        if (frame.pipelineCreations == null) frame.pipelineCreations = new ArrayList<>(1);
+        JsonObject event = new JsonObject();
+        event.addProperty("nativeCall", "metallum_MTLDevice_makeRenderPipelineState");
+        event.addProperty("validationPipelineId", validationPipelineId);
+        event.addProperty("creationKind", creationKind);
+        event.add("signature", signature.deepCopy());
+        event.addProperty("durationNs", durationNs);
+        frame.pipelineCreations.add(event);
     }
 
     /** Joins the terrain recorder's existing batch index to this source frame, never by time. */
@@ -496,6 +528,11 @@ public final class FrameEvidenceRecorder {
             JsonArray terrainBatches = new JsonArray();
             frame.terrainBatchIndices.forEach(terrainBatches::add);
             row.add("terrainBatchIndices", terrainBatches);
+            JsonArray pipelineCreations = new JsonArray();
+            if (frame.pipelineCreations != null) {
+                frame.pipelineCreations.forEach(event -> pipelineCreations.add(event.deepCopy()));
+            }
+            row.add("pipelineCreations", pipelineCreations);
             JsonObject abi = new JsonObject();
             frame.abi.forEach((symbol, counter) -> {
                 JsonObject value = new JsonObject();
@@ -560,6 +597,7 @@ public final class FrameEvidenceRecorder {
         final Map<String, Counter> abi;
         final LinkedHashSet<String> producers;
         final LinkedHashSet<Long> terrainBatchIndices;
+        List<JsonObject> pipelineCreations;
         final List<Submission> submissions;
         final long[] started;
         final long[] children;
@@ -578,6 +616,7 @@ public final class FrameEvidenceRecorder {
             abi = retained ? new LinkedHashMap<>() : null;
             producers = retained ? new LinkedHashSet<>() : null;
             terrainBatchIndices = retained ? new LinkedHashSet<>() : null;
+            pipelineCreations = null;
             submissions = retained ? new ArrayList<>() : null;
             started = retained ? new long[32] : null;
             children = retained ? new long[32] : null;

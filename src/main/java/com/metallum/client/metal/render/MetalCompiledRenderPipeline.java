@@ -33,6 +33,8 @@ import java.util.Set;
 @Environment(EnvType.CLIENT)
 final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, BackendRenderPipeline, AutoCloseable {
     static final int MAX_METAL_VERTEX_SLOTS = 31;
+    private static final String BASE_EAGER_CREATION = "base-eager";
+    private static final String ATTACHMENT_VARIANT_CREATION = "attachment-variant";
 
     private static final Identifier SODIUM_TERRAIN_VERTEX_SHADER =
             Identifier.fromNamespaceAndPath("sodium", "blocks/block_layer_opaque");
@@ -274,7 +276,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
-                        formats.stencilFormat()
+                        formats.stencilFormat(),
+                        this.validationPipelineId,
+                        BASE_EAGER_CREATION
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
                     states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), NativePipeline.of(pipeline));
@@ -408,7 +412,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                         vertexDescriptor,
                         this.colorFormats,
                         depthFormat,
-                        stencilFormat
+                        stencilFormat,
+                        this.validationPipelineId,
+                        ATTACHMENT_VARIANT_CREATION
                 );
             }
             if (MetalNativeBridge.isNullHandle(pipeline)) {
@@ -486,7 +492,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat[] colorFormats,
             final MTLPixelFormat depthFormat,
-            final MTLPixelFormat stencilFormat
+            final MTLPixelFormat stencilFormat,
+            final String validationPipelineId,
+            final String creationKind
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
@@ -530,10 +538,23 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 pipelineDesc.setSupportIndirectCommandBuffers(true);
             }
 
-            return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
-                    device.metalDeviceHandle(),
-                    pipelineDesc.handle()
-            );
+            long started = FrameEvidenceRuntime.pipelineCreationStart();
+            try {
+                return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
+                        device.metalDeviceHandle(),
+                        pipelineDesc.handle()
+                );
+            } finally {
+                FrameEvidenceRuntime.pipelineCreationEnd(
+                        started,
+                        validationPipelineId,
+                        creationKind,
+                        colorFormats,
+                        depthFormat,
+                        stencilFormat,
+                        1
+                );
+            }
         }
     }
 
