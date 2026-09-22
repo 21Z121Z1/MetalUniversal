@@ -21,6 +21,7 @@ import java.security.MessageDigest;
 import java.util.HexFormat;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import net.minecraft.resources.Identifier;
 
 /** Optional observer; no alternate renderer, native module, wait, or per-frame file I/O. */
 public final class FrameEvidenceRuntime {
@@ -122,7 +123,8 @@ public final class FrameEvidenceRuntime {
 
     /** Diagnostic-only timing around one real native render-pipeline creation. */
     public static long pipelineCreationStart() {
-        return ENABLED && "diagnostic".equals(MODE) ? System.nanoTime() : PIPELINE_CREATION_NOT_OBSERVED;
+        return ENABLED && "diagnostic".equals(MODE) && RECORDER.retainingCurrentFrame()
+                ? System.nanoTime() : PIPELINE_CREATION_NOT_OBSERVED;
     }
 
     /**
@@ -132,6 +134,7 @@ public final class FrameEvidenceRuntime {
     public static void pipelineCreationEnd(
             long started,
             String validationPipelineId,
+            Identifier pipelineLocation,
             String creationKind,
             MTLPixelFormat[] colorFormats,
             MTLPixelFormat depthFormat,
@@ -149,6 +152,7 @@ public final class FrameEvidenceRuntime {
         signature.addProperty("sampleCount", sampleCount);
         RECORDER.pipelineCreation(
                 validationPipelineId,
+                pipelineLocation.toString(),
                 creationKind,
                 signature,
                 durationNs

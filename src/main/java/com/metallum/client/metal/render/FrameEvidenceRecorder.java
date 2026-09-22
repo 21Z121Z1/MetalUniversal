@@ -239,13 +239,15 @@ public final class FrameEvidenceRecorder {
      */
     public void pipelineCreation(
             String validationPipelineId,
+            String pipelineLocation,
             String creationKind,
             JsonObject signature,
             long durationNs
     ) {
         Frame frame = current.get();
         if (frame == null || !frame.retained || frame.exported) return;
-        if (durationNs < 0 || validationPipelineId == null || creationKind == null || signature == null) {
+        if (durationNs < 0 || validationPipelineId == null || pipelineLocation == null
+                || creationKind == null || signature == null) {
             frame.failure = "invalid-pipeline-creation-evidence";
             return;
         }
@@ -257,6 +259,7 @@ public final class FrameEvidenceRecorder {
         JsonObject event = new JsonObject();
         event.addProperty("nativeCall", "metallum_MTLDevice_makeRenderPipelineState");
         event.addProperty("validationPipelineId", validationPipelineId);
+        event.addProperty("pipelineLocation", pipelineLocation);
         event.addProperty("creationKind", creationKind);
         event.add("signature", signature.deepCopy());
         event.addProperty("durationNs", durationNs);

@@ -548,6 +548,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 FrameEvidenceRuntime.pipelineCreationEnd(
                         started,
                         validationPipelineId,
+                        info.getLocation(),
                         creationKind,
                         colorFormats,
                         depthFormat,
