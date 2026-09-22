@@ -1,5 +1,5 @@
 # Temporary convergence machinery. Remove before final main acceptance.
-# This job creates Git objects only; it never moves or deletes any branch.
+# This job prepares content blobs only; publication uses the connected GitHub app.
 name: Convergence edit
 on:
   push:
@@ -16,14 +16,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare exact reviewed candidate without updating refs
+      - name: Prepare exact reviewed blobs without updating refs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request, urllib.error
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
@@ -35,8 +35,12 @@ jobs:
                   headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
                            'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10'},
                   method='GET' if data is None else 'POST')
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  return json.load(response)
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  print('GitHub API failure:', request.method, path, error.code, error.read().decode())
+                  raise
           parent = git('rev-parse', 'HEAD').decode().strip()
           base = 'c81adfba4a6ef0e1a06f9f2230c8112f902b07b4'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
@@ -71,21 +75,16 @@ jobs:
               raise RuntimeError('Unexpected patch paths: ' + repr(paths))
           entries = []
           for path in paths:
-              entry = {'path': path, 'mode': '100644', 'type': 'blob'}
-              if (root / path).exists():
-                  mode = git('ls-files', '--stage', '--', path).decode().split()[0]
-                  if mode != '100644':
-                      raise RuntimeError('Unexpected file mode')
-                  entry['content'] = (root / path).read_text()
-              else:
-                  entry['sha'] = None
-              entries.append(entry)
-          tree = api('/git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries})
-          if tree['sha'] != git('write-tree').decode().strip():
-              raise RuntimeError('Remote tree differs from reviewed local tree')
-          commit = api('/git/commits', {'message': 'fix(ci): require JVM PSO and hosted GPU smoke without HUD confounding\n\nSame-binary controls at c81adfba (Actions 35791555328, artifact 10722441692) pass all cold/native/JVM sequences with HUD disabled and fail all three Java controls with HUD enabled. Do not misclassify an optional-overlay failure as an unsupported background-thread ABI. Require probe exit status and both native markers, remove environment-blocked test exclusions, keep all hosted GPU suites mandatory, preserve dedicated native HUD tests and Metal validation settings, and retain JVM crash artifacts. Local shell negative controls pass; Gradle validation remains for Actions.', 'tree': tree['sha'], 'parents': [parent]})
-          result = {'parent_sha': parent, 'candidate_sha': commit['sha'], 'candidate_tree': tree['sha'],
-              'patch_sha256': digest, 'changed_paths': paths, 'refs_updated': False, 'tests_claimed': False}
+              mode, expected_sha = git('ls-files', '--stage', '--', path).decode().split()[:2]
+              if mode != '100644':
+                  raise RuntimeError('Unexpected file mode')
+              blob = api('/git/blobs', {'content': (root / path).read_text(), 'encoding': 'utf-8'})
+              if blob['sha'] != expected_sha:
+                  raise RuntimeError('Prepared blob differs from reviewed content')
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': blob['sha']})
+          result = {'parent_sha': parent, 'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+              'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest,
+              'entries': entries, 'refs_updated': False, 'tests_claimed': False}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
