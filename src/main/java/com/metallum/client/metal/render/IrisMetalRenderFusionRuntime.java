@@ -101,7 +101,7 @@ public final class IrisMetalRenderFusionRuntime {
     }
 
     private static boolean enabled() {
-        return IrisMetalOptimizationPlan.ENABLE_PASS_FUSION;
+        return IrisMetalAdvancedOptimizationConfig.RENDER_PASS_FUSION;
     }
 
     private static boolean mayFuse(final PassAccess previous, final PassAccess current) {

@@ -288,13 +288,13 @@ final class IrisMetalExperimentalOptimizer {
     static String toJson(final IrisMetalOptimizationPlan plan) {
         StringBuilder out = new StringBuilder(4096);
         out.append("{\n");
-        appendFlag(out, "passFusion", IrisMetalOptimizationPlan.ENABLE_PASS_FUSION, true);
-        appendFlag(out, "loadStoreLiveness", IrisMetalOptimizationPlan.ENABLE_LOAD_STORE, true);
-        appendFlag(out, "computeGrouping", IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING, true);
-        appendFlag(out, "resourcePruning", IrisMetalOptimizationPlan.ENABLE_RESOURCE_PRUNING, true);
-        appendFlag(out, "finalColorFusion", IrisMetalOptimizationPlan.ENABLE_FINAL_COLOR_FUSION, true);
-        appendFlag(out, "argumentTables", IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES, true);
-        appendFlag(out, "icb", IrisMetalOptimizationPlan.ENABLE_ICB, true);
+        appendFlag(out, "passFusion", IrisMetalAdvancedOptimizationConfig.RENDER_PASS_FUSION, true);
+        appendFlag(out, "loadStoreLiveness", IrisMetalAdvancedOptimizationConfig.ATTACHMENT_LIVENESS, true);
+        appendFlag(out, "computeGrouping", IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING, true);
+        appendFlag(out, "resourcePruning", IrisMetalAdvancedOptimizationConfig.DEPTH_LIVENESS, true);
+        appendFlag(out, "finalColorFusion", IrisMetalAdvancedOptimizationConfig.FINAL_COLOR_FUSION, true);
+        appendFlag(out, "argumentTables", IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES, true);
+        appendFlag(out, "icb", IrisMetalAdvancedOptimizationConfig.INDIRECT_SUBMISSION, true);
         out.append("  \"chainGeneration\": ").append(plan.chainGeneration()).append(",\n");
         out.append("  \"receiptStatus\": \"DIAGNOSTIC_ONLY\",\n");
         out.append("  \"diagnosticOnly\": true,\n");

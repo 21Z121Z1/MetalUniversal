@@ -13,6 +13,7 @@ import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
 import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
+import com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
@@ -997,8 +998,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             JsonObject argumentReport = new JsonObject();
             argumentReport.addProperty(
                     "enabled",
-                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
-                            || Boolean.getBoolean("metallum.iris.argumentTables")
+                    IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES
             );
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());

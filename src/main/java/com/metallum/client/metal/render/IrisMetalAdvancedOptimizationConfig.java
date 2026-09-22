@@ -6,7 +6,9 @@ package com.metallum.client.metal.render;
  * <p>The stable {@code metallum.iris.*} property names and the earlier
  * {@code metallum.iris.experimental.*} aliases are both accepted. Each lane is
  * independent so local validation can bisect regressions without changing the
- * conservative fallback.</p>
+ * conservative fallback. An explicitly supplied stable property, including
+ * {@code false}, overrides its legacy alias. Values are resolved once per
+ * process and shared by planning, execution and evidence reporting.</p>
  */
 public final class IrisMetalAdvancedOptimizationConfig {
     public static final boolean HAZARD_GRAPH = bool("metallum.iris.hazardGraph", true);
