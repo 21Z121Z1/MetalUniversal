@@ -432,8 +432,9 @@ initial-world snapshot and bounded window; only the encoder-state reuse feature
 changes. `gameplay.json`, `recording.json` and the frame profile record that
 pair identity. The gameplay route enables only the narrow reuse activation
 counters for both pair members and the runner requires packet and state-shadow
-reuse hits from the candidate. This proves route activation, not comparable
-performance or physical acceptance.
+reuse hits from the candidate. These counters are cumulative from client startup
+through gameplay completion, not a sample-window cost. This proves route
+activation, not comparable performance or physical acceptance.
 
 The initial JFR flight profile identified state-shadow arrays and indexed-binding
 list iterators as allocation hot spots. Reusing stable objects follows Apple's

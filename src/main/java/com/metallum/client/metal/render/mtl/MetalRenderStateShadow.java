@@ -19,8 +19,9 @@ final class MetalRenderStateShadow {
     static MetalRenderStateShadow acquire() {
         MetalRenderStateShadow shadow = REUSE ? IDLE.get() : null;
         if (shadow == null) {
-            if (REUSE) MetalRenderStatePacketTelemetry.recordShadowAllocation();
-            return new MetalRenderStateShadow();
+            MetalRenderStateShadow created = new MetalRenderStateShadow();
+            MetalRenderStatePacketTelemetry.recordShadowAllocation();
+            return created;
         }
         IDLE.set(null);
         MetalRenderStatePacketTelemetry.recordShadowReuse();

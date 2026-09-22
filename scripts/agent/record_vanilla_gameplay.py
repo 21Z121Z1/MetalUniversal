@@ -139,9 +139,23 @@ def verify_gameplay_optimization(receipt, expected_profile):
         raise RuntimeError("Reuse candidate did not activate both encoder-state reuse paths")
 
 
+def verify_archive_optimization(raw_evidence, expected_profile):
+    """Require the completed archive window to carry the same pair identity."""
+    window = raw_evidence.get("window", {})
+    profile = window.get("profile", {}) if isinstance(window, dict) else {}
+    actual = profile.get("optimizationProfile") if isinstance(profile, dict) else None
+    if not isinstance(actual, dict):
+        raise RuntimeError("Frame evidence archive is missing optimization profile identity")
+    for key in ("id", "pairKey", "reuseEncoderState", "candidate"):
+        if actual.get(key) != expected_profile.get(key):
+            raise RuntimeError(f"Frame evidence archive optimization profile differs for {key}")
+    return actual
+
+
 def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_command=None,
                           *, expected_trial_id=None, expected_phase=None,
-                          expected_warmup_seconds=None, expected_sample_seconds=None):
+                          expected_warmup_seconds=None, expected_sample_seconds=None,
+                          expected_optimization_profile=None):
     """Verify the final bounded archive after the client has exited normally."""
     if frame_evidence_mode == "off":
         return None
@@ -180,6 +194,9 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
                 or (expected_sample_seconds is not None
                     and (actual_sample != expected_sample or actual_sample_seconds != expected_sample_seconds))):
             raise RuntimeError("Frame evidence archive window differs from the requested runner window")
+    archive_optimization_profile = None
+    if expected_optimization_profile is not None:
+        archive_optimization_profile = verify_archive_optimization(raw_evidence, expected_optimization_profile)
     if run_command is None:
         run_command = subprocess.run
     verification = run_command(
@@ -199,6 +216,7 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
         "instrumentationMode": verification_result.get("instrumentationMode"),
         "trialId": identity.get("trialId"),
         "physicalPerformanceAcceptance": verification_result.get("physicalPerformanceAcceptance"),
+        "optimizationProfile": archive_optimization_profile,
         "path": verification_path.name,
     }
 
@@ -206,7 +224,7 @@ def verify_frame_evidence(output, frame_evidence_mode, expected_head, root, run_
 def finalize_client_run(receipt, recording, client, output, root, source_sha,
                         frame_evidence_mode, run_command=None, *, expected_trial_id=None,
                         expected_phase=None, expected_warmup_seconds=None,
-                        expected_sample_seconds=None):
+                        expected_sample_seconds=None, expected_optimization_profile=None):
     """Close the profiler/client, then verify evidence emitted during client shutdown."""
     if recording is not None:
         if recording.poll() is None:
@@ -221,7 +239,8 @@ def finalize_client_run(receipt, recording, client, output, root, source_sha,
         output, frame_evidence_mode, source_sha, root, run_command,
         expected_trial_id=expected_trial_id, expected_phase=expected_phase,
         expected_warmup_seconds=expected_warmup_seconds,
-        expected_sample_seconds=expected_sample_seconds)
+        expected_sample_seconds=expected_sample_seconds,
+        expected_optimization_profile=expected_optimization_profile)
 
 
 def main():
@@ -420,7 +439,8 @@ def main():
                                 args.frame_evidence, expected_trial_id=trial_id,
                                 expected_phase=args.frame_evidence_phase,
                                 expected_warmup_seconds=args.frame_evidence_warmup_seconds,
-                                expected_sample_seconds=args.frame_evidence_sample_seconds)
+                                expected_sample_seconds=args.frame_evidence_sample_seconds,
+                                expected_optimization_profile=optimization_profile)
         except BaseException as failure:
             receipt["failure"] = str(failure)
             raise

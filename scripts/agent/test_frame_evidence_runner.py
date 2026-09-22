@@ -62,13 +62,15 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
             "archive": {"complete": complete},
         }
 
-    def run_completed(self, client, mode="timing", verifier=None, trial_id="trial-A", phase="stationary"):
+    def run_completed(self, client, mode="timing", verifier=None, trial_id="trial-A", phase="stationary",
+                      expected_optimization_profile=None):
         self.verifier_calls = 0
         receipt = {"gameplay": {"status": "completed"}}
         runner.finalize_client_run(receipt, None, client, self.output, self.root,
                                    self.identity, mode, verifier or self.fake_verifier,
                                    expected_trial_id=trial_id, expected_phase=phase,
-                                   expected_warmup_seconds=5, expected_sample_seconds=10)
+                                   expected_warmup_seconds=5, expected_sample_seconds=10,
+                                   expected_optimization_profile=expected_optimization_profile)
         return receipt
 
     def test_archive_written_during_client_wait_is_verified_after_wait(self):
@@ -189,6 +191,40 @@ class FrameEvidenceRunnerTest(unittest.TestCase):
         receipt["gameplay"]["optimizationActivation"]["active"] = False
         with self.assertRaisesRegex(RuntimeError, "did not activate"):
             runner.verify_gameplay_optimization(receipt, expected)
+
+    def test_completed_archive_must_repeat_gameplay_optimization_profile(self):
+        expected = runner.resolve_optimization_profile(
+            runner.OPTIMIZATION_PROFILE_REUSE,
+            stationary_baseline=True, frame_evidence_phase="stationary",
+            frame_evidence="timing", metrics_only=True,
+            presentation_metrics=False, render_labels=False,
+            terrain_slice_cache=False, reuse_encoder_state=True)
+        archive = self.archive_fixture()
+        archive["window"]["profile"]["optimizationProfile"] = expected
+        receipt = {"gameplay": {"status": "completed", "optimizationProfile": expected,
+                                "optimizationActivation": {"active": True}}}
+        self.verifier_calls = 0
+        runner.finalize_client_run(
+            receipt, None, DeferredClient(self.output, archive), self.output, self.root,
+            self.identity, "timing", self.fake_verifier,
+            expected_trial_id="trial-A", expected_phase="stationary",
+            expected_warmup_seconds=5, expected_sample_seconds=10,
+            expected_optimization_profile=expected)
+        self.assertEqual(receipt["frameEvidenceVerification"]["optimizationProfile"]["id"],
+                         runner.OPTIMIZATION_PROFILE_REUSE)
+
+        archive["window"]["profile"]["optimizationProfile"] = {
+            **expected, "id": runner.OPTIMIZATION_PROFILE_BASELINE,
+            "reuseEncoderState": False, "candidate": False,
+        }
+        with self.assertRaisesRegex(RuntimeError, "archive optimization profile differs"):
+            runner.finalize_client_run(
+                {"gameplay": {"status": "completed"}}, None,
+                DeferredClient(self.output, archive), self.output, self.root,
+                self.identity, "timing", self.fake_verifier,
+                expected_trial_id="trial-A", expected_phase="stationary",
+                expected_warmup_seconds=5, expected_sample_seconds=10,
+                expected_optimization_profile=expected)
 
 
 if __name__ == "__main__":

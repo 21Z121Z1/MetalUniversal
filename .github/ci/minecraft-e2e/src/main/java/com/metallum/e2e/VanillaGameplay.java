@@ -493,6 +493,8 @@ public final class VanillaGameplay {
         value.addProperty("active", active);
         value.addProperty("status", !REUSE_ENCODER_STATE ? "not-requested" : active ? "active" : "inactive");
         value.addProperty("telemetryEnabled", MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled());
+        value.addProperty("scope", "startup-to-gameplay-completion");
+        value.addProperty("cumulative", true);
         value.addProperty("packetStorageAllocations", snapshot.packetStorageAllocations());
         value.addProperty("packetStorageReuseHits", snapshot.packetStorageReuseHits());
         value.addProperty("shadowAllocations", snapshot.shadowAllocations());
