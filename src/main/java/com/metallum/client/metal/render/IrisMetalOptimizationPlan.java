@@ -18,10 +18,10 @@ import java.util.Set;
  * false so the local agent can enable one transformation at a time.
  */
 final class IrisMetalOptimizationPlan {
-    static final boolean ENABLE_PASS_FUSION = Boolean.getBoolean("metallum.iris.experimental.passFusion");
+    static final boolean ENABLE_PASS_FUSION = IrisMetalAdvancedOptimizationConfig.RENDER_PASS_FUSION;
     static final boolean ENABLE_LOAD_STORE = Boolean.getBoolean("metallum.iris.experimental.loadStoreLiveness");
-    static final boolean ENABLE_COMPUTE_GROUPING = Boolean.getBoolean("metallum.iris.experimental.computeGrouping");
-    static final boolean ENABLE_RESOURCE_PRUNING = Boolean.getBoolean("metallum.iris.experimental.resourcePruning");
+    static final boolean ENABLE_COMPUTE_GROUPING = IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING;
+    static final boolean ENABLE_RESOURCE_PRUNING = IrisMetalAdvancedOptimizationConfig.DEPTH_LIVENESS;
     static final boolean ENABLE_FINAL_COLOR_FUSION = Boolean.getBoolean("metallum.iris.experimental.finalColorFusion");
     static final boolean ENABLE_ARGUMENT_TABLES = Boolean.getBoolean("metallum.iris.experimental.argumentTables");
     static final boolean ENABLE_ICB = Boolean.getBoolean("metallum.iris.experimental.icb");
