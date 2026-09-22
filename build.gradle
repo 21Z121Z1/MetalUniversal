@@ -86,11 +86,11 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
-// encoder counter sampling, even with both Metal validation layers disabled.
-// CI still compiles the native backend and GPU harnesses, but executes only
-// headless tests which do not create an MTLDevice. Real GPU/readback/window
-// validation remains part of every local Apple Silicon `build`.
+// Ordinary hosted builds run unit tests and the shipping JVM PSO smoke.
+// The dedicated metal-capabilities lane runs additional hosted GPU readbacks.
+// Physical presentation and MetalFX visual acceptance still require a real
+// Apple Silicon display. HUD instrumentation is configured by the harness,
+// independently from Metal API and shader validation below.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
@@ -140,22 +140,20 @@ tasks.test {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
 		environment "MTL_SHADER_VALIDATION", metalShaderValidation
+		// A headless JVM test does not need optional HUD counter sampling.
+		// This does not alter API/shader validation or the native HUD tasks.
+		if (hostedCi) {
+			environment "MTL_HUD_ENABLED", "0"
+			environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
+			environment "MTLFX_HUD_ENABLED", "0"
+			environment "METALLUM_PSO_COMPILE_HOP", "0"
+		}
 		// Keep JVM crash evidence with the rest of the agent evidence so a
 		// hosted SIGSEGV yields a full native stack instead of a bare exit code.
 		def hsErrDir = providers.gradleProperty("metallum.hsErrDir").orNull
 		if (hsErrDir != null) {
 			layout.buildDirectory.dir(hsErrDir).get().asFile.mkdirs()
 			jvmArgs "-XX:ErrorFile=${layout.buildDirectory.dir(hsErrDir).get().asFile.absolutePath}/hs_err_pid%p.log"
-		}
-		// Capability gate mirrors HostedMetalGradle.init.gradle: only an exact,
-		// probe-derived verdict may move the JVM PSO smoke to environment-
-		// blocked; unset or unknown keeps the strict default.
-		if (System.getenv("METALLUM_JVM_PSO_SMOKE_MODE") == "environment-blocked") {
-			exclude "**/MetalNativeBridgeRenderPipelineSmokeTest.class"
-			doFirst {
-				println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
-						"JVM PSO smoke reported environment-blocked (E2E remains the JVM-path authority)")
-			}
 		}
 	}
 }
