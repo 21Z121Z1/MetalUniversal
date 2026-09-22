@@ -28,8 +28,11 @@ DEFAULT_GAMEPLAY_TIMEOUT_SECONDS = 300
 MAX_GAMEPLAY_TIMEOUT_SECONDS = MAX_WINDOW_SECONDS + GAMEPLAY_TIMEOUT_MARGIN_SECONDS
 OPTIMIZATION_PROFILE_BASELINE = "baseline-v1"
 OPTIMIZATION_PROFILE_REUSE = "reuse-encoder-state-v1"
+OPTIMIZATION_PROFILE_ARGUMENT_REUSE = "encoder-argument-reuse-v1"
 OPTIMIZATION_FEATURE = "encoder-cpu-state-reuse"
-OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE)
+OPTIMIZATION_ARGUMENT_FEATURE = "encoder-native-argument-reuse"
+OPTIMIZATION_PROFILE_CHOICES = (OPTIMIZATION_PROFILE_BASELINE, OPTIMIZATION_PROFILE_REUSE,
+                                OPTIMIZATION_PROFILE_ARGUMENT_REUSE)
 
 
 def validate_window(warmup_seconds, sample_seconds, phase):
@@ -56,12 +59,15 @@ def gameplay_timeout_seconds(window_seconds):
 
 def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence_phase,
                                  frame_evidence, metrics_only, presentation_metrics,
-                                 render_labels, terrain_slice_cache, reuse_encoder_state):
+                                 render_labels, terrain_slice_cache, reuse_encoder_state,
+                                 reuse_native_encoder_arguments=False):
     """Resolve the explicit paired profile and reject an unpaired reuse request."""
     if profile not in OPTIMIZATION_PROFILE_CHOICES:
         raise ValueError(f"optimization profile must be one of {', '.join(OPTIMIZATION_PROFILE_CHOICES)}")
     if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_encoder_state:
         raise ValueError("--reuse-encoder-state requires --optimization-profile reuse-encoder-state-v1")
+    if profile == OPTIMIZATION_PROFILE_BASELINE and reuse_native_encoder_arguments:
+        raise ValueError("--reuse-native-encoder-arguments requires --optimization-profile encoder-argument-reuse-v1")
     if profile == OPTIMIZATION_PROFILE_REUSE:
         if not reuse_encoder_state:
             raise ValueError("reuse-encoder-state-v1 requires --reuse-encoder-state")
@@ -71,13 +77,29 @@ def resolve_optimization_profile(profile, *, stationary_baseline, frame_evidence
             raise ValueError("reuse-encoder-state-v1 requires the stationary metrics-only timing route")
         if presentation_metrics or render_labels or terrain_slice_cache:
             raise ValueError("reuse-encoder-state-v1 excludes diagnostic getters and terrain cache experiments")
+        if reuse_native_encoder_arguments:
+            raise ValueError("reuse-encoder-state-v1 cannot enable native encoder argument reuse")
+    if profile == OPTIMIZATION_PROFILE_ARGUMENT_REUSE:
+        if not reuse_native_encoder_arguments:
+            raise ValueError("encoder-argument-reuse-v1 requires --reuse-native-encoder-arguments")
+        if reuse_encoder_state:
+            raise ValueError("encoder-argument-reuse-v1 cannot enable encoder-state reuse")
+        if not stationary_baseline:
+            raise ValueError("encoder-argument-reuse-v1 requires --stationary-baseline")
+        if frame_evidence_phase != "stationary" or frame_evidence != "timing" or not metrics_only:
+            raise ValueError("encoder-argument-reuse-v1 requires the stationary metrics-only timing route")
+        if presentation_metrics or render_labels or terrain_slice_cache:
+            raise ValueError("encoder-argument-reuse-v1 excludes diagnostic getters and terrain cache experiments")
     route = "vanilla-stationary-60-v1" if stationary_baseline else f"vanilla-normal-{frame_evidence_phase}-v1"
+    feature = (OPTIMIZATION_ARGUMENT_FEATURE if profile == OPTIMIZATION_PROFILE_ARGUMENT_REUSE
+               else OPTIMIZATION_FEATURE)
     return {
         "id": profile,
         "pairKey": route if stationary_baseline else None,
-        "feature": OPTIMIZATION_FEATURE,
+        "feature": feature,
         "reuseEncoderState": bool(reuse_encoder_state),
-        "candidate": profile == OPTIMIZATION_PROFILE_REUSE,
+        "reuseNativeEncoderArguments": bool(reuse_native_encoder_arguments),
+        "candidate": profile in (OPTIMIZATION_PROFILE_REUSE, OPTIMIZATION_PROFILE_ARGUMENT_REUSE),
     }
 
 
@@ -128,7 +150,7 @@ def verify_gameplay_optimization(receipt, expected_profile):
     actual = gameplay.get("optimizationProfile") if isinstance(gameplay, dict) else None
     if not isinstance(actual, dict):
         raise RuntimeError("Gameplay report is missing optimization profile identity")
-    for key in ("id", "pairKey", "reuseEncoderState", "candidate"):
+    for key in ("id", "pairKey", "feature", "reuseEncoderState", "reuseNativeEncoderArguments", "candidate"):
         if actual.get(key) != expected_profile.get(key):
             raise RuntimeError(f"Gameplay optimization profile differs for {key}")
     activation = gameplay.get("optimizationActivation")
@@ -136,7 +158,7 @@ def verify_gameplay_optimization(receipt, expected_profile):
         raise RuntimeError("Gameplay report is missing optimization activation evidence")
     receipt["optimizationActivation"] = activation
     if expected_profile["candidate"] and activation.get("active") is not True:
-        raise RuntimeError("Reuse candidate did not activate both encoder-state reuse paths")
+        raise RuntimeError("Optimization candidate did not report active runtime reuse")
 
 
 def verify_archive_optimization(raw_evidence, expected_profile):
@@ -146,7 +168,7 @@ def verify_archive_optimization(raw_evidence, expected_profile):
     actual = profile.get("optimizationProfile") if isinstance(profile, dict) else None
     if not isinstance(actual, dict):
         raise RuntimeError("Frame evidence archive is missing optimization profile identity")
-    for key in ("id", "pairKey", "reuseEncoderState", "candidate"):
+    for key in ("id", "pairKey", "feature", "reuseEncoderState", "reuseNativeEncoderArguments", "candidate"):
         if actual.get(key) != expected_profile.get(key):
             raise RuntimeError(f"Frame evidence archive optimization profile differs for {key}")
     return actual
@@ -271,6 +293,8 @@ def main():
                         help="Sample native drawable wait once per frame; diagnostic, excluded from timing trials")
     parser.add_argument("--reuse-encoder-state", action="store_true",
                         help="Enable reuse for the explicit reuse-encoder-state-v1 candidate profile")
+    parser.add_argument("--reuse-native-encoder-arguments", action="store_true",
+                        help="Enable the bounded RenderEncoderV3 argument scratch candidate profile")
     parser.add_argument("--optimization-profile", choices=OPTIMIZATION_PROFILE_CHOICES,
                         default=OPTIMIZATION_PROFILE_BASELINE,
                         help="Explicit paired identity; baseline-v1 keeps encoder-state reuse off")
@@ -299,7 +323,8 @@ def main():
             presentation_metrics=args.presentation_metrics,
             render_labels=args.render_labels,
             terrain_slice_cache=args.terrain_slice_cache,
-            reuse_encoder_state=args.reuse_encoder_state)
+            reuse_encoder_state=args.reuse_encoder_state,
+            reuse_native_encoder_arguments=args.reuse_native_encoder_arguments)
     except ValueError as failure:
         parser.error(str(failure))
     if args.stationary_baseline and (args.frame_evidence == "diagnostic" or args.frame_evidence_phase != "stationary" or not args.metrics_only
@@ -351,6 +376,7 @@ def main():
                f"-PpresentationMetrics={str(args.presentation_metrics).lower()}",
                "-Pp1Metal4Lane=candidate",
                f"-PreuseEncoderState={str(args.reuse_encoder_state).lower()}",
+               f"-PreuseNativeEncoderArguments={str(args.reuse_native_encoder_arguments).lower()}",
                f"-PoptimizationProfile={optimization_profile['id']}",
                f"-PterrainSliceCache={str(args.terrain_slice_cache).lower()}",
                f"-PverifyTerrainSliceCache={str(args.verify_terrain_cache).lower()}",

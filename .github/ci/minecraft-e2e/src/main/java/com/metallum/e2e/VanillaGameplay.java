@@ -31,7 +31,12 @@ public final class VanillaGameplay {
     private static final String OPTIMIZATION_PROFILE = System.getProperty(
             "metallum.ci.optimizationProfile", "baseline-v1");
     private static final boolean REUSE_ENCODER_STATE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
-    private static final boolean REUSE_CANDIDATE = "reuse-encoder-state-v1".equals(OPTIMIZATION_PROFILE);
+    private static final boolean REUSE_NATIVE_ENCODER_ARGUMENTS =
+            Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments");
+    private static final boolean REUSE_STATE_CANDIDATE = "reuse-encoder-state-v1".equals(OPTIMIZATION_PROFILE);
+    private static final boolean ENCODER_ARGUMENT_CANDIDATE =
+            "encoder-argument-reuse-v1".equals(OPTIMIZATION_PROFILE);
+    private static final boolean REUSE_CANDIDATE = REUSE_STATE_CANDIDATE || ENCODER_ARGUMENT_CANDIDATE;
     private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
     private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
     private static final int DEFAULT_WARMUP_SECONDS = 5;
@@ -113,10 +118,12 @@ public final class VanillaGameplay {
         require(!STATIONARY_BASELINE || worldEvidence.has("replaySourceSnapshotSha256"), "Stationary baseline requires a verified initial snapshot");
         require(OPTIMIZATION_PROFILE.equals("baseline-v1") || REUSE_CANDIDATE,
                 "Unknown optimization profile: " + OPTIMIZATION_PROFILE);
-        require(REUSE_CANDIDATE == REUSE_ENCODER_STATE,
+        require(REUSE_STATE_CANDIDATE == REUSE_ENCODER_STATE,
                 "Optimization profile and reuseEncoderState property disagree");
+        require(ENCODER_ARGUMENT_CANDIDATE == REUSE_NATIVE_ENCODER_ARGUMENTS,
+                "Optimization profile and reuseNativeEncoderArguments property disagree");
         require(!REUSE_CANDIDATE || STATIONARY_BASELINE,
-                "reuse-encoder-state-v1 requires the stationary route");
+                "Reuse candidates require the stationary route");
         var input = context.getInput();
         JsonObject report = new JsonObject();
         report.addProperty("scenario", ROUTE);
@@ -197,6 +204,7 @@ public final class VanillaGameplay {
                 && settings.get("presentHeight").getAsInt() == NATIVE_HEIGHT,
                 "Native window/present dimensions differ from the physical display: " + settings);
         report.addProperty("reuseEncoderState", REUSE_ENCODER_STATE);
+        report.addProperty("reuseNativeEncoderArguments", REUSE_NATIVE_ENCODER_ARGUMENTS);
         report.add("optimizationProfile", optimizationProfile());
         boolean terrainSliceCache = Boolean.getBoolean("metallum.opt.terrainSliceCache");
         boolean verifyTerrainSliceCache = Boolean.getBoolean("metallum.terrain.verifySliceCache");
@@ -465,8 +473,10 @@ public final class VanillaGameplay {
         JsonObject value = new JsonObject();
         value.addProperty("id", OPTIMIZATION_PROFILE);
         value.addProperty("pairKey", STATIONARY_BASELINE ? ROUTE : null);
-        value.addProperty("feature", "encoder-cpu-state-reuse");
+        value.addProperty("feature", ENCODER_ARGUMENT_CANDIDATE
+                ? "encoder-native-argument-reuse" : "encoder-cpu-state-reuse");
         value.addProperty("reuseEncoderState", REUSE_ENCODER_STATE);
+        value.addProperty("reuseNativeEncoderArguments", REUSE_NATIVE_ENCODER_ARGUMENTS);
         value.addProperty("candidate", REUSE_CANDIDATE);
         value.addProperty("activationTelemetry", MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled());
         return value;
@@ -476,11 +486,15 @@ public final class VanillaGameplay {
         var snapshot = MetalRenderStatePacketTelemetry.snapshot();
         boolean packetReuse = snapshot.packetStorageReuseHits() > 0;
         boolean shadowReuse = snapshot.shadowReuseHits() > 0;
-        boolean active = REUSE_ENCODER_STATE && packetReuse && shadowReuse;
+        boolean stateReuseActive = REUSE_ENCODER_STATE && packetReuse && shadowReuse;
+        boolean argumentReuseActive = REUSE_NATIVE_ENCODER_ARGUMENTS
+                && snapshot.nativeEncoderArgumentReuseCalls() > 0;
+        boolean active = ENCODER_ARGUMENT_CANDIDATE ? argumentReuseActive : stateReuseActive;
+        boolean requested = REUSE_ENCODER_STATE || REUSE_NATIVE_ENCODER_ARGUMENTS;
         JsonObject value = new JsonObject();
-        value.addProperty("requested", REUSE_ENCODER_STATE);
+        value.addProperty("requested", requested);
         value.addProperty("active", active);
-        value.addProperty("status", !REUSE_ENCODER_STATE ? "not-requested" : active ? "active" : "inactive");
+        value.addProperty("status", !requested ? "not-requested" : active ? "active" : "inactive");
         value.addProperty("telemetryEnabled", MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled());
         value.addProperty("scope", "startup-to-gameplay-completion");
         value.addProperty("cumulative", true);
@@ -488,6 +502,7 @@ public final class VanillaGameplay {
         value.addProperty("packetStorageReuseHits", snapshot.packetStorageReuseHits());
         value.addProperty("shadowAllocations", snapshot.shadowAllocations());
         value.addProperty("shadowReuseHits", snapshot.shadowReuseHits());
+        value.addProperty("nativeEncoderArgumentReuseCalls", snapshot.nativeEncoderArgumentReuseCalls());
         return value;
     }
 

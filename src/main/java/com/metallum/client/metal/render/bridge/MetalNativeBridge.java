@@ -39,7 +39,7 @@ public final class MetalNativeBridge {
      */
     private static final boolean REUSE_NATIVE_ENCODER_ARGUMENTS =
             Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments");
-    private static final ThreadLocal<RenderEncoderArgumentScratch> RENDER_ENCODER_ARGUMENT_SCRATCH =
+    static final ThreadLocal<RenderEncoderArgumentScratch> RENDER_ENCODER_ARGUMENT_SCRATCH =
             ThreadLocal.withInitial(RenderEncoderArgumentScratch::new);
     private static final int MAX_RENDER_ENCODER_COLOR_ATTACHMENTS = 8;
 
@@ -2622,22 +2622,33 @@ public final class MetalNativeBridge {
         if (REUSE_NATIVE_ENCODER_ARGUMENTS
                 && colorTextures.length <= MAX_RENDER_ENCODER_COLOR_ATTACHMENTS) {
             RenderEncoderArgumentScratch scratch = RENDER_ENCODER_ARGUMENT_SCRATCH.get();
-            scratch.copy(colorTextures, colorLoadActions, colorStoreActions, clearColors);
-            return invokeRenderCommandEncoderV3(
-                    commandBuffer,
-                    colorTextures.length,
-                    depthTexture,
-                    scratch.textureArray,
-                    scratch.loadArray,
-                    scratch.storeArray,
-                    scratch.clearColorArray,
-                    depthLoadAction,
-                    depthStoreAction,
-                    clearDepth,
-                    viewportWidth,
-                    viewportHeight,
-                    scratch.label(label)
-            );
+            if (scratch.tryAcquire()) {
+                try {
+                    MemorySegment scratchLabel = scratch.label(label);
+                    if (scratchLabel != null) {
+                        scratch.copy(colorTextures, colorLoadActions, colorStoreActions, clearColors);
+                        MemorySegment result = invokeRenderCommandEncoderV3(
+                                commandBuffer,
+                                colorTextures.length,
+                                depthTexture,
+                                scratch.textureArray(colorTextures.length),
+                                scratch.loadArray(colorTextures.length),
+                                scratch.storeArray(colorTextures.length),
+                                scratch.clearColorArray(colorTextures.length),
+                                depthLoadAction,
+                                depthStoreAction,
+                                clearDepth,
+                                viewportWidth,
+                                viewportHeight,
+                                scratchLabel
+                        );
+                        MetalRenderStatePacketTelemetry.recordNativeEncoderArgumentReuse();
+                        return result;
+                    }
+                } finally {
+                    scratch.release();
+                }
+            }
         }
 
         try (Arena arena = Arena.ofConfined()) {
@@ -4315,13 +4326,15 @@ public final class MetalNativeBridge {
     /**
      * Per-render-thread native argument storage for the opt-in RenderEncoderV3
      * path. The Swift entry point copies these values into a Metal descriptor
-     * before returning, so the storage never aliases a live encoder. A thread
-     * local keeps the confined arena on its owning render thread and bounds the
-     * retained native storage to the eight attachment slots supported by the
-     * ABI.
+     * before returning, so the storage never aliases a live encoder. An auto
+     * arena makes the fixed storage reclaimable with the scratch object; the
+     * fixed arrays and label buffer keep retained native storage bounded. A
+     * lease prevents a reentrant bridge call from overwriting an in-flight
+     * invocation; callers then use the scoped path below.
      */
-    private static final class RenderEncoderArgumentScratch {
-        private final Arena arena = Arena.ofConfined();
+    static final class RenderEncoderArgumentScratch {
+        static final int MAX_LABEL_BYTES = 256;
+        private final Arena arena = Arena.ofAuto();
         private final MemorySegment textureArray =
                 arena.allocate(ValueLayout.ADDRESS, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
         private final MemorySegment loadArray =
@@ -4330,17 +4343,36 @@ public final class MetalNativeBridge {
                 arena.allocate(INT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS);
         private final MemorySegment clearColorArray =
                 arena.allocate(FLOAT, MAX_RENDER_ENCODER_COLOR_ATTACHMENTS * 4);
-        @Nullable
-        private MemorySegment labelArray;
+        private final MemorySegment labelArray = arena.allocate(MAX_LABEL_BYTES, 1L);
+        private boolean inUse;
 
-        private void copy(
+        boolean tryAcquire() {
+            if (inUse) {
+                return false;
+            }
+            inUse = true;
+            return true;
+        }
+
+        void release() {
+            if (!inUse) {
+                throw new IllegalStateException("Render encoder argument scratch lease is not held");
+            }
+            inUse = false;
+        }
+
+        boolean inUse() {
+            return inUse;
+        }
+
+        void copy(
                 final MemorySegment[] colorTextures,
                 final int[] colorLoadActions,
                 final int[] colorStoreActions,
                 final float[] clearColors
         ) {
             for (int index = 0; index < colorTextures.length; index++) {
-                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segmentForScratch(colorTextures[index]));
                 loadArray.setAtIndex(INT, index, colorLoadActions[index]);
                 storeArray.setAtIndex(INT, index, colorStoreActions[index]);
             }
@@ -4349,19 +4381,40 @@ public final class MetalNativeBridge {
             }
         }
 
-        private MemorySegment label(@Nullable final String value) {
+        MemorySegment textureArray(final int colorCount) {
+            return colorCount == 0 ? MemorySegment.NULL : textureArray;
+        }
+
+        MemorySegment loadArray(final int colorCount) {
+            return colorCount == 0 ? MemorySegment.NULL : loadArray;
+        }
+
+        MemorySegment storeArray(final int colorCount) {
+            return colorCount == 0 ? MemorySegment.NULL : storeArray;
+        }
+
+        MemorySegment clearColorArray(final int colorCount) {
+            return colorCount == 0 ? MemorySegment.NULL : clearColorArray;
+        }
+
+        /** Returns null when the bounded scratch label cannot represent value. */
+        @Nullable MemorySegment label(@Nullable final String value) {
             if (value == null) {
                 return MemorySegment.NULL;
             }
             byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
-            if (labelArray == null || labelArray.byteSize() < encoded.length + 1L) {
-                labelArray = arena.allocate(encoded.length + 1L, 1L);
+            if (encoded.length + 1L > MAX_LABEL_BYTES) {
+                return null;
             }
             for (int index = 0; index < encoded.length; index++) {
                 labelArray.set(ValueLayout.JAVA_BYTE, index, encoded[index]);
             }
             labelArray.set(ValueLayout.JAVA_BYTE, encoded.length, (byte) 0);
             return labelArray;
+        }
+
+        private static MemorySegment segmentForScratch(final MemorySegment pointer) {
+            return pointer == null || pointer.address() == 0L ? MemorySegment.NULL : pointer;
         }
     }
 
