@@ -25,4 +25,29 @@ class StationaryTerrainTest {
         for (int i = 0; i < 100; i++) assertFalse(gate.observe(state("a"), i));
         assertTrue(gate.observe(state("a"), 2_000_000_000L));
     }
+
+    @Test void activeInvocationBlocksEmptyQueueAndReleasesAfterException() {
+        var idle = StationaryTerrain.scheduledSectionWorkEvidence(0, 0);
+        assertTrue(idle.get("scheduledSectionWorkComplete").getAsBoolean());
+        assertEquals(0, idle.get("activeTaskInvocations").getAsInt());
+
+        var activity = new StationaryTaskActivity();
+        activity.run(() -> {
+            assertEquals(1, activity.activeInvocations());
+            var running = StationaryTerrain.scheduledSectionWorkEvidence(0, activity.activeInvocations());
+            assertFalse(running.get("scheduledSectionWorkComplete").getAsBoolean());
+        });
+        assertEquals(0, activity.activeInvocations());
+
+        assertThrows(IllegalStateException.class, () -> activity.run(() -> {
+            assertEquals(1, activity.activeInvocations());
+            throw new IllegalStateException("synthetic section task failure");
+        }));
+        assertEquals(0, activity.activeInvocations());
+
+        assertFalse(StationaryTerrain.scheduledSectionWorkEvidence(1, 0)
+                .get("scheduledSectionWorkComplete").getAsBoolean());
+        assertFalse(StationaryTerrain.scheduledSectionWorkEvidence(0, -1)
+                .get("scheduledSectionWorkComplete").getAsBoolean());
+    }
 }
