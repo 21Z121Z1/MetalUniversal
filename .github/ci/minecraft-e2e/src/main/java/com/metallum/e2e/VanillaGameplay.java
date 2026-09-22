@@ -29,16 +29,25 @@ public final class VanillaGameplay {
     private static final boolean STATIONARY_BASELINE = Boolean.getBoolean("metallum.ci.stationaryBaseline");
     private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
     private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static final int DEFAULT_WARMUP_SECONDS = 5;
+    private static final int DEFAULT_SAMPLE_SECONDS = 10;
+    private static final int MAX_WINDOW_SECONDS = 300;
+    private static final int WINDOW_TIMEOUT_MARGIN_TICKS = 1200;
+    private static final int WARMUP_SECONDS = configuredSeconds("metallum.ci.frameEvidenceWarmupSeconds", DEFAULT_WARMUP_SECONDS);
+    private static final int SAMPLE_SECONDS = configuredSeconds("metallum.ci.frameEvidenceSampleSeconds", DEFAULT_SAMPLE_SECONDS);
+    private static final int WINDOW_SECONDS = validateWindowContract();
+    private static final long WARMUP_NS = secondsToNanos(WARMUP_SECONDS);
+    private static final long SAMPLE_NS = secondsToNanos(SAMPLE_SECONDS);
+    private static final int WINDOW_TIMEOUT_TICKS = windowTimeoutTicks();
     private static long sampleStartNanos;
     private static int stationaryVisibleSections;
-    private static final long WARMUP_NS = 5_000_000_000L;
-    private static final long SAMPLE_NS = 10_000_000_000L;
     private static final int NATIVE_WIDTH = Integer.getInteger("metallum.ci.nativeWidth", 0);
     private static final int NATIVE_HEIGHT = Integer.getInteger("metallum.ci.nativeHeight", 0);
     private static final boolean PRESENTATION_METRICS = Boolean.getBoolean("metallum.ci.presentationMetrics");
     // Test-only bounded timestamps, with an opt-in scalar native wait getter.
     // No GPU readback or per-frame allocation.
-    private static final long[] FRAME_TIMES = new long[131_072];
+    private static final int FRAME_TIME_CAPACITY = 131_072;
+    private static final long[] FRAME_TIMES = new long[FRAME_TIME_CAPACITY];
     private static boolean recordingFrames;
     private static int frameCount;
     private static long startedNanos;
@@ -101,6 +110,9 @@ public final class VanillaGameplay {
         JsonObject report = new JsonObject();
         report.addProperty("scenario", ROUTE);
         report.addProperty("pid", ProcessHandle.current().pid());
+        report.addProperty("frameEvidenceWarmupSeconds", WARMUP_SECONDS);
+        report.addProperty("frameEvidenceSampleSeconds", SAMPLE_SECONDS);
+        report.addProperty("frameEvidenceWindowSeconds", WINDOW_SECONDS);
         report.add("world", worldEvidence);
         JsonArray phases = new JsonArray();
         report.add("phases", phases);
@@ -225,8 +237,11 @@ public final class VanillaGameplay {
         route.addProperty("inputAuthority", "Fabric client GameTest input driver");
         route.addProperty("samplePhase", EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
         route.addProperty("camera", "160.5,140,160.5 yaw=-65 pitch=15; creative flight fixed view");
+        route.addProperty("warmupSeconds", WARMUP_SECONDS);
+        route.addProperty("sampleSeconds", SAMPLE_SECONDS);
         route.addProperty("warmupNs", WARMUP_NS);
         route.addProperty("sampleNs", SAMPLE_NS);
+        route.addProperty("sourceFrameStorageCapacity", FRAME_TIME_CAPACITY);
         route.addProperty("completion", STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
                 : "selected window duration and all existing flight/place-break/quality assertions");
         profile.add("route", route);
@@ -269,12 +284,16 @@ public final class VanillaGameplay {
         try {
             phase(context, output, report, phases, "stationary-full-view");
             // Identical off/on workload clock: observer presence never controls the route.
-            context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS, 1200);
+            context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS,
+                    WINDOW_TIMEOUT_TICKS);
             context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
             require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
                     "Frame evidence did not finish the predeclared stationary window");
-            report.add("stationarySourceFrames", context.computeOnClient(client ->
-                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS)));
+            JsonObject stationarySourceFrames = context.computeOnClient(client ->
+                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS));
+            stationarySourceFrames.addProperty("storageCapacity", FRAME_TIME_CAPACITY);
+            stationarySourceFrames.addProperty("storageOverflow", droppedSamples);
+            report.add("stationarySourceFrames", stationarySourceFrames);
             if (STATIONARY_BASELINE) {
                 JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
                 report.add("finalStationaryTerrain", finalTerrain);
@@ -470,6 +489,55 @@ public final class VanillaGameplay {
         value.addProperty("vsync", client.options.enableVsync().get());
         value.addProperty("fpsLimitOption", client.options.framerateLimit().get());
         return value;
+    }
+
+    private static int configuredSeconds(String property, int defaultValue) {
+        String raw = System.getProperty(property);
+        if (raw == null || raw.isBlank()) return defaultValue;
+        final int value;
+        try {
+            value = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException failure) {
+            throw new IllegalArgumentException(property + " must be an integer number of seconds", failure);
+        }
+        if (value < 1 || value > MAX_WINDOW_SECONDS) {
+            throw new IllegalArgumentException(property + " must be between 1 and " + MAX_WINDOW_SECONDS + " seconds");
+        }
+        return value;
+    }
+
+    private static int validateWindowContract() {
+        int total;
+        try {
+            total = Math.addExact(WARMUP_SECONDS, SAMPLE_SECONDS);
+        } catch (ArithmeticException impossible) {
+            throw new IllegalArgumentException("frame evidence window duration overflow", impossible);
+        }
+        if (total > MAX_WINDOW_SECONDS) {
+            throw new IllegalArgumentException("frame evidence warmup plus sample must not exceed " + MAX_WINDOW_SECONDS + " seconds");
+        }
+        if ("streaming".equals(EVIDENCE_PHASE)
+                && (WARMUP_SECONDS != DEFAULT_WARMUP_SECONDS || SAMPLE_SECONDS != DEFAULT_SAMPLE_SECONDS)) {
+            throw new IllegalArgumentException("streaming frame evidence only supports the declared 5s warmup and 10s sample route");
+        }
+        return total;
+    }
+
+    private static long secondsToNanos(int seconds) {
+        try {
+            return Math.multiplyExact((long) seconds, 1_000_000_000L);
+        } catch (ArithmeticException impossible) {
+            throw new IllegalArgumentException("frame evidence duration does not fit in nanoseconds", impossible);
+        }
+    }
+
+    private static int windowTimeoutTicks() {
+        try {
+            return Math.toIntExact(Math.addExact(Math.multiplyExact((long) WINDOW_SECONDS, 20L),
+                    WINDOW_TIMEOUT_MARGIN_TICKS));
+        } catch (ArithmeticException impossible) {
+            throw new IllegalArgumentException("frame evidence wait timeout overflow", impossible);
+        }
     }
 
     private static JsonObject finishFrames() {

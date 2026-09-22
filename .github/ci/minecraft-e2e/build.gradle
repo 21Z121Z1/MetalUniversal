@@ -34,6 +34,29 @@ def frameEvidenceMode = providers.gradleProperty('frameEvidenceMode').orElse('of
 if (!(frameEvidenceMode in ['off', 'timing', 'diagnostic'])) {
     throw new GradleException('frameEvidenceMode must be off, timing, or diagnostic')
 }
+def parseFrameEvidenceSeconds = { String propertyName, int defaultValue ->
+    def raw = providers.gradleProperty(propertyName).orElse(defaultValue.toString()).get().trim()
+    int value
+    try {
+        value = Integer.parseInt(raw)
+    } catch (NumberFormatException failure) {
+        throw new GradleException("${propertyName} must be an integer number of seconds", failure)
+    }
+    if (value < 1 || value > 300) {
+        throw new GradleException("${propertyName} must be between 1 and 300 seconds")
+    }
+    value
+}
+def frameEvidenceWarmupSeconds = parseFrameEvidenceSeconds('frameEvidenceWarmupSeconds', 5)
+def frameEvidenceSampleSeconds = parseFrameEvidenceSeconds('frameEvidenceSampleSeconds', 10)
+def frameEvidenceWindowSeconds = frameEvidenceWarmupSeconds + frameEvidenceSampleSeconds
+if (frameEvidenceWindowSeconds > 300) {
+    throw new GradleException('frame evidence warmup plus sample must not exceed 300 seconds')
+}
+def segmentedFrameEvidence = providers.gradleProperty('frameEvidenceSegmented')
+        .map { it.toBoolean() }
+        .orElse(frameEvidenceMode != 'off')
+        .get()
 if (frameEvidenceMode == 'timing' && (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()
         || providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()
         || providers.gradleProperty('presentationMetrics').orElse('false').get().toBoolean()
@@ -43,6 +66,10 @@ if (frameEvidenceMode == 'timing' && (providers.gradleProperty('gameplayJfr').or
 def frameEvidencePhase = providers.gradleProperty('frameEvidencePhase').orElse('stationary').get()
 if (!(frameEvidencePhase in ['stationary', 'streaming'])) {
     throw new GradleException('frameEvidencePhase must be stationary or streaming')
+}
+if (frameEvidencePhase == 'streaming'
+        && (frameEvidenceWarmupSeconds != 5 || frameEvidenceSampleSeconds != 10)) {
+    throw new GradleException('streaming frame evidence only supports the declared 5s warmup and 10s sample route')
 }
 def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
 
@@ -128,8 +155,13 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     if (gameplay) {
         jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
         jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
+        // M0 evidence runs use the bounded archive so a long/terminated client
+        // cannot silently fall back to the legacy fixed-size in-memory snapshot.
+        jvmArgs.add("-Dmetallum.frameEvidence.segmented=${segmentedFrameEvidence}")
         jvmArgs.add("-Dmetallum.ci.stationaryBaseline=${providers.gradleProperty('stationaryBaseline').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
+        jvmArgs.add("-Dmetallum.ci.frameEvidenceWarmupSeconds=${frameEvidenceWarmupSeconds}")
+        jvmArgs.add("-Dmetallum.ci.frameEvidenceSampleSeconds=${frameEvidenceSampleSeconds}")
         jvmArgs.add("-Dmetallum.ci.initialWorld=${providers.gradleProperty('initialWorld').orElse('').get()}")
         jvmArgs.add("-Dmetallum.frameEvidence.mode=${frameEvidenceMode}")
         jvmArgs.add("-Dmetallum.frameEvidence.trialId=${providers.gradleProperty('frameEvidenceTrialId').orElse('gameplay').get()}")
