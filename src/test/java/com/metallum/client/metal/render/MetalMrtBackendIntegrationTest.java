@@ -115,6 +115,14 @@ final class MetalMrtBackendIntegrationTest {
                      () -> "timestamp upload", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, data.capacity())) {
             assertEquals(2, queries.size());
             assertTrue(queries.getValue(0).isEmpty());
+            if (device.getDeviceInfo().timestampPeriod() == 0.0F) {
+                assertThrows(UnsupportedOperationException.class, () -> encoder.writeTimestamp(queries, 0),
+                        "a device without counter storage must reject GPU timestamp writes");
+                assertTrue(queries.getValue(0).isEmpty(), "unsupported queries cannot fabricate samples");
+                assertThrows(UnsupportedOperationException.class, device::getTimestampCalibrationOffset,
+                        "a device without GPU samples cannot calibrate their clock");
+                return;
+            }
             encoder.writeTimestamp(queries, 0);
             encoder.writeToBuffer(destination.slice(0, data.capacity()), data);
             encoder.writeTimestamp(queries, 1);
@@ -151,6 +159,12 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void timestampQueryPoolSupportsProfilerCapacity() {
         try (var queries = device.createTimestampQueryPool(1024)) {
+            assertEquals(1024, queries.size());
+            if (device.getDeviceInfo().timestampPeriod() == 0.0F) {
+                assertThrows(UnsupportedOperationException.class, () -> encoder.writeTimestamp(queries, 1023));
+                assertTrue(queries.getValues(1022, 2)[1].isEmpty());
+                return;
+            }
             encoder.writeTimestamp(queries, 1023);
             assertTrue(queries.getValues(1022, 2)[1].isEmpty());
             encoder.submit();

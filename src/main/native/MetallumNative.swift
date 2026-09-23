@@ -784,13 +784,18 @@ private func renderPearlMetalFence(_ pointer: UnsafeMutableRawPointer) -> MTLFen
 
 @_cdecl("metallum_renderpearl_timestamp_period_v1")
 public func metallum_renderpearl_timestamp_period_v1(_ devicePointer: UnsafeMutableRawPointer) -> Double {
-    if #available(macOS 26.0, iOS 26.0, *) {
-        let frequency = renderPearlMetalDevice(devicePointer).queryTimestampFrequency()
+    let device = renderPearlMetalDevice(devicePointer)
+    // A virtual Metal device may expose the method but abort inside
+    // queryTimestampFrequency(). Probe actual counter storage first, and only
+    // ask for the Metal 4 tick frequency when a Metal 4 heap exists.
+    guard let pool = RenderPearlTimestampPool(device, count: 1) else { return 0 }
+    if #available(macOS 26.0, iOS 26.0, *), pool.metal4Heap != nil {
+        let frequency = device.queryTimestampFrequency()
         // Metal 4 ticks are normalized in readMetal4, so public samples and
         // sampleTimestamps() share nanoseconds per timestamp unit.
         return frequency > 0 ? 1.0 : 0
     }
-    return 0
+    return pool.metal3Samples != nil ? 1.0 : 0
 }
 
 @_cdecl("metallum_renderpearl_timestamp_pair_v1")
