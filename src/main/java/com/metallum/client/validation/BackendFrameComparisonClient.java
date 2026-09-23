@@ -23,6 +23,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
+import net.minecraft.client.renderer.chunk.SectionMesh;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
@@ -1162,6 +1164,14 @@ public final class BackendFrameComparisonClient {
                             String.format(Locale.ROOT, "frame-%05d-lightmap.bin", frame)), bytes);
                 }
             }
+            if (!SODIUM_LOADED) {
+                // A count cannot prove that two runs rendered the same visible
+                // sections. Record section identity and CPU mesh draw signatures
+                // at the captured frame before interpreting pixel differences.
+                Files.write(ROOT.resolve(backendName()).resolve(
+                        String.format(Locale.ROOT, "frame-%05d-visible-sections.txt", frame)),
+                        visibleSectionRows(Minecraft.getInstance()), StandardCharsets.UTF_8);
+            }
             COMPLETED_FRAMES.add(frame);
             if (COMPLETED_FRAMES.size() == CAPTURE_FRAMES.size()) {
                 stopRequested = true;
@@ -2236,6 +2246,24 @@ public final class BackendFrameComparisonClient {
         }
         states.sort(String::compareTo);
         return new EntityReceipt(states.size(), sha256(states), List.copyOf(states));
+    }
+
+    private static List<String> visibleSectionRows(final Minecraft minecraft) {
+        List<String> rows = new ArrayList<>();
+        for (var section : minecraft.levelRenderer.visibleSections()) {
+            SectionMesh mesh = section.getSectionMesh();
+            StringBuilder row = new StringBuilder(Long.toUnsignedString(section.getSectionNode()));
+            for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
+                SectionMesh.SectionDraw draw = mesh.getSectionDraw(layer);
+                row.append('|').append(layer.name()).append('=');
+                if (draw == null) row.append('-');
+                else row.append(draw.indexCount()).append(':').append(draw.indexType())
+                        .append(':').append(draw.hasCustomIndexBuffer());
+            }
+            rows.add(row.toString());
+        }
+        rows.sort(String::compareTo);
+        return rows;
     }
 
     private static String sha256(final List<String> values) {

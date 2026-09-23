@@ -2263,6 +2263,16 @@ tasks.register("backendFrameCompare") {
 			if (semanticEntityRows(metalDir, name) != semanticEntityRows(vulkanDir, name)) {
 				sceneIssues << "${name} entity types or recorded poses differ"
 			}
+			if (metalSession.sodiumLoaded == false && vulkanSession.sodiumLoaded == false) {
+				def sectionName = name.replace(".bin", "-visible-sections.txt")
+				def metalSections = new File(metalDir, sectionName)
+				def vulkanSections = new File(vulkanDir, sectionName)
+				if (!metalSections.isFile() || !vulkanSections.isFile()) {
+					sceneIssues << "${name} visible-section identity receipt is missing"
+				} else if (metalSections.readLines() != vulkanSections.readLines()) {
+					sceneIssues << "${name} visible-section identities or mesh draw signatures differ"
+				}
+			}
 			byte[] metal = metalFrames[name].bytes
 			byte[] vulkan = vulkanFrames[name].bytes
 			if (metal.length != vulkan.length || metal.length % 4 != 0) {
