@@ -13,7 +13,6 @@ import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
 import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
-import com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
@@ -994,12 +993,19 @@ public final class MetalValidationClient implements ClientModInitializer {
             depthReport.addProperty("pruneFailures", depth.pruneFailures());
             depthReport.addProperty("captureSkips", depth.captureSkips());
             report.add("depthLivenessRuntime", depthReport);
+            long[] nativeArgumentTableStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+            boolean nativeMainRendererEngaged = nativeArgumentTableStats[0] != 0L;
             IrisMetalArgumentBindingRuntime.Stats argumentStats = IrisMetalArgumentBindingRuntime.stats();
             JsonObject argumentReport = new JsonObject();
+            argumentReport.addProperty("enabled", IrisMetalArgumentBindingRuntime.diagnosticsEnabled());
+            argumentReport.addProperty("snapshotDiagnosticsEnabled", IrisMetalArgumentBindingRuntime.diagnosticsEnabled());
             argumentReport.addProperty(
-                    "enabled",
-                    IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES
+                    "executionAuthority",
+                    nativeMainRendererEngaged
+                            ? "native-metal4-argument-tables"
+                            : "java-patch-seam-native-not-negotiated"
             );
+            argumentReport.addProperty("nativeMainRendererEngaged", nativeMainRendererEngaged);
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());
             argumentReport.addProperty("encodedSnapshots", argumentStats.encodedSnapshots());

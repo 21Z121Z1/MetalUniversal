@@ -1,8 +1,8 @@
 # Unified render evaluation and autonomous optimization loop
 
-This is the canonical correctness/performance workflow for renderer work. `system-model.md` defines the overall control plane; `system-registry.json` defines ownership, boundary and proof rules; `context.py` compiles those rules into a task-local view; `unified-evaluation-acceptance.json` defines acceptance thresholds.
+This is the canonical correctness/performance workflow for renderer work. `AGENTS.md` states repository authority and component boundaries; `unified-evaluation-acceptance.json` defines acceptance thresholds.
 
-The canonical continued-development base is `integration/iris-metal-next`. Historical task branches, prompts and handoffs are provenance/recipes unless current executable truth explicitly points to them.
+The canonical continued-development base is `main`. Historical task branches, prompts and handoffs are provenance/recipes unless current executable truth explicitly points to them.
 
 ## 1. Evaluation model
 
@@ -28,68 +28,28 @@ deterministic scenario + source/binary/environment identity
 
 ## 2. Bootstrap: facts, inference and proof
 
-Run:
+Record the exact checkout, source identity, worktree state, environment, and scenario before selecting a gate:
 
 ```bash
-python3 scripts/agent/context.py --task "<candidate or problem>"
+git status --short --branch
+git rev-parse HEAD
+bash scripts/agent/doctor.sh
 ```
 
-Read the capsule in this order:
+Read the changed component's nearest `AGENTS.md`, source, and tests. Use the render contract and acceptance schema to list the proof obligations for the actual claim. A task description or historical branch name is not evidence of code ownership.
 
-1. exact Git/source identity;
-2. **changed-component ownership** when path-derived;
-3. **planned route** when it is task-text inference only;
-4. downstream impact and boundary contracts;
-5. complete **proof obligations**;
-6. **minimum execution schedule** after integrated gates are collapsed.
-
-Do not call task-keyword routing a fact. Do not edit every impacted component merely because it appears in the impact closure.
-
-For a multi-step task, create/update the ignored checkpoint:
-
-```bash
-python3 scripts/agent/checkpoint.py init \
-  --task "<task>" \
-  --hypothesis "<falsifiable hypothesis>" \
-  --next-command "<next cheapest action>"
-```
-
-Every recorded PASS is bound to the source SHA at which it ran. After HEAD changes it is stale until the relevant proof is re-established.
+Keep any task checkpoint and generated evidence under ignored `build/` paths. Every recorded PASS is bound to the source SHA at which it ran. After HEAD changes it is stale until the relevant proof is re-established.
 
 ## 3. Proof obligations vs minimum execution schedule
 
-The registry's `depends_on` graph describes **logical evidence obligations**. It is not a command list.
-
-Some executors deliberately produce lower proof artifacts internally. The registry records those relationships with `covers`. The context compiler therefore emits two views:
-
-- `proof_obligations` — everything that must be established for the claim;
-- `execution_plan` — the smallest command schedule that establishes those obligations without re-running integrated gates.
-
-`repo.static` remains an explicit cheap preflight even if a later executor covers it, because early falsification saves expensive client/GPU work.
-
-Typical renderer-performance example:
+Select the smallest schedule that establishes the obligations for the claim. A paired runner may execute its own local correctness prerequisites; exact-head CI and production-client E2E remain independent evidence. For a renderer performance claim, the obligations commonly include:
 
 ```text
-logical obligations:
-agent.control
-repo.static
-render.synthetic
-render.gpu
-minecraft.conformance
-hosted.exact-head
-minecraft.e2e
-performance.paired
-
-minimum execution schedule:
-repo.static
-performance.paired
-hosted.exact-head
-minecraft.e2e
+static contract -> render conformance -> exact-head CI -> production client
+                -> interleaved paired physical performance trials
 ```
 
-The paired runner supplies its own local correctness prerequisites; exact-head CI and production-client E2E remain independent evidence and are not erased by that integration.
-
-Run the generated execution schedule in increasing cost. Stop when an earlier gate falsifies the candidate.
+Run gates in increasing cost and stop when an earlier gate falsifies the candidate. Record each result with its exact proof subject; a synthetic PR merge result does not replace candidate-head proof.
 
 ## 4. Environment/capability truth
 

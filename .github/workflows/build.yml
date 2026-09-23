@@ -14,9 +14,7 @@ on:
       - 'v*'
   pull_request:
     branches:
-      - master
-      - 'integration/**'
-      - codex/frame-evidence-contract-v1-20260920
+      - main
 
 permissions:
   contents: read
@@ -125,11 +123,26 @@ jobs:
         # Ordinary build tests include the mandatory JVM PSO smoke. Additional
         # hosted GPU readbacks run in metal-capabilities; physical presentation
         # and MetalFX visual acceptance remain separate release evidence.
-        run: >-
-          ./gradlew buildMacNative build
-          -Pmetallum.hsErrDir=agent-evidence
-          -x metalFrameGenerationPresentationValidation
-          -x metalFxOffscreenValidation
+        run: |
+          set -euo pipefail
+          xcrun --sdk iphoneos --show-sdk-path
+          ./gradlew buildMacNative build \
+            -Pmetallum.hsErrDir=agent-evidence \
+            -x metalFrameGenerationPresentationValidation \
+            -x metalFxOffscreenValidation
+          test -s src/main/resources/natives/ios/libmetallum.dylib
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          root = Path('src/main/resources/natives/ios')
+          image = root / 'libmetallum.dylib'
+          receipt = json.loads((root / 'libmetallum-build-identity.json').read_text())
+          if receipt.get('platform') != 'ios' or receipt.get('target') != 'arm64-apple-ios14.0':
+              raise SystemExit('iOS native build identity has the wrong platform or target')
+          if receipt.get('nativeSha256') != hashlib.sha256(image.read_bytes()).hexdigest():
+              raise SystemExit('iOS native image hash does not match its build identity')
+          PY
       - name: capture JVM crash evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

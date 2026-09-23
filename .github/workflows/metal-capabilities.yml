@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - codex/frame-evidence-contract-v1-20260920
-      - codex/vision-cloud-convergence-*
+      - main
   pull_request:
     branches:
-      - codex/frame-evidence-contract-v1-20260920
+      - main
 
 permissions:
   contents: read

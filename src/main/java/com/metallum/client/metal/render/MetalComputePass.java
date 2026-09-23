@@ -81,6 +81,8 @@ final class MetalComputePass implements AutoCloseable {
 
     MetalComputePass bindBuffer(final int index, final MetalGpuBuffer buffer, final long offset) {
         ensureOpen();
+        validateBindingIndex(index, 31, "buffer");
+        validateBufferOffset(offset, buffer.size());
         BufferBinding previous = this.boundBuffers.get(index);
         if (previous != null && previous.matches(buffer, offset)) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
@@ -103,6 +105,7 @@ final class MetalComputePass implements AutoCloseable {
 
     MetalComputePass bindTexture(final int index, final MetalGpuTexture texture) {
         ensureOpen();
+        validateBindingIndex(index, 128, "texture");
         if (owner.hasPendingClear(texture)) {
             throw new IllegalStateException(
                     "Texture " + texture.getLabel() + " has an unflushed deferred clear registered after this"
@@ -128,6 +131,7 @@ final class MetalComputePass implements AutoCloseable {
 
     MetalComputePass bindTextureView(final int index, final MetalGpuTextureView view) {
         ensureOpen();
+        validateBindingIndex(index, 128, "texture");
         MetalGpuTexture texture = (MetalGpuTexture) view.texture();
         if (owner.hasPendingClear(texture)) {
             throw new IllegalStateException(
@@ -154,6 +158,7 @@ final class MetalComputePass implements AutoCloseable {
 
     MetalComputePass bindSampler(final int index, final MemorySegment samplerHandle) {
         ensureOpen();
+        validateBindingIndex(index, 16, "sampler");
         MemorySegment previous = this.boundSamplers.get(index);
         if (previous != null && MetalPipelineSupport.sameHandle(previous, samplerHandle)) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
@@ -219,6 +224,7 @@ final class MetalComputePass implements AutoCloseable {
     MetalComputePass dispatchIndirect(final MetalGpuBuffer argumentBuffer, final long offset) {
         ensureOpen();
         MetalComputePipeline bound = requirePipeline();
+        validateIndirectRange(offset, argumentBuffer.size());
         encoder.dispatchThreadgroupsIndirect(
                 argumentBuffer.nativeHandle(),
                 offset,
@@ -235,6 +241,24 @@ final class MetalComputePass implements AutoCloseable {
             );
         }
         return this;
+    }
+
+    static void validateBindingIndex(final int index, final int limit, final String kind) {
+        if (index < 0 || index >= limit) {
+            throw new IllegalArgumentException("Compute " + kind + " binding outside [0," + limit + "): " + index);
+        }
+    }
+
+    static void validateBufferOffset(final long offset, final long size) {
+        if (offset < 0L || offset >= size) {
+            throw new IllegalArgumentException("Compute buffer offset " + offset + " outside size " + size);
+        }
+    }
+
+    static void validateIndirectRange(final long offset, final long size) {
+        if (offset < 0L || (offset & 3L) != 0L || offset > size || size - offset < 12L) {
+            throw new IllegalArgumentException("Indirect compute arguments need 12 aligned bytes: " + offset + "/" + size);
+        }
     }
 
     private Map<String, String> traceResources() {

@@ -20,7 +20,7 @@
     }
   },
   "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
-  "reference_branch": "integration/iris-metal-next",
+  "reference_branch": "main",
   "suite_model": {
     "conformance": "Deterministic render-contract manifests, attachment readbacks, expectations, and first-divergence reports.",
     "admission": "A short real-client probe proves that the selected optimization lane actually executes before expensive paired performance trials begin.",
@@ -65,7 +65,7 @@
       "pass-fusion": "renderFusionRuntime.admissions > 0",
       "compute-grouping": "computeGroupingRuntime.admissions > 0 and deferredPassCloses > 0",
       "depth-liveness": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
-      "argument-tables": "argumentBindingRuntime.enabled is true and encodedSnapshots > 0",
+      "argument-tables": "argumentBindingRuntime.executionAuthority is native-metal4-argument-tables and nativeMainRendererEngaged is true; Java snapshot counts are diagnostic only",
       "all-safe-lanes": "at least one selected Iris lane proves runtime activation"
     },
     "failure_state": "rejected-no-admission",
@@ -115,7 +115,7 @@
     {"name": "frame_time_stutter_count", "relative_regression_max": 0.0},
     {"name": "validation_errors", "absolute_max": 0}
   ],
-  "acceptance_rule": "Accept only when correctness and admission pass, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
+  "acceptance_rule": "Accept only when correctness and admission pass, mandatory structured FPS exists, every guardrail has at least four paired blocks, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
   "decision_states": [
     "correctness-pass-no-performance-decision",
     "accepted-candidate",

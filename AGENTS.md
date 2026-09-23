@@ -59,6 +59,6 @@ Hosted compilation does not prove physical Metal behavior, WindowServer presenta
 
 ## Git safety
 
-`codex/frame-evidence-contract-v1-20260920` is the confirmed 26.3 evidence/development target as of 2026-09-21. Re-resolve its HEAD before work. The formerly documented `integration/metaluniversal` ref was absent from the remote; its name does not establish authority. `master` remains the existing stable 26.2 line until a separately verified release decision changes it. `research/modernization-backlog` is the history anchor. Keep the mobile lineage isolated.
+`main` is the canonical 26.3 development branch. Resolve its live HEAD before work. Historical branches and their reports are evidence, not alternate development authority. Keep platform-specific iOS lifecycle contracts isolated within the common renderer architecture.
 
 Do not force-push shared history. Do not merge an old task branch wholesale. Compare it with the confirmed target, port only a coherent superior delta with its tests, and then retire the task branch after the result is reachable.

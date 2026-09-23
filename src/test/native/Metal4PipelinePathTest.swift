@@ -2661,6 +2661,161 @@ private func runSharedV3ActionMappingTest() throws {
     print("Shared V3 action mapping: identical raw attachment semantics parsed before MTL3/MTL4 dispatch")
 }
 
+/// Exercise the same public pointer ABI before and after Metal 4 admission.
+/// No replacement dylib or raw encoder dispatch may stand in for these exports.
+private func runShippingGenericComputeABI(device: MTLDevice, queue: MTLCommandQueue, label: String) throws {
+    let source = """
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void generic_prepare(device const uint* input [[buffer(0)]],
+                                device uint* scratch [[buffer(1)]],
+                                device uint* arguments [[buffer(2)]],
+                                uint i [[thread_position_in_grid]]) {
+        scratch[i] = input[i] * 3u + 5u;
+        if (i == 0u) { arguments[0] = 2u; arguments[1] = 1u; arguments[2] = 1u; }
+    }
+    kernel void generic_consume(device const uint* scratch [[buffer(0)]],
+                                device uint* output [[buffer(1)]],
+                                texture2d<float> image [[texture(0)]],
+                                sampler imageSampler [[sampler(0)]],
+                                uint i [[thread_position_in_grid]]) {
+        output[i] = scratch[i] + uint(image.sample(imageSampler, float2(0.5), level(1)).r * 255.0 + 0.5);
+    }
+    kernel void generic_increment(device uint* output [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+        output[i] += 7u;
+    }
+    """
+    var handles: [UnsafeMutableRawPointer] = []
+    defer { for handle in handles.reversed() { metallum_release_object(handle) } }
+    func buffer(_ length: Int, _ options: MTLResourceOptions) throws -> MTLBuffer {
+        guard let pointer = metallum_create_buffer(device, length, options.union(.hazardTrackingModeUntracked)),
+              let value = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLBuffer else {
+            try fail("generic compute could not allocate \(length) bytes")
+        }
+        handles.append(pointer)
+        return value
+    }
+    let staging = try buffer(80, .storageModeShared)
+    let input = try buffer(80, .storageModePrivate)
+    let scratch = try buffer(64, .storageModePrivate)
+    let output = try buffer(64, .storageModePrivate)
+    let indirect = try buffer(28, .storageModePrivate)
+    let readback = try buffer(64, .storageModeShared)
+    guard let texturePointer = metallum_create_texture_2d(
+            device, .rgba8Unorm, 2, 2, 1, 2, 0, [.shaderRead], .shared, nil),
+          let texture = Unmanaged<AnyObject>.fromOpaque(texturePointer).takeUnretainedValue() as? MTLTexture,
+          let fence = device.makeFence(),
+          let samplerPointer = metallum_create_sampler_v3(
+            device, .clampToEdge, .clampToEdge, .nearest, .nearest, .nearest, 1, 1.0, -1, 1),
+          let sampler = Unmanaged<AnyObject>.fromOpaque(samplerPointer).takeUnretainedValue() as? MTLSamplerState else {
+        try fail("generic compute could not allocate texture, sampler or fence")
+    }
+    handles.append(texturePointer)
+    handles.append(samplerPointer)
+    try check(texture.textureType == .type2D && texture.mipmapLevelCount == 2,
+              "generic compute fixture requires a 2D texture with two mip levels")
+    if #available(macOS 13.0, iOS 16.0, *) {
+        try check(withUnsafeBytes(of: sampler.gpuResourceID) { $0.contains(where: { $0 != 0 }) }, "shipping sampler has no GPU resource identity")
+    }
+    let colors: [UInt8] = [64, 128, 192, 255, 64, 128, 192, 255,
+                           64, 128, 192, 255, 64, 128, 192, 255]
+    colors.withUnsafeBytes { bytes in
+        texture.replace(region: MTLRegionMake2D(0, 0, 2, 2), mipmapLevel: 0,
+                        withBytes: bytes.baseAddress!, bytesPerRow: 8)
+    }
+    var pipelines: [MTLComputePipelineState] = []
+    for name in ["generic_prepare", "generic_consume", "generic_increment"] {
+        let function = try createShippingFunction(device: device, entryPoint: name, source: source)
+        let (handle, pipeline) = try createShippingComputePipelineHandle(device: device, function: function)
+        handles.append(handle)
+        pipelines.append(pipeline)
+    }
+    // More than three submissions exercises every reused command-buffer slot.
+    for iteration in 0..<7 {
+        let words = staging.contents().assumingMemoryBound(to: UInt32.self)
+        for i in 0..<20 { words[i] = UInt32(i + iteration * 1000) }
+        guard let command = metallum_MTLCommandQueue_makeCommandBuffer(queue, nil) else {
+            try fail("generic compute could not acquire \(label) command buffer")
+        }
+        defer { metallum_release_object(command) }
+        guard let upload = metallum_MTLCommandBuffer_makeBlitCommandEncoder(command, nil) else {
+            try fail("generic compute could not open \(label) upload encoder")
+        }
+        MTLBlitCommandEncoder_waitForFence(upload, fence)
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(upload, staging, 0, input, 0, 80)
+        metallum_MTLBlitCommandEncoder_generateMipmaps(upload, texture)
+        MTLBlitCommandEncoder_updateFence(upload, fence)
+        metallum_MTLCommandEncoder_endEncoding(upload)
+        metallum_release_object(upload)
+
+        guard let prepare = metallum_MTLCommandBuffer_makeComputeCommandEncoder(command) else {
+            try fail("generic compute could not open \(label) producer")
+        }
+        metallum_MTLComputeCommandEncoder_waitForFence(prepare, fence)
+        metallum_MTLComputeCommandEncoder_setComputePipelineState(prepare, pipelines[0])
+        metallum_MTLComputeCommandEncoder_setBuffer(prepare, input, 16, 0)
+        metallum_MTLComputeCommandEncoder_setBuffer(prepare, scratch, 0, 1)
+        metallum_MTLComputeCommandEncoder_setBuffer(prepare, indirect, 16, 2)
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroups(prepare, 2, 1, 1, 8, 1, 1)
+        metallum_MTLComputeCommandEncoder_updateFence(prepare, fence)
+        metallum_MTLCommandEncoder_endEncoding(prepare)
+        metallum_release_object(prepare)
+
+        guard let consume = metallum_MTLCommandBuffer_makeComputeCommandEncoder(command) else {
+            try fail("generic compute could not open \(label) consumer")
+        }
+        metallum_MTLComputeCommandEncoder_waitForFence(consume, fence)
+        metallum_MTLComputeCommandEncoder_setComputePipelineState(consume, pipelines[1])
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, scratch, 0, 0)
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, output, 0, 1)
+        metallum_MTLComputeCommandEncoder_setTexture(consume, texture, 0)
+        metallum_MTLComputeCommandEncoder_setSamplerState(consume, sampler, 0)
+        // Invalid direct ABI inputs must not replace valid cached bindings.
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, input, UInt64.max, 0)
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, input, 0, 31)
+        metallum_MTLComputeCommandEncoder_setTexture(consume, nil, 128)
+        metallum_MTLComputeCommandEncoder_setSamplerState(consume, nil, 16)
+        // GPU-written indirect arguments at a nonzero aligned offset.
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(consume, indirect, 16, 8, 1, 1)
+        metallum_MTLComputeCommandEncoder_setComputePipelineState(consume, pipelines[2])
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, output, 0, 0)
+        metallum_MTLComputeCommandEncoder_setBuffer(consume, nil, 0, 1)
+        metallum_MTLComputeCommandEncoder_setTexture(consume, nil, 0)
+        metallum_MTLComputeCommandEncoder_setSamplerState(consume, nil, 0)
+        // This is a real dependent dispatch in the SAME encoder, not grouping
+        // two independent kernels. Metal 4 must preserve the serial ABI.
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroups(consume, 2, 1, 1, 8, 1, 1)
+        // These must encode no work, and must not trap on UInt64 -> Int conversion.
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(consume, indirect, UInt64.max, 8, 1, 1)
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(consume, indirect, 20, 8, 1, 1)
+        metallum_MTLComputeCommandEncoder_dispatchThreadgroups(consume, -1, 1, 1, 8, 1, 1)
+        metallum_MTLComputeCommandEncoder_updateFence(consume, fence)
+        metallum_MTLCommandEncoder_endEncoding(consume)
+        metallum_release_object(consume)
+
+        guard let copy = metallum_MTLCommandBuffer_makeBlitCommandEncoder(command, nil) else {
+            try fail("generic compute could not open \(label) readback")
+        }
+        MTLBlitCommandEncoder_waitForFence(copy, fence)
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(copy, output, 0, readback, 0, 64)
+        MTLBlitCommandEncoder_updateFence(copy, fence)
+        metallum_MTLCommandEncoder_endEncoding(copy)
+        metallum_release_object(copy)
+        metallum_MTLCommandBuffer_commit(command)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(command, 5_000) == 0,
+                  "generic compute \(label) iteration \(iteration) timed out")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(command) != 0,
+                  "generic compute \(label) iteration \(iteration) GPU error")
+        let actual = readback.contents().assumingMemoryBound(to: UInt32.self)
+        for i in 0..<16 {
+            let expected = UInt32(i + 4 + iteration * 1000) * 3 + 5 + 64 + 7
+            try check(actual[i] == expected,
+                      "generic compute \(label) iteration=\(iteration) element=\(i): \(actual[i]) != \(expected)")
+        }
+    }
+    print("GENERIC_COMPUTE_ABI_PASS \(label): upload, mipmap, sampled view, GPU indirect args, serial dispatch, copy readback, 7 slots")
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -2680,6 +2835,7 @@ private func runPathTest() throws {
     print("Metal 4 path test: metallum_metal4_supported=\(reported) on \(device.name)")
 
     try runSharedV3ActionMappingTest()
+    try runShippingGenericComputeABI(device: device, queue: queue, label: "Metal 3")
 
     guard reported else {
         print("Metal 4 path test skipped: this host has no Metal 4 support, nothing to compare against")
@@ -2813,6 +2969,8 @@ private func runPathTest() throws {
     // (6b) The shipping M4 main renderer under Minecraft-style per-draw
     // vertex/index/uniform binding churn across all reusable queue slots.
     try runShippingMetal4BindingChurnTest(device: device, queue: queue)
+    try check(metallum_metal4_main_renderer_stats(nil, nil, nil) != 0, "generic Metal 4 test needs an admitted main queue")
+    try runShippingGenericComputeABI(device: device, queue: queue, label: "Metal 4")
 
     // (6c) The queue-barrier contract for asynchronous private-buffer rewrite.
     try runShippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)

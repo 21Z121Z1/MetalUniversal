@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-CANONICAL_BRANCH="${METALLUM_CANONICAL_BRANCH:-integration/metaluniversal}"
+CANONICAL_BRANCH="${METALLUM_CANONICAL_BRANCH:-main}"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_AGENT_DOCTOR_OUT:-$RUN_ROOT/doctor-$STAMP}"

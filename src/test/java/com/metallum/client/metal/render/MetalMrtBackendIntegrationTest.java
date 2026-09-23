@@ -21,6 +21,7 @@ import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
+import org.lwjgl.system.MemoryUtil;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -273,6 +274,105 @@ final class MetalMrtBackendIntegrationTest {
             device.waitForSubmittedGpuWork();
             ByteBuffer copied = destination.currentStorage();
             for (int i = 0; i < 64; i++) assertEquals((byte) (i * 31), copied.get(i));
+        }
+    }
+
+    @Test
+    void oddWidthTextureUploadRepackagesRowsWithoutChangingSourceBounds() {
+        int width = 5;
+        int height = 3;
+        int bytes = width * height * 4;
+        int prefix = 13;
+        int suffix = 9;
+        ByteBuffer source = ByteBuffer.allocateDirect(prefix + bytes + suffix);
+        for (int i = 0; i < bytes; i++) {
+            source.put(prefix + i, (byte) (i * 37 + 11));
+        }
+        source.position(prefix);
+        source.limit(prefix + bytes + suffix);
+        int originalPosition = source.position();
+        int originalLimit = source.limit();
+
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                () -> "odd-width row-aligned upload",
+                TEXTURE_USAGE | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM,
+                width,
+                height,
+                1,
+                1
+        )) {
+            encoder.writeToTexture(texture, source, 0, 0, 0, 0, width, height);
+            assertEquals(originalPosition, source.position(), "upload must preserve source position");
+            assertEquals(originalLimit, source.limit(), "upload must preserve source limit");
+
+            ByteBuffer actual = readback(texture);
+            for (int i = 0; i < bytes; i++) {
+                assertEquals((byte) (i * 37 + 11), actual.get(i), "uploaded texel byte " + i);
+            }
+        }
+    }
+
+    @Test
+    void rowPackerKeepsOddWidthRowsSeparateAtSixteenByteStride() {
+        int sourceRowBytes = 5 * 4;
+        int destinationRowBytes = 32;
+        int height = 3;
+        int prefix = 7;
+        ByteBuffer source = ByteBuffer.allocateDirect(prefix + sourceRowBytes * height + 5);
+        for (int i = 0; i < sourceRowBytes * height; i++) {
+            source.put(prefix + i, (byte) (i * 19 + 3));
+        }
+        source.position(prefix);
+        source.limit(prefix + sourceRowBytes * height);
+        int originalPosition = source.position();
+        int originalLimit = source.limit();
+
+        ByteBuffer packed = MetalCommandEncoder.packTextureUploadRows(
+                source, sourceRowBytes, destinationRowBytes, height);
+        try {
+            assertEquals(destinationRowBytes * height, packed.remaining());
+            for (int row = 0; row < height; row++) {
+                for (int column = 0; column < sourceRowBytes; column++) {
+                    assertEquals((byte) ((row * sourceRowBytes + column) * 19 + 3),
+                            packed.get(row * destinationRowBytes + column),
+                            "row " + row + " byte " + column);
+                }
+                for (int padding = sourceRowBytes; padding < destinationRowBytes; padding++) {
+                    assertEquals(0, packed.get(row * destinationRowBytes + padding),
+                            "row " + row + " padding " + padding);
+                }
+            }
+            assertEquals(originalPosition, source.position());
+            assertEquals(originalLimit, source.limit());
+        } finally {
+            MemoryUtil.memFree(packed);
+        }
+    }
+
+    @Test
+    void textureUploadRejectsShortSourceAndOverflowBeforeEncoding() {
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                () -> "texture upload validation",
+                TEXTURE_USAGE | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM,
+                1,
+                1,
+                1,
+                1
+        )) {
+            ByteBuffer shortSource = ByteBuffer.allocateDirect(3);
+            shortSource.position(1);
+            int originalPosition = shortSource.position();
+            int originalLimit = shortSource.limit();
+            assertThrows(IllegalArgumentException.class,
+                    () -> encoder.writeToTexture(texture, shortSource, 0, 0, 0, 0, 1, 1));
+            assertEquals(originalPosition, shortSource.position());
+            assertEquals(originalLimit, shortSource.limit());
+
+            ByteBuffer tinySource = ByteBuffer.allocateDirect(1);
+            assertThrows(ArithmeticException.class,
+                    () -> encoder.writeToTexture(texture, tinySource, 0, 0, 0, 0, Integer.MAX_VALUE, 1));
         }
     }
 
