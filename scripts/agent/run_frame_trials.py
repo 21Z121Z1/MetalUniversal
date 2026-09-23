@@ -16,9 +16,9 @@ import subprocess
 import sys
 import time
 
-from frame_trial_contract import (BACKENDS, MODES, PRODUCERS, WORKLOADS, atomic_json, canonical_hash,
+from frame_trial_contract import (BACKENDS, MODES, PRODUCERS, WORKLOADS, EFFICIENCY_FLAGS, atomic_json, canonical_hash,
                                   finite_seconds, packaged_identity, parse_json, require, runner_lock,
-                                  shader_identity, snapshot_identity, trial_order, validate_pair, verify_inventory)
+                                  shader_identity, snapshot_identity, trial_order, validate_pair, verify_inventory, sha256)
 
 
 def build_plan(args) -> dict:
@@ -40,13 +40,24 @@ def build_plan(args) -> dict:
     if args.protocol == "observer":
         require(args.a_observer == "off", "observer protocol needs --a-observer off")
     variants = {"A": a, "B": b}
+    for name, variant in variants.items():
+        variant["flags"].update({key: getattr(args, name.lower() + "_" + flag.replace("-", "_"), False)
+                                 for key, flag in EFFICIENCY_FLAGS.items()})
     validate_pair(args.protocol, variants)
     differences = [key for key in ("artifact", "backend", "observer") if a[key] != b[key]]
     differences.extend("flags." + key for key in a["flags"] if a["flags"][key] != b["flags"][key])
     require(len(differences) <= 1, "change one implementation/actuator dimension per campaign, not several coupled experiments")
     shader = shader_identity(args.shader_pack, args.shader_pack_sha256) if args.producer == "iris" else None
     require(args.producer == "iris" or (args.shader_pack is None and args.shader_pack_sha256 is None), "non-Iris trial has a pack input")
+    energy = getattr(args, "energy_profile", None)
+    require(getattr(args, "power_trace_dir", None) is None or energy, "--power-trace-dir requires --energy-profile")
+    if energy:
+        from fixed_cadence_energy import PROFILE
+        require(args.protocol in ("aa", "abba", "baab"), "energy profile requires matched A/A or interleaved A/B")
+        require(args.warmup_seconds >= 30 and args.sample_seconds >= 120, "energy profile requires 30 s warmup and 120 s sample")
+        require(args.protocol == "aa" or args.blocks >= 4, "energy A/B needs four paired blocks")
     return {"schemaVersion": 1, "protocol": args.protocol, "variants": variants,
+            "energyProfile": PROFILE if energy else None,
             "declaredDifferences": differences, "order": trial_order(args.protocol, args.blocks),
             "workloadId": args.workload, "warmupNs": round(args.warmup_seconds * 1e9),
             "sampleNs": round(args.sample_seconds * 1e9), "targetFps": args.target_fps,
@@ -68,6 +79,12 @@ def trial_command(args, root, directory, row, variant):
         command.extend(["--shader-pack", str(args.shader_pack.absolute()), "--shader-pack-sha256", args.shader_pack_sha256])
     for key, flag in (("reuseEncoderState", "--reuse-encoder-state"), ("terrainSliceCache", "--terrain-slice-cache")):
         if variant["flags"][key]: command.append(flag)
+    for key, flag in EFFICIENCY_FLAGS.items():
+        if variant["flags"].get(key): command.append("--" + flag)
+    if getattr(args, "energy_profile", None):
+        command.extend(["--energy-profile", args.energy_profile])
+        if args.power_trace_dir is not None:
+            command.extend(["--power-trace", str(args.power_trace_dir.absolute() / (directory.name + ".json"))])
     return command
 
 
@@ -82,6 +99,7 @@ def verify_block(directory: Path) -> dict:
     require(block.get("complete") is True and len(block["trials"]) == len(order), "block is incomplete; preserve every planned trial")
     summaries, pair_identity, reasons = {"A": [], "B": []}, None, []
     failed_trials = 0
+    energy_trials = []
     for expected, execution in zip(order, block["trials"]):
         require(execution.get("order") == expected, "trial was moved, repeated, or filtered")
         name = f"trial-{expected['ordinal']:04d}-{expected['variant']}"
@@ -102,12 +120,24 @@ def verify_block(directory: Path) -> dict:
         require(trial["artifact"] == variant["artifact"] and trial["observerMode"] == variant["observer"], "trial binary/instrument differs from plan")
         for key in ("reuseEncoderState", "terrainSliceCache"):
             require(trial["features"][key] == variant["flags"][key], "trial actuator differs from plan")
+        for key in EFFICIENCY_FLAGS:
+            require(trial["features"].get(key, False) == variant["flags"].get(key, False), "trial actuator differs from plan")
         work = trial["workload"]
         require(work["backend"] == variant["backend"] and work["producer"] == variant["producer"]
                 and all(work[key] == plan[key] for key in ("workloadId", "warmupNs", "sampleNs", "targetFps", "initialWorld", "shaderPack")),
                 "trial work/quality/window differs from plan")
         require(trial["bootstrap"] is False, "bootstrap is not a comparison sample")
         observed = trial["observation"]
+        if plan.get("energyProfile"):
+            from fixed_cadence_energy import integrate, PROFILE
+            require(plan["energyProfile"] == PROFILE, "energy profile changed after declaration")
+            energy = observed.get("energy", {})
+            if energy.get("available"):
+                trace_path = trial_dir / "power-trace.json"
+                normalized = integrate(parse_json(trace_path.read_bytes()), name, variant["artifact"], observed["sourceSampleWindow"])
+                normalized["traceSha256"] = sha256(trace_path)
+                require(energy == normalized, "normalized energy differs from immutable raw trace")
+            energy_trials.append({"block": expected["block"], "variant": expected["variant"], "observation": observed})
         environment = trial["environmentBefore"]
         keys = ("os", "architecture", "hardwareModel", "jdk", "xcode", "sdk", "powerSource", "powerPolicy")
         facts = {key: environment[key].get("value") for key in keys}
@@ -128,12 +158,16 @@ def verify_block(directory: Path) -> dict:
                           "sourceFpsMeanAcrossTrials": statistics.mean(x["sourceFps"] for x in values) if values and not failed_trials else None,
                           "aggregateUnavailableReason": "failed-trial-prevents-unfiltered-aggregate" if failed_trials else None}
     # No confidence interval, non-inferiority margin or superiority is invented from a handful of trials.
-    return {"status": "invalid-evidence" if failed_trials else "valid-observation" if reasons else "comparison-ready", "reasons": reasons,
+    result = {"status": "invalid-evidence" if failed_trials else "valid-observation" if reasons else "comparison-ready", "reasons": reasons,
             "failedTrialCount": failed_trials,
             "protocol": plan["protocol"], "planSha256": canonical_hash(plan), "variants": stats,
             "filtering": "all planned trials retained; any failure prevents comparison-ready",
             "statisticalUnit": "trial/block, not independent per-frame samples",
             "physicalPerformanceAcceptance": "physical-validation-required", "productPromotable": False}
+    if plan.get("energyProfile"):
+        from fixed_cadence_energy import compare
+        result["energyComparison"] = compare(plan, energy_trials, result["status"] == "comparison-ready")
+    return result
 
 
 def main():
@@ -148,6 +182,10 @@ def main():
     for variant in ("a", "b"):
         parser.add_argument(f"--{variant}-reuse-encoder-state", action="store_true")
         parser.add_argument(f"--{variant}-terrain-slice-cache", action="store_true")
+        for flag in EFFICIENCY_FLAGS.values():
+            parser.add_argument(f"--{variant}-{flag}", action="store_true")
+    parser.add_argument("--energy-profile", choices=("fixed-cadence-energy-v1",))
+    parser.add_argument("--power-trace-dir", type=Path, help="Instrument exports named trial-NNNN-A/B.json, read after each trial")
     parser.add_argument("--initial-world", type=Path); parser.add_argument("--workload", choices=WORKLOADS)
     parser.add_argument("--shader-pack", type=Path); parser.add_argument("--shader-pack-sha256")
     parser.add_argument("--warmup-seconds", type=float, default=30); parser.add_argument("--sample-seconds", type=float, default=120)

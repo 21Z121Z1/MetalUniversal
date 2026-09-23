@@ -5,6 +5,7 @@ cd "$ROOT"
 export PYTHONPYCACHEPREFIX="$ROOT/build/python-cache"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
+python3 -m json.tool docs/agent/fixed-cadence-power-trace.schema.json >/dev/null
 python3 -m json.tool docs/agent/presentation-pacing-evidence.schema.json >/dev/null
 python3 -m json.tool docs/agent/minecraft-26.3-p0-baseline.json >/dev/null
 python3 -m json.tool docs/agent/terrain-work-events.schema.json >/dev/null
@@ -48,6 +49,15 @@ bash -n scripts/agent/verify.sh
   -x buildIOSNative \
   -x buildIOSSpvc \
   --tests com.metallum.client.metal.render.FrameEvidenceRecorderTest \
+  --tests com.metallum.client.metal.render.FramePacingPolicyTest \
+  --tests com.metallum.client.metal.render.MetalBufferUploadTest \
+  --tests com.metallum.client.metal.render.MetalMslDiskCacheTest \
+  --tests com.metallum.client.metal.render.MetalSurfaceFrameStateTest \
+  --tests com.metallum.client.metal.render.TerrainIcbSubmissionTest \
+  --tests com.metallum.client.metal.render.mtl.MTLCommandEncoderLifecycleTest \
+  --tests com.metallum.client.metal.render.mtl.MetalRenderStatePacketTest \
+  --tests com.metallum.client.metal.render.mtl.MetalRenderStateShadowTest \
+  --tests com.metallum.client.metal.render.mtl.MetalComputeStateShadowTest \
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
   --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
   --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \

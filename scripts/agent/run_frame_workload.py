@@ -17,7 +17,7 @@ import sys
 import time
 
 from frame_trial_contract import (
-    WORKLOADS, PRODUCERS, BACKENDS, require, packaged_identity, snapshot_identity,
+    WORKLOADS, PRODUCERS, BACKENDS, EFFICIENCY_FLAGS, require, packaged_identity, snapshot_identity,
     shader_identity, canonical_hash, sha256, parse_json, atomic_json, verify_loaded,
     validate_gameplay, finite_seconds, artifact_inventory, runner_lock,
 )
@@ -117,6 +117,9 @@ def workload_command(args, root, output, artifact, spec):
               "nativeWidth": spec["output"]["width"], "nativeHeight": spec["output"]["height"],
               "evidenceDir": str(output), "clientRunDir": str(output / "client-instance"),
               "shaderPackName": spec["shaderPack"]["stagedName"] if spec["shaderPack"] else ""}
+    for key, flag in EFFICIENCY_FLAGS.items():
+        values[key] = getattr(args, flag.replace("-", "_"), False)
+    values["efficiencyTelemetry"] = args.frame_evidence != "off"
     if args.initial_world is not None:
         values["initialWorld"] = str(args.initial_world.resolve())
     encoded = lambda value: str(value).lower() if isinstance(value, bool) else str(value)
@@ -147,6 +150,7 @@ def collect_workload_result(output, expected, specification):
     result["optimizationActivation"] = gameplay.get("optimizationActivation", {
         "status": "unavailable", "reason": "loaded-driver-does-not-report-activation"})
     result["terrainSliceCacheEvidence"] = gameplay.get("terrainSliceCacheEvidence")
+    result["efficiencyActivation"] = gameplay.get("efficiencyActivation", {})
     # The output copy and the input were independently verified; a seed is not substituted for either.
     snapshot = snapshot_identity(output / "initial-world")
     if specification["initialWorld"] is not None:
@@ -168,6 +172,13 @@ def run_workload(args, root):
     finite_seconds(args.warmup_seconds, 0, 3600, "warmup seconds")
     finite_seconds(args.sample_seconds, 1, 86400, "sample seconds")
     require(15 <= args.target_fps < 260, "target cadence must be explicit and below Vanilla's unlimited sentinel")
+    energy_profile = getattr(args, "energy_profile", None)
+    require(getattr(args, "power_trace", None) is None or energy_profile, "--power-trace requires --energy-profile")
+    if energy_profile:
+        from fixed_cadence_energy import PROFILE
+        require(args.warmup_seconds * 1e9 >= PROFILE["minimumWarmupNs"]
+                and args.sample_seconds * 1e9 >= PROFILE["minimumSampleNs"],
+                "energy profile requires 30 s warmup and 120 s sample")
     require(args.metrics_only,
             "versioned workload trials use --metrics-only; diagnostic profiler runs stay separate")
     require(not args.prepare_scene or args.workload in ("C0", "G0"), "only C0/G0 have prepared content")
@@ -215,6 +226,7 @@ def run_workload(args, root):
         manifest["features"] = {"reuseEncoderState": args.reuse_encoder_state, "terrainSliceCache": args.terrain_slice_cache,
                                 "verifyTerrainSliceCache": args.verify_terrain_cache, "frameEvidenceSegmented": True,
                                 "metalFx": "OFF", "frameInterpolation": False, "ordinaryDisplayLink": False}
+        manifest["features"].update({key: getattr(args, flag.replace("-", "_"), False) for key, flag in EFFICIENCY_FLAGS.items()})
         command = workload_command(args, root, output, artifact, spec)
         manifest["clientCommand"] = command
         manifest["clientEnvironment"] = {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"}
@@ -245,6 +257,13 @@ def run_workload(args, root):
                         and activation.get("telemetryEnabled") is True,
                         "requested encoder reuse did not produce an activation receipt")
         manifest["observation"] = result
+        if getattr(args, "energy_profile", None):
+            from fixed_cadence_energy import collect
+            result["energy"] = collect(args.power_trace, output, output.name, artifact, result["sourceSampleWindow"])
+        for key in EFFICIENCY_FLAGS:
+            if manifest["features"][key] and args.frame_evidence != "off":
+                require(result["efficiencyActivation"].get(key, {}).get("active") is True,
+                        "requested efficiency lane did not activate: " + key)
         manifest["environmentAfter"] = environment_facts()
         manifest["displayAfter"] = physical_display()
         require(manifest["displayBefore"] == manifest["displayAfter"], "display identity changed outside the declared transition")
@@ -301,6 +320,10 @@ def main():
     parser.add_argument("--warmup-seconds", type=float, default=30)
     parser.add_argument("--sample-seconds", type=float, default=120)
     parser.add_argument("--target-fps", type=int, default=60)
+    for flag in EFFICIENCY_FLAGS.values():
+        parser.add_argument("--" + flag, action="store_true")
+    parser.add_argument("--energy-profile", choices=("fixed-cadence-energy-v1",))
+    parser.add_argument("--power-trace", type=Path, help="Instrument export for this exact trial/source window; absent means unavailable")
     parser.add_argument("--metrics-only", action="store_true", required=True,
                         help="Physical trials never enable JFR, HUD or diagnostic rendering labels")
     parser.add_argument("--initial-world", type=Path)

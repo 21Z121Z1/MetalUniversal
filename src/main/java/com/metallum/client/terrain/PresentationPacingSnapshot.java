@@ -28,6 +28,7 @@ public record PresentationPacingSnapshot(
     public static final String COUNT_UNIT = "count";
     public static final String JAVA_RUNTIME_PROVENANCE = "java-terrain-runtime-signals";
     public static final String REFRESH_RATE_PROVENANCE = "minecraft.window.refresh-rate";
+    public static final String USER_TARGET_PROVENANCE = "minecraft.limiter.metallum-user-policy";
     public static final String TARGET_FALLBACK_PROVENANCE = "conservative-60hz-fallback";
     public static final String TARGET_FALLBACK_REASON = "display-refresh-source-unavailable";
     public static final String PRESENT_INTERVAL_UNAVAILABLE_REASON =
@@ -55,6 +56,13 @@ public record PresentationPacingSnapshot(
         if (fallbackReason != null && fallbackReason.isBlank()) {
             fallbackReason = null;
         }
+    }
+
+    public PresentationPacingSnapshot withUserTarget(long nanos) {
+        if (nanos <= 0L) return this;
+        return new PresentationPacingSnapshot(frameIndex, refreshRateHz,
+                Value.derivedNanos(nanos, USER_TARGET_PROVENANCE), measuredPresentInterval,
+                cpuFrameTime, gpuFrameTime, drawableWait, framesInFlight, provenance, null);
     }
 
     /** Builds a snapshot from the sources currently available to Java. */

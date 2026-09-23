@@ -18,9 +18,11 @@ public final class MetalReadbackControlGameTest implements FabricClientGameTest 
 
         require(FabricLoader.getInstance().isModLoaded("metallum"), "MetalUniversal was not loaded");
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
+        boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
+        require(!(vanillaOnly && sodiumOnly), "Vanilla and Sodium-only lanes cannot both be selected");
         require(FabricLoader.getInstance().isModLoaded("sodium") == !vanillaOnly,
                 "Sodium runtime presence disagrees with the requested lane");
-        require(FabricLoader.getInstance().isModLoaded("iris") == !vanillaOnly,
+        require(FabricLoader.getInstance().isModLoaded("iris") == (!vanillaOnly && !sodiumOnly),
                 "Iris runtime presence disagrees with the requested lane");
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {

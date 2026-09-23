@@ -56,6 +56,7 @@
     "render.LightmapFlickerValidationMixin",
     "render.TextureAtlasAnimationValidationMixin",
     "render.MinecraftMetalFxMixin",
+    "render.FramerateLimitTrackerMixin",
     "render.MetalGpuBufferUploadDedupMixin",
     "render.MetalCommandEncoderUploadDedupMixin",
     "render.MetalCommandEncoderDynamicBackingBudgetMixin",

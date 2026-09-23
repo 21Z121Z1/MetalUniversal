@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fixed cadence measured interval power export v1",
+  "type": "object",
+  "required": ["schemaVersion", "trialId", "artifact", "sourceWindow", "source", "sampleKind", "clockMapping", "samples"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "trialId": {"type": "string", "minLength": 1},
+    "artifact": {"type": "object", "description": "Exact trial-manifest artifact, including Java/native hashes and build identity."},
+    "sourceWindow": {
+      "type": "object", "required": ["clock", "startNs", "endNs"], "additionalProperties": false,
+      "properties": {"clock": {"const": "System.nanoTime"}, "startNs": {"type": "integer"}, "endNs": {"type": "integer"}}
+    },
+    "source": {
+      "type": "object", "required": ["id", "version", "method", "domain", "authority", "unit"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1},
+        "method": {"type": "string", "minLength": 1}, "unit": {"const": "W"},
+        "domain": {"enum": ["cpu", "gpu", "soc", "wall-system"]},
+        "authority": {"enum": ["calibrated-instrument", "platform-reported"]}
+      }
+    },
+    "sampleKind": {"const": "interval-mean"},
+    "clockMapping": {
+      "type": "object", "required": ["method", "evidence", "maximumErrorNs"],
+      "properties": {
+        "method": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1},
+        "maximumErrorNs": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    },
+    "samples": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["startNs", "endNs", "meanWatts"],
+        "properties": {"startNs": {"type": "integer"}, "endNs": {"type": "integer"}, "meanWatts": {"type": "number", "minimum": 0}}
+      }
+    }
+  },
+  "$comment": "The executable verifier additionally requires exact artifact/window identity, positive contiguous intervals of at most one second, complete coverage, finite numbers and no extrapolation. Schema validity alone is not acceptance."
+}

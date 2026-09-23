@@ -9,6 +9,11 @@ repositories {
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
 def noOptionalRenderMods = providers.gradleProperty("metallum.noOptionalMods")
         .map { it.toBoolean() }.orElse(false).get()
+def sodiumOnly = providers.gradleProperty("metallum.sodiumOnly")
+        .map { it.toBoolean() }.orElse(false).get()
+if (noOptionalRenderMods && sodiumOnly) {
+    throw new GradleException('metallum.noOptionalMods and metallum.sodiumOnly cannot both be true')
+}
 def expectedSourceSha = providers.gradleProperty("metallumSourceSha")
         .orElse(providers.gradleProperty("p1SourceSha"))
         .orElse(providers.environmentVariable("METALLUM_SOURCE_SHA"))
@@ -121,6 +126,9 @@ if (frameCampaign && (!(frameWorkload in ['P0','T0','C0','G0','I0','I1','X0'])
 if (frameCampaign && noOptionalRenderMods != (trialProducer == 'vanilla')) {
     throw new GradleException('trialProducer and metallum.noOptionalMods disagree')
 }
+if (frameCampaign && sodiumOnly && trialProducer != 'sodium') {
+    throw new GradleException('metallum.sodiumOnly requires trialProducer=sodium in a frame campaign')
+}
 // Versioned physical trials are a separate evidence protocol, never an alias for
 // the guarded legacy optimization profiles above. They cannot weaken those gates.
 if (frameCampaign != (optimizationProfile == 'frame-trial-v1')) {
@@ -163,7 +171,9 @@ dependencies {
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     if (!noOptionalRenderMods) {
         productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-        if (!frameCampaign || trialProducer == 'iris') productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+        if (!sodiumOnly && (!frameCampaign || trialProducer == 'iris')) {
+            productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+        }
     }
 }
 
@@ -209,6 +219,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.gameplay=${providers.gradleProperty('gameplay').orElse('false').get()}")
     jvmArgs.add("-Dmetallum.ci.waitForProfiler=${waitForProfiler}")
     jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.ci.sodiumOnly=${sodiumOnly}")
     jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.validation.sourceCommit=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
@@ -218,7 +229,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Compatibility seam for older invocations while P1 switches to the
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
-    jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods && !sodiumOnly}")
     jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
@@ -263,6 +274,12 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
         jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
+        ['dynamicUploadRangeCopy', 'nativeMultiDrawBatch', 'asyncPrecompile'].each { flag ->
+            jvmArgs.add("-Dmetallum.opt.${flag}=${providers.gradleProperty(flag).orElse('false').get()}")
+        }
+        jvmArgs.add("-Dmetallum.hotpath.telemetry=${providers.gradleProperty('efficiencyTelemetry').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.pacing.enabled=${providers.gradleProperty('pacingPolicy').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.pacing.targetFps=${providers.gradleProperty('targetFps').orElse('60').get()}")
         jvmArgs.add("-Dmetallum.terrain.verifySliceCache=${providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.presentationMetrics=${presentationMetrics}")
         jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")

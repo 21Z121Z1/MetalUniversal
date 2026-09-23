@@ -364,8 +364,12 @@ public final class VanillaGameplay {
         windowClockAnchors.getAsJsonArray("events").add(stationaryWindow);
         try {
             if (FrameWorkloads.ENABLED) {
-                report.add("workload", FrameWorkloads.run(context, world, sampleStartNanos,
-                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT));
+                // Publish the mutable receipt before actions so a failed physical
+                // transition retains its exact observed dimensions and progress.
+                JsonObject workloadReceipt = new JsonObject();
+                report.add("workload", workloadReceipt);
+                FrameWorkloads.run(context, world, sampleStartNanos,
+                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT, workloadReceipt);
                 report.add("sourceSampleWindow", context.computeOnClient(client -> sourceWindow.finish()));
                 if (STABLE_SCENE) {
                     JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
@@ -516,6 +520,7 @@ public final class VanillaGameplay {
             JsonObject finalSettings = context.computeOnClient(VanillaGameplay::settings);
             report.add("finalSettings", finalSettings);
             report.add("optimizationActivation", context.computeOnClient(client -> optimizationActivation()));
+            report.add("efficiencyActivation", context.computeOnClient(client -> efficiencyActivation()));
             require(settings.equals(finalSettings), "Rendering settings changed during the route");
             require(invalidSettingsFrames == 0 && droppedSamples == 0 && throttledFrames == 0,
                     "Source frame measurements failed the full-resolution, maximum-distance or cadence gate");
@@ -648,6 +653,42 @@ public final class VanillaGameplay {
         value.addProperty("shadowAllocations", snapshot.shadowAllocations());
         value.addProperty("shadowReuseHits", snapshot.shadowReuseHits());
         value.addProperty("nativeEncoderArgumentReuseCalls", snapshot.nativeEncoderArgumentReuseCalls());
+        return value;
+    }
+
+    private static JsonObject efficiencyActivation() {
+        JsonObject value = new JsonObject();
+        // Reflection keeps the driver usable with the exact baseline JAR,
+        // which may predate a candidate's new counter. Absence stays absent.
+        for (String[] lane : new String[][]{
+                {"dynamicUploadRangeCopy", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "dynamicRangeCopies"},
+                {"nativeMultiDrawBatch", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "nativeMultiDrawBatches"},
+                {"asyncPrecompile", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "preparedPipelineCount"}}) {
+            JsonObject row = new JsonObject();
+            boolean requested = Boolean.getBoolean("metallum.opt." + lane[0]);
+            row.addProperty("requested", requested);
+            row.addProperty("scope", "startup-to-gameplay-completion; activation only");
+            try {
+                Object counter = Class.forName(lane[1]).getMethod(lane[2]).invoke(null);
+                long count = ((Number) (lane[3].isEmpty() ? counter : counter.getClass().getMethod(lane[3]).invoke(counter))).longValue();
+                row.addProperty("count", count);
+                row.addProperty("active", requested && count > 0);
+            } catch (ReflectiveOperationException unavailable) {
+                row.addProperty("active", false);
+                row.addProperty("unavailableReason", unavailable.getClass().getSimpleName());
+            }
+            value.add(lane[0], row);
+        }
+        JsonObject pacing = new JsonObject();
+        try {
+            JsonObject snapshot = (JsonObject) Class.forName("com.metallum.client.metal.render.MetalFramePacing").getMethod("snapshot").invoke(null);
+            pacing.add("decision", snapshot);
+            pacing.addProperty("active", snapshot.get("enabled").getAsBoolean()
+                    && "metallum".equals(snapshot.get("owner").getAsString()) && snapshot.get("effectiveFps").getAsInt() < 260);
+        } catch (ReflectiveOperationException unavailable) {
+            pacing.addProperty("active", false);
+        }
+        value.add("pacingPolicy", pacing);
         return value;
     }
 

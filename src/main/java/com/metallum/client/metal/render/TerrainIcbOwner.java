@@ -25,6 +25,25 @@ public final class TerrainIcbOwner implements AutoCloseable {
     /** -1 for CPU/all-visible ICB; otherwise the visibility producer epoch. */
     private long visibilityEpoch = -1L;
     private boolean closed;
+    private long executionSerial;
+
+    long executionSerial() { return executionSerial; }
+
+    static final class SubmissionUncertain extends IllegalStateException {
+        SubmissionUncertain(RuntimeException cause) {
+            super("Terrain ICB execution did not return a receipt; indirect fallback would risk duplicate draws", cause);
+        }
+    }
+
+    static boolean submitDraw(java.util.function.BooleanSupplier submit) {
+        try {
+            // Native false is a pre-encode rejection. A thrown crossing has no
+            // such guarantee and must abort the frame, never replay geometry.
+            return submit.getAsBoolean();
+        } catch (RuntimeException failure) {
+            throw new SubmissionUncertain(failure);
+        }
+    }
 
     boolean hasReusableGpuIcb(
             final MetalDevice currentDevice,
@@ -294,7 +313,8 @@ public final class TerrainIcbOwner implements AutoCloseable {
         if (MetalNativeBridge.isNullHandle(indirectCommandBuffer)) {
             return false;
         }
-        if (encoder.executeTerrainIcb(indirectCommandBuffer, drawCount)) {
+        if (submitDraw(() -> encoder.executeTerrainIcb(indirectCommandBuffer, drawCount))) {
+            executionSerial++;
             return true;
         }
 

@@ -50,7 +50,7 @@ SOURCE_CONTRACTS = (
         ),
     ),
     SourceContract(
-        "net/minecraft/client/renderer/LevelExtractor.java",
+        "net/minecraft/client/renderer/extract/LevelExtractor.java",
         ("LevelExtractor",),
         (
             MethodContract("setSectionDirty", ("int", "int", "int", "boolean"), "void"),
@@ -62,21 +62,29 @@ SOURCE_CONTRACTS = (
         "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java",
         ("SectionRenderDispatcher", "RenderSection", "CompileTask"),
         (
-            MethodContract("doTask", ("SectionBufferBuilderPack",), "SectionTaskResult"),
+            MethodContract(
+                "doTask",
+                ("SectionBufferBuilderPack",),
+                "SectionRenderDispatcher.RenderSection.SectionTask.SectionTaskResult",
+            ),
         ),
     ),
     SourceContract(
         "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java",
         ("SectionRenderDispatcher", "RenderSection"),
         (
-            MethodContract("createCompileTask", ("RenderSectionRegion",), "SectionTask"),
+            MethodContract(
+                "createCompileTask",
+                ("RenderSectionRegion",),
+                "SectionRenderDispatcher.RenderSection.SectionTask",
+            ),
             MethodContract("compileAsync", ("RenderSectionRegion",), "void"),
             MethodContract("compileSync", ("RenderSectionRegion",), "void"),
             MethodContract("reset", (), "void"),
             MethodContract(
                 "addSectionBuffersToUberBuffer",
                 ("ChunkSectionLayer", "CompiledSectionMesh", "ByteBuffer", "ByteBuffer"),
-                "void",
+                "boolean",
             ),
             MethodContract("vertexBufferUploadCallback", ("CompiledSectionMesh", "ChunkSectionLayer"), "void"),
             MethodContract(
@@ -92,7 +100,11 @@ SOURCE_CONTRACTS = (
         "net/minecraft/client/renderer/chunk/SectionCompiler.java",
         ("SectionCompiler",),
         (
-            MethodContract("compile", ("RenderSectionRegion",), exact_parameters=False),
+            MethodContract(
+                "compile",
+                ("SectionPos", "RenderSectionRegion", "VertexSorting", "SectionBufferBuilderPack"),
+                "SectionCompiler.Results",
+            ),
         ),
     ),
     SourceContract(
@@ -353,6 +365,21 @@ def normalize_type(raw: str) -> str:
     return value.rsplit(".", 1)[-1]
 
 
+def canonical_type(raw: str) -> str:
+    """Normalize formatting but preserve qualification for nested target types."""
+    value = re.sub(r"@\w+(?:\([^)]*\))?", "", raw).strip()
+    value = re.sub(r"\b(final|volatile|transient)\b", "", value)
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(r"<.*>", "", value)
+    return value.replace("...", "[]")
+
+
+def return_type_matches(actual: str, expected: str) -> bool:
+    if "." in expected:
+        return canonical_type(actual) == canonical_type(expected)
+    return normalize_type(actual) == normalize_type(expected)
+
+
 def normalize_parameter(raw: str) -> str:
     value = re.sub(r"@\w+(?:\([^)]*\))?", "", raw).strip()
     value = re.sub(r"\b(final|volatile|transient)\b", "", value).strip()
@@ -373,9 +400,13 @@ def parse_methods(class_text: str, class_span: tuple[int, int]) -> dict[str, lis
         name = name_match.group(1)
         if depths[name_start] != class_depth + 1:
             continue
-        line_start = clean.rfind("\n", class_open + 1, name_start) + 1
-        prefix = clean[line_start:name_start].strip()
-        if not prefix or "=" in prefix or "." in prefix:
+        prefix_start = max(
+            clean.rfind("{", class_open + 1, name_start),
+            clean.rfind("}", class_open + 1, name_start),
+            clean.rfind(";", class_open + 1, name_start),
+        ) + 1
+        prefix = clean[prefix_start:name_start].strip()
+        if not prefix or "=" in prefix:
             continue
         words = prefix.split()
         return_word = words[-1]
@@ -387,7 +418,7 @@ def parse_methods(class_text: str, class_span: tuple[int, int]) -> dict[str, lis
             continue
         raw_parameters = clean[opening + 1:closing].strip()
         parameters = tuple(normalize_parameter(part) for part in split_top_level(raw_parameters))
-        methods.setdefault(name, []).append((parameters, normalize_type(return_word)))
+        methods.setdefault(name, []).append((parameters, canonical_type(return_word)))
     return methods
 
 
@@ -463,13 +494,13 @@ class Verifier:
                         parameters_match = all(required in parameters for required in expected_parameters)
                     return_match = (
                         method_contract.returns is None
-                        or result == normalize_type(method_contract.returns)
+                        or return_type_matches(result, method_contract.returns)
                     )
                     if parameters_match and return_match:
                         matches.append((parameters, result))
                 expected = f"{method_contract.name}({', '.join(expected_parameters)})"
                 if method_contract.returns:
-                    expected += f" -> {normalize_type(method_contract.returns)}"
+                    expected += f" -> {canonical_type(method_contract.returns)}"
                 if matches:
                     detail = f"{contract_name}.{expected} matched"
                     self.check(f"method:{contract_name}.{method_contract.name}", detail, True)
@@ -530,9 +561,16 @@ def run_self_test() -> None:
         class SectionRenderDispatcher {
           class RenderSection {
             class CompileTask {
-              SectionTaskResult doTask(SectionBufferBuilderPack pack) { return null; }
+              SectionRenderDispatcher.RenderSection.SectionTask.SectionTaskResult
+              doTask(SectionBufferBuilderPack pack) { return null; }
             }
+            SectionRenderDispatcher.RenderSection.SectionTask
+            createCompileTask(RenderSectionRegion region) { return null; }
           }
+        }
+        class SectionCompiler {
+          SectionCompiler.Results compile(SectionPos pos, RenderSectionRegion region,
+              VertexSorting sorting, SectionBufferBuilderPack builders) { return null; }
         }
         class LevelExtractor {
           void setSectionDirty(int x, int y, int z, boolean important) { }
@@ -545,9 +583,33 @@ def run_self_test() -> None:
         raise AssertionError("self-test could not locate synthetic top-level/nested targets")
     nested_methods = parse_methods(clean, nested)
     top_methods = parse_methods(clean, top_level)
-    expected_do_task = (("SectionBufferBuilderPack",), "SectionTaskResult")
+    expected_do_task = (
+        ("SectionBufferBuilderPack",),
+        "SectionRenderDispatcher.RenderSection.SectionTask.SectionTaskResult",
+    )
     if expected_do_task not in nested_methods.get("doTask", []):
         raise AssertionError(f"self-test rejected valid nested signature: {nested_methods}")
+    render_section_span = find_class_span(
+        clean,
+        ("SectionRenderDispatcher", "RenderSection"),
+    )
+    assert render_section_span is not None
+    render_section_methods = parse_methods(clean, render_section_span)
+    expected_create = (
+        ("RenderSectionRegion",),
+        "SectionRenderDispatcher.RenderSection.SectionTask",
+    )
+    if expected_create not in render_section_methods.get("createCompileTask", []):
+        raise AssertionError(f"self-test rejected qualified nested return type: {render_section_methods}")
+    compiler_span = find_class_span(clean, ("SectionCompiler",))
+    assert compiler_span is not None
+    compiler_methods = parse_methods(clean, compiler_span)
+    expected_compile = (
+        ("SectionPos", "RenderSectionRegion", "VertexSorting", "SectionBufferBuilderPack"),
+        "SectionCompiler.Results",
+    )
+    if expected_compile not in compiler_methods.get("compile", []):
+        raise AssertionError(f"self-test rejected multiline exact signature: {compiler_methods}")
     valid_dirty = (("int", "int", "int", "boolean"), "void")
     if valid_dirty not in top_methods.get("setSectionDirty", []):
         raise AssertionError(f"self-test rejected valid selector signature: {top_methods}")
@@ -559,6 +621,20 @@ def run_self_test() -> None:
     drifted_methods = parse_methods(drifted_clean, drifted_span)
     if valid_dirty in drifted_methods.get("setSectionDirty", []):
         raise AssertionError("self-test failed to detect parameter-type drift")
+
+    qualified_return_drift = sample.replace(
+        "SectionRenderDispatcher.RenderSection.SectionTask.SectionTaskResult",
+        "SectionRenderDispatcher.RenderSection.OtherTask.SectionTaskResult",
+    )
+    return_drift_clean = mask_java_literals(strip_java_comments(qualified_return_drift))
+    return_drift_span = find_class_span(
+        return_drift_clean,
+        ("SectionRenderDispatcher", "RenderSection", "CompileTask"),
+    )
+    assert return_drift_span is not None
+    return_drift_methods = parse_methods(return_drift_clean, return_drift_span)
+    if expected_do_task in return_drift_methods.get("doTask", []):
+        raise AssertionError("self-test failed to detect qualified return-type drift")
 
     missing_target = find_class_span(clean, ("SectionRenderDispatcher", "RenderSection", "MissingTask"))
     if missing_target is not None:

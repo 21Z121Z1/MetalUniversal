@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
+import com.metallum.client.metal.render.MetalBufferUpload;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -21,6 +22,8 @@ public abstract class MetalCommandEncoderUploadDedupMixin {
             final ByteBuffer data,
             final CallbackInfo ci
     ) {
+        if (destination.buffer().isClosed()) throw new IllegalStateException("Metal buffer is closed");
+        MetalBufferUpload.validate(destination.buffer().size(), destination.offset(), destination.length(), data.remaining());
         if (!(destination.buffer() instanceof MetalUploadDedupBuffer dedup)) {
             return;
         }

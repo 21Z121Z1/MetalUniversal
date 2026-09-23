@@ -3219,6 +3219,22 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	// than merely observing the device family bit. The MRT suite below also
 	// activates the offscreen main queue; client presentation has its own lane.
 	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+	// One optional candidate at a time; baseline remains the default. These
+	// are correctness/readback runs, never paired performance observations.
+	def efficiencyProfiles = [
+		"baseline": null,
+		"reuse-encoder-state": "metallum.opt.reuseEncoderState",
+		"dynamic-upload-range-copy": "metallum.opt.dynamicUploadRangeCopy",
+		"async-precompile": "metallum.opt.asyncPrecompile",
+		"native-multi-draw-batch": "metallum.opt.nativeMultiDrawBatch"
+	]
+	def efficiencyProfile = providers.gradleProperty("metallum.efficiencyProfile").orElse("baseline").get()
+	if (!efficiencyProfiles.containsKey(efficiencyProfile)) {
+		throw new GradleException("Unknown native efficiency profile: ${efficiencyProfile}")
+	}
+	efficiencyProfiles.values().findAll { it != null }.each { property ->
+		task.systemProperty property, (property == efficiencyProfiles[efficiencyProfile]).toString()
+	}
 	if (metal4) {
 		// MRT readbacks also validate real MTL4 encoder/store actions. The native
 		// offscreen queue is process-wide, so isolate test classes from it.

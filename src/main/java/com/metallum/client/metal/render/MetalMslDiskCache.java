@@ -44,7 +44,8 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v6-renderpearl-spv-owned-copy";
+    static final String CACHE_SALT = "metallum-msl-v7-length-prefixed-integrity";
+    private static final int SCHEMA_VERSION = 1;
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));
@@ -100,7 +101,7 @@ final class MetalMslDiskCache {
     }
 
     /**
-     * SHA-256 over the given segments joined with {@code '\0'}, lowercase
+     * SHA-256 over length-prefixed UTF-8 segments, lowercase
      * hex. Callers must pass <b>every</b> input that can influence the
      * translated five-tuple; see the call site in
      * {@link MetalCrossShaderCompiler} for the segment inventory.
@@ -109,8 +110,9 @@ final class MetalMslDiskCache {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             for (String segment : segments) {
-                digest.update(segment.getBytes(StandardCharsets.UTF_8));
-                digest.update((byte) 0);
+                byte[] bytes = segment.getBytes(StandardCharsets.UTF_8);
+                digest.update(java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
+                digest.update(bytes);
             }
             return HexFormat.of().formatHex(digest.digest());
         } catch (Exception e) {
@@ -126,6 +128,13 @@ final class MetalMslDiskCache {
         }
         try {
             JsonObject root = JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8)).getAsJsonObject();
+            String payloadHash = root.remove("payloadSha256").getAsString();
+            if (root.get("schemaVersion").getAsInt() != SCHEMA_VERSION
+                    || !key.equals(root.get("cacheKey").getAsString())
+                    || !CACHE_SALT.equals(root.get("translationVersion").getAsString())
+                    || !payloadHash.equals(key(root.toString()))) {
+                throw new IllegalArgumentException("MSL cache identity or payload mismatch");
+            }
             List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>();
             for (JsonElement element : root.getAsJsonArray("resources")) {
                 JsonObject binding = element.getAsJsonObject();
@@ -168,6 +177,9 @@ final class MetalMslDiskCache {
 
     void store(final String key, final Entry entry) {
         JsonObject root = new JsonObject();
+        root.addProperty("schemaVersion", SCHEMA_VERSION);
+        root.addProperty("cacheKey", key);
+        root.addProperty("translationVersion", CACHE_SALT);
         root.addProperty("vertexMsl", entry.vertexMsl());
         root.addProperty("fragmentMsl", entry.fragmentMsl());
         root.addProperty("vertexEntryPoint", entry.vertexEntryPoint());
@@ -195,15 +207,19 @@ final class MetalMslDiskCache {
             genericVertexInputs.add(serialized);
         }
         root.add("genericVertexInputs", genericVertexInputs);
+        root.addProperty("payloadSha256", key(root.toString()));
         Path file = this.directory.resolve(key + ".json");
-        Path temp = this.directory.resolve(key + ".tmp");
+        Path temp = null;
         try {
+            // Multiple devices/processes may compile the same key. Each writer
+            // owns its temporary file; readers see only an entire old/new entry.
+            temp = Files.createTempFile(this.directory, key + "-", ".tmp");
             Files.writeString(temp, root.toString(), StandardCharsets.UTF_8);
             Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (Exception e) {
             Metallum.LOGGER.warn("[metallum] failed to store MSL cache entry", e);
             try {
-                Files.deleteIfExists(temp);
+                if (temp != null) Files.deleteIfExists(temp);
             } catch (Exception ignored) {
             }
         }

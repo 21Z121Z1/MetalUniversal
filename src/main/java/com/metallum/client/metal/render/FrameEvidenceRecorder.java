@@ -315,6 +315,11 @@ public final class FrameEvidenceRecorder {
         if (frame != null && frame.retained && !frame.exported) frame.context = context.deepCopy();
     }
 
+    public void pacingPolicy(JsonObject policy) {
+        Frame frame = current.get();
+        if (frame != null && frame.retained && !frame.exported) frame.context.add("pacingPolicy", policy.deepCopy());
+    }
+
     /** Identity is captured on first observed buffer use, never inferred from GPU sample order. */
     public synchronized Submission commandBuffer(long nativeSubmitIndex) {
         Frame frame = current.get();

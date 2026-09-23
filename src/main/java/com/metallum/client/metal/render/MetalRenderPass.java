@@ -583,6 +583,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             return false;
         }
 
+        long executionSerial = owner.executionSerial();
         try {
             MTLRenderCommandEncoder enc = renderEncoder();
             bindDrawState(enc);
@@ -808,6 +809,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                     drawCount
             );
         } catch (RuntimeException exception) {
+            if (exception instanceof TerrainIcbOwner.SubmissionUncertain
+                    || owner.executionSerial() != executionSerial) {
+                throw new IllegalStateException("Terrain draw may already be encoded; refusing duplicate fallback", exception);
+            }
             return false;
         }
     }

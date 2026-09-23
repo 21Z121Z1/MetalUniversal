@@ -475,7 +475,23 @@ public final class MetalFxManager {
      * generation can learn that it no longer presents on the refresh boundary.
      */
     public static void observePresentMode(final boolean immediate) {
+        if (immediatePresentMode != immediate) surfaceDiscontinuity("present mode changed");
         immediatePresentMode = immediate;
+    }
+
+    private static boolean windowVisible = true;
+
+    public static void observeWindowVisibility(boolean visible) {
+        windowVisible = visible;
+    }
+
+    /** Stop the old presenter before SDL/layer ownership or temporal history changes. */
+    public static void surfaceDiscontinuity(String reason) {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.suspendFrameGenerationInternal(reason);
+            manager.resetHistoryInternal(reason);
+        }
     }
 
     public static int sceneWidth(final int displayWidth) {
@@ -1236,12 +1252,12 @@ public final class MetalFxManager {
             this.nativeOffFastPathFrames++;
             return;
         }
-        if (frameGenerationEnabled && (hasActiveGui() || immediatePresentMode)) {
+        if (frameGenerationEnabled && (hasActiveGui() || immediatePresentMode || !windowVisible)) {
             suspendFrameGenerationInternal(
-                    hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
+                    !windowVisible ? "window is inactive or minimized" : hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
             );
         }
-        if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode) {
+        if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode && windowVisible) {
             frameGenerationSuspended = false;
             frameGenerationEnabled = true;
             frameGenerationEncodeObserved = false;

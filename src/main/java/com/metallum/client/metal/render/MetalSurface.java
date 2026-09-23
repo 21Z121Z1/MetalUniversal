@@ -24,6 +24,7 @@ final class MetalSurface implements GpuSurfaceBackend {
     private boolean closed;
     private GpuSurface.Configuration configuration;
     private MetalCommandEncoder pendingPresentEncoder;
+    private final MetalSurfaceFrameState frameState = new MetalSurfaceFrameState();
 
     MetalSurface(final MetalDevice device, final MemorySegment metalLayer, final long sdlMetalView) {
         this.device = device;
@@ -33,11 +34,22 @@ final class MetalSurface implements GpuSurfaceBackend {
 
     @Override
     public void configure(final GpuSurface.Configuration config) throws SurfaceException {
+        frameState.requireConfigurable();
         if (config.width() <= 0 || config.height() <= 0) {
             throw new SurfaceException("Metal surface configuration must be positive, got " + config.width() + "x" + config.height());
         }
 
         boolean immediate = config.presentMode() == GpuSurface.PresentMode.MAILBOX;
+        if (!SUPPORTED_PRESENT_MODES.contains(config.presentMode())) {
+            throw new SurfaceException("Unsupported Metal present mode: " + config.presentMode());
+        }
+        if (configuration != null) {
+            // An explicit reconfigure also covers display/fullscreen changes
+            // whose drawable size and present mode happen to stay identical.
+            MetalFxManager.surfaceDiscontinuity("surface reconfigured");
+            this.device.waitForSubmittedGpuWork();
+            FrameEvidenceRuntime.surfaceChanged();
+        }
         // Frame generation presents from CAMetalDisplayLink and is only valid
         // with vsync on. Publish the mode before the layer is reconfigured so
         // the presenter is already gated off when displaySyncEnabled drops.
@@ -50,6 +62,7 @@ final class MetalSurface implements GpuSurfaceBackend {
         );
 
         this.configuration = config;
+        frameState.configured();
     }
 
     @Override
@@ -59,21 +72,27 @@ final class MetalSurface implements GpuSurfaceBackend {
 
     @Override
     public void acquireNextTexture() {
+        frameState.acquire();
     }
 
     @Override
     public void blitFromTexture(final @NonNull CommandEncoderBackend commandEncoder, final @NonNull GpuTextureView textureView) {
+        frameState.requireAcquired();
         if (!(commandEncoder instanceof MetalCommandEncoder metalEncoder)) {
             throw new IllegalArgumentException("Metal surface requires MetalCommandEncoder");
         }
 
         metalEncoder.presentTextureToDrawable(metalLayer, textureView);
         this.pendingPresentEncoder = metalEncoder;
+        frameState.encoded();
     }
 
     @Override
     public void present() {
-        pendingPresentEncoder.submit();
+        frameState.present();
+        MetalCommandEncoder encoder = pendingPresentEncoder;
+        pendingPresentEncoder = null;
+        encoder.submit();
     }
 
     @Override
@@ -82,6 +101,11 @@ final class MetalSurface implements GpuSurfaceBackend {
             return;
         }
         this.closed = true;
+        frameState.close();
+        pendingPresentEncoder = null;
+        MetalFxManager.surfaceDiscontinuity("surface closed");
+        this.device.waitForSubmittedGpuWork();
+        MetalFxManager.close();
         this.device.presentationSurfaceClosed(this.sdlMetalView);
     }
 

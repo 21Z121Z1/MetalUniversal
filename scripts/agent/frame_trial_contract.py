@@ -17,6 +17,9 @@ WORKLOADS = ("P0", "T0", "C0", "G0", "I0", "I1", "X0")
 MODES = ("off", "timing", "diagnostic")
 BACKENDS = ("metal3", "metal4")
 PRODUCERS = ("vanilla", "sodium", "iris")
+EFFICIENCY_FLAGS = {"dynamicUploadRangeCopy": "dynamic-upload-range-copy",
+                    "nativeMultiDrawBatch": "native-multi-draw-batch",
+                    "asyncPrecompile": "async-precompile", "pacingPolicy": "pacing-policy"}
 
 
 def require(condition: bool, reason: str) -> None:
