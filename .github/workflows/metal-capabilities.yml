@@ -1,0 +1,126 @@
+name: metal-capabilities
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - upstream/renderpearl-26.3
+      - 26.3-fabric-dev
+  pull_request:
+    branches:
+      - 26.3-fabric-dev
+
+permissions:
+  contents: read
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: metal-capabilities-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Verify exact-head static contracts
+        run: bash scripts/agent/verify_unified_eval.sh
+
+  hosted-metal:
+    needs: static-contracts
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Record exact-head identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          mkdir -p build/agent-evidence
+          python3 scripts/agent/record_ci_subject.py \
+            --proof-subject candidate-head \
+            --output build/agent-evidence/ci-subject-metal-capabilities.json
+          uname -a
+          sw_vers
+          xcodebuild -version
+      - name: Execute raw Metal compute and readback probe
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/metallum-hosted-metal-probe"
+          "$RUNNER_TEMP/metallum-hosted-metal-probe" | tee build/agent-evidence/hosted-metal-probe.log
+          grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
+      - name: Compile shipping and validation paths
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -I .github/ci/HostedMetalGradle.init.gradle \
+            buildMacNative \
+            verifyProductionJarIsolation \
+            metalFrameGenerationLifecycleTest \
+            compileMetalMrtSmokeTest \
+            compileMetal4PipelineSmokeTest \
+            compileMetal4PipelinePathTest \
+            compileMetalHudRuntimeTest \
+            compileMetalFxOffscreenValidation \
+            compileMetalFxPerformanceValidation \
+            compileMetalFrameGenerationPresentationValidation
+      - name: Execute hosted shipping contracts
+        run: |
+          set -euo pipefail
+          MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 build/metal-tests/MetalMRTSmokeTest \
+            | tee build/agent-evidence/metal-mrt.log
+          ./gradlew --no-daemon --stacktrace \
+            -I .github/ci/HostedMetalGradle.init.gradle \
+            metalHudDisabledEnvironmentTest \
+            metal4PipelineSmokeTest \
+            metal4PipelinePathTest \
+            hostedMetalCoreIntegrationTest \
+            hostedMetalIrisIntegrationTest \
+            hostedMetalIrisComputeGroupingTest
+      - name: State evidence boundary
+        run: |
+          cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt
+          This job proves exact-head compilation, ABI integration, raw hosted Metal execution,
+          and the hosted shipping contracts. It does not prove WindowServer presentation,
+          Minecraft visual parity, stable performance, thermals, VRR, or MetalFX image quality.
+          BOUNDARY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: metal-capabilities-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/
+            build/test-results/
+            build/reports/tests/
+          if-no-files-found: warn
+          retention-days: 14
