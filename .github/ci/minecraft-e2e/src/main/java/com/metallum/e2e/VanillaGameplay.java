@@ -659,7 +659,7 @@ public final class VanillaGameplay {
         for (String[] lane : new String[][]{
                 {"dynamicUploadRangeCopy", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "dynamicRangeCopies"},
                 {"nativeMultiDrawBatch", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "nativeMultiDrawBatches"},
-                {"asyncPrecompile", "com.metallum.client.metal.render.MetalDevice", "preparedPipelineCount", ""}}) {
+                {"asyncPrecompile", "com.metallum.client.metal.render.mtl.MetalHotPathTelemetry", "snapshot", "preparedPipelineCount"}}) {
             JsonObject row = new JsonObject();
             boolean requested = Boolean.getBoolean("metallum.opt." + lane[0]);
             row.addProperty("requested", requested);

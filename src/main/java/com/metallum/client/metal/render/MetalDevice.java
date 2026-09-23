@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
@@ -193,9 +194,6 @@ final class MetalDevice implements GpuDeviceBackend {
     private volatile boolean closed;
     /** Prepared native pipelines remain owned here until RenderPearl takes or cancels them. */
     private final Set<PreparedPipeline> pendingPipelines = new HashSet<>();
-    private static final java.util.concurrent.atomic.LongAdder PREPARED_PIPELINES = new java.util.concurrent.atomic.LongAdder();
-
-    public static long preparedPipelineCount() { return PREPARED_PIPELINES.sum(); }
     @Nullable
     private final ExecutorService prewarmExecutor;
     private static boolean renderPipelineUsesIdentityEquals() {
@@ -608,7 +606,7 @@ final class MetalDevice implements GpuDeviceBackend {
             // RenderPearl invokes this on its caller-supplied loading executor.
             // Do native work here, not on the reload/render executor's finishCompile.
             PreparedPipeline prepared = new PreparedPipeline(pending.finishCompile(), generation);
-            if (prepared.pipeline != null) PREPARED_PIPELINES.increment();
+            if (prepared.pipeline != null) MetalHotPathTelemetry.recordPreparedPipeline();
             this.pendingPipelines.add(prepared);
             return prepared;
         }
