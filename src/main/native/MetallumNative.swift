@@ -1396,12 +1396,17 @@ private func encodeMetal4Compute<T>(
     afterStages: MTLStages = [.vertex, .fragment, .dispatch, .blit],
     producerBarrierBeforeStages: MTLStages = []
 ) -> Bool {
-    guard let encoder = lease.commandBuffer.makeComputeCommandEncoder(),
-          let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(
-              uniforms,
-              at: lease.slotIndex,
-              alignment: 256
-          ) else {
+    guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else {
+        return false
+    }
+    // A created encoder owns an encoding scope even when uniform allocation fails.
+    // End it on every exit, before callers can append another encoder to this buffer.
+    defer { encoder.endEncoding() }
+    guard let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(
+        uniforms,
+        at: lease.slotIndex,
+        alignment: 256
+    ) else {
         return false
     }
     encoder.label = label
@@ -1433,7 +1438,6 @@ private func encodeMetal4Compute<T>(
             visibilityOptions: .device
         )
     }
-    encoder.endEncoding()
     NativeState.metal4AuxiliaryComputeEncodeCount &+= 1
     return true
 }
