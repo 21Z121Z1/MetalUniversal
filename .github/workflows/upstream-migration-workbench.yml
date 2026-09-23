@@ -1,0 +1,51 @@
+name: Upstream migration workbench
+
+on:
+  push:
+    branches: [agent/upstream-26.3-workbench-20260923]
+    paths: [.github/workflows/upstream-migration-workbench.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-pinned-history:
+    if: github.repository == '21Z121Z1/MetalUniversal'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact audited source history
+        env:
+          FORK_SHA: 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1
+          UPSTREAM_SHA: f8294b2fb6ce2edc56d418510294111c9276091e
+          START_SHA: 825226f2e747ec557629866232e5b55c99d34a2e
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/EternityQwQ/MetalUniversal.git refs/heads/26.3-fabric-dev:refs/heads/export-upstream
+          test "$(git rev-parse refs/heads/export-upstream)" = "$UPSTREAM_SHA"
+          git cat-file -e "$FORK_SHA^{commit}"
+          git cat-file -e "$START_SHA^{commit}"
+          git update-ref refs/heads/export-fork "$FORK_SHA"
+          git update-ref refs/heads/export-start "$START_SHA"
+          mkdir -p "$RUNNER_TEMP/migration-source"
+          git bundle create "$RUNNER_TEMP/migration-source/source.bundle" refs/heads/export-fork refs/heads/export-upstream refs/heads/export-start
+          git bundle verify "$RUNNER_TEMP/migration-source/source.bundle"
+          git log --all --format='%H %P %s' > "$RUNNER_TEMP/migration-source/history.txt"
+          git diff --stat "$UPSTREAM_SHA" "$FORK_SHA" > "$RUNNER_TEMP/migration-source/direct-stat.txt"
+          git diff --name-status "$UPSTREAM_SHA" "$FORK_SHA" > "$RUNNER_TEMP/migration-source/direct-paths.txt"
+          git diff "$UPSTREAM_SHA" "$FORK_SHA" -- gradle.properties gradle/wrapper/gradle-wrapper.properties build.gradle settings.gradle src/main/resources/fabric.mod.json > "$RUNNER_TEMP/migration-source/build.diff"
+          (cd "$RUNNER_TEMP/migration-source" && sha256sum source.bundle > SHA256SUMS)
+          cat "$RUNNER_TEMP/migration-source/direct-stat.txt"
+          du -h "$RUNNER_TEMP/migration-source/source.bundle"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pinned-upstream-migration-source
+          path: ${{ runner.temp }}/migration-source/
+          if-no-files-found: error
+          retention-days: 3
