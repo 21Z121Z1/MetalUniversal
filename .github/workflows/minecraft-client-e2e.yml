@@ -27,9 +27,21 @@ env:
 
 jobs:
   minecraft-client-e2e:
+    name: Minecraft client E2E (${{ matrix.renderer }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - renderer: vanilla
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+          - renderer: sodium
+            no_optional_mods: 'false'
+            sodium_only: 'true'
     runs-on: macos-26
     timeout-minutes: 30
     env:
+      METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
@@ -73,12 +85,13 @@ jobs:
           jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
           unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
-      - name: Run the Vanilla Minecraft 26.3 production client GameTest
+      - name: Run the ${{ matrix.renderer }} Minecraft 26.3 production client GameTest
         run: |
           ./gradlew --no-daemon --stacktrace \
             -p .github/ci/minecraft-e2e \
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
-            -Pmetallum.noOptionalMods=true \
+            -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
+            -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -111,16 +124,28 @@ jobs:
           if suite.get('allExact') is not True:
               raise SystemExit(f'readback controls failed: {suite}')
 
+          renderer = os.environ['METALLUM_E2E_RENDERER']
+          expected_sodium = renderer == 'sodium'
           identity = json.loads(required[6].read_text(encoding='utf-8'))
-          if identity.get('rendererMode') != 'vanilla' or any(
-                  name in identity.get('mods', {}) for name in ('sodium', 'iris')):
-              raise SystemExit('production test did not run Vanilla without optional renderer mods')
+          mods = identity.get('mods', {})
+          if identity.get('rendererMode') != renderer or not isinstance(mods, dict) or (
+                  ('sodium' in mods) != expected_sodium or 'iris' in mods):
+              raise SystemExit(f'production test used the wrong renderer mods: {identity}')
           if identity.get('build', {}).get('sourceSha') != os.environ['METALLUM_SOURCE_SHA'] or identity['build'].get('dirty') is not False:
               raise SystemExit('loaded artifact does not prove the clean candidate HEAD')
           loaded = pathlib.Path(identity['loadedJavaArtifact'])
           expected_jar_hash = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
           if hashlib.sha256(loaded.read_bytes()).hexdigest() != expected_jar_hash or identity.get('javaArtifactSha256') != expected_jar_hash:
               raise SystemExit('loaded production JAR hash does not match the evidence')
+
+          runtime = json.loads(required[3].read_text(encoding='utf-8'))
+          if (runtime.get('backend', '').lower() != 'metal'
+                  or runtime.get('productionRuntime') is not True
+                  or runtime.get('sodiumLoaded') is not expected_sodium
+                  or runtime.get('irisLoaded') is not False
+                  or runtime.get('worldLoaded') is not True
+                  or runtime.get('chunksRendered') is not True):
+              raise SystemExit(f'production client did not render the requested lane: {runtime}')
 
           raw = required[1].read_bytes()
           if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
@@ -161,13 +186,14 @@ jobs:
         run: |
           cat <<'BOUNDARY' > build/agent-evidence/minecraft-e2e-boundary.txt
           This job proves the exact candidate JAR can run its Minecraft 26.3 client GameTest
-          on the hosted Apple Silicon environment and emit valid Metal readback evidence.
+          with the requested Vanilla or Sodium-only runtime on the hosted Apple Silicon
+          environment and emit valid Metal readback evidence.
           It does not prove attended visual parity, stable performance, thermals, or release readiness.
           BOUNDARY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: minecraft-26.3-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: minecraft-26.3-${{ matrix.renderer }}-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             .github/ci/minecraft-e2e/build/evidence/
