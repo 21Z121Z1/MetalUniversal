@@ -325,6 +325,39 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void shaderSourceReplacementRebuildsNativePipelineAfterResourceReload() {
+        String name = "resource_reload_fragment";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "shader source replacement", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1)) {
+            render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
+            ByteBuffer before = readback(texture);
+            assertByteNear(before.get(0), 255, "original shader red");
+            assertByteNear(before.get(4), 255, "original shader red at another pixel");
+            assertByteNear(before.get(1), 0, "original shader green");
+
+            // Keep the same RenderPearl shader identifier and pipeline key;
+            // a resource-pack reload replaces the source behind that name.
+            fragmentShaders.put(name, """
+                    #version 450
+                    layout(location=0) out vec4 color;
+                    void main() { color = vec4(0.0, 1.0, 0.0, 1.0); }
+                    """);
+            device.clearPipelineCache();
+            render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
+            ByteBuffer after = readback(texture);
+            assertByteNear(after.get(0), 0, "replacement shader red");
+            assertByteNear(after.get(4), 0, "replacement shader red at another pixel");
+            assertByteNear(after.get(1), 255, "replacement shader green");
+        }
+    }
+
+    @Test
     void oddWidthTextureUploadRepackagesRowsWithoutChangingSourceBounds() {
         int width = 5;
         int height = 3;

@@ -2203,9 +2203,66 @@ tasks.register("backendFrameCompare") {
 		}
 		int maxAllowedDelta = Integer.parseInt((findProperty("backendCompareMaxChannelDelta") ?: "0").toString())
 		long maxAllowedPixels = Long.parseLong((findProperty("backendCompareMaxDifferingPixels") ?: "0").toString())
+		def parseReceipt = { File directory, String name ->
+			def receipt = new File(directory, name)
+			if (!receipt.isFile()) throw new GradleException("Missing backend comparison receipt: ${receipt}")
+			new groovy.json.JsonSlurper().parse(receipt)
+		}
+		def metalSession = parseReceipt(metalDir, "session.json")
+		def vulkanSession = parseReceipt(vulkanDir, "session.json")
+		def sceneIssues = []
+		[[expected: "Metal", receipt: metalSession], [expected: "Vulkan", receipt: vulkanSession]].each { lane ->
+			if (lane.receipt.status != "passed" || lane.receipt.failedCaptures != 0
+					|| !lane.expected.equalsIgnoreCase(lane.receipt.deviceBackend?.toString())
+					|| lane.receipt.sceneReady != true) {
+				sceneIssues << "${lane.expected} lane did not complete on the requested backend with a ready scene"
+			}
+		}
+		[
+			"scenarioId", "worldName", "worldSnapshotSha256",
+			"playerName", "playerUuid", "fixedClockTicks", "freezeSimulationRequested",
+			"fixedWeather", "fixedCamera", "irisLoaded", "sodiumLoaded",
+			"irisSemanticRequested", "irisShadersEnabled", "metalFxMode",
+			"sceneStartLoadedChunkCount", "sceneStartEntityCount"
+		].each { key ->
+			if (metalSession[key] != vulkanSession[key]) sceneIssues << "session ${key} differs"
+		}
+		if ((metalSession.requestedFrames as Set) != (vulkanSession.requestedFrames as Set)) {
+			sceneIssues << "session requestedFrames differs"
+		}
 		def results = []
 		def failures = []
+		def semanticEntityRows = { File directory, String frameName ->
+			def file = new File(directory, frameName.replace(".bin", "-entities.txt"))
+			if (!file.isFile()) throw new GradleException("Missing backend entity receipt: ${file}")
+			file.readLines().collect { line ->
+				int first = line.indexOf('|')
+				int second = first < 0 ? -1 : line.indexOf('|', first + 1)
+				if (second < 0) throw new GradleException("Malformed backend entity receipt: ${file}")
+				// Vanilla may assign a fresh UUID to a spawned mob in each copied
+				// world. Compare type and every recorded pose field, while the
+				// player UUID is checked against the session receipt above.
+				line.substring(0, first) + line.substring(second)
+			}.sort()
+		}
 		common.each { name ->
+			def metalFrame = parseReceipt(metalDir, name.replace(".bin", ".json"))
+			def vulkanFrame = parseReceipt(vulkanDir, name.replace(".bin", ".json"))
+			[
+				"scenarioId", "worldName", "worldSnapshotSha256", "frame", "width", "height",
+				"format", "bytes", "fixedClockTicks", "observedCamera", "observedCameraFov",
+				"renderEntityCount", "loadedChunkCount",
+				"terrainInputs", "integratedServerScenarioConfigured", "serverSimulationFrozen",
+				"clientSimulationFrozen"
+			].each { key ->
+				if (metalFrame[key] != vulkanFrame[key]) sceneIssues << "${name} ${key} differs"
+			}
+			def metalLightmap = metalFrame.lightmapInputs?.findAll { key, value -> key != "needsUpdate" }
+			def vulkanLightmap = vulkanFrame.lightmapInputs?.findAll { key, value -> key != "needsUpdate" }
+			if (metalLightmap != vulkanLightmap) sceneIssues << "${name} lightmap inputs differ"
+			if (semanticEntityRows(metalDir, name) != semanticEntityRows(vulkanDir, name)) {
+				sceneIssues << "${name} entity types or recorded poses differ"
+			}
 			byte[] metal = metalFrames[name].bytes
 			byte[] vulkan = vulkanFrames[name].bytes
 			if (metal.length != vulkan.length || metal.length % 4 != 0) {
@@ -2256,13 +2313,18 @@ tasks.register("backendFrameCompare") {
 				frames: results,
 				maxAllowedChannelDelta: maxAllowedDelta,
 				maxAllowedDifferingPixels: maxAllowedPixels,
-				status: failures.isEmpty() ? "passed" : "failed",
+				status: !sceneIssues.isEmpty() ? "invalid-scene-contract" : failures.isEmpty() ? "passed" : "failed",
+				preconditionFailures: sceneIssues,
 				failures: failures
 		]
 		def reportFile = file(findProperty("backendCompareReport") ?: "${buildDir}/backend-compare/comparison.json")
 		reportFile.parentFile.mkdirs()
 		reportFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(report)) + "\n"
 		logger.lifecycle("Backend frame compare: ${report.status}; frames=${results.size()}; report=${reportFile}")
+		if (!sceneIssues.isEmpty()) {
+			sceneIssues.each { logger.error("BACKEND SCENE MISMATCH ${it}") }
+			throw new GradleException("Metal/Vulkan scene inputs differ (${sceneIssues.size()} fields)")
+		}
 		if (!failures.isEmpty()) {
 			failures.each { logger.error("BACKEND FRAME DIFF ${it}") }
 			throw new GradleException("Metal/Vulkan final framebuffer comparison failed (${failures.size()} frame(s))")
@@ -2592,6 +2654,10 @@ if (backendCaptureRequested) {
 				args "--gameDir", gameDir == null ? "" : gameDir.absolutePath
 				args "--username", playerName, "--uuid", playerUuid
 				args "--quickPlaySingleplayer=${worldName}", "--width", "854", "--height", "480"
+				// Force the requested Minecraft backend at startup. An options.txt
+				// preference can be reset to DEFAULT during startup, yielding a
+				// plausible but invalid Metal capture in the Vulkan lane.
+				args "--graphicsBackend", metalLane ? "DEFAULT" : "VULKAN"
 				environment "MTL_DEBUG_LAYER", metalLane ? "1" : "0"
 				environment "MTL_SHADER_VALIDATION", "0"
 				doFirst {

@@ -15,7 +15,7 @@ The engineering target is at least 19 of these 20 lines passing, including every
 | 7 | Buffer/texture copy and readback preserve bytes, offsets, rows and callback completion | critical | pending |
 | 8 | Render/transfer RAW, WAR and WAW ordering and resource retirement pass native readback tests | critical | pending |
 | 9 | Direct and indirect draw offsets, base vertex and first instance pass independent expected-pixel tests | critical | pending |
-| 10 | MRT blend, depth, stencil and write masks pass independent expected-pixel tests | critical | pending |
+| 10 | MRT blend, depth and write masks pass independent expected-pixel tests; packed depth/stencil attachment formats obey the supported-format policy | critical | pending |
 | 11 | Shader inputs, outputs, bindings, push constants and coordinate/depth conventions match RenderPearl SPIR-V semantics | critical | pending |
 | 12 | Dynamic shader source and user resource-pack shader changes reach the Metal pipeline | critical | pending |
 | 13 | Metal 3 pipeline creation/cache and reload produce correct native PSOs | critical | pending |
@@ -28,6 +28,10 @@ The engineering target is at least 19 of these 20 lines passing, including every
 | 20 | Native Metal 4 automated suite passes on true Metal 4 hardware, separately from hosted/Paravirtual results | critical | pending |
 
 Statuses will be changed only alongside the exact final artifact, command, exit status and independent observation. A hosted runner with `metallum_metal4_supported=false` cannot pass line 20. Encoder-level GPU telemetry is not line 15's arbitrary RenderPearl query contract. The existing `RenderTraceRecorder` and unified evaluation loop own cross-backend semantic identity; this document only records acceptance, not another trace format.
+
+The 26.3 `DepthStencilState` contains depth compare, depth write and depth bias; it does not expose stencil compare or stencil write controls. Line 10 checks only the depth/stencil attachment formats that RenderPearl can describe, including fail-closed rejection of unsupported combinations. This corrects the initial wording without removing a matrix line.
+
+For line 3, `minecraftBackendCapture` must force the requested Minecraft backend and the comparison must verify each receipt's actual device backend. The two captures must share the world snapshot, player, camera, clock, weather, simulation state, extent, format, lightmap and recorded entity poses before a pixel result is eligible for acceptance. Copied worlds can assign new mob UUIDs, so compare their recorded types and poses rather than UUID-derived hashes; keep the player's requested UUID exact. An unmatched scene or unexplained pixel difference is not a pass.
 
 ## Shader and native pipeline boundary
 
