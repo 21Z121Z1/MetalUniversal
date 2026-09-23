@@ -1,0 +1,403 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+def shippingPins = new Properties()
+file('../../../gradle.properties').withInputStream { shippingPins.load(it) }
+for (String pin : ['minecraft_version', 'loader_version', 'loom_version', 'sodium_version', 'iris_version']) {
+    if (project.property(pin).toString() != shippingPins.getProperty(pin)) {
+        throw new GradleException("E2E ${pin} must equal the shipping project pin")
+    }
+}
+
+repositories {
+    maven { url "https://api.modrinth.com/maven" }
+}
+
+def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+// Compile-only adapters never become mandatory Fabric dependencies. Runtime
+// profiles are exact sets: vanilla={}, sodium={Sodium}, iris={Sodium,Iris}.
+def rendererProfile = (findProperty("metallum.renderer")
+        ?: ((findProperty("metallum.noOptionalMods") ?: "false").toString().toBoolean()
+            ? "vanilla" : "iris")).toString()
+if (!(rendererProfile in ["vanilla", "sodium", "iris"])) {
+    throw new GradleException("metallum.renderer must be vanilla, sodium, or iris")
+}
+if (project.hasProperty("metallum.noOptionalMods")
+        && findProperty("metallum.noOptionalMods").toString().toBoolean() != (rendererProfile == "vanilla")) {
+    throw new GradleException("metallum.renderer conflicts with metallum.noOptionalMods")
+}
+def noOptionalRenderMods = rendererProfile == "vanilla"
+def expectedSourceSha = providers.gradleProperty("metallumSourceSha")
+        .orElse(providers.gradleProperty("p1SourceSha"))
+        .orElse(providers.environmentVariable("METALLUM_SOURCE_SHA"))
+        .orElse("unrecorded").get()
+def legacyRequireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
+        .map { it.toBoolean() }
+        .orElse(false)
+        .get()
+def p1Metal4Lane = providers.gradleProperty("p1Metal4Lane")
+        .map { it.trim().toLowerCase() }
+        .orElse(legacyRequireMetal4MainRenderer ? "candidate" : "off")
+        .get()
+if (!(p1Metal4Lane in ["off", "baseline", "candidate"])) {
+    throw new GradleException("p1Metal4Lane must be off, baseline, or candidate (got ${p1Metal4Lane})")
+}
+def p1SourceSha = providers.gradleProperty("p1SourceSha").orElse("unrecorded").get().trim()
+def p1ProductionJarSha256 = providers.gradleProperty("p1ProductionJarSha256").orElse("unrecorded").get().trim()
+def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse("unrecorded").get().trim()
+def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
+def requireP1Metal4Evidence = p1Metal4Lane != "off"
+def gameplay = providers.gradleProperty('gameplay').orElse('false').get().toBoolean()
+def stationaryBaseline = providers.gradleProperty('stationaryBaseline').orElse('false').get().toBoolean()
+def reuseEncoderState = providers.gradleProperty('reuseEncoderState').orElse('false').get().toBoolean()
+def reuseNativeEncoderArguments = providers.gradleProperty('reuseNativeEncoderArguments').orElse('false').get().toBoolean()
+def optimizationProfile = providers.gradleProperty('optimizationProfile').orElse('baseline-v1').get().trim()
+def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'reuse-encoder-state-diagnostic-v1', 'encoder-argument-reuse-v1', 'frame-trial-v1']
+if (!(optimizationProfile in optimizationProfiles)) {
+    throw new GradleException("optimizationProfile must be one of ${optimizationProfiles} (got ${optimizationProfile})")
+}
+def frameEvidenceMode = providers.gradleProperty('frameEvidenceMode').orElse('off').get()
+if (!(frameEvidenceMode in ['off', 'timing', 'diagnostic'])) {
+    throw new GradleException('frameEvidenceMode must be off, timing, or diagnostic')
+}
+def parseFrameEvidenceSeconds = { String propertyName, int defaultValue ->
+    def raw = providers.gradleProperty(propertyName).orElse(defaultValue.toString()).get().trim()
+    int value
+    try {
+        value = Integer.parseInt(raw)
+    } catch (NumberFormatException failure) {
+        throw new GradleException("${propertyName} must be an integer number of seconds", failure)
+    }
+    if (value < 1 || value > 300) {
+        throw new GradleException("${propertyName} must be between 1 and 300 seconds")
+    }
+    value
+}
+def frameEvidenceWarmupSeconds = parseFrameEvidenceSeconds('frameEvidenceWarmupSeconds', 5)
+def frameEvidenceSampleSeconds = parseFrameEvidenceSeconds('frameEvidenceSampleSeconds', 10)
+def frameEvidenceWindowSeconds = frameEvidenceWarmupSeconds + frameEvidenceSampleSeconds
+if (frameEvidenceWindowSeconds > 300) {
+    throw new GradleException('frame evidence warmup plus sample must not exceed 300 seconds')
+}
+def segmentedFrameEvidence = providers.gradleProperty('frameEvidenceSegmented')
+        .map { it.toBoolean() }
+        .orElse(frameEvidenceMode != 'off')
+        .get()
+if (frameEvidenceMode == 'timing' && (providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()
+        || providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()
+        || providers.gradleProperty('presentationMetrics').orElse('false').get().toBoolean()
+        || providers.gradleProperty('waitForProfiler').orElse('false').get().toBoolean())) {
+    throw new GradleException('Timing frame evidence requires gameplayJfr=false and diagnostic instrumentation disabled')
+}
+def frameEvidencePhase = providers.gradleProperty('frameEvidencePhase').orElse('stationary').get()
+if (!(frameEvidencePhase in ['stationary', 'streaming'])) {
+    throw new GradleException('frameEvidencePhase must be stationary or streaming')
+}
+def waitForProfiler = providers.gradleProperty('waitForProfiler').orElse('false').get().toBoolean()
+def gameplayJfr = providers.gradleProperty('gameplayJfr').orElse('true').get().toBoolean()
+def renderDebugLabels = providers.gradleProperty('renderDebugLabels').orElse('false').get().toBoolean()
+def presentationMetrics = providers.gradleProperty('presentationMetrics').orElse('false').get().toBoolean()
+def terrainSliceCache = providers.gradleProperty('terrainSliceCache').orElse('false').get().toBoolean()
+if (gameplay && optimizationProfile == 'baseline-v1' && reuseEncoderState) {
+    throw new GradleException('reuseEncoderState requires optimizationProfile=reuse-encoder-state-v1')
+}
+if (gameplay && optimizationProfile == 'baseline-v1' && reuseNativeEncoderArguments) {
+    throw new GradleException('reuseNativeEncoderArguments requires optimizationProfile=encoder-argument-reuse-v1')
+}
+if (gameplay && optimizationProfile == 'reuse-encoder-state-v1'
+        && (!reuseEncoderState || !stationaryBaseline || frameEvidenceMode != 'timing'
+        || frameEvidencePhase != 'stationary' || waitForProfiler || gameplayJfr
+        || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
+        || reuseNativeEncoderArguments)) {
+    throw new GradleException('reuse-encoder-state-v1 requires the stationary metrics-only timing route with segmented evidence')
+}
+if (gameplay && optimizationProfile == 'reuse-encoder-state-diagnostic-v1'
+        && (!reuseEncoderState || frameEvidenceMode != 'diagnostic' || !gameplayJfr
+        || renderDebugLabels || presentationMetrics || terrainSliceCache || !segmentedFrameEvidence
+        || reuseNativeEncoderArguments)) {
+    throw new GradleException('reuse-encoder-state-diagnostic-v1 requires diagnostic JFR with no other optimization')
+}
+if (gameplay && optimizationProfile == 'encoder-argument-reuse-v1'
+        && (!reuseNativeEncoderArguments || reuseEncoderState || !stationaryBaseline
+        || frameEvidenceMode != 'timing' || frameEvidencePhase != 'stationary'
+        || waitForProfiler || gameplayJfr || renderDebugLabels || presentationMetrics
+        || terrainSliceCache || !segmentedFrameEvidence)) {
+    throw new GradleException('encoder-argument-reuse-v1 requires the stationary metrics-only timing route with segmented evidence and no other optimization')
+}
+if (frameEvidencePhase == 'streaming'
+        && (frameEvidenceWarmupSeconds != 5 || frameEvidenceSampleSeconds != 10)) {
+    throw new GradleException('streaming frame evidence only supports the declared 5s warmup and 10s sample route')
+}
+def frameWorkload = providers.gradleProperty('frameWorkload').orElse('').get()
+def frameCampaign = !frameWorkload.isEmpty()
+def trialProducer = providers.gradleProperty('trialProducer').orElse(rendererProfile).get()
+def trialBackend = providers.gradleProperty('trialBackend').orElse('metal3').get()
+if (frameCampaign && (!(frameWorkload in ['P0','T0','C0','G0','I0','I1','X0'])
+        || !(trialProducer in ['vanilla','sodium','iris']) || !(trialBackend in ['metal3','metal4']))) {
+    throw new GradleException('Unknown frame workload/producer/backend contract')
+}
+if (frameCampaign && noOptionalRenderMods != (trialProducer == 'vanilla')) {
+    throw new GradleException('trialProducer and metallum.noOptionalMods disagree')
+}
+// Versioned physical trials are a separate evidence protocol, never an alias for
+// the guarded legacy optimization profiles above. They cannot weaken those gates.
+if (frameCampaign != (optimizationProfile == 'frame-trial-v1')) {
+    throw new GradleException('frameWorkload requires exactly optimizationProfile=frame-trial-v1')
+}
+if (frameCampaign && (!gameplay || stationaryBaseline || frameEvidencePhase != 'stationary'
+        || requireP1Metal4Evidence || waitForProfiler || gameplayJfr || renderDebugLabels
+        || presentationMetrics || (frameEvidenceMode != 'off' && !segmentedFrameEvidence)
+        || reuseNativeEncoderArguments)) {
+    throw new GradleException('frame-trial-v1 requires its metrics-only versioned route without legacy P1/profile overrides')
+}
+if (frameCampaign && (providers.gradleProperty('frameEvidenceWarmupSeconds').isPresent()
+        || providers.gradleProperty('frameEvidenceSampleSeconds').isPresent())) {
+    throw new GradleException('versioned trials declare warmupNs/sampleNs; legacy second-based overrides are ambiguous')
+}
+if (frameCampaign && providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get().toBoolean()
+        && (!terrainSliceCache || frameEvidenceMode != 'diagnostic')) {
+    throw new GradleException('terrain slice differential verification is diagnostic-only and requires its cache')
+}
+if (frameCampaign && providers.gradleProperty('prepareScene').orElse('false').get().toBoolean()
+        && !(frameWorkload in ['C0', 'G0'])) {
+    throw new GradleException('only C0/G0 have prepared fixture content')
+}
+def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // The CI probe lives in com.metallum.client.metal.render so it can exercise
+    // the exact package-private production MetalDevice/MetalCommandEncoder
+    // texture -> buffer path. Keep this compile-only: the runtime still loads
+    // the independently-built production MetalUniversal JAR below.
+    compileOnly files(metallumJarProvider)
+    testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
+
+    // Fabric API supplies the test driver. Renderer adapters are optional.
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    if (!noOptionalRenderMods) {
+        productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+        if ((frameCampaign ? trialProducer : rendererProfile) == 'iris') productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+// The profiling run selects the input workload, not the separate conformance
+// suites whose readbacks and telemetry would perturb the measured route.
+tasks.named('processResources') {
+    inputs.property('gameplay', gameplay)
+    doLast {
+        if (gameplay) {
+            def manifest = new File(destinationDir, 'fabric.mod.json')
+            def json = new groovy.json.JsonSlurper().parse(manifest)
+            json.entrypoints.'fabric-client-gametest' = ['com.metallum.e2e.MetalUniversalClientGameTest']
+            json.mixins = ['metaluniversal-gameplay.mixins.json']
+            manifest.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json)) + '\n'
+        }
+    }
+}
+
+tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named("jar")
+
+    doFirst {
+        def metallumJar = metallumJarProvider.get()
+        if (!metallumJar.isFile()) {
+            throw new GradleException("MetalUniversal production JAR does not exist: ${metallumJar}")
+        }
+    }
+
+    // Minecraft 26.3 uses Loom's non-obfuscated plugin, so ordinary JARs are
+    // the production artifacts; there is intentionally no remapJar task.
+    mods.from(tasks.named("jar"))
+    mods.from(metallumJarProvider)
+    mods.from(configurations.productionRuntimeMods)
+
+    jvmArgs.add("-Dfabric.client.gametest")
+    jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.ci.gameplay=${providers.gradleProperty('gameplay').orElse('false').get()}")
+    jvmArgs.add("-Dmetallum.ci.waitForProfiler=${waitForProfiler}")
+    jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.ci.renderer=${frameCampaign ? trialProducer : rendererProfile}")
+    jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
+    jvmArgs.add("-Dmetallum.validation.sourceCommit=${expectedSourceSha}")
+    jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
+    jvmArgs.add("-Dmetallum.ci.p1SourceSha=${p1SourceSha}")
+    jvmArgs.add("-Dmetallum.ci.p1ProductionJarSha256=${p1ProductionJarSha256}")
+    jvmArgs.add("-Dmetallum.ci.p1NativeDylibSha256=${p1NativeDylibSha256}")
+    // Compatibility seam for older invocations while P1 switches to the
+    // explicit off/baseline/candidate lane contract.
+    jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
+    jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : rendererProfile == 'iris'}")
+    jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
+    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
+    jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    jvmArgs.add("-Dmetallum.metal.hud=false")
+    jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
+    jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
+    if (gameplay) {
+        jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
+        if (frameCampaign) {
+            jvmArgs.add("-Dmetallum.ci.workload=${frameWorkload}")
+            jvmArgs.add("-Dmetallum.ci.producer=${trialProducer}")
+            jvmArgs.add("-Dmetallum.ci.gameplayBackend=${trialBackend}")
+            jvmArgs.add("-Dmetallum.ci.workloadSha256=${providers.gradleProperty('workloadSha256').get()}")
+            jvmArgs.add("-Dmetallum.ci.prepareScene=${providers.gradleProperty('prepareScene').orElse('false').get()}")
+            jvmArgs.add("-Dmetallum.ci.warmupNs=${providers.gradleProperty('warmupNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.sampleNs=${providers.gradleProperty('sampleNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.targetFps=${providers.gradleProperty('targetFps').get()}")
+            jvmArgs.add("-Dmetallum.ci.shaderPackName=${providers.gradleProperty('shaderPackName').orElse('').get()}")
+            jvmArgs.add("-Dmetallum.frameEvidence.segmented=${providers.gradleProperty('frameEvidenceSegmented').orElse('true').get()}")
+        }
+        jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
+        // M0 evidence runs use the bounded archive so a long/terminated client
+        // cannot silently fall back to the legacy fixed-size in-memory snapshot.
+        jvmArgs.add("-Dmetallum.frameEvidence.segmented=${segmentedFrameEvidence}")
+        jvmArgs.add("-Dmetallum.ci.stationaryBaseline=${stationaryBaseline}")
+        jvmArgs.add("-Dmetallum.ci.optimizationProfile=${optimizationProfile}")
+        jvmArgs.add("-Dmetallum.ci.reuseActivationTelemetry=${frameEvidenceMode != 'off'}")
+        jvmArgs.add("-Dmetallum.ci.frameEvidencePhase=${frameEvidencePhase}")
+        jvmArgs.add("-Dmetallum.ci.frameEvidenceWarmupSeconds=${frameEvidenceWarmupSeconds}")
+        jvmArgs.add("-Dmetallum.ci.frameEvidenceSampleSeconds=${frameEvidenceSampleSeconds}")
+        jvmArgs.add("-Dmetallum.ci.initialWorld=${providers.gradleProperty('initialWorld').orElse('').get()}")
+        jvmArgs.add("-Dmetallum.frameEvidence.mode=${frameEvidenceMode}")
+        jvmArgs.add("-Dmetallum.frameEvidence.trialId=${providers.gradleProperty('frameEvidenceTrialId').orElse('gameplay').get()}")
+        jvmArgs.add("-Dmetallum.frameEvidence.output=${new File(evidenceDirectory, 'frame-evidence.json').absolutePath}")
+        if (renderDebugLabels) {
+            programArgs.add('--renderDebugLabels')
+        }
+        // A failed automated launch can persist Vanilla's OpenGL recovery choice.
+        // Select Metal explicitly for this profiling lane; native activation is
+        // still required before any measurements are accepted.
+        jvmArgs.add("-Dmetallum.validation.forceMetal=true")
+        jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
+        jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
+        jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
+        jvmArgs.add("-Dmetallum.terrain.verifySliceCache=${providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.ci.presentationMetrics=${presentationMetrics}")
+        jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")
+        jvmArgs.add("-Dmetallum.ci.nativeHeight=${providers.gradleProperty('nativeHeight').get()}")
+        if (gameplayJfr) {
+            jvmArgs.add("-XX:StartFlightRecording=filename=${new File(evidenceDirectory, 'gameplay.jfr').absolutePath},settings=profile,dumponexit=true,maxsize=256m")
+        }
+    }
+
+    if (frameCampaign) {
+        // A full Metal 3/4 lowering comparison, not the legacy main-queue-only P1 experiment.
+        def metal4 = trialBackend == 'metal4'
+        for (String feature : ['metal4', 'metal4Compiler', 'metal4Present', 'metal4MainRenderer', 'residencySet']) {
+            jvmArgs.add("-Dmetallum.opt.${feature}=${metal4}")
+        }
+        jvmArgs.add('-Dmetallum.opt.metal4MainQueuePilot=false')
+        jvmArgs.add('-Dmetallum.opt.renderStatePacket=true')
+    } else if (requireP1Metal4Evidence) {
+        // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
+        // presentation, and explicit residency identical. The only intended
+        // execution-model difference is whether the main renderer is enabled.
+        jvmArgs.add("-Dmetallum.opt.metal4=true")
+        jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=true")
+        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=${requireMetal4MainRenderer}")
+        jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+        jvmArgs.add("-Dmetallum.opt.residencySet=true")
+    } else {
+        // Hosted P0 regression keeps the already-validated shipping path. The
+        // GitHub Apple Paravirtual device does not expose residency sets, so it
+        // cannot close P1 activation and must not pretend to do so.
+        jvmArgs.add("-Dmetallum.opt.metal4=false")
+        jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=false")
+        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
+        jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+        // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
+        // Do not put this in JAVA_TOOL_OPTIONS: doing so changes the Gradle daemon's
+        // JVM identity and prevents reuse of the daemon already started by root tasks.
+        jvmArgs.add("-Dmetallum.opt.renderStatePacket=${gameplay}")
+        jvmArgs.add("-Dmetallum.opt.residencySet=false")
+    }
+
+    jvmArgs.add("-Dmetallum.ci.evidenceDir=${evidenceDirectory.absolutePath}")
+
+    // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
+    // device; authoritative evidence is read from Metal textures, not scan-out.
+    useXVFB = false
+    runDir = file(providers.gradleProperty('clientRunDir').orElse("${buildDir}/run/clientGameTest").get())
+}
+
+tasks.named("test") { useJUnitPlatform() }
+
+// Physical timing executes the same packaged mod as correctness, never runClient
+// development output or a client GameTest fixture. Script preflight owns the
+// WindowServer/world/shader inputs; this task forwards properties to the JVM.
+tasks.register("runProductionPhysicalPerformance", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    mods.from(metallumJarProvider)
+    mods.from(configurations.productionRuntimeMods)
+    useXVFB = false
+    runDir = file('../../../run')
+    def world = providers.gradleProperty('world').orElse('').get()
+    def output = System.getProperty('metallum.validation.output', '')
+    def properties = [
+        'metallum.validation.enabled': 'true',
+        'metallum.validation.productionArtifact': 'true',
+        'metallum.validation.performanceOnly': 'true',
+        'metallum.validation.forceMetal': 'true',
+        'metallum.validation.requireMetal': 'true',
+        'metallum.validation.preserveFullscreen': 'true',
+        'metallum.validation.gpuTiming': 'true',
+        'metallum.validation.gpuPassTiming': 'true',
+        'metallum.validation.output': output,
+        'metallum.validation.world': world,
+        'metallum.validation.sourceCommit': expectedSourceSha,
+        'metallum.renderContract.enabled': 'false',
+        'metallum.metalfx.mode': 'OFF',
+        'metallum.metalfx.frameGeneration': 'false',
+        'metallum.metalfx.objectMotionProducer': 'false',
+        'metallum.metal.hud': 'false',
+        'metallum.window.retinaFullscreen': 'true',
+        'metallum.ci.renderer': rendererProfile,
+        'metallum.iris.semantic': (rendererProfile == 'iris').toString()
+    ]
+    System.properties.each { key, value ->
+        if (key.toString().startsWith('metallum.opt.')
+                || key.toString().startsWith('metallum.terrain.')
+                || key.toString().startsWith('metallum.iris.')
+                || key.toString().startsWith('metallum.validation.')) {
+            properties[key.toString()] = value.toString()
+        }
+    }
+    // Observed artifact identity is mandatory and cannot be disabled by overrides.
+    properties['metallum.validation.productionArtifact'] = 'true'
+    properties.each { key, value -> jvmArgs.add("-D${key}=${value}".toString()) }
+    programArgs.addAll("--quickPlaySingleplayer=${world}".toString(), '--width', '854', '--height', '480')
+    doFirst {
+        if (!metallumJarProvider.get().isFile() || world.isBlank() || output.isBlank()
+                || !(expectedSourceSha ==~ /[0-9a-f]{40}/)) {
+            throw new GradleException('Physical performance requires a production JAR, WORLD, output directory and exact source SHA')
+        }
+        if (System.getenv('METALLUM_HOSTED_METAL_OFFSCREEN') != null
+                || System.getenv('RUNNER_ENVIRONMENT') == 'github-hosted') {
+            throw new GradleException('Hosted offscreen evidence cannot enter the physical performance route')
+        }
+    }
+    doLast {
+        def report = new File(output, 'native-fullscreen-baseline.json')
+        def identity = new File(output, 'artifact-identity.json')
+        if (!report.isFile() || !identity.isFile()) {
+            throw new GradleException('Physical performance produced no complete report and loaded-artifact identity')
+        }
+        def data = new groovy.json.JsonSlurper().parse(report)
+        if (data.nativeMainReadback?.completed != true || data.nativeMainReadback?.passed != true) {
+            throw new GradleException('Physical performance readback did not pass')
+        }
+    }
+}

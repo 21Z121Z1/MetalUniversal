@@ -29,4 +29,19 @@ public abstract class MTLCommandEncoder {
         MetalNativeBridge.metallum_release_object(this.handle);
         this.handle = MemorySegment.NULL;
     }
+
+    /**
+     * Ends an encoder while retaining its native bridge for a same-command-
+     * buffer Metal 4 transition. The caller must release the returned handle
+     * after the native transition has consumed the bridge's queue-buffer lease.
+     */
+    public MemorySegment endEncodingRetainingHandle() {
+        if (MetalNativeBridge.isNullHandle(this.handle)) {
+            return MemorySegment.NULL;
+        }
+        MetalNativeBridge.MTLCommandEncoder_endEncoding(this.handle);
+        MemorySegment retained = this.handle;
+        this.handle = MemorySegment.NULL;
+        return retained;
+    }
 }

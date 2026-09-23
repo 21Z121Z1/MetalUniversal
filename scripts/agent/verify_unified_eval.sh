@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+export PYTHONPYCACHEPREFIX="$ROOT/build/python-cache"
+
+python3 -m json.tool validation/contracts/unified-evaluation-acceptance.json >/dev/null
+python3 -m json.tool validation/contracts/presentation-pacing-evidence.schema.json >/dev/null
+python3 -m json.tool validation/contracts/minecraft-26.3-p0-baseline.json >/dev/null
+python3 -m json.tool validation/contracts/terrain-work-events.schema.json >/dev/null
+python3 -m json.tool validation/terrain-work-events/oracle-fixtures.json >/dev/null
+python3 -m json.tool validation/contracts/benchmark-profiles.json >/dev/null
+python3 -m json.tool validation/contracts/metal4-main-production-acceptance.json >/dev/null
+python3 scripts/agent/verify_benchmark_profiles.py
+python3 scripts/agent/verify_metal4_main_hotpath.py \
+  --output build/agent-evidence/metal4-main-hotpath.json
+python3 scripts/agent/verify_p1_performance_route.py
+python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
+python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
+python3 scripts/agent/check_metal4_main_trial.py --self-test
+python3 scripts/agent/analyze_unified_eval.py --self-test
+python3 scripts/agent/normalize_unified_trial.py --self-test
+python3 scripts/agent/check_unified_eval_admission.py --self-test
+python3 scripts/agent/verify_terrain_work_events.py --self-test
+python3 scripts/agent/verify_frame_evidence.py --self-test
+python3 -m unittest discover -s scripts/agent -p 'test_frame_*.py'
+python3 -m py_compile \
+  scripts/agent/verify_benchmark_profiles.py \
+  scripts/agent/verify_metal4_main_hotpath.py \
+  scripts/agent/verify_p1_performance_route.py \
+  scripts/agent/check_metal4_main_e2e_pair.py \
+  scripts/agent/check_metal4_main_profile_matrix.py \
+  scripts/agent/check_metal4_main_trial.py \
+  scripts/agent/analyze_unified_eval.py \
+  scripts/agent/normalize_unified_trial.py \
+  scripts/agent/check_unified_eval_admission.py \
+  scripts/agent/verify_terrain_work_events.py \
+  scripts/agent/verify_frame_evidence.py
+bash -n scripts/agent/doctor.sh
+bash -n scripts/agent/run_unified_eval_cycle.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_matrix.sh
+bash -n scripts/agent/verify.sh
+
+./gradlew --no-daemon compileJava test \
+  -x buildMacNative \
+  -x buildIOSNative \
+  -x buildIOSSpvc \
+  --tests com.metallum.client.metal.render.FrameEvidenceRecorderTest \
+  --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
+  --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
+  --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \
+  --tests com.metallum.client.terrain.VanillaTerrainAdmissionTelemetryTest \
+  --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
+  --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
+  --tests com.metallum.client.terrain.TerrainWorkReportTest \
+  --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
+  --tests com.metallum.client.terrain.TerrainNativeSignalTest \
+  --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
+  --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
+  --tests com.metallum.mixin.MetallumMixinRegistrationTest \
+  --tests com.metallum.client.validation.contract.RenderContractCoreTest \
+  --tests com.metallum.client.validation.report.RenderContractReportTest
+
+echo "Unified evaluation static verification: PASS"
