@@ -14,7 +14,7 @@ jobs:
     env:
       METALLUM_SOURCE_SHA: 300f21c41214350ec8a7c1ff7aaa891f457ff1b6
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
-      METALLUM_MSL_CACHE_DIR: ${{ runner.temp }}/shader-cache
+      METALLUM_MSL_CACHE_DIR: /tmp/metallum-diagnostic-msl
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
