@@ -66,6 +66,11 @@ public final class FrameEvidenceRuntime {
         if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
     }
 
+    /** Use the driver's existing Java-clock anchor; do not resample or reinterpret the durations. */
+    public static void armWindowAt(JsonObject profile, long warmupNs, long sampleNs, long anchorNs) {
+        if (ENABLED) RECORDER.armWindowAt(profile, warmupNs, sampleNs, anchorNs);
+    }
+
     public static boolean windowComplete() { return ENABLED && RECORDER.windowComplete(); }
 
     public static void beginFrame(boolean advanceGameTime) {

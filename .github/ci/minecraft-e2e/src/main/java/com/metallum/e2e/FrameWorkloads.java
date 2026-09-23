@@ -75,7 +75,7 @@ final class FrameWorkloads {
             boolean intact = world.getServer().computeOnServer(server -> {
                 var level = server.overworld();
                 for (int layer = 0; layer < 9; layer++) for (int y = 127; y <= 150; y++) for (int z = 155; z <= 181; z++) {
-                    var expected = layer % 2 == 0 ? Blocks.RED_STAINED_GLASS : Blocks.BLUE_STAINED_GLASS;
+                    var expected = layer % 2 == 0 ? Blocks.STAINED_GLASS.red() : Blocks.STAINED_GLASS.blue();
                     if (!level.getBlockState(new BlockPos(172 + 2 * layer, y, z)).is(expected)) return false;
                 }
                 return true;
@@ -87,7 +87,7 @@ final class FrameWorkloads {
     private static int cpuEntities(TestSingleplayerContext world) {
         return world.getServer().computeOnServer(server -> {
             int count = 0;
-            for (var entity : server.overworld().getAllEntities()) if (entity.getTags().contains(CPU_TAG)) count++;
+            for (var entity : server.overworld().getAllEntities()) if (entity.entityTags().contains(CPU_TAG)) count++;
             return count;
         });
     }
@@ -200,7 +200,8 @@ final class FrameWorkloads {
             return System.nanoTime() >= sampleEnd;
         }, timeoutTicks(sampleEnd - System.nanoTime()));
         context.waitTick();
-        receipt.addProperty("serverTickAtCompletion", world.getServer().computeOnServer(server -> server.getTickCount()));
+        int serverTickAtCompletion = world.getServer().computeOnServer(server -> server.getTickCount());
+        receipt.addProperty("serverTickAtCompletion", serverTickAtCompletion);
         receipt.add("producerAfter", context.computeOnClient(client -> producerReceipt()));
         validateScene(world);
         receipt.add("jvmAfter", jvmObservation());

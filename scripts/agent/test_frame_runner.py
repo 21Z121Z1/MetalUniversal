@@ -150,7 +150,7 @@ class FrameRunnerTest(unittest.TestCase):
         args = self.arguments(); spec, _ = self.fixture()
         expected = {"build": {"sourceSha": "a" * 40}}
         command = workload_command(args, self.root, args.output, expected, spec)
-        self.assertIn("-PmetallumJar=" + str(args.jar), command)
+        self.assertIn("-PmetallumJar=" + str(args.jar.resolve()), command)
         self.assertIn("-PclientRunDir=" + str(args.output / "client-instance"), command)
         self.assertIn("-PtrialBackend=metal3", command)
         self.assertIn("-PoptimizationProfile=frame-trial-v1", command)
@@ -161,6 +161,17 @@ class FrameRunnerTest(unittest.TestCase):
         command = workload_command(args, self.root, args.output, expected, spec)
         self.assertIn("-PtrialBackend=metal4", command)
         self.assertIn("-PframeEvidenceMode=off", command)
+
+    def test_command_resolves_jar_symlinks_without_splitting_space_containing_paths(self):
+        args = self.arguments(); spec, _ = self.fixture()
+        actual_jar = args.jar.resolve()
+        alias = self.root / "artifact alias with spaces.jar"
+        alias.symlink_to(actual_jar)
+        args.jar = alias
+        command = workload_command(args, self.root, args.output, {"build": {"sourceSha": "a" * 40}}, spec)
+        jar_arguments = [item for item in command if item.startswith("-PmetallumJar=")]
+        self.assertEqual(["-PmetallumJar=" + str(actual_jar)], jar_arguments)
+        self.assertNotIn("-PmetallumJar=" + str(alias), command)
 
     def test_physical_lock_rejects_concurrent_independent_open_but_allows_a_declared_child(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -598,7 +598,7 @@ public final class VanillaGameplay {
         value.addProperty("anchorAuthority", "shared-source-workload-recorder-java-clock");
         value.addProperty("route", route);
         value.add("before", clockPair("before-arm-window"));
-        FrameEvidenceRuntime.armWindowAt(profile, armedAtNs, WARMUP_NS, SAMPLE_NS);
+        FrameEvidenceRuntime.armWindowAt(profile, WARMUP_NS, SAMPLE_NS, armedAtNs);
         value.add("after", clockPair("after-arm-window"));
         return value;
     }
