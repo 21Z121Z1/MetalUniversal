@@ -1,4 +1,4 @@
-# Temporary exact-source preparation. No branch, tag or setting is mutated.
+# Temporary exact-source validation/transport. No branch, tag or setting is mutated.
 name: Convergence prepared-worktree validation
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
-      - name: Apply exact reviewed source with expected-blob and tree checks
+      - name: Apply reviewed source and the diagnosed text lightmap correction
         id: prepare
         shell: bash
         env:
@@ -42,7 +42,6 @@ jobs:
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
           base = '4cf2476e68c8d7802ef5c4eea282e75eee917a76'
-          expected_tree = '3b01becb9a8f9bcc53d6fc2221e77b52334ab857'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
@@ -72,27 +71,41 @@ jobs:
               path.write_text(text)
               if git('hash-object', name) != change['expected_blob']:
                   raise RuntimeError('Prepared source blob mismatch: ' + name)
+          # The first real compilation found two GUI variants calling an excluded function.
+          # Pair usage with the existing include condition. Do not change GUI pipeline admission.
+          name = 'src/main/resources/assets/metallum/shaders/core/text_previous_motion.vsh'
+          path = pathlib.Path(name); text = path.read_text()
+          old = '#ifdef IS_SEE_THROUGH\n    metallumVertexColor = Color;'
+          new = '#if defined(IS_GUI) || defined(IS_SEE_THROUGH)\n    metallumVertexColor = Color;'
+          if text.count(old) != 1:
+              raise RuntimeError('Text shader correction no longer matches reviewed source')
+          path.write_text(text.replace(old, new))
+          changes[name]['expected_blob'] = 'bf509c5068e64e1acaea50f7dc13f2f4e3eb32a0'
+          if git('hash-object', name) != changes[name]['expected_blob']:
+              raise RuntimeError('Text shader correction blob mismatch')
           subprocess.run(['git', 'add', '--', *sorted(changes)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           tree = git('write-tree')
-          if tree != expected_tree:
+          if tree != 'ab866c76b9973ac05e374611fd9fcc25640f44bd':
               raise RuntimeError('Reviewed tree mismatch: ' + tree)
           output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
-          (output / 'payload.json').write_bytes(payload)
+          (output / 'payload.json').write_text(json.dumps(changes, indent=2) + '\n')
+          (output / 'original-payload.json').write_bytes(payload)
           (output / 'change.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index']))
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared optional ABI and shader source boundaries; unpublished validation only\n', text=True).strip()
+              input='Prepared optional ABI, encoder lifetime and packaged shader corrections\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
           proof = {'schema_version': 1, 'proof_subject': 'unpublished-prepared-worktree',
               'workflow_sha': os.environ['GITHUB_SHA'], 'source_base': base,
-              'tested_commit_sha': commit, 'tested_tree_sha': tree, 'payload_sha256': digest,
+              'tested_commit_sha': commit, 'tested_tree_sha': tree, 'original_payload_sha256': digest,
+              'text_lightmap_correction': {'old': old, 'new': new},
               'expected_blobs': {p: c['expected_blob'] for p, c in changes.items()},
               'refs_updated': False, 'main_acceptance': False, 'physical_acceptance': False}
           (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
           subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
           print(json.dumps(proof, indent=2))
           PY
-      - name: Compile real packaged motion shaders and optional adapter regressions
+      - name: Compile packaged shaders and optional adapter regressions
         run: |
           set -euo pipefail
           ./gradlew --no-daemon --stacktrace test \
@@ -100,14 +113,14 @@ jobs:
             --tests '*IrisMetalBlend*' --tests '*MetalFrameGenerationNativeSourceContractTest' \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
             2>&1 | tee build/agent-evidence/source-boundaries-tests.log
-      - name: Check common backend with Iris and Sodium physically absent from classpath
+      - name: Validate with Iris and Sodium absent from the classpath
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
           set -euo pipefail
           ./gradlew --no-daemon --stacktrace -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
             2>&1 | tee build/agent-evidence/vanilla-boundary-tests.log
-      - name: Compile the shipping Metal module with encoder-scope cleanup
+      - name: Compile shipping Metal module
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
           set -euo pipefail
