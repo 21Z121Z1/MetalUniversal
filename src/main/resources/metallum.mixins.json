@@ -67,7 +67,6 @@
     "render.MetalGpuBufferNativeHandleAccessor",
     "render.MetalRenderPassNoTraceDrawMixin",
     "render.MetalRenderPassMultiDrawBatchMixin",
-    "render.IrisMetalCommandEncoderComputeGroupingMixin",
     "render.IrisMetalRenderFusionBoundaryMixin",
     "render.IrisMetalArgumentSnapshotMixin",
     "render.IrisMetalArgumentSnapshotSubmitMixin",
@@ -127,7 +126,6 @@
     "iris.IrisMetalOptimizationBootstrapMixin",
     "iris.IrisMetalDepthLivenessMixin",
     "iris.IrisMetalDepthAllocationMixin",
-    "iris.IrisMetalPostChainComputeGroupingMixin",
     "iris.IrisMetalRenderFusionPolicyMixin"
   ],
   "injectors": {

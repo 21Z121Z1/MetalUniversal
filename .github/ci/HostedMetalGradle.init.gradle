@@ -182,4 +182,14 @@ gradle.projectsEvaluated {
         ]
     )
     hostedIris.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
+
+    def groupedIrisCompute = configureHostedTest(
+        "hostedMetalIrisComputeGroupingTest",
+        "Checks the opt-in typed compute grouping path against the same pixel, SSBO and resize oracle as the conservative path.",
+        ["com.metallum.client.metal.render.IrisMetalComputeConformanceTest"]
+    )
+    groupedIrisCompute.configure { task ->
+        task.dependsOn(hostedBridgeFfmSmoke)
+        task.systemProperty "metallum.iris.computeGrouping", "true"
+    }
 }

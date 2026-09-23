@@ -29,4 +29,25 @@ class MetalGpuBufferFrontendContractTest {
         assertTrue(frontendBuffer.isClosed());
         assertThrows(IllegalStateException.class, frontendBuffer::checkCanBeUsed);
     }
+
+    @Test
+    void borrowedUsageFacadesShareTheAllocationRatherThanInventingAliasIndependence() {
+        MetalAllocationIdentity backing = new MetalAllocationIdentity(201L, 7L);
+        MetalGpuBuffer vertex = new MetalGpuBuffer(null, GpuBuffer.USAGE_VERTEX, 64L,
+                MemorySegment.ofAddress(1L), backing);
+        MetalGpuBuffer indirect = new MetalGpuBuffer(null, GpuBuffer.USAGE_INDIRECT_PARAMETERS, 64L,
+                MemorySegment.ofAddress(1L), backing);
+        assertNotSame(vertex, indirect);
+        assertEquals(vertex.nativeHandle(), indirect.nativeHandle());
+        assertEquals(backing, vertex.allocationIdentity());
+        assertEquals(backing, indirect.allocationIdentity());
+        assertNotEquals(vertex.usage(), indirect.usage());
+        var window = new IrisMetalComputeGroupingRuntime.IndependenceWindow();
+        window.append(new IrisMetalComputeGroupingRuntime.AccessSet(java.util.Set.of(),
+                java.util.Set.of(vertex.allocationIdentity())));
+        assertFalse(window.admits(new IrisMetalComputeGroupingRuntime.AccessSet(
+                java.util.Set.of(indirect.allocationIdentity()), java.util.Set.of())),
+                "an indirect read through another facade still follows the physical allocation's writer");
+    }
+
 }

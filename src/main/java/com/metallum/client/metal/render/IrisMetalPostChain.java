@@ -1239,6 +1239,24 @@ final class IrisMetalPostChain implements AutoCloseable {
             return;
         }
 
+        if (IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING && computes.size() > 1) {
+            try (MetalCommandEncoder.ComputeGroupingScope scope = device.commandEncoder().beginComputeGrouping()) {
+                for (PlannedCompute compute : computes) {
+                    PreparedComputeBindings bindings = new PreparedComputeBindings();
+                    resolveComputeResources(bindings, compute, targets, resources);
+                    bindings.indirect(resolveIndirectDispatch(compute, resources));
+                    IrisMetalComputeGroupingRuntime.AccessSet accesses = bindings.accesses();
+                    try (MetalComputePass pass = scope.createPass("iris/compute", accesses)) {
+                        pass.setPipeline(Objects.requireNonNull(compute.pipeline, "compute pipeline"));
+                        bindings.bind(pass);
+                        dispatchResolvedCompute(pass, compute, targets, bindings.indirect);
+                        if (executed != null) executed.add(compute.info.name());
+                    }
+                }
+            }
+            return;
+        }
+
         // Fixed Iris issues image/texture-fetch/SSBO barriers before every
         // dispatch unless the pack explicitly opts into concurrent compute.
         // An encoder boundary on the shared Metal fence is the conservative
@@ -1271,50 +1289,191 @@ final class IrisMetalPostChain implements AutoCloseable {
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
+        resolveComputeResources(new ImmediateComputeBindings(pass), compute, targets, resources);
+    }
+
+    /** One resource resolver for ordinary and grouped dispatches; each provider is called once. */
+    private void resolveComputeResources(
+            final ComputeBindingSink sink,
+            final PlannedCompute compute,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
         IrisMetalUniformValues.DrawUniformContext uniformContext =
                 IrisMetalUniformValues.requiresDrawContext(compute.reflection.uniformLayout())
                         ? fullscreenUniformContext(compute.info, targets, resources, Optional.empty())
                         : IrisMetalUniformValues.DrawUniformContext.empty();
         for (MetalIrisShaderCompiler.ComputeResource resource : compute.reflection.resources()) {
             switch (resource.kind()) {
-                case UNIFORM_BUFFER -> bindComputeBuffer(
-                        pass,
-                        resource.binding(),
-                        requireBuffer(
-                                resources.uniform(
-                                        compute.info, resource.name(), compute.token, uniformContext
-                                ),
-                                compute, "uniform block", resource.name()
-                        )
-                );
-                case STORAGE_BUFFER -> bindComputeBuffer(
-                        pass,
-                        resource.binding(),
-                        requireBuffer(
-                                resources.storageBuffer(resource.binding()),
-                                compute, "SSBO binding", Integer.toString(resource.binding())
-                        )
-                );
+                case UNIFORM_BUFFER -> acceptComputeBuffer(sink, resource.binding(), requireBuffer(
+                        resources.uniform(compute.info, resource.name(), compute.token, uniformContext),
+                        compute, "uniform block", resource.name()), false);
+                case STORAGE_BUFFER -> acceptComputeBuffer(sink, resource.binding(), requireBuffer(
+                        resources.storageBuffer(resource.binding()),
+                        compute, "SSBO binding", Integer.toString(resource.binding())), true);
                 case SAMPLED_IMAGE -> {
                     TextureBinding binding = requireComputeTexture(compute, resource.name(), targets, resources);
-                    pass.bindTextureView(resource.binding(), metalView(binding.view(), compute, resource.name()));
-                    pass.bindSampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle());
+                    sink.texture(resource.binding(), metalView(binding.view(), compute, resource.name()), false);
+                    sink.sampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()));
                 }
                 case SEPARATE_SAMPLER -> {
                     TextureBinding binding = requireComputeTexture(compute, resource.name(), targets, resources);
-                    pass.bindSampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle());
+                    sink.sampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()));
                 }
                 case STORAGE_IMAGE -> {
-                    GpuTextureView view = storageImage(compute, resource.name(), targets, resources);
-                    MetalGpuTextureView metalView = metalView(view, compute, resource.name());
-                    metalView.validateStorageBinding();
-                    ((MetalGpuTexture) metalView.texture()).markContentsDirty();
-                    pass.bindTextureView(resource.binding(), metalView);
+                    MetalGpuTextureView view = metalView(
+                            storageImage(compute, resource.name(), targets, resources), compute, resource.name());
+                    view.validateStorageBinding();
+                    sink.texture(resource.binding(), view, true);
                 }
                 case TEXEL_BUFFER, STORAGE_TEXEL_BUFFER, ATOMIC_COUNTER -> throw new IllegalStateException(
                         "Unsupported compute resource survived admission: " + resource.kind() + " " + resource.name()
                 );
             }
+        }
+    }
+
+    private interface ComputeBindingSink {
+        void buffer(int index, MetalGpuBuffer buffer, long offset, boolean writable);
+        void texture(int index, MetalGpuTextureView view, boolean writable);
+        void sampler(int index, MetalGpuSampler sampler);
+    }
+
+    private record ImmediateComputeBindings(MetalComputePass pass) implements ComputeBindingSink {
+        @Override
+        public void buffer(int index, MetalGpuBuffer buffer, long offset, boolean writable) {
+            pass.bindBuffer(index, buffer, offset);
+        }
+
+        @Override
+        public void texture(int index, MetalGpuTextureView view, boolean writable) {
+            if (writable) {
+                view.validateStorageBinding();
+                ((MetalGpuTexture) view.texture()).markContentsDirty();
+            }
+            pass.bindTextureView(index, view);
+        }
+
+        @Override
+        public void sampler(int index, MetalGpuSampler sampler) {
+            pass.bindSampler(index, sampler.nativeHandle());
+        }
+    }
+
+    private sealed interface PreparedComputeBinding {
+        void validate();
+        void bind(ComputeBindingSink sink);
+    }
+
+    private record PreparedComputeBuffer(int index, MetalGpuBuffer buffer, long offset,
+                                         boolean writable, MetalAllocationIdentity identity)
+            implements PreparedComputeBinding {
+        @Override
+        public void validate() {
+            if (!identity.equals(buffer.allocationIdentity())) {
+                throw new IllegalStateException("Compute buffer backing changed during binding preparation");
+            }
+        }
+
+        @Override
+        public void bind(ComputeBindingSink sink) {
+            sink.buffer(index, buffer, offset, writable);
+        }
+    }
+
+    private record PreparedComputeTexture(int index, MetalGpuTextureView view, boolean writable)
+            implements PreparedComputeBinding {
+        @Override
+        public void validate() {
+            if (view.isClosed()) throw new IllegalStateException("Prepared compute texture view is closed");
+            if (writable) view.validateStorageBinding();
+        }
+
+        @Override
+        public void bind(ComputeBindingSink sink) {
+            sink.texture(index, view, writable);
+        }
+    }
+
+    private record PreparedComputeSampler(int index, MetalGpuSampler sampler) implements PreparedComputeBinding {
+        @Override
+        public void validate() {
+            if (sampler.isClosed()) throw new IllegalStateException("Prepared compute sampler is closed");
+        }
+
+        @Override
+        public void bind(ComputeBindingSink sink) {
+            sink.sampler(index, sampler);
+        }
+    }
+
+    record PreparedIndirectDispatch(MetalGpuBuffer buffer, long offset, MetalAllocationIdentity identity) {
+        void validate() {
+            if (!identity.equals(buffer.allocationIdentity())) {
+                throw new IllegalStateException("Indirect argument backing changed during compute preparation");
+            }
+        }
+    }
+
+    /** Temporary immutable bindings replace name-based guesses only when grouping is requested. */
+    static final class PreparedComputeBindings implements ComputeBindingSink {
+        private final List<PreparedComputeBinding> bindings = new ArrayList<>();
+        private @Nullable PreparedIndirectDispatch indirect;
+
+        void indirect(final @Nullable PreparedIndirectDispatch dispatch) {
+            indirect = dispatch;
+        }
+
+        @Override
+        public void buffer(int index, MetalGpuBuffer buffer, long offset, boolean writable) {
+            bindings.add(new PreparedComputeBuffer(index, buffer, offset, writable, buffer.allocationIdentity()));
+        }
+
+        @Override
+        public void texture(int index, MetalGpuTextureView view, boolean writable) {
+            bindings.add(new PreparedComputeTexture(index, view, writable));
+        }
+
+        @Override
+        public void sampler(int index, MetalGpuSampler sampler) {
+            bindings.add(new PreparedComputeSampler(index, sampler));
+        }
+
+        private void validate() {
+            try {
+                for (PreparedComputeBinding binding : bindings) binding.validate();
+                if (indirect != null) indirect.validate();
+            } catch (RuntimeException failure) {
+                IrisMetalComputeGroupingRuntime.recordAnalysisFailure();
+                throw failure;
+            }
+        }
+
+        IrisMetalComputeGroupingRuntime.AccessSet accesses() {
+            validate();
+            Set<MetalAllocationIdentity> reads = new LinkedHashSet<>();
+            Set<MetalAllocationIdentity> writes = new LinkedHashSet<>();
+            for (PreparedComputeBinding binding : bindings) {
+                if (binding instanceof PreparedComputeBuffer buffer) {
+                    reads.add(buffer.identity());
+                    if (buffer.writable()) writes.add(buffer.identity());
+                } else if (binding instanceof PreparedComputeTexture texture) {
+                    MetalAllocationIdentity identity = ((MetalGpuTexture) texture.view().texture()).allocationIdentity();
+                    reads.add(identity);
+                    if (texture.writable()) writes.add(identity);
+                }
+            }
+            // Indirect arguments are reads even when absent from shader reflection.
+            if (indirect != null) reads.add(indirect.identity());
+            return new IrisMetalComputeGroupingRuntime.AccessSet(reads, writes);
+        }
+
+        void bind(MetalComputePass pass) {
+            // A deferred render/clear flushed while opening the pass may have
+            // changed a dynamic backing. Reject before encoding stale accesses.
+            validate();
+            ComputeBindingSink sink = new ImmediateComputeBindings(pass);
+            for (PreparedComputeBinding binding : bindings) binding.bind(sink);
         }
     }
 
@@ -1332,15 +1491,16 @@ final class IrisMetalPostChain implements AutoCloseable {
         return slice;
     }
 
-    private static void bindComputeBuffer(
-            final MetalComputePass pass,
+    private static void acceptComputeBuffer(
+            final ComputeBindingSink sink,
             final int binding,
-            final GpuBufferSlice slice
+            final GpuBufferSlice slice,
+            final boolean writable
     ) {
         if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
             throw new IllegalStateException("Iris compute resource is not backed by a Metal buffer");
         }
-        pass.bindBuffer(binding, buffer, slice.offset());
+        sink.buffer(binding, buffer, slice.offset(), writable);
     }
 
     private static TextureBinding requireComputeTexture(
@@ -1414,25 +1574,37 @@ final class IrisMetalPostChain implements AutoCloseable {
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
+        dispatchResolvedCompute(pass, compute, targets, resolveIndirectDispatch(compute, resources));
+    }
+
+    private static @Nullable PreparedIndirectDispatch resolveIndirectDispatch(
+            final PlannedCompute compute, final ResourceProvider resources
+    ) {
         IndirectPointer indirect = compute.source.getIndirectPointer();
+        if (indirect == null) return null;
+        GpuBufferSlice slice = requireBuffer(resources.storageBuffer(indirect.buffer()), compute,
+                "indirect SSBO binding", Integer.toString(indirect.buffer()));
+        long relativeOffset = indirect.offset();
+        if (relativeOffset < 0 || relativeOffset > slice.length() - 12L) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " indirect range " + relativeOffset + "+12 exceeds "
+                            + slice.length() + " bytes at SSBO binding " + indirect.buffer());
+        }
+        if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+            throw new IllegalStateException("Iris indirect dispatch buffer is not backed by Metal");
+        }
+        return new PreparedIndirectDispatch(buffer, Math.addExact(slice.offset(), relativeOffset), buffer.allocationIdentity());
+    }
+
+    private static void dispatchResolvedCompute(
+            final MetalComputePass pass,
+            final PlannedCompute compute,
+            final IrisMetalRenderTargets targets,
+            final @Nullable PreparedIndirectDispatch indirect
+    ) {
         if (indirect != null) {
-            GpuBufferSlice slice = requireBuffer(
-                    resources.storageBuffer(indirect.buffer()),
-                    compute,
-                    "indirect SSBO binding",
-                    Integer.toString(indirect.buffer())
-            );
-            long relativeOffset = indirect.offset();
-            if (relativeOffset < 0 || relativeOffset > slice.length() - 12L) {
-                throw new IllegalStateException(
-                        "Iris compute " + compute.info.name() + " indirect range " + relativeOffset + "+12 exceeds "
-                                + slice.length() + " bytes at SSBO binding " + indirect.buffer()
-                );
-            }
-            if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
-                throw new IllegalStateException("Iris indirect dispatch buffer is not backed by Metal");
-            }
-            pass.dispatchIndirect(buffer, Math.addExact(slice.offset(), relativeOffset));
+            indirect.validate();
+            pass.dispatchIndirect(indirect.buffer(), indirect.offset());
             return;
         }
         Vector3i absolute = compute.source.getWorkGroups();

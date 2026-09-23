@@ -17,7 +17,9 @@ import java.util.Map;
  * Mod-private compute pass over one {@code MTLComputeCommandEncoder}.
  *
  * <p>Created via {@link MetalCommandEncoder#createComputePass(String)}; the
- * pass owns the encoder until {@link #close()}. Because all backend resources
+ * pass owns the encoder until {@link #close()}, unless its lexical grouping
+ * scope retains the encoder for proven allocation-independent dispatches.
+ * Because all backend resources
  * are hazard-untracked, ordering against surrounding render/blit work is
  * provided by the encoder-level global fence chain — a compute pass therefore
  * observes all previously encoded writes and publishes its own writes to the
@@ -256,6 +258,9 @@ final class MetalComputePass implements AutoCloseable {
         if (closed) {
             throw new IllegalStateException("Compute pass is closed");
         }
+        if (!owner.isCurrentEncoder(encoder)) {
+            throw new IllegalStateException("Compute encoder was retired by interleaved work");
+        }
     }
 
     @Override
@@ -264,8 +269,14 @@ final class MetalComputePass implements AutoCloseable {
             return;
         }
         closed = true;
-        owner.endContractTraceGroup();
-        owner.endComputePass(encoder);
-        RenderContractRuntime.endPass(contractPassToken);
+        try {
+            owner.endContractTraceGroup();
+        } finally {
+            try {
+                owner.endComputePass(encoder);
+            } finally {
+                RenderContractRuntime.endPass(contractPassToken);
+            }
+        }
     }
 }

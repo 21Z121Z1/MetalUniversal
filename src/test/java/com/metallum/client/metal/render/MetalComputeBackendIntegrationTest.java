@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -209,6 +210,205 @@ final class MetalComputeBackendIntegrationTest {
                 assertEquals(0, data.getInt(i * 4), "element beyond 3 groups must stay untouched");
             }
         }
+    }
+
+    @Test
+    void scopedGroupingReusesIndependentDispatchesButFencesRealAllocationHazards() {
+        String writer = """
+                #version 450
+                layout(local_size_x = 1) in;
+                layout(std430, binding = 0) buffer Output { uint value; };
+                void main() { value = 17u; }
+                """;
+        String consumer = """
+                #version 450
+                layout(local_size_x = 1) in;
+                layout(std430, binding = 0) readonly buffer Input { uint inputValue; };
+                layout(std430, binding = 1) buffer Output { uint outputValue; };
+                void main() { outputValue = inputValue * 3u; }
+                """;
+        try (MetalComputePipeline write = MetalComputePipeline.compileGlsl(device, "group_write", writer);
+             MetalComputePipeline read = MetalComputePipeline.compileGlsl(device, "group_read", consumer);
+             MetalGpuBuffer a = (MetalGpuBuffer) device.createBuffer(() -> "same-label", GpuBuffer.USAGE_MAP_READ, 4);
+             MetalGpuBuffer b = (MetalGpuBuffer) device.createBuffer(() -> "same-label", GpuBuffer.USAGE_MAP_READ, 4);
+             MetalGpuBuffer c = (MetalGpuBuffer) device.createBuffer(() -> "group-consumer", GpuBuffer.USAGE_MAP_READ, 4)) {
+            IrisMetalComputeGroupingRuntime.Snapshot before = IrisMetalComputeGroupingRuntime.snapshot();
+            long firstGeneration;
+            try (MetalCommandEncoder.ComputeGroupingScope scope = encoder.beginComputeGrouping()) {
+                assertThrows(IllegalStateException.class, encoder::beginComputeGrouping);
+                try (MetalComputePass pass = scope.createPass("iris/group-first", writes(a))) {
+                    pass.setPipeline(write).bindBuffer(0, a).dispatchGroups(1, 1, 1);
+                    firstGeneration = encoder.encoderGeneration();
+                }
+                try (MetalComputePass pass = scope.createPass("iris/group-independent", writes(b))) {
+                    assertEquals(firstGeneration, encoder.encoderGeneration(),
+                            "same logical label does not create a false hazard between distinct allocations");
+                    pass.setPipeline(write).bindBuffer(0, b).dispatchGroups(1, 1, 1);
+                }
+                try (MetalComputePass pass = scope.createPass("iris/group-dependent",
+                        new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(a.allocationIdentity()),
+                                Set.of(c.allocationIdentity())))) {
+                    assertTrue(encoder.encoderGeneration() > firstGeneration,
+                            "read-after-write needs the real native encoder/fence boundary");
+                    pass.setPipeline(read).bindBuffer(0, a).bindBuffer(1, c).dispatchGroups(1, 1, 1);
+                }
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals(17, a.currentStorage().order(ByteOrder.nativeOrder()).getInt(0));
+            assertEquals(17, b.currentStorage().order(ByteOrder.nativeOrder()).getInt(0));
+            assertEquals(51, c.currentStorage().order(ByteOrder.nativeOrder()).getInt(0));
+            IrisMetalComputeGroupingRuntime.Snapshot after = IrisMetalComputeGroupingRuntime.snapshot();
+            assertEquals(1, after.admissions() - before.admissions());
+            assertEquals(1, after.rejections() - before.rejections());
+            assertEquals(2, after.admissionCandidates() - before.admissionCandidates());
+            assertEquals(3, after.deferredPassCloses() - before.deferredPassCloses());
+        }
+    }
+
+    @Test
+    void indirectArgumentsAreAReadDependencyEvenWithoutAShaderBinding() {
+        String writer = """
+                #version 450
+                layout(local_size_x = 1) in;
+                layout(std430, binding = 0) buffer Args { uint values[]; };
+                void main() { values[0] = 3u; values[1] = 1u; values[2] = 1u; }
+                """;
+        String consumer = """
+                #version 450
+                layout(local_size_x = 1) in;
+                layout(std430, binding = 0) buffer Output { uint values[]; };
+                void main() { values[gl_GlobalInvocationID.x] = 91u; }
+                """;
+        try (MetalComputePipeline write = MetalComputePipeline.compileGlsl(device, "group_args_write", writer);
+             MetalComputePipeline consume = MetalComputePipeline.compileGlsl(device, "group_args_read", consumer);
+             MetalGpuBuffer args = (MetalGpuBuffer) device.createBuffer(() -> "group-args",
+                     GpuBuffer.USAGE_INDIRECT_PARAMETERS, 12);
+             MetalGpuBuffer out = (MetalGpuBuffer) device.createBuffer(() -> "group-args-out",
+                     GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                     ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder()))) {
+            try (MetalCommandEncoder.ComputeGroupingScope scope = encoder.beginComputeGrouping()) {
+                long generation;
+                try (MetalComputePass pass = scope.createPass("iris/argument-writer", writes(args))) {
+                    pass.setPipeline(write).bindBuffer(0, args).dispatchGroups(1, 1, 1);
+                    generation = encoder.encoderGeneration();
+                }
+                try (MetalComputePass pass = scope.createPass("iris/indirect-reader",
+                        new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(args.allocationIdentity()),
+                                Set.of(out.allocationIdentity())))) {
+                    assertTrue(encoder.encoderGeneration() > generation);
+                    pass.setPipeline(consume).bindBuffer(0, out).dispatchIndirect(args, 0L);
+                }
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer data = out.currentStorage().order(ByteOrder.nativeOrder());
+            assertEquals(91, data.getInt(0));
+            assertEquals(91, data.getInt(4));
+            assertEquals(91, data.getInt(8));
+            assertEquals(0, data.getInt(12), "GPU-written group counts must limit the dispatch");
+        }
+    }
+
+    @Test
+    void groupingScopeClosesOnExceptionsAndCannotAffectAFuturePass() {
+        MetalCommandEncoder.ComputeGroupingScope scope = encoder.beginComputeGrouping();
+        long generation;
+        RuntimeException marker = new RuntimeException("provider/dispatch failure");
+        RuntimeException observed = assertThrows(RuntimeException.class, () -> {
+            try (scope; MetalComputePass ignored = scope.createPass("iris/failed-pass",
+                    new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(), Set.of()))) {
+                throw marker;
+            }
+        });
+        assertSame(marker, observed);
+        generation = encoder.encoderGeneration();
+        assertDoesNotThrow(scope::close, "scope retirement is idempotent");
+        assertThrows(IllegalStateException.class, () -> scope.createPass("iris/stale-scope",
+                new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(), Set.of())));
+        try (MetalComputePass ignored = encoder.createComputePass("ordinary-after-group-failure")) {
+            assertTrue(encoder.encoderGeneration() > generation);
+        }
+        try (MetalCommandEncoder.ComputeGroupingScope next = encoder.beginComputeGrouping();
+             MetalComputePass ignored = next.createPass("iris/new-scope",
+                     new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(), Set.of()))) {
+            assertTrue(encoder.encoderGeneration() > generation);
+        }
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+    }
+
+    @Test
+    void interveningBlitBreaksGroupingWithoutLosingTheScopedOwner() {
+        String writer = """
+                #version 450
+                layout(local_size_x = 1) in;
+                layout(std430, binding = 0) buffer Output { uint value; };
+                void main() { value = 67u; }
+                """;
+        try (MetalComputePipeline pipeline = MetalComputePipeline.compileGlsl(device, "group_blit_boundary", writer);
+             MetalGpuBuffer a = (MetalGpuBuffer) device.createBuffer(() -> "group-blit-source", 0, 4);
+             MetalGpuBuffer b = (MetalGpuBuffer) device.createBuffer(() -> "group-blit-copy",
+                     GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 4);
+             MetalGpuBuffer c = (MetalGpuBuffer) device.createBuffer(() -> "group-blit-next", GpuBuffer.USAGE_MAP_READ, 4)) {
+            try (MetalCommandEncoder.ComputeGroupingScope scope = encoder.beginComputeGrouping()) {
+                try (MetalComputePass pass = scope.createPass("iris/pre-blit", writes(a))) {
+                    pass.setPipeline(pipeline).bindBuffer(0, a).dispatchGroups(1, 1, 1);
+                }
+                long first = encoder.encoderGeneration();
+                encoder.copyToBuffer(a.slice(), b.slice());
+                long blit = encoder.encoderGeneration();
+                assertTrue(blit > first);
+                try (MetalComputePass pass = scope.createPass("iris/post-blit", writes(c))) {
+                    assertTrue(encoder.encoderGeneration() > blit,
+                            "independent resources alone cannot revive an encoder ended by a blit");
+                    pass.setPipeline(pipeline).bindBuffer(0, c).dispatchGroups(1, 1, 1);
+                }
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals(67, b.currentStorage().order(ByteOrder.nativeOrder()).getInt(0));
+            assertEquals(67, c.currentStorage().order(ByteOrder.nativeOrder()).getInt(0));
+        }
+    }
+
+    @Test
+    void transientUsageWrappersCannotHideOnePhysicalAllocationFromAdmission() {
+        var first = encoder.transientMemory().allocateGpu(16, 16, GpuBuffer.USAGE_VERTEX, 16, 4);
+        var second = encoder.transientMemory().allocateGpu(16, 16, GpuBuffer.USAGE_INDIRECT_PARAMETERS, 16, 4);
+        MetalGpuBuffer a = (MetalGpuBuffer) first.buffer();
+        MetalGpuBuffer b = (MetalGpuBuffer) second.buffer();
+        assertNotSame(a, b, "usage variants have distinct frontend objects");
+        assertEquals(a.nativeHandle(), b.nativeHandle(), "these small allocations share a native arena block");
+        assertEquals(a.allocationIdentity(), b.allocationIdentity());
+        var window = new IrisMetalComputeGroupingRuntime.IndependenceWindow();
+        window.append(writes(a));
+        assertFalse(window.admits(new IrisMetalComputeGroupingRuntime.AccessSet(
+                Set.of(b.allocationIdentity()), Set.of())), "whole-allocation conservatism covers aliased facades");
+        encoder.commandBuffer();
+        encoder.submit();
+        assertTrue(a.isClosed());
+        assertTrue(b.isClosed());
+        assertThrows(IllegalStateException.class, a::allocationIdentity);
+        assertThrows(IllegalStateException.class, b::allocationIdentity);
+        device.waitForSubmittedGpuWork();
+    }
+
+    @Test
+    void aComputePassCannotBindThroughAnEncoderRetiredByInterleavedWork() {
+        MetalComputePass pass = encoder.createComputePass("invalid-interleave");
+        encoder.blitCommandEncoder();
+        assertThrows(IllegalStateException.class, () -> pass.bindSampler(0, MemorySegment.NULL),
+                "reject before crossing FFM with a stale native encoder");
+        assertThrows(IllegalStateException.class, pass::close);
+        assertDoesNotThrow(pass::close, "logical close remains idempotent after the caller error");
+        assertDoesNotThrow(encoder::submit);
+        device.waitForSubmittedGpuWork();
+    }
+
+    private static IrisMetalComputeGroupingRuntime.AccessSet writes(MetalGpuBuffer buffer) {
+        return new IrisMetalComputeGroupingRuntime.AccessSet(Set.of(buffer.allocationIdentity()),
+                Set.of(buffer.allocationIdentity()));
     }
 
     @Test
