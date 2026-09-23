@@ -11,10 +11,13 @@ jobs:
   validate:
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: 8fb9232e3c479fe6a866b0b0082a1f9d2b7a9dc7
+          ref: 4cf2476e68c8d7802ef5c4eea282e75eee917a76
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -24,7 +27,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
-      - name: Apply the reviewed three-file payload with expected-blob checks
+      - name: Apply exact reviewed source with expected-blob and tree checks
         id: prepare
         shell: bash
         env:
@@ -35,12 +38,11 @@ jobs:
           GIT_COMMITTER_EMAIL: validation@localhost
         run: |
           set -euo pipefail
-          gh api repos/21Z121Z1/MetalUniversal/git/blobs/a40401ce9b58fff42faf86f690561a493a78585e > "$RUNNER_TEMP/payload-blob.json"
+          gh api repos/21Z121Z1/MetalUniversal/git/blobs/82c5ee56835065a5aa29f14e6562813a04a94959 > "$RUNNER_TEMP/payload-blob.json"
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
-          base = '8fb9232e3c479fe6a866b0b0082a1f9d2b7a9dc7'
-          expected_paths = {'build.gradle', 'scripts/agent/verify_terrain_work_events.py',
-              'validation/terrain-work-events/oracle-fixtures.json'}
+          base = '4cf2476e68c8d7802ef5c4eea282e75eee917a76'
+          expected_tree = '3b01becb9a8f9bcc53d6fc2221e77b52334ab857'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
@@ -48,30 +50,38 @@ jobs:
           blob = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'payload-blob.json').read_text())
           payload = gzip.decompress(base64.b64decode(blob['content']))
           digest = hashlib.sha256(payload).hexdigest()
-          if digest != '9e7ada4f8aa7a28da1c36f8e0cde66d69cdf7b67561c461ef886e4c78bc03a28':
+          if digest != 'f4a6d3b18357566734c2bac740d662d9aa19bdae63fcc44464c027085af0c1c7':
               raise RuntimeError('Reviewed payload checksum mismatch')
           changes = json.loads(payload)
-          if set(changes) != expected_paths:
-              raise RuntimeError('Reviewed path set mismatch')
+          if len(changes) != 21 or any(not p.startswith(('src/main/', 'src/test/')) for p in changes):
+              raise RuntimeError('Unexpected payload paths')
           for name, change in changes.items():
-              if git('hash-object', name) != change['base_blob']:
-                  raise RuntimeError('Source blob changed: ' + name)
-              path = pathlib.Path(name); lines = path.read_text().splitlines(keepends=True)
-              for edit in reversed(change['edits']):
-                  lines[edit['start']:edit['end']] = edit['lines']
-              path.write_text(''.join(lines))
+              path = pathlib.Path(name)
+              if change['base_blob'] is None:
+                  if path.exists():
+                      raise RuntimeError('New path already exists: ' + name)
+                  text = change['content']
+              else:
+                  if git('hash-object', name) != change['base_blob']:
+                      raise RuntimeError('Source blob changed: ' + name)
+                  lines = path.read_text().splitlines(keepends=True)
+                  for edit in reversed(change['edits']):
+                      lines[edit['start']:edit['end']] = edit['lines']
+                  text = ''.join(lines)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(text)
               if git('hash-object', name) != change['expected_blob']:
                   raise RuntimeError('Prepared source blob mismatch: ' + name)
           subprocess.run(['git', 'add', '--', *sorted(changes)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
-          if set(git('diff', '--cached', '--name-only').splitlines()) != expected_paths:
-              raise RuntimeError('Unexpected staged change')
           tree = git('write-tree')
+          if tree != expected_tree:
+              raise RuntimeError('Reviewed tree mismatch: ' + tree)
           output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
           (output / 'payload.json').write_bytes(payload)
           (output / 'change.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index']))
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared terrain oracle and iOS native recipe; unpublished validation only\n', text=True).strip()
+              input='Prepared optional ABI and shader source boundaries; unpublished validation only\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
           proof = {'schema_version': 1, 'proof_subject': 'unpublished-prepared-worktree',
               'workflow_sha': os.environ['GITHUB_SHA'], 'source_base': base,
@@ -82,35 +92,28 @@ jobs:
           subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
           print(json.dumps(proof, indent=2))
           PY
-      - name: Verify independent terrain oracle and shared Gradle recipe
+      - name: Compile real packaged motion shaders and optional adapter regressions
         run: |
           set -euo pipefail
-          python3 scripts/agent/verify_terrain_work_events.py --self-test
-          ./gradlew --no-daemon help
-      - name: Select and record the real iOS SDK
-        id: sdk
+          ./gradlew --no-daemon --stacktrace test \
+            --tests '*MetalMotionShaderCompilationTest' --tests '*MetalIrisDepthConventionTest' \
+            --tests '*IrisMetalBlend*' --tests '*MetalFrameGenerationNativeSourceContractTest' \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
+            2>&1 | tee build/agent-evidence/source-boundaries-tests.log
+      - name: Check common backend with Iris and Sodium physically absent from classpath
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
+            2>&1 | tee build/agent-evidence/vanilla-boundary-tests.log
+      - name: Compile the shipping Metal module with encoder-scope cleanup
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
           set -euo pipefail
           latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
           sudo xcode-select -s "$latest"
-          { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-path; xcrun --sdk iphoneos --show-sdk-version; } \
-            | tee build/agent-evidence/ios-sdk.txt
-      - name: Compile the shared native module for iOS arm64
-        env:
-          MTL_HUD_ENABLED: '0'
-          MTLFX_HUD_ENABLED: '0'
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace buildIOSNative 2>&1 | tee build/agent-evidence/ios-native-build.log
-          test -s src/main/resources/natives/ios/libmetallum.dylib
-          xcrun vtool -show-build src/main/resources/natives/ios/libmetallum.dylib | tee build/agent-evidence/ios-native-platform.txt
-      - name: Independently compile the full iOS SPIRV-Cross MSL image
-        if: ${{ always() && steps.prepare.outcome == 'success' && steps.sdk.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace buildIOSSpvc 2>&1 | tee build/agent-evidence/ios-spvc-build.log
-          test -s src/main/resources/natives/ios/libspvc.dylib
-          xcrun vtool -show-build src/main/resources/natives/ios/libspvc.dylib | tee build/agent-evidence/ios-spvc-platform.txt
+          ./gradlew --no-daemon --stacktrace buildMacNative 2>&1 | tee build/agent-evidence/native-source-build.log
       - name: Publish verified immutable source blobs only
         shell: bash
         env:
@@ -122,8 +125,7 @@ jobs:
           output = pathlib.Path('build/agent-evidence')
           changes = json.loads((output / 'payload.json').read_text()); entries = []
           for name, change in changes.items():
-              data = pathlib.Path(name).read_bytes()
-              request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode()})
               response = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
                   'repos/21Z121Z1/MetalUniversal/git/blobs', '--input', '-'], input=request, text=True))
               if response['sha'] != change['expected_blob']:
@@ -131,13 +133,14 @@ jobs:
               entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': response['sha']})
           (output / 'source-blobs.json').write_text(json.dumps(entries, indent=2) + '\n')
           PY
-      - name: Preserve prepared source and both platform diagnostics
+      - name: Preserve exact preparation and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: terrain-ios-prepared-${{ github.sha }}-${{ github.run_attempt }}
+          name: source-boundaries-prepared-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
-            src/main/resources/natives/ios/
+            build/test-results/
+            build/reports/tests/
           if-no-files-found: error
           retention-days: 30
