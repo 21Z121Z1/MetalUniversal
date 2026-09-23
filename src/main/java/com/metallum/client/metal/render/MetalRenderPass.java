@@ -1122,8 +1122,19 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     @Override
     public void writeTimestamp(final @NonNull GpuQueryPool pool, final int index) {
-        if (pool instanceof MetalGpuQueryPool metalPool && index >= 0 && index < pool.size()) {
-            metalPool.setValue(index, device.getTimestampNow());
+        if (!(pool instanceof MetalGpuQueryPool metalPool)) {
+            throw new IllegalArgumentException("Expected a Metal timestamp query pool");
+        }
+        metalPool.requireDevice(device);
+        long generation = metalPool.beginWrite(index);
+        try {
+            int backend = MetalNativeBridge.renderPearlTimestampWriteRender(
+                    renderEncoder().handle(), metalPool.nativeHandle(), index
+            );
+            metalPool.written(commandEncoder, index, generation, backend);
+        } catch (RuntimeException | Error failure) {
+            metalPool.failed(index, generation);
+            throw failure;
         }
     }
 

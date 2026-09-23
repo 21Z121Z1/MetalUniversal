@@ -107,6 +107,86 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void timestampQueriesWaitForGpuCompletionAndCalibrateToJvmClock() {
+        ByteBuffer data = ByteBuffer.allocateDirect(256);
+        for (int i = 0; i < data.capacity(); i++) data.put(i, (byte) (i * 7));
+        try (var queries = device.createTimestampQueryPool(2);
+             MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                     () -> "timestamp upload", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, data.capacity())) {
+            assertEquals(2, queries.size());
+            assertTrue(queries.getValue(0).isEmpty());
+            encoder.writeTimestamp(queries, 0);
+            encoder.writeToBuffer(destination.slice(0, data.capacity()), data);
+            encoder.writeTimestamp(queries, 1);
+            assertTrue(queries.getValue(0).isEmpty(), "unsubmitted GPU work must not return a timestamp");
+            assertThrows(IllegalStateException.class, () -> encoder.writeTimestamp(queries, 1),
+                    "an in-flight slot cannot be silently overwritten");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            var values = queries.getValues(0, 2);
+            assertTrue(values[0].isPresent(), "first GPU sample must resolve");
+            assertTrue(values[1].isPresent(), "second GPU sample must resolve");
+            assertTrue(values[1].getAsLong() >= values[0].getAsLong(),
+                    "GPU samples must preserve command-stream order");
+            long offset = device.getTimestampCalibrationOffset();
+            long hostEquivalent = Math.round(values[1].getAsLong()
+                    * (double) device.getDeviceInfo().timestampPeriod()) + offset;
+            assertTrue(Math.abs(hostEquivalent - System.nanoTime()) < 5_000_000_000L,
+                    () -> "calibrated GPU sample must be near the completed JVM timeline: gpu="
+                            + values[1].getAsLong() + ", period=" + device.getDeviceInfo().timestampPeriod()
+                            + ", offset=" + offset + ", hostEquivalent=" + hostEquivalent
+                            + ", now=" + System.nanoTime());
+            for (int i = 0; i < data.capacity(); i++) {
+                assertEquals(data.get(i), destination.currentStorage().get(i));
+            }
+            assertThrows(IndexOutOfBoundsException.class, () -> queries.getValue(2));
+            encoder.writeTimestamp(queries, 0);
+            assertTrue(queries.getValue(0).isEmpty(), "a reused slot must discard its previous result");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertTrue(queries.getValue(0).orElseThrow() >= values[1].getAsLong());
+        }
+    }
+
+    @Test
+    void timestampQueryPoolSupportsProfilerCapacity() {
+        try (var queries = device.createTimestampQueryPool(1024)) {
+            encoder.writeTimestamp(queries, 1023);
+            assertTrue(queries.getValues(1022, 2)[1].isEmpty());
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            var values = queries.getValues(1022, 2);
+            assertTrue(values[0].isEmpty());
+            assertTrue(values[1].isPresent());
+        }
+    }
+
+    @Test
+    void renderPassTimestampIsGpuSampleOrExplicitlyUnsupported() {
+        try (var queries = device.createTimestampQueryPool(1);
+             MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                     "timestamp attachment", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1)) {
+            MetalRenderPass pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "timestamp pass")
+                    .withColorAttachment(view, Optional.of(new Vector4f(0.25F, 0.5F, 0.75F, 1.0F))).build());
+            boolean supported = true;
+            try {
+                pass.writeTimestamp(queries, 0);
+            } catch (UnsupportedOperationException unavailable) {
+                supported = false;
+                assertFalse(Boolean.getBoolean("metallum.test.mrtMetal4Commands"),
+                        "Metal 4 counter heaps must support render-pass timestamps");
+            }
+            encoder.submitRenderPass();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals(supported, queries.getValue(0).isPresent(),
+                    "unavailable render-pass samples must never become host timestamps");
+            assertByteNear(readback(texture).get(0), 64, "timestamp pass must still clear red");
+        }
+    }
+
+    @Test
     void pollingUnsubmittedFencePreservesTransientUploadsUntilExplicitSubmit() {
         ByteBuffer source = ByteBuffer.allocateDirect(64);
         for (int i = 0; i < 64; i++) source.put(i, (byte) (i * 17));

@@ -556,6 +556,39 @@ final class MetalComputeBackendIntegrationTest {
     }
 
     @Test
+    void oneLevelMipmapRequestDoesNotEncodeInvalidMetalWork() {
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "single-level-mipmap",
+                GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+                GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1)) {
+            ByteBuffer pixels = ByteBuffer.allocateDirect(WIDTH * HEIGHT * 4);
+            for (int i = 0; i < WIDTH * HEIGHT; i++) {
+                pixels.put((byte) 17).put((byte) 51).put((byte) 85).put((byte) 255);
+            }
+            pixels.flip();
+            encoder.writeToTexture(texture, pixels, 0, 0, 0, 0, WIDTH, HEIGHT);
+            encoder.generateMipmaps(texture);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            // Exercise the native ABI directly as well: its guard must survive
+            // a caller that bypasses MetalCommandEncoder's early return.
+            var nativeBlit = encoder.commandBuffer().makeBlitCommandEncoder("single-level no-op");
+            nativeBlit.generateMipmaps(texture.nativeHandle());
+            nativeBlit.endEncoding();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            ByteBuffer actual = readbackTexture(texture, 0, WIDTH, HEIGHT);
+            for (int i = 0; i < WIDTH * HEIGHT; i++) {
+                assertByteNear(actual.get(i * 4), 17, "single-level mip red");
+                assertByteNear(actual.get(i * 4 + 1), 51, "single-level mip green");
+                assertByteNear(actual.get(i * 4 + 2), 85, "single-level mip blue");
+            }
+        }
+    }
+
+    @Test
     void compareSamplerImplementsShadowSemantics() {
         String glsl = """
                 #version 450

@@ -736,6 +736,18 @@ public final class MetalNativeBridge {
             frameEvidenceEnable = optionalDowncall(lookup, "metallum_frame_evidence_enable", FunctionDescriptor.ofVoid(INT));
             commandBufferEncodingCounters = optionalDowncall(lookup, "metallum_command_buffer_encoding_counters_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
+            renderPearlTimestampPeriod = optionalDowncall(lookup, "metallum_renderpearl_timestamp_period_v1",
+                    FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
+            renderPearlTimestampPair = optionalDowncall(lookup, "metallum_renderpearl_timestamp_pair_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            renderPearlTimestampPoolCreate = optionalDowncall(lookup, "metallum_renderpearl_timestamp_pool_create_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
+            renderPearlTimestampWriteCommand = optionalDowncall(lookup, "metallum_renderpearl_timestamp_write_command_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            renderPearlTimestampWriteRender = optionalDowncall(lookup, "metallum_renderpearl_timestamp_write_render_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
+            renderPearlTimestampRead = optionalDowncall(lookup, "metallum_renderpearl_timestamp_read_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, INT, ValueLayout.ADDRESS));
             if (Boolean.getBoolean("metallum.frameEvidence.enabled") && MetalNativeBridge.frameEvidenceEnable != null
                     && MetalNativeBridge.commandBufferEncodingCounters != null) {
                 try {
@@ -1154,6 +1166,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle frameEvidenceEnable;
     @Nullable
     private static final MethodHandle commandBufferEncodingCounters;
+    @Nullable private static final MethodHandle renderPearlTimestampPeriod;
+    @Nullable private static final MethodHandle renderPearlTimestampPair;
+    @Nullable private static final MethodHandle renderPearlTimestampPoolCreate;
+    @Nullable private static final MethodHandle renderPearlTimestampWriteCommand;
+    @Nullable private static final MethodHandle renderPearlTimestampWriteRender;
+    @Nullable private static final MethodHandle renderPearlTimestampRead;
     private static final MethodHandle gpuEncoderTimingReset;
     private static final MethodHandle gpuEncoderTimingCount;
     private static final MethodHandle gpuEncoderTimingMilliseconds;
@@ -4320,6 +4338,81 @@ public final class MetalNativeBridge {
             throw new IllegalArgumentException("Byte size must be non-negative");
         }
         return MemorySegment.ofAddress(pointer.address()).reinterpret(byteSize).asByteBuffer();
+    }
+
+    /** A paired Apple CPU/GPU clock sample bracketed in the JVM monotonic domain. */
+    public record TimestampCalibrationPair(long appleCpu, long gpu, long javaBefore, long javaAfter) {
+    }
+
+    public static double renderPearlTimestampPeriod(final MemorySegment device) {
+        if (renderPearlTimestampPeriod == null) return 0.0;
+        try {
+            return (double) renderPearlTimestampPeriod.invokeExact(segment(device));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_period_v1", throwable);
+        }
+    }
+
+    public static @Nullable TimestampCalibrationPair renderPearlTimestampPair(final MemorySegment device) {
+        if (renderPearlTimestampPair == null) return null;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment output = arena.allocate(2L * Long.BYTES, Long.BYTES);
+            long before = System.nanoTime();
+            int result = (int) renderPearlTimestampPair.invokeExact(segment(device), output);
+            long after = System.nanoTime();
+            if (result != 1) return null;
+            return new TimestampCalibrationPair(
+                    output.get(LONG, 0L), output.get(LONG, Long.BYTES), before, after
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_pair_v1", throwable);
+        }
+    }
+
+    public static MemorySegment renderPearlTimestampPoolCreate(final MemorySegment device, final int size) {
+        if (renderPearlTimestampPoolCreate == null) return MemorySegment.NULL;
+        try {
+            return (MemorySegment) renderPearlTimestampPoolCreate.invokeExact(segment(device), size);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_pool_create_v1", throwable);
+        }
+    }
+
+    /** Returns 0=unavailable, 1=Metal 3 samples, 2=Metal 4 counter heap. */
+    public static int renderPearlTimestampWriteCommand(
+            final MemorySegment commandBuffer, final MemorySegment pool, final int index,
+            final MemorySegment renderFence, final MemorySegment transferFence
+    ) {
+        if (renderPearlTimestampWriteCommand == null) return 0;
+        try {
+            return (int) renderPearlTimestampWriteCommand.invokeExact(
+                    segment(commandBuffer), segment(pool), index, segment(renderFence), segment(transferFence)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_write_command_v1", throwable);
+        }
+    }
+
+    /** Returns 0=unavailable, 1=Metal 3 samples, 2=Metal 4 counter heap. */
+    public static int renderPearlTimestampWriteRender(final MemorySegment encoder, final MemorySegment pool, final int index) {
+        if (renderPearlTimestampWriteRender == null) return 0;
+        try {
+            return (int) renderPearlTimestampWriteRender.invokeExact(segment(encoder), segment(pool), index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_write_render_v1", throwable);
+        }
+    }
+
+    /** Zero means the GPU sample could not be resolved; callers must keep it unavailable. */
+    public static long renderPearlTimestampRead(final MemorySegment pool, final int index, final int backend) {
+        if (renderPearlTimestampRead == null) return 0L;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment output = arena.allocate(LONG);
+            int ok = (int) renderPearlTimestampRead.invokeExact(segment(pool), index, backend == 2 ? 1 : 0, output);
+            return ok == 1 ? output.get(LONG, 0L) : 0L;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderpearl_timestamp_read_v1", throwable);
+        }
     }
 
     private static MemorySegment segment(final MemorySegment pointer) {
