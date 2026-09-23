@@ -40,8 +40,13 @@ public final class VanillaGameplay {
     private static final boolean ENCODER_ARGUMENT_CANDIDATE =
             "encoder-argument-reuse-v1".equals(OPTIMIZATION_PROFILE);
     private static final boolean REUSE_CANDIDATE = REUSE_STATE_CANDIDATE || ENCODER_ARGUMENT_CANDIDATE;
-    private static final int TARGET_FPS = STATIONARY_BASELINE ? 60 : 260;
-    private static final String ROUTE = STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static final boolean STABLE_SCENE = STATIONARY_BASELINE || (FrameWorkloads.ID.equals("P0") && FrameWorkloads.PRODUCER.equals("vanilla"));
+    private static final int TARGET_FPS = FrameWorkloads.ENABLED ? Integer.getInteger("metallum.ci.targetFps", 60) : STATIONARY_BASELINE ? 60 : 260;
+    private static final boolean VSYNC = FrameWorkloads.ENABLED || STATIONARY_BASELINE;
+    private static final String ROUTE = FrameWorkloads.ENABLED ? "frame-workload-" + FrameWorkloads.ID + "-v1" :
+            STATIONARY_BASELINE ? "vanilla-stationary-60-v1" : "vanilla-normal-gameplay-native-max-v3";
+    private static final boolean EXPECT_METAL4 = !FrameWorkloads.ENABLED || "metal4".equals(System.getProperty("metallum.ci.gameplayBackend", "metal3"));
+    private static SourceWindow.Accumulator sourceWindow;
     private static final int DEFAULT_WARMUP_SECONDS = 5;
     private static final int DEFAULT_SAMPLE_SECONDS = 10;
     private static final int MAX_WINDOW_SECONDS = 300;
@@ -49,8 +54,8 @@ public final class VanillaGameplay {
     private static final int WARMUP_SECONDS = configuredSeconds("metallum.ci.frameEvidenceWarmupSeconds", DEFAULT_WARMUP_SECONDS);
     private static final int SAMPLE_SECONDS = configuredSeconds("metallum.ci.frameEvidenceSampleSeconds", DEFAULT_SAMPLE_SECONDS);
     private static final int WINDOW_SECONDS = validateWindowContract();
-    private static final long WARMUP_NS = secondsToNanos(WARMUP_SECONDS);
-    private static final long SAMPLE_NS = secondsToNanos(SAMPLE_SECONDS);
+    private static final long WARMUP_NS = FrameWorkloads.ENABLED ? FrameWorkloads.WARMUP_NS : secondsToNanos(WARMUP_SECONDS);
+    private static final long SAMPLE_NS = FrameWorkloads.ENABLED ? FrameWorkloads.SAMPLE_NS : secondsToNanos(SAMPLE_SECONDS);
     private static final int WINDOW_TIMEOUT_TICKS = windowTimeoutTicks();
     private static long sampleStartNanos;
     private static int stationaryVisibleSections;
@@ -59,7 +64,7 @@ public final class VanillaGameplay {
     private static final boolean PRESENTATION_METRICS = Boolean.getBoolean("metallum.ci.presentationMetrics");
     // Test-only bounded timestamps, with an opt-in scalar native wait getter.
     // No GPU readback or per-frame allocation.
-    private static final int FRAME_TIME_CAPACITY = 131_072;
+    private static final int FRAME_TIME_CAPACITY = FrameWorkloads.ENABLED ? 0 : 131_072;
     private static final long[] FRAME_TIMES = new long[FRAME_TIME_CAPACITY];
     private static boolean recordingFrames;
     private static int frameCount;
@@ -76,7 +81,11 @@ public final class VanillaGameplay {
         lastPresentedConfiguration = presented;
         if (!recordingFrames) return;
         long now = System.nanoTime();
-        if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
+        if (FrameWorkloads.ENABLED) {
+            frameCount++;
+            sourceWindow.record(now);
+            if (now < sampleStartNanos || now >= sampleStartNanos + SAMPLE_NS) return;
+        } else if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
         else droppedSamples++;
         if (PRESENTATION_METRICS) {
             long wait = MetalNativeBridge.metallum_presentation_latest_drawable_wait_nanos();
@@ -86,16 +95,17 @@ public final class VanillaGameplay {
             }
         }
         var target = client.gameRenderer.mainRenderTarget();
-        if (client.getWindow().getWidth() != NATIVE_WIDTH || client.getWindow().getHeight() != NATIVE_HEIGHT
-                || target.width != NATIVE_WIDTH || target.height != NATIVE_HEIGHT
-                || presented == null || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT
-                || client.options.getEffectiveRenderDistance() != 32) invalidSettingsFrames++;
+        if (presented == null || client.options.getEffectiveRenderDistance() != 32
+                || (!FrameWorkloads.TRANSITIONS && (client.getWindow().getWidth() != NATIVE_WIDTH
+                || client.getWindow().getHeight() != NATIVE_HEIGHT || target.width != NATIVE_WIDTH
+                || target.height != NATIVE_HEIGHT || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT)))
+            invalidSettingsFrames++;
         for (var check : qualityChecks) {
             if (!check.getAsBoolean()) { invalidSettingsFrames++; break; }
         }
-        if (STATIONARY_BASELINE && client.levelRenderer.visibleSections().size() != stationaryVisibleSections)
+        if (STABLE_SCENE && client.levelRenderer.visibleSections().size() != stationaryVisibleSections)
             invalidSettingsFrames++;
-        if (STATIONARY_BASELINE && (client.player == null
+        if (STABLE_SCENE && (client.player == null
                 || Math.abs(client.player.getX() - 160.5) > 0.001 || Math.abs(client.player.getY() - 140) > 0.001
                 || Math.abs(client.player.getZ() - 160.5) > 0.001
                 || Math.abs(net.minecraft.util.Mth.wrapDegrees(client.player.getYRot() + 65)) > 0.001 || Math.abs(client.player.getXRot() - 15) > 0.001))
@@ -116,24 +126,42 @@ public final class VanillaGameplay {
 
     static void run(ClientGameTestContext context, TestSingleplayerContext world,
                     Path output, JsonObject worldEvidence) {
+        if (FrameWorkloads.ENABLED) {
+            FrameWorkloads.validate();
+            require(TARGET_FPS >= 15 && TARGET_FPS < 260 && WARMUP_NS >= 0 && SAMPLE_NS > 0,
+                    "Invalid fixed cadence/window contract");
+            require(!FrameWorkloads.ID.equals("T0") || SAMPLE_NS >= 50_000_000_000L, "T0 needs at least a 50-second route window");
+        }
         require(EVIDENCE_PHASE.equals("stationary") || EVIDENCE_PHASE.equals("streaming"), "Unknown frame evidence phase");
         require(!STATIONARY_BASELINE || EVIDENCE_PHASE.equals("stationary"), "Stationary baseline requires stationary phase");
         require(!STATIONARY_BASELINE || worldEvidence.has("replaySourceSnapshotSha256"), "Stationary baseline requires a verified initial snapshot");
-        require(OPTIMIZATION_PROFILE.equals("baseline-v1") || REUSE_CANDIDATE,
-                "Unknown optimization profile: " + OPTIMIZATION_PROFILE);
-        require(REUSE_STATE_CANDIDATE == REUSE_ENCODER_STATE,
-                "Optimization profile and reuseEncoderState property disagree");
-        require(ENCODER_ARGUMENT_CANDIDATE == REUSE_NATIVE_ENCODER_ARGUMENTS,
-                "Optimization profile and reuseNativeEncoderArguments property disagree");
-        require(!REUSE_CANDIDATE || DIAGNOSTIC_REUSE_CANDIDATE || STATIONARY_BASELINE,
-                "Timing reuse candidates require the stationary route");
+        if (FrameWorkloads.ENABLED) {
+            require(OPTIMIZATION_PROFILE.equals("frame-trial-v1") && !STATIONARY_BASELINE
+                    && EVIDENCE_PHASE.equals("stationary") && !REUSE_NATIVE_ENCODER_ARGUMENTS,
+                    "Versioned trials cannot impersonate a guarded optimization profile");
+        } else {
+            require(OPTIMIZATION_PROFILE.equals("baseline-v1") || REUSE_CANDIDATE,
+                    "Unknown optimization profile: " + OPTIMIZATION_PROFILE);
+            require(REUSE_STATE_CANDIDATE == REUSE_ENCODER_STATE,
+                    "Optimization profile and reuseEncoderState property disagree");
+            require(ENCODER_ARGUMENT_CANDIDATE == REUSE_NATIVE_ENCODER_ARGUMENTS,
+                    "Optimization profile and reuseNativeEncoderArguments property disagree");
+            require(!REUSE_CANDIDATE || DIAGNOSTIC_REUSE_CANDIDATE || STATIONARY_BASELINE,
+                    "Timing reuse candidates require the stationary route");
+        }
         var input = context.getInput();
         JsonObject report = new JsonObject();
         report.addProperty("scenario", ROUTE);
         report.addProperty("pid", ProcessHandle.current().pid());
-        report.addProperty("frameEvidenceWarmupSeconds", WARMUP_SECONDS);
-        report.addProperty("frameEvidenceSampleSeconds", SAMPLE_SECONDS);
-        report.addProperty("frameEvidenceWindowSeconds", WINDOW_SECONDS);
+        if (FrameWorkloads.ENABLED) {
+            report.addProperty("frameEvidenceWarmupSeconds", WARMUP_NS / 1e9);
+            report.addProperty("frameEvidenceSampleSeconds", SAMPLE_NS / 1e9);
+            report.addProperty("frameEvidenceWindowSeconds", (WARMUP_NS + SAMPLE_NS) / 1e9);
+        } else {
+            report.addProperty("frameEvidenceWarmupSeconds", WARMUP_SECONDS);
+            report.addProperty("frameEvidenceSampleSeconds", SAMPLE_SECONDS);
+            report.addProperty("frameEvidenceWindowSeconds", WINDOW_SECONDS);
+        }
         report.add("world", worldEvidence);
         JsonArray phases = new JsonArray();
         report.add("phases", phases);
@@ -142,7 +170,7 @@ public final class VanillaGameplay {
             client.options.pauseOnLostFocus = false;
             client.options.graphicsPreset().set(GraphicsPreset.FABULOUS);
             client.options.renderDistance().set(32);
-            client.options.enableVsync().set(STATIONARY_BASELINE);
+            client.options.enableVsync().set(VSYNC);
             client.options.framerateLimit().set(TARGET_FPS);
             client.getWindow().setPreferredFullscreenVideoMode(java.util.Optional.empty());
             client.options.fullscreen().set(true);
@@ -196,6 +224,7 @@ public final class VanillaGameplay {
         terrainReady.addProperty("waitNanos", System.nanoTime() - terrainWaitStart);
         terrainReady.addProperty("scope", "Vanilla server sending footprint at the starting camera; normal generation");
         report.add("initialTerrainReadiness", terrainReady);
+        FrameWorkloads.prepare(context, world);
         JsonObject settings = context.computeOnClient(VanillaGameplay::settings);
         report.add("settings", settings);
         require(settings.get("effectiveRenderDistance").getAsInt() == 32, "Maximum view distance did not activate");
@@ -217,8 +246,9 @@ public final class VanillaGameplay {
         int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
         report.addProperty("initialVisibleSections", initialVisibleSections);
         long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-        require(initialMetal4[0] == 1, "Gameplay profiling requires an active Metal 4 main renderer");
-        report.addProperty("metal4MainRendererActive", true);
+        require(initialMetal4[0] == (EXPECT_METAL4 ? 1 : 0), "Requested Metal lowering did not activate");
+        report.addProperty("metal4MainRendererActive", initialMetal4[0] == 1);
+        report.addProperty("backendRequested", EXPECT_METAL4 ? "metal4" : "metal3");
         JsonObject initialContent = world.getServer().computeOnServer(server -> {
             server.saveEverything(false, true, true);
             return WorldSnapshot.capture(world.getWorldSave().getSaveDirectory(),
@@ -231,7 +261,7 @@ public final class VanillaGameplay {
             initialContent.addProperty("snapshotDirectory", "initial-world");
         }
         JsonObject stationaryTerrain = null;
-        if (STATIONARY_BASELINE) {
+        if (STABLE_SCENE) {
             var readiness = new StationaryTerrain();
             context.waitFor(readiness::ready, 1200);
             // Incremental loading can leave a conservative graph dependent on arrival order.
@@ -246,26 +276,41 @@ public final class VanillaGameplay {
             report.add("stationaryTerrain", stationaryTerrain);
         }
         JsonObject profile = new JsonObject();
-        profile.addProperty("profileId", STATIONARY_BASELINE ? ROUTE : "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        profile.addProperty("profileId", FrameWorkloads.ENABLED || STATIONARY_BASELINE ? ROUTE : "vanilla-normal-" + EVIDENCE_PHASE + "-v1");
+        if (FrameWorkloads.ENABLED) {
+            profile.addProperty("workloadId", FrameWorkloads.ID);
+            profile.addProperty("protocolVersion", 1);
+            profile.addProperty("producer", FrameWorkloads.PRODUCER);
+            profile.addProperty("transitionWindow", FrameWorkloads.TRANSITIONS);
+            profile.addProperty("workloadSha256", System.getProperty("metallum.ci.workloadSha256", "unavailable"));
+            profile.add("producerReceipt", context.computeOnClient(client -> FrameWorkloads.producerReceipt()));
+        }
         profile.add("initialContent", initialContent);
         profile.add("quality", settings.deepCopy());
         if (stationaryTerrain != null) profile.add("stationaryTerrain", stationaryTerrain.deepCopy());
         JsonObject targetIntent = new JsonObject();
         targetIntent.addProperty("fpsLimit", TARGET_FPS);
-        targetIntent.addProperty("vsync", STATIONARY_BASELINE);
+        targetIntent.addProperty("vsync", VSYNC);
         targetIntent.addProperty("authority", "requested-options-not-system-deadline");
         profile.add("targetIntent", targetIntent);
         JsonObject route = new JsonObject();
         route.addProperty("id", ROUTE);
         route.addProperty("inputAuthority", "Fabric client GameTest input driver");
-        route.addProperty("samplePhase", EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
+        route.addProperty("samplePhase", FrameWorkloads.ENABLED ? "workload-" + FrameWorkloads.ID :
+                EVIDENCE_PHASE.equals("stationary") ? "stationary-full-view" : "flight-new-chunks");
         route.addProperty("camera", "160.5,140,160.5 yaw=-65 pitch=15; creative flight fixed view");
-        route.addProperty("warmupSeconds", WARMUP_SECONDS);
-        route.addProperty("sampleSeconds", SAMPLE_SECONDS);
+        if (FrameWorkloads.ENABLED) {
+            route.addProperty("warmupSeconds", WARMUP_NS / 1e9);
+            route.addProperty("sampleSeconds", SAMPLE_NS / 1e9);
+        } else {
+            route.addProperty("warmupSeconds", WARMUP_SECONDS);
+            route.addProperty("sampleSeconds", SAMPLE_SECONDS);
+        }
         route.addProperty("warmupNs", WARMUP_NS);
         route.addProperty("sampleNs", SAMPLE_NS);
         route.addProperty("sourceFrameStorageCapacity", FRAME_TIME_CAPACITY);
-        route.addProperty("completion", STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
+        route.addProperty("completion", FrameWorkloads.ENABLED ? "fixed window, complete versioned action sequence, verified producer/scene/settings; transitions are not steady-state comparisons" :
+                STATIONARY_BASELINE ? "fixed-view window duration, stable terrain, pose and quality assertions"
                 : "selected window duration and all existing flight/place-break/quality assertions");
         profile.add("route", route);
         profile.addProperty("instrumentationMode", System.getProperty("metallum.frameEvidence.mode", "off"));
@@ -301,17 +346,16 @@ public final class VanillaGameplay {
             drawableWaitNanos = 0;
             drawableWaitSamples = 0;
             startedNanos = System.nanoTime();
+            long start = startedNanos;
+            sampleStartNanos = Math.addExact(start, WARMUP_NS);
+            if (FrameWorkloads.ENABLED) sourceWindow = new SourceWindow.Accumulator(sampleStartNanos, Math.addExact(sampleStartNanos, SAMPLE_NS));
             recordingFrames = true;
             JsonObject timing = new JsonObject();
             timing.addProperty("event", "source-route-start");
             timing.add("routeStart", clockPair("source-route-start"));
-            if (EVIDENCE_PHASE.equals("stationary")) {
-                timing.add("armWindow", armWindowWithClockAnchors(profile, "stationary"));
-            }
-            long start = System.nanoTime();
             timing.addProperty("routeStartNs", start);
-            sampleStartNanos = start + WARMUP_NS;
-            if (EVIDENCE_PHASE.equals("stationary")) {
+            if (FrameWorkloads.ENABLED || EVIDENCE_PHASE.equals("stationary")) {
+                timing.add("armWindow", armWindowWithClockAnchors(profile, ROUTE, start));
                 timing.add("declaredSourceWindow", declaredSourceWindow(sampleStartNanos));
             }
             return timing;
@@ -319,125 +363,142 @@ public final class VanillaGameplay {
         long stationaryStart = stationaryWindow.get("routeStartNs").getAsLong();
         windowClockAnchors.getAsJsonArray("events").add(stationaryWindow);
         try {
-            phase(context, output, report, phases, "stationary-full-view");
-            // Identical off/on workload clock: observer presence never controls the route.
-            context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS,
-                    WINDOW_TIMEOUT_TICKS);
-            context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
-            require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
-                    "Frame evidence did not finish the predeclared stationary window");
-            if (EVIDENCE_PHASE.equals("stationary")) {
-                JsonObject endAnchor = context.computeOnClient(client -> clockPair("source-window-end-observed"));
-                windowClockAnchors.getAsJsonArray("events").add(endAnchor);
-            }
-            JsonObject stationarySourceFrames = context.computeOnClient(client ->
-                    SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS));
-            stationarySourceFrames.addProperty("storageCapacity", FRAME_TIME_CAPACITY);
-            stationarySourceFrames.addProperty("storageOverflow", droppedSamples);
-            report.add("stationarySourceFrames", stationarySourceFrames);
-            if (STATIONARY_BASELINE) {
-                JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
-                report.add("finalStationaryTerrain", finalTerrain);
-                require(finalTerrain != null && finalTerrain.get("visibleSectionSha256").equals(
-                        report.getAsJsonObject("stationaryTerrain").get("visibleSectionSha256")),
-                        "Stationary visible section identity changed across the window");
-                report.addProperty("stationaryGeometryChanged", !finalTerrain.get("visibleDrawSha256").equals(
-                        report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")));
-            }
-            if (!STATIONARY_BASELINE) {
-                phase(context, output, report, phases, "flight-new-chunks");
-                if (EVIDENCE_PHASE.equals("streaming")) {
-                    JsonObject streamingWindow = context.computeOnClient(client -> {
-                        JsonObject timing = armWindowWithClockAnchors(profile, "streaming");
-                        timing.add("declaredSourceWindow", declaredSourceWindow(System.nanoTime() + WARMUP_NS));
-                        return timing;
-                    });
-                    windowClockAnchors.getAsJsonArray("events").add(streamingWindow);
+            if (FrameWorkloads.ENABLED) {
+                report.add("workload", FrameWorkloads.run(context, world, sampleStartNanos,
+                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT));
+                report.add("sourceSampleWindow", context.computeOnClient(client -> sourceWindow.finish()));
+                if (STABLE_SCENE) {
+                    JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
+                    report.add("finalStationaryTerrain", finalTerrain);
+                    require(finalTerrain != null && finalTerrain.get("visibleSectionSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleSectionSha256")),
+                            "P0 visible section identity changed across the window");
+                    report.addProperty("stationaryGeometryChanged", !finalTerrain.get("visibleDrawSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")));
                 }
-                double startX = context.computeOnClient(client -> client.player.getX());
-                double startZ = context.computeOnClient(client -> client.player.getZ());
-                input.holdKey(options -> options.keyUp);
-                input.holdKey(options -> options.keySprint);
-                for (int leg = 0; leg < 6; leg++) {
-                    input.lookAt(-65 + leg * 12, 15);
-                    // Fabric's synthetic input drives key state directly; report the
-                    // input to Vanilla's AFK limiter just as a real mouse event does.
-                    context.runOnClient(client -> client.getFramerateLimitTracker().onInputReceived());
-                    context.waitTicks(160);
-                }
-                input.releaseKey(options -> options.keyUp);
-                input.releaseKey(options -> options.keySprint);
-                double distance = context.computeOnClient(client -> Math.hypot(
-                        client.player.getX() - startX, client.player.getZ() - startZ));
-                require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
-                        "Frame evidence did not finish the predeclared streaming window");
-                if (EVIDENCE_PHASE.equals("streaming")) {
+                require(!FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(), "Frame evidence window is incomplete");
+            } else {
+                phase(context, output, report, phases, "stationary-full-view");
+                // Identical off/on workload clock: observer presence never controls the route.
+                context.waitFor(client -> System.nanoTime() - stationaryStart >= WARMUP_NS + SAMPLE_NS,
+                        WINDOW_TIMEOUT_TICKS);
+                context.waitTick(); // Same extra tick in off/on; finish the frame containing the boundary.
+                require(!EVIDENCE_PHASE.equals("stationary") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
+                        "Frame evidence did not finish the predeclared stationary window");
+                if (EVIDENCE_PHASE.equals("stationary")) {
                     JsonObject endAnchor = context.computeOnClient(client -> clockPair("source-window-end-observed"));
                     windowClockAnchors.getAsJsonArray("events").add(endAnchor);
                 }
-                report.addProperty("flightDistanceBlocks", distance);
-                require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
+                JsonObject stationarySourceFrames = context.computeOnClient(client ->
+                        SourceWindow.summarize(FRAME_TIMES, frameCount, sampleStartNanos, sampleStartNanos + SAMPLE_NS));
+                stationarySourceFrames.addProperty("storageCapacity", FRAME_TIME_CAPACITY);
+                stationarySourceFrames.addProperty("storageOverflow", droppedSamples);
+                report.add("stationarySourceFrames", stationarySourceFrames);
+                if (STATIONARY_BASELINE) {
+                    JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
+                    report.add("finalStationaryTerrain", finalTerrain);
+                    require(finalTerrain != null && finalTerrain.get("visibleSectionSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleSectionSha256")),
+                            "Stationary visible section identity changed across the window");
+                    report.addProperty("stationaryGeometryChanged", !finalTerrain.get("visibleDrawSha256").equals(
+                            report.getAsJsonObject("stationaryTerrain").get("visibleDrawSha256")));
+                }
+                if (!STATIONARY_BASELINE) {
+                    phase(context, output, report, phases, "flight-new-chunks");
+                    if (EVIDENCE_PHASE.equals("streaming")) {
+                        JsonObject streamingWindow = context.computeOnClient(client -> {
+                            long start = System.nanoTime();
+                            JsonObject timing = armWindowWithClockAnchors(profile, "streaming", start);
+                            timing.add("declaredSourceWindow", declaredSourceWindow(Math.addExact(start, WARMUP_NS)));
+                            return timing;
+                        });
+                        windowClockAnchors.getAsJsonArray("events").add(streamingWindow);
+                    }
+                    double startX = context.computeOnClient(client -> client.player.getX());
+                    double startZ = context.computeOnClient(client -> client.player.getZ());
+                    input.holdKey(options -> options.keyUp);
+                    input.holdKey(options -> options.keySprint);
+                    for (int leg = 0; leg < 6; leg++) {
+                        input.lookAt(-65 + leg * 12, 15);
+                        // Fabric's synthetic input drives key state directly; report the
+                        // input to Vanilla's AFK limiter just as a real mouse event does.
+                        context.runOnClient(client -> client.getFramerateLimitTracker().onInputReceived());
+                        context.waitTicks(160);
+                    }
+                    input.releaseKey(options -> options.keyUp);
+                    input.releaseKey(options -> options.keySprint);
+                    double distance = context.computeOnClient(client -> Math.hypot(
+                            client.player.getX() - startX, client.player.getZ() - startZ));
+                    require(!EVIDENCE_PHASE.equals("streaming") || !FrameEvidenceRuntime.ENABLED || FrameEvidenceRuntime.windowComplete(),
+                            "Frame evidence did not finish the predeclared streaming window");
+                    if (EVIDENCE_PHASE.equals("streaming")) {
+                        JsonObject endAnchor = context.computeOnClient(client -> clockPair("source-window-end-observed"));
+                        windowClockAnchors.getAsJsonArray("events").add(endAnchor);
+                    }
+                    report.addProperty("flightDistanceBlocks", distance);
+                    require(distance > 100, "Input-driven flight did not traverse terrain: " + distance);
 
-                phase(context, output, report, phases, "land-walk-jump");
-                BlockPos position = context.computeOnClient(client -> client.player.blockPosition());
-                int groundY = world.getServer().computeOnServer(server -> server.overworld()
-                        .getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, position.getX(), position.getZ()));
-                world.getServer().runCommand("tp @a " + (position.getX() + 0.5) + " " + groundY
-                        + " " + (position.getZ() + 0.5) + " 0 15");
-                context.runOnClient(client -> {
-                    client.player.getAbilities().flying = false;
-                    client.player.onUpdateAbilities();
-                });
-                context.waitFor(client -> !client.player.getAbilities().flying);
-                input.holdKey(options -> options.keyUp);
-                input.holdKey(options -> options.keyJump);
-                context.waitTicks(120);
-                input.releaseKey(options -> options.keyUp);
-                input.releaseKey(options -> options.keyJump);
-                context.waitTicks(20);
+                    phase(context, output, report, phases, "land-walk-jump");
+                    BlockPos position = context.computeOnClient(client -> client.player.blockPosition());
+                    int groundY = world.getServer().computeOnServer(server -> server.overworld()
+                            .getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, position.getX(), position.getZ()));
+                    world.getServer().runCommand("tp @a " + (position.getX() + 0.5) + " " + groundY
+                            + " " + (position.getZ() + 0.5) + " 0 15");
+                    context.runOnClient(client -> {
+                        client.player.getAbilities().flying = false;
+                        client.player.onUpdateAbilities();
+                    });
+                    context.waitFor(client -> !client.player.getAbilities().flying);
+                    input.holdKey(options -> options.keyUp);
+                    input.holdKey(options -> options.keyJump);
+                    context.waitTicks(120);
+                    input.releaseKey(options -> options.keyUp);
+                    input.releaseKey(options -> options.keyJump);
+                    context.waitTicks(20);
 
-                phase(context, output, report, phases, "inventory-place-break");
-                input.pressKey(options -> options.keyInventory);
-                context.waitFor(client -> client.gui.screen() != null);
-                context.waitTicks(30);
-                input.pressKey(options -> options.keyInventory);
-                context.waitFor(client -> client.gui.screen() == null);
-                world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
-                input.pressKey(options -> options.keyHotbarSlots[0]);
-                context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.STONE));
-                // Aim beyond the player's collision box; a near-vertical placement
-                // targets the block occupied by the player and Vanilla rejects it.
-                input.lookAt(0, 45);
-                context.waitTicks(10);
-                BlockPos target = context.computeOnClient(client -> {
-                    require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
-                            "No ground block targeted for placement");
-                    BlockHitResult hit = (BlockHitResult) client.hitResult;
-                    // Tall grass/snow can be replaced in-place; Vanilla owns that decision.
-                    return new net.minecraft.world.item.context.BlockPlaceContext(client.player,
-                            net.minecraft.world.InteractionHand.MAIN_HAND, client.player.getMainHandItem(), hit).getClickedPos();
-                });
-                report.addProperty("placementTarget", target.toShortString());
-                write(output.resolve("gameplay-progress.json"), report);
-                input.holdKeyFor(options -> options.keyUse, 2);
-                context.waitFor(client -> client.level.getBlockState(target).is(net.minecraft.world.level.block.Blocks.STONE));
-                report.addProperty("placedBlock", target.toShortString());
-                input.lookAt(target);
-                input.holdKeyFor(options -> options.keyAttack, 10);
-                context.waitFor(client -> client.level.getBlockState(target).isAir());
-                report.addProperty("placedAndBroken", true);
-
-                phase(context, output, report, phases, "weather-camera");
-                world.getServer().runCommand("weather rain");
-                for (int step = 0; step < 8; step++) {
-                    input.lookAt(step * 45, step % 2 == 0 ? -15 : 30);
+                    phase(context, output, report, phases, "inventory-place-break");
+                    input.pressKey(options -> options.keyInventory);
+                    context.waitFor(client -> client.gui.screen() != null);
                     context.waitTicks(30);
+                    input.pressKey(options -> options.keyInventory);
+                    context.waitFor(client -> client.gui.screen() == null);
+                    world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
+                    input.pressKey(options -> options.keyHotbarSlots[0]);
+                    context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.STONE));
+                    // Aim beyond the player's collision box; a near-vertical placement
+                    // targets the block occupied by the player and Vanilla rejects it.
+                    input.lookAt(0, 45);
+                    context.waitTicks(10);
+                    BlockPos target = context.computeOnClient(client -> {
+                        require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
+                                "No ground block targeted for placement");
+                        BlockHitResult hit = (BlockHitResult) client.hitResult;
+                        // Tall grass/snow can be replaced in-place; Vanilla owns that decision.
+                        return new net.minecraft.world.item.context.BlockPlaceContext(client.player,
+                                net.minecraft.world.InteractionHand.MAIN_HAND, client.player.getMainHandItem(), hit).getClickedPos();
+                    });
+                    report.addProperty("placementTarget", target.toShortString());
+                    write(output.resolve("gameplay-progress.json"), report);
+                    input.holdKeyFor(options -> options.keyUse, 2);
+                    context.waitFor(client -> client.level.getBlockState(target).is(net.minecraft.world.level.block.Blocks.STONE));
+                    report.addProperty("placedBlock", target.toShortString());
+                    input.lookAt(target);
+                    input.holdKeyFor(options -> options.keyAttack, 10);
+                    context.waitFor(client -> client.level.getBlockState(target).isAir());
+                    report.addProperty("placedAndBroken", true);
+
+                    phase(context, output, report, phases, "weather-camera");
+                    world.getServer().runCommand("weather rain");
+                    for (int step = 0; step < 8; step++) {
+                        input.lookAt(step * 45, step % 2 == 0 ? -15 : 30);
+                        context.waitTicks(30);
+                    }
                 }
             }
             report.addProperty("status", "completed");
             long[] finalMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
-            require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
-                    "Metal 4 did not submit work during gameplay");
+            require(finalMetal4[0] == (EXPECT_METAL4 ? 1 : 0)
+                    && (!EXPECT_METAL4 || finalMetal4[2] > initialMetal4[2]), "Metal lowering changed or submitted no work");
             report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
             report.add("sourceFrames", context.computeOnClient(client -> finishFrames()));
             JsonObject cacheEvidence = context.computeOnClient(client -> {
@@ -530,12 +591,14 @@ public final class VanillaGameplay {
         return value;
     }
 
-    private static JsonObject armWindowWithClockAnchors(JsonObject profile, String route) {
+    private static JsonObject armWindowWithClockAnchors(JsonObject profile, String route, long armedAtNs) {
         JsonObject value = new JsonObject();
         value.addProperty("event", "FrameEvidenceRuntime.armWindow");
+        value.addProperty("anchorNs", armedAtNs);
+        value.addProperty("anchorAuthority", "shared-source-workload-recorder-java-clock");
         value.addProperty("route", route);
         value.add("before", clockPair("before-arm-window"));
-        FrameEvidenceRuntime.armWindow(profile, WARMUP_NS, SAMPLE_NS);
+        FrameEvidenceRuntime.armWindowAt(profile, armedAtNs, WARMUP_NS, SAMPLE_NS);
         value.add("after", clockPair("after-arm-window"));
         return value;
     }
@@ -673,6 +736,14 @@ public final class VanillaGameplay {
     private static JsonObject finishFrames() {
         recordingFrames = false;
         long elapsed = System.nanoTime() - startedNanos;
+        if (FrameWorkloads.ENABLED) {
+            JsonObject value = sourceWindow.finish();
+            value.addProperty("invalidSettingsFrames", invalidSettingsFrames);
+            value.addProperty("throttledFrames", throttledFrames);
+            value.addProperty("droppedSamples", droppedSamples);
+            value.addProperty("instrumentation", "constant-memory source-return histogram, identical in OFF/timing/diagnostic");
+            return value;
+        }
         long[] intervals = new long[Math.max(0, frameCount - 1)];
         for (int i = 1; i < frameCount; i++) intervals[i - 1] = FRAME_TIMES[i] - FRAME_TIMES[i - 1];
         java.util.Arrays.sort(intervals);

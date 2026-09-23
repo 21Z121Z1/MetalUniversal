@@ -34,7 +34,7 @@ def stationaryBaseline = providers.gradleProperty('stationaryBaseline').orElse('
 def reuseEncoderState = providers.gradleProperty('reuseEncoderState').orElse('false').get().toBoolean()
 def reuseNativeEncoderArguments = providers.gradleProperty('reuseNativeEncoderArguments').orElse('false').get().toBoolean()
 def optimizationProfile = providers.gradleProperty('optimizationProfile').orElse('baseline-v1').get().trim()
-def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'reuse-encoder-state-diagnostic-v1', 'encoder-argument-reuse-v1']
+def optimizationProfiles = ['baseline-v1', 'reuse-encoder-state-v1', 'reuse-encoder-state-diagnostic-v1', 'encoder-argument-reuse-v1', 'frame-trial-v1']
 if (!(optimizationProfile in optimizationProfiles)) {
     throw new GradleException("optimizationProfile must be one of ${optimizationProfiles} (got ${optimizationProfile})")
 }
@@ -110,6 +110,40 @@ if (frameEvidencePhase == 'streaming'
         && (frameEvidenceWarmupSeconds != 5 || frameEvidenceSampleSeconds != 10)) {
     throw new GradleException('streaming frame evidence only supports the declared 5s warmup and 10s sample route')
 }
+def frameWorkload = providers.gradleProperty('frameWorkload').orElse('').get()
+def frameCampaign = !frameWorkload.isEmpty()
+def trialProducer = providers.gradleProperty('trialProducer').orElse(noOptionalRenderMods ? 'vanilla' : 'iris').get()
+def trialBackend = providers.gradleProperty('trialBackend').orElse('metal3').get()
+if (frameCampaign && (!(frameWorkload in ['P0','T0','C0','G0','I0','I1','X0'])
+        || !(trialProducer in ['vanilla','sodium','iris']) || !(trialBackend in ['metal3','metal4']))) {
+    throw new GradleException('Unknown frame workload/producer/backend contract')
+}
+if (frameCampaign && noOptionalRenderMods != (trialProducer == 'vanilla')) {
+    throw new GradleException('trialProducer and metallum.noOptionalMods disagree')
+}
+// Versioned physical trials are a separate evidence protocol, never an alias for
+// the guarded legacy optimization profiles above. They cannot weaken those gates.
+if (frameCampaign != (optimizationProfile == 'frame-trial-v1')) {
+    throw new GradleException('frameWorkload requires exactly optimizationProfile=frame-trial-v1')
+}
+if (frameCampaign && (!gameplay || stationaryBaseline || frameEvidencePhase != 'stationary'
+        || requireP1Metal4Evidence || waitForProfiler || gameplayJfr || renderDebugLabels
+        || presentationMetrics || (frameEvidenceMode != 'off' && !segmentedFrameEvidence)
+        || reuseNativeEncoderArguments)) {
+    throw new GradleException('frame-trial-v1 requires its metrics-only versioned route without legacy P1/profile overrides')
+}
+if (frameCampaign && (providers.gradleProperty('frameEvidenceWarmupSeconds').isPresent()
+        || providers.gradleProperty('frameEvidenceSampleSeconds').isPresent())) {
+    throw new GradleException('versioned trials declare warmupNs/sampleNs; legacy second-based overrides are ambiguous')
+}
+if (frameCampaign && providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get().toBoolean()
+        && (!terrainSliceCache || frameEvidenceMode != 'diagnostic')) {
+    throw new GradleException('terrain slice differential verification is diagnostic-only and requires its cache')
+}
+if (frameCampaign && providers.gradleProperty('prepareScene').orElse('false').get().toBoolean()
+        && !(frameWorkload in ['C0', 'G0'])) {
+    throw new GradleException('only C0/G0 have prepared fixture content')
+}
 def evidenceDirectory = file(providers.gradleProperty('evidenceDir').orElse("${buildDir}/evidence").get())
 
 dependencies {
@@ -129,7 +163,7 @@ dependencies {
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     if (!noOptionalRenderMods) {
         productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
-        productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+        if (!frameCampaign || trialProducer == 'iris') productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
     }
 }
 
@@ -184,7 +218,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Compatibility seam for older invocations while P1 switches to the
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
-    jvmArgs.add("-Dmetallum.iris.semantic=${!noOptionalRenderMods}")
+    jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
@@ -193,6 +227,18 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (gameplay) {
         jvmArgs.add("-Dmetallum.frameEvidence.enabled=${frameEvidenceMode != 'off'}")
+        if (frameCampaign) {
+            jvmArgs.add("-Dmetallum.ci.workload=${frameWorkload}")
+            jvmArgs.add("-Dmetallum.ci.producer=${trialProducer}")
+            jvmArgs.add("-Dmetallum.ci.gameplayBackend=${trialBackend}")
+            jvmArgs.add("-Dmetallum.ci.workloadSha256=${providers.gradleProperty('workloadSha256').get()}")
+            jvmArgs.add("-Dmetallum.ci.prepareScene=${providers.gradleProperty('prepareScene').orElse('false').get()}")
+            jvmArgs.add("-Dmetallum.ci.warmupNs=${providers.gradleProperty('warmupNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.sampleNs=${providers.gradleProperty('sampleNs').get()}")
+            jvmArgs.add("-Dmetallum.ci.targetFps=${providers.gradleProperty('targetFps').get()}")
+            jvmArgs.add("-Dmetallum.ci.shaderPackName=${providers.gradleProperty('shaderPackName').orElse('').get()}")
+            jvmArgs.add("-Dmetallum.frameEvidence.segmented=${providers.gradleProperty('frameEvidenceSegmented').orElse('true').get()}")
+        }
         jvmArgs.add("-Dmetallum.frameEvidence.windowed=true")
         // M0 evidence runs use the bounded archive so a long/terminated client
         // cannot silently fall back to the legacy fixed-size in-memory snapshot.
@@ -226,7 +272,15 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         }
     }
 
-    if (requireP1Metal4Evidence) {
+    if (frameCampaign) {
+        // A full Metal 3/4 lowering comparison, not the legacy main-queue-only P1 experiment.
+        def metal4 = trialBackend == 'metal4'
+        for (String feature : ['metal4', 'metal4Compiler', 'metal4Present', 'metal4MainRenderer', 'residencySet']) {
+            jvmArgs.add("-Dmetallum.opt.${feature}=${metal4}")
+        }
+        jvmArgs.add('-Dmetallum.opt.metal4MainQueuePilot=false')
+        jvmArgs.add('-Dmetallum.opt.renderStatePacket=true')
+    } else if (requireP1Metal4Evidence) {
         // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
         // presentation, and explicit residency identical. The only intended
         // execution-model difference is whether the main renderer is enabled.
@@ -257,7 +311,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
     // device; authoritative evidence is read from Metal textures, not scan-out.
     useXVFB = false
-    runDir = file("${buildDir}/run/clientGameTest")
+    runDir = file(providers.gradleProperty('clientRunDir').orElse("${buildDir}/run/clientGameTest").get())
 }
 
 tasks.named("test") { useJUnitPlatform() }

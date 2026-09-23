@@ -525,3 +525,52 @@ submit index; reuse never replaces an already recorded owner. GPU service time
 therefore describes the whole buffer, including any preceding uploads, rather than
 a source-only critical path. Presentation coverage requires this carry-in ownership:
 a complete callback subset is not proof that all ordinary requests were recorded.
+
+
+## Versioned physical workload protocol
+
+`run_frame_workload.py` executes one controlled trial through the existing
+production GameTest. It is separate from the Instruments/JFR diagnostic launcher;
+`frame-trial-v1` cannot impersonate the guarded legacy optimization profiles.
+Workload, source-return histogram and frame recorder share one Java clock anchor.
+The constant-memory histogram reports 0.1 ms upper bounds, not exact quantiles,
+and freezes at its half-open end boundary. Presentation evidence is independent.
+
+The versioned actions are P0 (fixed presentation scene), T0 (six input-driven
+terrain flight legs), C0 (128 normally ticking villagers), G0 (nine glass layers),
+I0/I1 (user-classified Iris packs with exact bytes and activation receipts), and
+X0 (real window resize, resource reload, optional Iris reload, and restoration).
+X0 is a transition observation, not a steady-state comparison. Fixtures are
+created only with explicit bootstrap into a disposable world; paired trials
+restore an independently verified immutable snapshot. No gameplay rules or
+entity behavior are changed to improve a result.
+
+`run_frame_trials.py` fixes A/A, A/B/B/A, B/A/A/B, or observer-OFF/ON order before
+execution. It permits one declared implementation dimension per A/B comparison,
+serializes physical trials with a process lock, retains every planned failure,
+and refuses to average away failed or missing trials. Each trial binds the
+clean harness, exact packaged and actually loaded JAR/native identities, input
+world, shader pack, producer, window, quality, environment and raw artifacts.
+Generated evidence belongs under ignored `build/` paths. For example:
+
+```bash
+python3 scripts/agent/run_frame_workload.py --metrics-only --jar build/libs/EXACT.jar \
+  --output build/agent-evidence/bootstrap-p0 --workload P0 --bootstrap
+python3 scripts/agent/run_frame_trials.py --protocol aa --blocks 2 \
+  --a-jar build/libs/EXACT.jar --initial-world build/agent-evidence/bootstrap-p0/initial-world \
+  --workload P0 --warmup-seconds 30 --sample-seconds 120 --target-fps 60 \
+  --output build/agent-evidence/p0-aa
+python3 scripts/agent/run_frame_trials.py --verify build/agent-evidence/p0-aa
+```
+
+Long segmented trials declare their bounded nanosecond window independently of
+the legacy profiler's 300-second contract. T0 requires at least 50 seconds and X0
+at least 60 seconds. C0/G0 bootstrap additionally requires `--prepare-scene`.
+Iris trials require `--producer iris`, `--shader-pack` and `--shader-pack-sha256`;
+installed Iris alone is not proof of pack activation. Timing trials never enable
+HUD, JFR, render labels, or differential terrain-cache instrumentation.
+
+A hosted/paravirtual or non-Apple-Silicon runner emits unavailable, not fabricated
+physical results. A valid source observation is not scan-out, visual parity,
+energy, input-to-photon, a statistically established improvement, or product
+acceptance. Those remain explicitly `physical-validation-required`.
