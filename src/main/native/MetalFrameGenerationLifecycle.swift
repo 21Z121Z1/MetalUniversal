@@ -33,6 +33,52 @@ final class MetalFxDepthHistoryState {
     }
 }
 
+/// Immutable source values consumed by both Metal 3 and Metal 4 interpolation.
+/// Motion is stored as a top-left oriented NDC displacement (previous-current).
+/// The SDK scales it into PREVIOUS COLOR pixels, not depth/motion texel units.
+/// Input allocation dimensions must therefore never determine these scales.
+struct MetalFxFrameParameters: Equatable {
+    let depthWidth: Int
+    let depthHeight: Int
+    let colorWidth: Int
+    let colorHeight: Int
+    let jitterX: Float
+    let jitterY: Float
+    let fieldOfView: Float
+    let nearPlane: Float
+    let farPlane: Float
+    let aspectRatio: Float
+    let deltaTime: Float
+
+    var motionScaleX: Float { Float(colorWidth) * 0.5 }
+    var motionScaleY: Float { Float(colorHeight) * 0.5 }
+
+    init?(depthWidth: Int, depthHeight: Int, colorWidth: Int, colorHeight: Int,
+          jitterX: Float, jitterY: Float, fieldOfView: Float, nearPlane: Float,
+          farPlane: Float, aspectRatio: Float, deltaTime: Float) {
+        guard depthWidth > 0, depthHeight > 0, colorWidth > 0, colorHeight > 0,
+              depthWidth <= Int(Int32.max), depthHeight <= Int(Int32.max),
+              colorWidth <= Int(Int32.max), colorHeight <= Int(Int32.max),
+              jitterX.isFinite, jitterY.isFinite,
+              fieldOfView.isFinite, fieldOfView > 0, fieldOfView < 180,
+              nearPlane.isFinite, nearPlane > 0,
+              farPlane.isFinite, farPlane > nearPlane,
+              aspectRatio.isFinite, aspectRatio > 0,
+              deltaTime.isFinite, deltaTime > 0 else { return nil }
+        self.depthWidth = depthWidth
+        self.depthHeight = depthHeight
+        self.colorWidth = colorWidth
+        self.colorHeight = colorHeight
+        self.jitterX = jitterX
+        self.jitterY = jitterY
+        self.fieldOfView = fieldOfView
+        self.nearPlane = nearPlane
+        self.farPlane = farPlane
+        self.aspectRatio = aspectRatio
+        self.deltaTime = deltaTime
+    }
+}
+
 /// CPU reference for bounded Frame Generation input resampling.
 ///
 /// The GPU pass uses the same candidate order (base, +x, +y, diagonal) and

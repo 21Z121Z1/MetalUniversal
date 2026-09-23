@@ -388,8 +388,7 @@ public final class MetalFxManager {
     private MetalGpuTexture frameDepthTexture;
     @Nullable
     private MetalGpuTexture frameHandDepthTexture;
-    @Nullable
-    private FrameSynthesisContract.Perspective frameCameraPerspective;
+    private FrameSynthesisContract.@Nullable Perspective frameCameraPerspective;
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
 

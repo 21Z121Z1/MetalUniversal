@@ -361,11 +361,65 @@ private func testDepthHistoryCompletionPermutations() throws {
     }
 }
 
+private func makeParameters(
+    depthWidth: Int = 640, depthHeight: Int = 360,
+    colorWidth: Int = 1920, colorHeight: Int = 1080,
+    jitterX: Float = -0.375, jitterY: Float = 0.25,
+    fieldOfView: Float = 67.25, nearPlane: Float = 0.05,
+    farPlane: Float = 1536, aspectRatio: Float = 16.0 / 9.0,
+    deltaTime: Float = 1.0 / 37.0
+) -> MetalFxFrameParameters? {
+    MetalFxFrameParameters(depthWidth: depthWidth, depthHeight: depthHeight,
+        colorWidth: colorWidth, colorHeight: colorHeight,
+        jitterX: jitterX, jitterY: jitterY, fieldOfView: fieldOfView,
+        nearPlane: nearPlane, farPlane: farPlane, aspectRatio: aspectRatio,
+        deltaTime: deltaTime)
+}
+
+private func testInterpolationMotionUsesPreviousColorPixels() throws {
+    for size in [(640, 360, 1920, 1080), (853, 479, 1281, 719), (613, 997, 613, 997)] {
+        let p = makeParameters(depthWidth: size.0, depthHeight: size.1,
+                               colorWidth: size.2, colorHeight: size.3)!
+        // Independent forward screen motion: object moved right/down 10px.
+        let current = SIMD2<Float>(0.15, -0.31)
+        let previous = current - SIMD2<Float>(20.0 / Float(size.2), 20.0 / Float(size.3))
+        let pixels = (previous - current) * SIMD2(p.motionScaleX, p.motionScaleY)
+        try expect(abs(pixels.x + 10) < 0.0001 && abs(pixels.y + 10) < 0.0001,
+                   "NDC motion must address previous COLOR pixels even with lower-resolution depth")
+    }
+}
+
+private func testInterpolationPreservesRealSourceMetadata() throws {
+    for delta: Float in [0.001, 1.0 / 37.0, 0.3, 1.25] {
+        let p = makeParameters(deltaTime: delta)!
+        try expect(p.deltaTime.bitPattern == delta.bitPattern,
+                   "Source time must not be quantized, clamped, or replaced by enqueue spacing")
+        try expect(p.jitterX == -0.375 && p.jitterY == 0.25 && p.fieldOfView == 67.25
+                   && p.nearPlane == 0.05 && p.farPlane == 1536,
+                   "Source jitter/camera metadata must reach the SDK unchanged")
+    }
+    for bad: Float in [0, -1, .nan, .infinity, -.infinity] {
+        try expect(makeParameters(deltaTime: bad) == nil, "Unknown source time must fail closed")
+        try expect(makeParameters(nearPlane: bad) == nil, "Invalid near plane must fail closed")
+        try expect(makeParameters(aspectRatio: bad) == nil, "Invalid aspect must fail closed")
+        try expect(makeParameters(fieldOfView: bad) == nil, "Invalid FOV must fail closed")
+    }
+    try expect(makeParameters(fieldOfView: 180) == nil, "180-degree perspective is invalid")
+    try expect(makeParameters(farPlane: 0.05) == nil, "Far must exceed near")
+    try expect(makeParameters(jitterX: .nan) == nil && makeParameters(jitterY: .infinity) == nil,
+               "Non-finite jitter must fail closed")
+    try expect(makeParameters(depthWidth: 0) == nil && makeParameters(depthHeight: -1) == nil
+               && makeParameters(colorWidth: 0) == nil && makeParameters(colorHeight: -1) == nil
+               && makeParameters(colorWidth: Int.max) == nil, "All extents are checked")
+}
+
 @main
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
             ("native scaler-link status", assertScalerLinkStatusContract),
+            ("interpolation motion uses previous-color pixels", testInterpolationMotionUsesPreviousColorPixels),
+            ("interpolation preserves source time and camera", testInterpolationPreservesRealSourceMetadata),
             ("depth history stale callbacks and reset", testDepthHistoryRejectsStaleCompletions),
             ("depth history replacement and pending source", testDepthHistoryReplacementAndPendingSource),
             ("depth history callback permutations", testDepthHistoryCompletionPermutations),

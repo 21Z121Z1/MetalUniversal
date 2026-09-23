@@ -2088,16 +2088,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let frameGenerationHeight: Int
         let nativeWidth: Int
         let nativeHeight: Int
-        let jitterX: Float
-        let jitterY: Float
-        let fieldOfView: Float
-        let nearPlane: Float
-        let farPlane: Float
-        let aspectRatio: Float
-        // Render-timeline interval between this source frame and the previous
-        // one, measured by the game at scene-frame start. 0 or non-finite
-        // means "unknown"; the presenter then falls back to enqueue spacing.
-        let sourceDelta: Float
+        let parameters: MetalFxFrameParameters
         let reset: Bool
     }
 
@@ -2245,7 +2236,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var queuedLifecycle: MetalFrameGenerationLifecycle?
     private var activePreviousIndex: Int?
     private var activeShouldResetHistory = true
-    private var activeDeltaTime: Float = 1.0 / 60.0
+    private var activeDeltaTime: Float = 0.0
     private var historyOwnership = MetalFrameGenerationHistoryOwnership()
     private var realPresentationTimeoutAt: CFTimeInterval?
     private var displayUpdateStarvationTimeoutAt: CFTimeInterval?
@@ -2941,11 +2932,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         nearPlane: Float,
         farPlane: Float,
         aspectRatio: Float,
-        sourceDeltaSeconds: Float = 0.0,
+        sourceDeltaSeconds: Float,
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
-        guard sceneColor.width > 0, sceneColor.height > 0,
+        guard let parameters = MetalFxFrameParameters(
+                  depthWidth: inputWidth, depthHeight: inputHeight,
+                  colorWidth: sceneColor.width, colorHeight: sceneColor.height,
+                  jitterX: jitterX, jitterY: jitterY, fieldOfView: fieldOfView,
+                  nearPlane: nearPlane, farPlane: farPlane, aspectRatio: aspectRatio,
+                  deltaTime: sourceDeltaSeconds),
               nativeSceneColor.width > 0, nativeSceneColor.height > 0,
               uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
@@ -3194,13 +3190,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameGenerationHeight: sceneColor.height,
             nativeWidth: nativeSceneColor.width,
             nativeHeight: nativeSceneColor.height,
-            jitterX: jitterX,
-            jitterY: jitterY,
-            fieldOfView: fieldOfView,
-            nearPlane: nearPlane,
-            farPlane: farPlane,
-            aspectRatio: aspectRatio,
-            sourceDelta: sourceDeltaSeconds,
+            parameters: parameters,
             reset: reset
         )
 
@@ -3453,25 +3443,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             activeShouldResetHistory = frame.reset
                     || !historyOwnership.interpolatorValid
                     || !historyOwnership.displayValid
-            activeDeltaTime = {
-                guard !activeShouldResetHistory else {
-                    return 1.0 / 60.0
-                }
-                // Prefer the game-provided render-timeline interval; the
-                // enqueue spacing below is only a proxy that inherits CPU
-                // scheduling jitter from the encode path.
-                if frame.sourceDelta.isFinite && frame.sourceDelta > 0.0 {
-                    return min(max(frame.sourceDelta, 1.0 / 240.0), 0.25)
-                }
-                guard let previousTimestamp = lastPresentedTimestamp else {
-                    return 1.0 / 60.0
-                }
-                let delta = frame.timestamp - previousTimestamp
-                guard delta.isFinite, delta > 0.0 else {
-                    return 1.0 / 60.0
-                }
-                return Float(min(max(delta, 1.0 / 240.0), 0.25))
-            }()
+            // The render-timeline interval is immutable source metadata.
+            // Resetting history changes history ownership, not elapsed time.
+            activeDeltaTime = frame.parameters.deltaTime
             currentLifecycle = lifecycle
         }
 
@@ -3554,24 +3528,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         commandBuffer.encodeWaitForEvent(readyEvent, value: frame.eventValue)
 
         if work.step == .generated {
-            frameInterpolator.colorTexture = sceneBuffers[frame.index]
-            frameInterpolator.prevColorTexture = sceneBuffers[work.previousIndex]
-            frameInterpolator.depthTexture = depthBuffers[frame.index]
-            frameInterpolator.motionTexture = motionBuffers[frame.index]
-            frameInterpolator.uiTexture = nil
-            frameInterpolator.outputTexture = interpolationOutputs[frame.index]
-            frameInterpolator.isUITextureComposited = false
-            frameInterpolator.jitterOffsetX = frame.jitterX
-            frameInterpolator.jitterOffsetY = frame.jitterY
-            frameInterpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            frameInterpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
-            frameInterpolator.fieldOfView = frame.fieldOfView
-            frameInterpolator.nearPlane = frame.nearPlane
-            frameInterpolator.farPlane = frame.farPlane
-            frameInterpolator.aspectRatio = frame.aspectRatio
-            frameInterpolator.deltaTime = work.deltaTime
-            frameInterpolator.isDepthReversed = true
-            frameInterpolator.shouldResetHistory = work.shouldResetHistory
+            guard configureInterpolator(frameInterpolator, for: work) else {
+                failPresentationBeforeSubmission(work, reason: "interpolator source contract mismatch")
+                return
+            }
             frameInterpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -3675,6 +3635,56 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ///   - the selected Metal 4 slot must be closed on every path out of here,
     ///     which is what abandonFrame() is for. All early returns after beginFrame
     ///     call it, and it is idempotent. Slot exhaustion returns before encoding.
+    /// The same immutable source contract reaches both SDK backends. Validate
+    /// actual ring resources again after queueing/resize, before SDK encoding.
+    private func configureInterpolator(
+        _ interpolator: any MTLFXFrameInterpolatorBase,
+        for work: PresentationWork
+    ) -> Bool {
+        let frame = work.frame
+        let p = frame.parameters
+        let color = sceneBuffers[frame.index]
+        let previous = sceneBuffers[work.previousIndex]
+        let depth = depthBuffers[frame.index]
+        let motion = motionBuffers[frame.index]
+        let output = interpolationOutputs[frame.index]
+        guard color.width == p.colorWidth, color.height == p.colorHeight,
+              previous.width == p.colorWidth, previous.height == p.colorHeight,
+              output.width == p.colorWidth, output.height == p.colorHeight,
+              depth.width == p.depthWidth, depth.height == p.depthHeight,
+              motion.width == p.depthWidth, motion.height == p.depthHeight,
+              color.pixelFormat == interpolator.colorTextureFormat,
+              previous.pixelFormat == interpolator.colorTextureFormat,
+              depth.pixelFormat == interpolator.depthTextureFormat,
+              motion.pixelFormat == interpolator.motionTextureFormat,
+              output.pixelFormat == interpolator.outputTextureFormat,
+              output.storageMode == .private,
+              color.usage.isSuperset(of: interpolator.colorTextureUsage),
+              previous.usage.isSuperset(of: interpolator.colorTextureUsage),
+              depth.usage.isSuperset(of: interpolator.depthTextureUsage),
+              motion.usage.isSuperset(of: interpolator.motionTextureUsage),
+              output.usage.isSuperset(of: interpolator.outputTextureUsage) else { return false }
+        interpolator.colorTexture = color
+        interpolator.prevColorTexture = previous
+        interpolator.depthTexture = depth
+        interpolator.motionTexture = motion
+        interpolator.uiTexture = nil
+        interpolator.outputTexture = output
+        interpolator.isUITextureComposited = false
+        interpolator.jitterOffsetX = p.jitterX
+        interpolator.jitterOffsetY = p.jitterY
+        interpolator.motionVectorScaleX = p.motionScaleX
+        interpolator.motionVectorScaleY = p.motionScaleY
+        interpolator.fieldOfView = p.fieldOfView
+        interpolator.nearPlane = p.nearPlane
+        interpolator.farPlane = p.farPlane
+        interpolator.aspectRatio = p.aspectRatio
+        interpolator.deltaTime = p.deltaTime
+        interpolator.isDepthReversed = true
+        interpolator.shouldResetHistory = work.shouldResetHistory
+        return true
+    }
+
     @available(macOS 26.0, *)
     private func presentMetal4(
         _ work: PresentationWork,
@@ -3696,24 +3706,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
 
         if work.step == .generated {
-            interpolator.colorTexture = sceneBuffers[frame.index]
-            interpolator.prevColorTexture = sceneBuffers[work.previousIndex]
-            interpolator.depthTexture = depthBuffers[frame.index]
-            interpolator.motionTexture = motionBuffers[frame.index]
-            interpolator.uiTexture = nil
-            interpolator.outputTexture = interpolationOutputs[frame.index]
-            interpolator.isUITextureComposited = false
-            interpolator.jitterOffsetX = frame.jitterX
-            interpolator.jitterOffsetY = frame.jitterY
-            interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            interpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
-            interpolator.fieldOfView = frame.fieldOfView
-            interpolator.nearPlane = frame.nearPlane
-            interpolator.farPlane = frame.farPlane
-            interpolator.aspectRatio = frame.aspectRatio
-            interpolator.deltaTime = work.deltaTime
-            interpolator.isDepthReversed = true
-            interpolator.shouldResetHistory = work.shouldResetHistory
+            guard configureInterpolator(interpolator, for: work) else {
+                path.abandonFrame()
+                failPresentationBeforeSubmission(work, reason: "interpolator source contract mismatch")
+                return
+            }
             interpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -3970,7 +3967,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         currentLifecycle = nil
         activePreviousIndex = nil
         activeShouldResetHistory = true
-        activeDeltaTime = 1.0 / 60.0
+        activeDeltaTime = 0.0
         realPresentationTimeoutAt = nil
         displayUpdateStarvationTimeoutAt = nil
         completeFrameLocked()
@@ -4007,7 +4004,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         queuedLifecycle = nil
         activePreviousIndex = nil
         activeShouldResetHistory = true
-        activeDeltaTime = 1.0 / 60.0
+        activeDeltaTime = 0.0
         displayUpdateStarvationTimeoutAt = CACurrentMediaTime()
                 + Self.displayUpdateStarvationTimeout
         condition.broadcast()
