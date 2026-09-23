@@ -117,7 +117,11 @@ public final class IrisMetalPipelineOverrides {
     private static final AtomicInteger GENERATIONS = new AtomicInteger();
     private static volatile @Nullable Instance active;
     private static final ThreadLocal<TerrainKind> ACTIVE_TERRAIN_KIND = new ThreadLocal<>();
-    private static final Field IRIS_BLEND_MODE = irisBlendModeField();
+    // Common motion admission can inspect an inactive adapter with Iris absent.
+    // Resolve optional blend ABI only when an actual Iris blend override is used.
+    private static final class IrisBlendAbi {
+        private static final Field MODE = irisBlendModeField();
+    }
 
     /**
      * Whether the sodium terrain render pass carries the pack's extra
@@ -2739,7 +2743,7 @@ public final class IrisMetalPipelineOverrides {
 
     static Optional<BlendFunction> irisBlendFunction(final BlendModeOverride override) {
         try {
-            BlendMode blendMode = (BlendMode) IRIS_BLEND_MODE.get(override);
+            BlendMode blendMode = (BlendMode) IrisBlendAbi.MODE.get(override);
             return blendMode == null ? Optional.empty() : Optional.of(irisBlendFunction(blendMode));
         } catch (IllegalAccessException e) {
             throw new IllegalStateException("Could not read Iris blend override", e);
