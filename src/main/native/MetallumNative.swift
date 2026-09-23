@@ -377,7 +377,7 @@ private enum NativeState {
     static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
     static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
     static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
-    static var metalFxPreviousDepthValid: Set<MetalFxScalerKey> = []
+    static var metalFxPreviousDepthHistory: [MetalFxScalerKey: MetalFxDepthHistoryState] = [:]
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -6878,6 +6878,8 @@ private func metal4MetalFxEncodeV2(
     )
     let previousDepthTexture: MTLTexture
     let previousDepthIsValid: Bool
+    let previousDepthHistory: MetalFxDepthHistoryState
+    let previousDepthWrite: MetalFxDepthHistoryState.Write
     NativeState.metalFxHistoryLock.lock()
     if let cached = NativeState.metalFxPreviousDepthTextures[key],
        cached.width == depthTexture.width, cached.height == depthTexture.height,
@@ -6899,11 +6901,13 @@ private func metal4MetalFxEncodeV2(
         created.label = "MetalFX Previous Depth (Metal 4)"
         residencyTrackCreated(created)
         NativeState.metalFxPreviousDepthTextures[key] = created
-        NativeState.metalFxPreviousDepthValid.remove(key)
+        NativeState.metalFxPreviousDepthHistory[key] = MetalFxDepthHistoryState()
         previousDepthTexture = created
     }
-    if reset != 0 { NativeState.metalFxPreviousDepthValid.remove(key) }
-    previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+    previousDepthHistory = NativeState.metalFxPreviousDepthHistory[key] ?? MetalFxDepthHistoryState()
+    NativeState.metalFxPreviousDepthHistory[key] = previousDepthHistory
+    previousDepthWrite = previousDepthHistory.beginWrite(reset: reset != 0)
+    previousDepthIsValid = previousDepthWrite.previousDepthIsValid
     NativeState.metalFxHistoryLock.unlock()
 
     let scaler: any MTL4FXTemporalScaler
@@ -7100,11 +7104,7 @@ private func metal4MetalFxEncodeV2(
     historyCopy.endEncoding()
     lease.addCompletionHandler { error, _, _ in
         NativeState.metalFxHistoryLock.lock()
-        if error == nil {
-            NativeState.metalFxPreviousDepthValid.insert(key)
-        } else {
-            NativeState.metalFxPreviousDepthValid.remove(key)
-        }
+        previousDepthHistory.complete(previousDepthWrite, succeeded: error == nil)
         NativeState.metalFxHistoryLock.unlock()
     }
     NativeState.metal4TemporalEncodeCount &+= 1
@@ -7176,6 +7176,8 @@ private func metal3MetalFxEncodeV2(
             )
             let previousDepthTexture: MTLTexture
             let previousDepthIsValid: Bool
+            let previousDepthHistory: MetalFxDepthHistoryState
+            let previousDepthWrite: MetalFxDepthHistoryState.Write
             NativeState.metalFxHistoryLock.lock()
             if let cachedDepth = NativeState.metalFxPreviousDepthTextures[key],
                cachedDepth.width == depthTexture.width,
@@ -7198,13 +7200,14 @@ private func metal3MetalFxEncodeV2(
                 }
                 createdDepth.label = "MetalFX Previous Depth"
                 NativeState.metalFxPreviousDepthTextures[key] = createdDepth
-                NativeState.metalFxPreviousDepthValid.remove(key)
+                residencyTrackCreated(createdDepth)
+                NativeState.metalFxPreviousDepthHistory[key] = MetalFxDepthHistoryState()
                 previousDepthTexture = createdDepth
             }
-            if reset != 0 {
-                NativeState.metalFxPreviousDepthValid.remove(key)
-            }
-            previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+            previousDepthHistory = NativeState.metalFxPreviousDepthHistory[key] ?? MetalFxDepthHistoryState()
+            NativeState.metalFxPreviousDepthHistory[key] = previousDepthHistory
+            previousDepthWrite = previousDepthHistory.beginWrite(reset: reset != 0)
+            previousDepthIsValid = previousDepthWrite.previousDepthIsValid
             NativeState.metalFxHistoryLock.unlock()
 
             let scalerObject: AnyObject?
@@ -7453,11 +7456,7 @@ private func metal3MetalFxEncodeV2(
             historyBlit.endEncoding()
             commandBuffer.addCompletedHandler { completed in
                 NativeState.metalFxHistoryLock.lock()
-                if completed.status == .completed {
-                    NativeState.metalFxPreviousDepthValid.insert(key)
-                } else {
-                    NativeState.metalFxPreviousDepthValid.remove(key)
-                }
+                previousDepthHistory.complete(previousDepthWrite, succeeded: completed.status == .completed)
                 NativeState.metalFxHistoryLock.unlock()
             }
             return 1
@@ -7962,7 +7961,7 @@ public func metallum_metalfx_release_scalers() {
     }
     NativeState.metalFxPreviousDepthTextures.removeAll()
     NativeState.metalFxValidationReactiveTextures.removeAll()
-    NativeState.metalFxPreviousDepthValid.removeAll()
+    NativeState.metalFxPreviousDepthHistory.removeAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
 }

@@ -1,5 +1,38 @@
 import Foundation
 
+/// Ownership of one cached previous-depth texture, independent of Metal.
+/// The caller serializes every method with its history lock. Capturing this
+/// owner in a completion keeps callbacks for retired textures isolated from
+/// a replacement that happens to have the same scaler key.
+final class MetalFxDepthHistoryState {
+    struct Write: Equatable {
+        fileprivate let owner: ObjectIdentifier
+        fileprivate let sequence: UInt64
+        let previousDepthIsValid: Bool
+    }
+
+    private var latestSequence: UInt64 = 0
+    private var settled = true
+    private(set) var isValid = false
+
+    func beginWrite(reset: Bool) -> Write {
+        precondition(latestSequence < UInt64.max, "Depth history sequence exhausted")
+        let previousDepthIsValid = !reset && isValid
+        latestSequence += 1
+        settled = false
+        isValid = false
+        return Write(owner: ObjectIdentifier(self), sequence: latestSequence,
+                     previousDepthIsValid: previousDepthIsValid)
+    }
+
+    func complete(_ write: Write, succeeded: Bool) {
+        guard write.owner == ObjectIdentifier(self),
+              write.sequence == latestSequence, !settled else { return }
+        settled = true
+        isValid = succeeded
+    }
+}
+
 /// CPU reference for bounded Frame Generation input resampling.
 ///
 /// The GPU pass uses the same candidate order (base, +x, +y, diagonal) and

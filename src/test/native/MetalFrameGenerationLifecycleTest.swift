@@ -309,11 +309,66 @@ private func testPresentedTimeZeroFails() throws {
     try expect(actions.contains(.releaseOwnership), "non-presented real frame releases")
 }
 
+private func testDepthHistoryRejectsStaleCompletions() throws {
+    let history = MetalFxDepthHistoryState()
+    let first = history.beginWrite(reset: false)
+    try expect(!first.previousDepthIsValid, "first source has no previous depth")
+    history.complete(first, succeeded: true)
+    let second = history.beginWrite(reset: false)
+    try expect(second.previousDepthIsValid, "completed immediate predecessor can be read")
+    history.complete(first, succeeded: false)
+    try expect(!history.isValid, "older failure cannot settle the pending source")
+    history.complete(second, succeeded: true)
+    history.complete(first, succeeded: false)
+    try expect(history.isValid, "older failure cannot invalidate newer successful depth")
+    let reset = history.beginWrite(reset: true)
+    try expect(!reset.previousDepthIsValid, "reset never reads pre-reset depth")
+    history.complete(second, succeeded: true)
+    try expect(!history.isValid, "older success cannot authorize a reset generation")
+    history.complete(reset, succeeded: false)
+    history.complete(reset, succeeded: true)
+    try expect(!history.isValid, "duplicate callback cannot reverse a failure")
+}
+
+private func testDepthHistoryReplacementAndPendingSource() throws {
+    let retired = MetalFxDepthHistoryState()
+    let oldWrite = retired.beginWrite(reset: false)
+    let replacement = MetalFxDepthHistoryState()
+    let newWrite = replacement.beginWrite(reset: false)
+    retired.complete(oldWrite, succeeded: true)
+    replacement.complete(oldWrite, succeeded: true)
+    try expect(!replacement.isValid, "retired resource cannot authorize a replacement at the same key")
+    let pending = replacement.beginWrite(reset: false)
+    try expect(!pending.previousDepthIsValid, "a pending copy is not a completed immediate predecessor")
+    replacement.complete(newWrite, succeeded: true)
+    try expect(!replacement.isValid, "out-of-order callback cannot make older depth current")
+    replacement.complete(pending, succeeded: true)
+    try expect(replacement.isValid, "latest successful copy owns history")
+}
+
+private func testDepthHistoryCompletionPermutations() throws {
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        for latestSucceeded in [false, true] {
+            let history = MetalFxDepthHistoryState()
+            let writes = [history.beginWrite(reset: false), history.beginWrite(reset: true),
+                          history.beginWrite(reset: false)]
+            for index in order {
+                history.complete(writes[index], succeeded: index == 2 ? latestSucceeded : !latestSucceeded)
+            }
+            try expect(history.isValid == latestSucceeded,
+                       "only the latest write may settle history, regardless of callback order")
+        }
+    }
+}
+
 @main
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
             ("native scaler-link status", assertScalerLinkStatusContract),
+            ("depth history stale callbacks and reset", testDepthHistoryRejectsStaleCompletions),
+            ("depth history replacement and pending source", testDepthHistoryReplacementAndPendingSource),
+            ("depth history callback permutations", testDepthHistoryCompletionPermutations),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),
