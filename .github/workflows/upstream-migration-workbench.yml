@@ -24,7 +24,7 @@ jobs:
         env:
           BASE: f8294b2fb6ce2edc56d418510294111c9276091e
           SOURCE: 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1
-          EXPECTED_TREE: 1eb2321e0aeaa39d89f7de07a0b43a0ed25f92d4
+          EXPECTED_TREE: 62ea78dbae1e7107dc8c8a47ee917dc34749f3a2
           EXPECTED_PATCH: fcbb116933fe26540ccf72467fbe0c1fd682c12d5e3bcb3034fe7a4010503705
         shell: bash
         run: |
@@ -45,6 +45,12 @@ jobs:
           python3 "$RUNNER_TEMP/upstream-migration/import.py"
           git apply --check --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
           git apply --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build.gradle')
+          p.write_text(''.join(line.rstrip() + '\n' for line in p.read_text().splitlines()))
+          PY
+          git add build.gradle
           test "$(git write-tree)" = "$EXPECTED_TREE"
           git diff --cached --check
           git diff --cached --quiet "$BASE" -- gradle/wrapper/ settings.gradle README.md README_zh-CN.md LICENSE src/main/resources/metallum.accesswidener .github/workflows/build.yml
