@@ -8,15 +8,14 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
 /**
- * Minimal JVM-background-thread render-PSO capability probe.
+ * Required fresh-process JVM-background-thread render-PSO smoke.
  *
- * Runs the exact shipping-dylib sequence (device -> MSL -> descriptor ->
- * render PSO) on a plain Java background thread — the same threading context
- * as a Gradle test executor worker. This is the machine-readable verdict that
- * decides METALLUM_JVM_PSO_SMOKE_MODE: a signal death here means this
- * environment cannot compile pipelines from a JVM background thread and the
- * JVM smoke is reported environment-blocked instead of failed. The Minecraft
- * E2E remains the authoritative JVM->FFM->Swift PSO proof either way.
+ * Executes the shipping device -> MSL -> descriptor -> render PSO sequence
+ * on a plain Java background thread, without a process-main-thread warmup.
+ * The caller owns diagnostic-layer environment settings and must preserve
+ * this process's exit status and crash log. A signal is a failure of the
+ * tested configuration, not evidence that all JVM GPU tests are unsupported.
+ * This checks compilation only, not physical presentation or visual parity.
  *
  * Usage: java --enable-native-access=ALL-UNNAMED JvmPsoThreadingProbe.java /path/libmetallum.dylib
  */
@@ -59,8 +58,8 @@ public final class JvmPsoThreadingProbe {
 
         final boolean[] passed = { false };
         final String[] failure = { null };
-        // Plain java.lang.Thread: the same threading context whose PSO compile
-        // path must be proven before the JVM smoke may be required here.
+        // Exercise a JVM-created thread without warming the compiler on the
+        // Java main thread or serializing through a special native queue.
         final Thread worker = new Thread(() -> {
             try (Arena arena = Arena.ofConfined()) {
                 final MemorySegment device = (MemorySegment) createDevice.invokeExact();

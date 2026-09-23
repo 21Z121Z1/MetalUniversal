@@ -12,4 +12,4 @@ Local invariants:
 - When the oracle itself changes, require an independent fixture/self-test before using that same changed oracle to approve renderer behavior.
 - Broad readback belongs to conformance/diagnostic runs, not performance instrumentation.
 
-Use `python3 scripts/agent/context.py --task "<task>"` to obtain the minimum proof plan. Start with synthetic fixtures before paying for Minecraft E2E.
+Select the minimum proof plan from the changed contract, nearest fixture, and `docs/agent/unified-evaluation-acceptance.json`. Start with synthetic fixtures before paying for Minecraft E2E.

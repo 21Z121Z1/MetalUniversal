@@ -2,6 +2,8 @@ package com.metallum.client.terrain;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -17,10 +19,7 @@ final class TerrainPublicationGenerationGuardTest {
         f.guard.bindMeshFromActiveTask(mesh);
         f.guard.exitTask(task);
 
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
-                f.guard.publicationDecision(7L, mesh)
-        );
+        assertPublication(f.guard, 7L, mesh, Expected.ALLOW_CURRENT);
         assertEquals(1L, f.guard.snapshot().allowedPublications());
         assertEquals(0, f.guard.snapshot().trackedMeshes());
     }
@@ -43,10 +42,7 @@ final class TerrainPublicationGenerationGuardTest {
         Task current = new Task();
         f.guard.registerTask(current, 9L);
         assertTrue(f.guard.enterTask(current));
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
-                f.guard.publicationDecision(9L, null)
-        );
+        assertPublication(f.guard, 9L, null, Expected.ALLOW_CURRENT);
         f.guard.exitTask(current);
     }
 
@@ -58,10 +54,7 @@ final class TerrainPublicationGenerationGuardTest {
         assertTrue(f.guard.enterTask(task));
         f.guard.markDirty(11L);
 
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
-                f.guard.publicationDecision(11L, null)
-        );
+        assertPublication(f.guard, 11L, null, Expected.REJECT_STALE);
         assertEquals(1L, f.guard.snapshot().rejectedStalePublications());
         f.guard.exitTask(task);
     }
@@ -77,10 +70,7 @@ final class TerrainPublicationGenerationGuardTest {
         f.guard.exitTask(task);
         f.guard.markDirty(12L);
 
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
-                f.guard.publicationDecision(12L, mesh)
-        );
+        assertPublication(f.guard, 12L, mesh, Expected.REJECT_STALE);
     }
 
     @Test
@@ -89,10 +79,7 @@ final class TerrainPublicationGenerationGuardTest {
         Task task = new Task();
         f.guard.registerTask(task, 13L);
         assertTrue(f.guard.enterTask(task));
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
-                f.guard.publicationDecision(14L, null)
-        );
+        assertPublication(f.guard, 14L, null, Expected.REJECT_STALE);
         f.guard.exitTask(task);
     }
 
@@ -113,20 +100,14 @@ final class TerrainPublicationGenerationGuardTest {
                 f.guard.advanceMaterialGeneration();
             }
             assertTrue(task.cancelled);
-            assertEquals(
-                    TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
-                    f.guard.publicationDecision(15L, mesh)
-            );
+            assertPublication(f.guard, 15L, mesh, Expected.REJECT_STALE);
         }
     }
 
     @Test
     void unknownPublicationFailsOpenInsteadOfDroppingVanillaWork() {
         Fixture f = new Fixture();
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.BASELINE_ALLOW,
-                f.guard.publicationDecision(16L, new Object())
-        );
+        assertPublication(f.guard, 16L, new Object(), Expected.BASELINE_ALLOW);
         assertFalse(f.guard.snapshot().active());
         assertEquals(
                 TerrainPublicationGenerationGuard.FailOpenReason.UNKNOWN_PUBLICATION,
@@ -134,10 +115,7 @@ final class TerrainPublicationGenerationGuardTest {
         );
         assertEquals(1L, f.guard.snapshot().unknownPublicationFailOpenCount());
 
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.BASELINE_ALLOW,
-                f.guard.publicationDecision(16L, new Object())
-        );
+        assertPublication(f.guard, 16L, new Object(), Expected.BASELINE_ALLOW);
         assertEquals(2L, f.guard.snapshot().baselinePublicationsAfterFailOpen());
     }
 
@@ -150,10 +128,7 @@ final class TerrainPublicationGenerationGuardTest {
         Task first = new Task();
         bounded.registerTask(first, 21L);
         assertTrue(bounded.enterTask(first));
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
-                bounded.publicationDecision(21L, null)
-        );
+        assertPublication(bounded, 21L, null, Expected.ALLOW_CURRENT);
         bounded.exitTask(first);
 
         Task second = new Task();
@@ -161,10 +136,7 @@ final class TerrainPublicationGenerationGuardTest {
         assertTrue(bounded.snapshot().active());
         assertEquals(1, bounded.snapshot().sectionVersionEntries());
         assertTrue(bounded.enterTask(second));
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
-                bounded.publicationDecision(22L, null)
-        );
+        assertPublication(bounded, 22L, null, Expected.ALLOW_CURRENT);
         bounded.exitTask(second);
     }
 
@@ -195,10 +167,7 @@ final class TerrainPublicationGenerationGuardTest {
         bounded.markDirty(33L);
         assertEquals(0, bounded.snapshot().sectionVersionEntries(),
                 "fail-open must not rebuild diagnostic version state");
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.BASELINE_ALLOW,
-                bounded.publicationDecision(31L, mesh)
-        );
+        assertPublication(bounded, 31L, mesh, Expected.BASELINE_ALLOW);
     }
 
     @Test
@@ -218,19 +187,13 @@ final class TerrainPublicationGenerationGuardTest {
         assertTrue(bounded.snapshot().active());
         assertEquals(1, bounded.snapshot().sectionVersionEntries());
 
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
-                bounded.publicationDecision(41L, null)
-        );
+        assertPublication(bounded, 41L, null, Expected.REJECT_STALE);
         assertEquals(1, bounded.snapshot().sectionVersionEntries(),
                 "stale validation must be lookup-only and must not recreate evicted metadata");
 
         bounded.exitTask(stale);
         assertTrue(bounded.enterTask(replacementSection));
-        assertEquals(
-                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
-                bounded.publicationDecision(42L, null)
-        );
+        assertPublication(bounded, 42L, null, Expected.ALLOW_CURRENT);
         bounded.exitTask(replacementSection);
     }
 
@@ -257,6 +220,37 @@ final class TerrainPublicationGenerationGuardTest {
         tiny.exitTask(second);
     }
 
+    private enum Expected { BASELINE_ALLOW, ALLOW_CURRENT, REJECT_STALE }
+
+    /** Verify actual pointer exchange, callback cardinality, returned ownership and accounting. */
+    private static void assertPublication(TerrainPublicationGenerationGuard<Task> guard, long section,
+                                          Object candidate, Expected expected) {
+        Object old = new Object();
+        var current = new java.util.concurrent.atomic.AtomicReference<>(old);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var before = guard.snapshot();
+        Object retired = guard.publish(section, candidate, () -> {
+            calls.incrementAndGet();
+            return current.getAndSet(candidate);
+        });
+        var after = guard.snapshot();
+        if (expected == Expected.REJECT_STALE) {
+            assertSame(candidate, retired, "vanilla must retire the rejected candidate, not the displayed mesh");
+            assertSame(old, current.get());
+            assertEquals(0, calls.get());
+        } else {
+            assertSame(old, retired);
+            assertSame(candidate, current.get());
+            assertEquals(1, calls.get());
+        }
+        assertEquals(before.allowedPublications() + (expected == Expected.ALLOW_CURRENT ? 1 : 0),
+                after.allowedPublications());
+        assertEquals(before.rejectedStalePublications() + (expected == Expected.REJECT_STALE ? 1 : 0),
+                after.rejectedStalePublications());
+        assertEquals(before.baselinePublicationsAfterFailOpen() + (expected == Expected.BASELINE_ALLOW ? 1 : 0),
+                after.baselinePublicationsAfterFailOpen());
+    }
+
     private static final TerrainPublicationGenerationGuard.TaskOps<Task> OPS =
             new TerrainPublicationGenerationGuard.TaskOps<>() {
                 @Override
@@ -279,6 +273,6 @@ final class TerrainPublicationGenerationGuardTest {
     }
 
     private static final class Task {
-        boolean cancelled;
+        volatile boolean cancelled;
     }
 }

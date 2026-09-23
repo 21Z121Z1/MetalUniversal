@@ -1,6 +1,8 @@
 package com.metallum.mixin.terrain;
 
-import com.metallum.client.terrain.TerrainPublicationGenerationGuard;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.metallum.client.terrain.VanillaTerrainGenerationRuntime;
 import java.nio.ByteBuffer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
@@ -51,18 +53,9 @@ abstract class RenderSectionTerrainGenerationMixin {
         VanillaTerrainGenerationRuntime.bindMeshFromActiveTask(mesh);
     }
 
-    @Inject(method = "setSectionMesh", at = @At("HEAD"), cancellable = true)
-    private void metallum$guardPublication(
-            final SectionMesh candidate,
-            final CallbackInfoReturnable<SectionMesh> cir
-    ) {
-        TerrainPublicationGenerationGuard.PublicationDecision decision =
-                VanillaTerrainGenerationRuntime.publicationDecision(getSectionNode(), candidate);
-        if (decision == TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE) {
-            // Both vanilla callers immediately release the returned old mesh. Returning the stale
-            // candidate itself preserves that ownership flow while leaving sectionMesh untouched.
-            cir.setReturnValue(candidate);
-        }
+    @WrapMethod(method = "setSectionMesh")
+    private SectionMesh metallum$guardPublication(final SectionMesh candidate, final Operation<SectionMesh> original) {
+        return VanillaTerrainGenerationRuntime.publish(getSectionNode(), candidate, () -> original.call(candidate));
     }
 
     @Inject(method = "releaseSectionMesh", at = @At("HEAD"))

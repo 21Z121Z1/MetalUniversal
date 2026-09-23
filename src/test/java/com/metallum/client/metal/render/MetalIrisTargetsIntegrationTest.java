@@ -15,6 +15,7 @@ import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
@@ -497,7 +498,15 @@ final class MetalIrisTargetsIntegrationTest {
             ).withRenderArea(new com.mojang.renderpearl.api.commands.RenderPass.RenderArea(
                     0, 0, WIDTH, HEIGHT
             ));
+            MetalGpuTextureView raw = (MetalGpuTextureView) source.readView(0);
+            MetalGpuTextureView sampled = (MetalGpuTextureView) source.sampleReadView(0);
+            assertNotSame(raw, sampled, "logical RGB sampling requires a separate swizzled view");
+            assertDoesNotThrow(raw::validateStorageBinding);
+            assertThrows(IllegalArgumentException.class, sampled::validateStorageBinding);
             MetalRenderPass sourcePass = (MetalRenderPass) encoder.createRenderPass(sourceDescriptor.build());
+            assertThrows(IllegalArgumentException.class,
+                    () -> sourcePass.bindStorageImage("colorimg0", sampled),
+                    "raster images must reject a sample-only alpha-one swizzle before native binding");
             sourcePass.setPipeline(sourcePipeline);
             sourcePass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();
@@ -530,6 +539,83 @@ final class MetalIrisTargetsIntegrationTest {
             assertRgba(source.readTexture(0), 64, 128, 191, 0, "physical RGBA backing");
             assertRgba(output.colorTargets().writeTexture(0), 64, 128, 191, 255,
                     "logical RGB sampled value");
+        }
+    }
+
+    @Test
+    void storageImageSelectionTracksTheCurrentAllocationAndNeverOwnsIt() {
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT)) {
+            GpuTextureView first = IrisMetalPostChain.standardStorageImage("colorimg0", targets);
+            assertSame(targets.colorTargets().readView(0), first);
+            assertNull(IrisMetalPostChain.standardStorageImage("customImage", targets));
+            assertThrows(IllegalStateException.class,
+                    () -> IrisMetalPostChain.standardStorageImage("colorimg1", targets));
+            targets.colorTargets().flip(0);
+            GpuTextureView second = IrisMetalPostChain.standardStorageImage("colorimg0", targets);
+            assertNotSame(first, second);
+            assertSame(targets.colorTargets().readView(0), second);
+            targets.resize(WIDTH * 2, HEIGHT * 2);
+            assertTrue(first.isClosed());
+            assertTrue(second.isClosed());
+            GpuTextureView recreated = IrisMetalPostChain.standardStorageImage("colorimg0", targets);
+            assertNotSame(first, recreated);
+            assertNotSame(second, recreated);
+            assertSame(targets.colorTargets().readView(0), recreated);
+            assertEquals(WIDTH * 2, recreated.getWidth(0));
+            assertThrows(IllegalStateException.class,
+                    () -> ((MetalGpuTextureView) first).validateStorageBinding());
+        }
+    }
+
+    @Test
+    void retiredAllocationsCannotLeaveDeferredClears() {
+        MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                "retired-clear-color", GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+        MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                "retired-clear-depth", GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1);
+        encoder.clearColorTexture(color, new Vector4f(1.0F));
+        encoder.clearDepthTexture(depth, 0.25);
+        assertTrue(encoder.hasPendingClear(color));
+        assertTrue(encoder.hasPendingClear(depth));
+        color.close();
+        depth.close();
+        assertFalse(encoder.hasPendingClear(color));
+        assertFalse(encoder.hasPendingClear(depth));
+        // Before the fix submit tried to materialize a clear through a closed handle.
+        assertDoesNotThrow(encoder::submit);
+        device.waitForSubmittedGpuWork();
+    }
+
+    @Test
+    void closingTextureOwnerPreservesClearsUntilTheLastViewRetires() {
+        MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "view-owned-clear", GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+        MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1);
+        encoder.clearColorTexture(texture, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F));
+        texture.close();
+        assertTrue(encoder.hasPendingClear(texture), "the view still owns observable contents");
+        assertDoesNotThrow(view::nativeHandle);
+        view.close();
+        assertFalse(encoder.hasPendingClear(texture), "allocation retirement drops unobservable work");
+        assertDoesNotThrow(encoder::submit);
+        device.waitForSubmittedGpuWork();
+    }
+
+    @Test
+    void deferredClearSurvivesOwnerCloseWhenTheViewIsStillConsumed() {
+        MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "view-consumed-clear", GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_COPY_SRC,
+                GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+        try (MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1)) {
+            encoder.clearColorTexture(texture, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F));
+            texture.close();
+            assertTrue(encoder.hasPendingClear(texture));
+            encoder.flushPendingClear(texture);
+            assertRgba(texture, 64, 128, 191, 255, "view-owned allocation retains its clear");
         }
     }
 

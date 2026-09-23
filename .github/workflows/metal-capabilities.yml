@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - codex/frame-evidence-contract-v1-20260920
-      - codex/vision-cloud-convergence-*
+      - main
   pull_request:
     branches:
-      - codex/frame-evidence-contract-v1-20260920
+      - main
 
 permissions:
   contents: read
@@ -103,7 +102,8 @@ jobs:
             metal4PipelineSmokeTest \
             metal4PipelinePathTest \
             hostedMetalCoreIntegrationTest \
-            hostedMetalIrisIntegrationTest
+            hostedMetalIrisIntegrationTest \
+            hostedMetalIrisComputeGroupingTest
       - name: State evidence boundary
         run: |
           cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt
@@ -115,6 +115,9 @@ jobs:
         if: always()
         with:
           name: metal-capabilities-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
-          path: build/agent-evidence/
+          path: |
+            build/agent-evidence/
+            build/test-results/
+            build/reports/tests/
           if-no-files-found: warn
           retention-days: 14

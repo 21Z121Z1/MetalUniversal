@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DEFAULT_MC_VERSION="26.2"
+DEFAULT_MC_VERSION="26.3"
 if [[ -f "${REPO_ROOT}/gradle.properties" ]]; then
   detected_version="$(awk -F= '$1 == "minecraft_version" { print $2; exit }' "${REPO_ROOT}/gradle.properties" | tr -d '[:space:]')"
   if [[ -n "${detected_version}" ]]; then
@@ -32,7 +32,7 @@ Usage: bash scripts/minecraft-reference.sh [--force|--clean|--print-path]
 Generate a local, git-ignored decompiled Minecraft client source tree for agents.
 
 Environment overrides:
-  MINECRAFT_REFERENCE_VERSION   Minecraft version (default: project version or 26.2)
+  MINECRAFT_REFERENCE_VERSION   Minecraft version (default: project version or 26.3)
   MINECRAFT_REFERENCE_DIR       Output root (default: .minecraft-reference)
   MINECRAFT_REFERENCE_JAVA_OPTS Java options for Vineflower (default: -Xmx3G)
 USAGE

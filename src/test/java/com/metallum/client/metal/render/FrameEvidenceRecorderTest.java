@@ -304,4 +304,38 @@ class FrameEvidenceRecorderTest {
         assertThrows(java.io.IOException.class, () -> FrameEvidenceRuntime.writeReport(impossible, report));
         assertFalse(java.nio.file.Files.exists(impossible));
     }
+
+    @Test void windowDeclarationOverflowAndNullProfileDoNotPublishPartialState() {
+        var bounded = new FrameEvidenceRecorder(4, clock::get, true);
+        String original = bounded.snapshot(new JsonObject()).getAsJsonObject("window").toString();
+        for (long[] declaration : new long[][]{
+                {Long.MAX_VALUE, 1, 1}, {Long.MAX_VALUE - 1, 1, 1}, {100, 0, Long.MAX_VALUE}}) {
+            assertThrows(ArithmeticException.class, () -> bounded.armWindowAt(
+                    new JsonObject(), declaration[1], declaration[2], declaration[0]));
+            assertEquals(original, bounded.snapshot(new JsonObject()).getAsJsonObject("window").toString());
+        }
+        assertThrows(IllegalStateException.class, () -> bounded.armWindowAt(null, 0, 10, 100));
+        assertEquals(original, bounded.snapshot(new JsonObject()).getAsJsonObject("window").toString());
+        // An unsuccessful declaration neither captures frames nor consumes the one valid arm.
+        bounded.beginFrame(true); bounded.endFrame();
+        assertTrue(bounded.snapshot(new JsonObject()).getAsJsonArray("frames").isEmpty());
+        bounded.armWindowAt(new JsonObject(), 0, 10, clock.get());
+        bounded.beginFrame(true); bounded.endFrame();
+        assertEquals(1, bounded.snapshot(new JsonObject()).getAsJsonArray("frames").size());
+    }
+
+    @Test void sharedAnchorIsNotResampledAndProfileCannotBeChangedAfterArming() {
+        var bounded = new FrameEvidenceRecorder(4, () -> { throw new AssertionError("clock resampled"); }, true);
+        var profile = new JsonObject();
+        var nested = new JsonObject(); nested.addProperty("feature", "off"); profile.add("settings", nested);
+        bounded.armWindowAt(profile, 10, 20, 100);
+        nested.addProperty("feature", "on");
+        var window = bounded.snapshot(new JsonObject()).getAsJsonObject("window");
+        assertEquals(110, window.get("startNs").getAsLong());
+        assertEquals(130, window.get("endNs").getAsLong());
+        assertEquals("off", window.getAsJsonObject("profile").getAsJsonObject("settings").get("feature").getAsString());
+        assertThrows(IllegalStateException.class, () -> bounded.armWindowAt(profile, 0, 1, 200));
+        assertEquals(window, bounded.snapshot(new JsonObject()).getAsJsonObject("window"));
+    }
+
 }

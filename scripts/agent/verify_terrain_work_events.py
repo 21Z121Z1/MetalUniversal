@@ -38,6 +38,9 @@ STAGES = {
     "RETIRED",
 }
 CAUSAL_PAIRS = (
+    ("DATA_READY", "QUEUED"),
+    ("QUEUED", "BUILD_START"),
+    ("BUILD_END", "UPLOAD_QUEUED"),
     ("BUILD_START", "BUILD_END"),
     ("UPLOAD_QUEUED", "GPU_ENCODED"),
     ("GPU_ENCODED", "GPU_DEPENDENCY_READY"),
@@ -154,13 +157,13 @@ def evaluate(payload: Any) -> dict[str, Any]:
             errors.append("source.clock must be System.nanoTime")
 
     status = payload.get("status")
-    if status not in {"complete", "failed", "environment-blocked"}:
+    if not isinstance(status, str) or status not in {"complete", "failed", "environment-blocked"}:
         errors.append("status must be complete, failed, or environment-blocked")
     failure_reason = payload.get("failureReason")
     if status == "complete":
         if failure_reason is not None:
             errors.append("complete reports must have failureReason=null")
-    elif status in {"failed", "environment-blocked"}:
+    elif isinstance(status, str) and status in {"failed", "environment-blocked"}:
         if not isinstance(failure_reason, str) or not failure_reason.strip():
             errors.append("failed/environment-blocked reports require failureReason")
 
@@ -236,7 +239,7 @@ def evaluate(payload: Any) -> dict[str, Any]:
             groups.setdefault(key, []).append(raw)
 
         stage = raw.get("stage")
-        if stage not in STAGES:
+        if not isinstance(stage, str) or stage not in STAGES:
             errors.append(f"events[{index}].stage is unknown: {stage!r}")
         timestamp = _u64(raw.get("monotonicNanos"), f"events[{index}].monotonicNanos", errors)
         if timestamp is not None and start is not None and timestamp < start:
@@ -266,10 +269,21 @@ def evaluate(payload: Any) -> dict[str, Any]:
         mesh_generation = raw.get("meshGeneration")
         if mesh_generation is not None:
             _u64(mesh_generation, f"events[{index}].meshGeneration", errors)
-        if stage in {"PUBLISHED", "FIRST_VALID_DRAW", "DRAW_NOT_REQUIRED"} and mesh_generation is None:
+        if isinstance(stage, str) and stage in {"PUBLISHED", "FIRST_VALID_DRAW", "DRAW_NOT_REQUIRED"} and mesh_generation is None:
             errors.append(f"events[{index}] {stage} requires meshGeneration")
         if stage == "FIRST_VALID_DRAW" and frame_index is None:
             errors.append(f"events[{index}] FIRST_VALID_DRAW requires frameIndex")
+
+    # Schema errors are verdicts, not exceptions from subsequent arithmetic.
+    # Never coerce an invalid timestamp/stage into a plausible lifecycle.
+    if errors:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "accepted": False,
+            "state": "rejected-invalid-evidence",
+            "errors": errors,
+            "summary": {"observedWorkItems": len(groups), "latencySampleCount": 0},
+        }
 
     latencies: list[int] = []
     published_items = 0
@@ -314,10 +328,11 @@ def evaluate(payload: Any) -> dict[str, Any]:
         cancelled_positions = positions.get("CANCELLED", [])
         if cancelled_positions:
             cancelled_items += 1
-            first_cancel = min(cancelled_positions)
-            for forbidden in ("PUBLISHED", "FIRST_VALID_DRAW"):
-                if any(position > first_cancel for position in positions.get(forbidden, [])):
-                    errors.append(f"{forbidden} occurs after CANCELLED for key={key}")
+            # CANCELLED belongs to unpublished work. A published mesh is
+            # invalidated through RETIRED, never relabelled as cancelled work.
+            for forbidden in ("PUBLISHED", "FIRST_VALID_DRAW", "DRAW_NOT_REQUIRED"):
+                if positions.get(forbidden):
+                    errors.append(f"{forbidden} coexists with CANCELLED for key={key}")
 
         published = [event for event in work_events if event.get("stage") == "PUBLISHED"]
         first_draw = [event for event in work_events if event.get("stage") == "FIRST_VALID_DRAW"]
@@ -330,6 +345,13 @@ def evaluate(payload: Any) -> dict[str, Any]:
                 errors.append(f"DRAW_NOT_REQUIRED precedes publication: key={key}")
         if published:
             published_items += 1
+            # The runtime cannot publish before its build ends. Some producers
+            # additionally expose a GPU dependency boundary; encoded work alone
+            # must not be relabelled GPU-completed or ready.
+            publication = positions["PUBLISHED"][0]
+            ready = positions.get("GPU_DEPENDENCY_READY", positions.get("BUILD_END", []))
+            if not ready or min(ready) >= publication:
+                errors.append(f"PUBLISHED has no prior ready predecessor for key={key}")
         if first_draw:
             first_draw_items += 1
             if not published:

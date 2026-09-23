@@ -1,4 +1,5 @@
 #version 330
+#extension GL_ARB_separate_shader_objects : require
 
 #if !defined(IS_GUI) && !defined(IS_SEE_THROUGH)
 #include <minecraft:sample_lightmap.glsl>
@@ -48,7 +49,7 @@ void main() {
         metallumObjectMotion = vec2(0.0);
     }
     metallumObjectValidity = valid ? 1.0 : 0.0;
-#ifdef IS_SEE_THROUGH
+#if defined(IS_GUI) || defined(IS_SEE_THROUGH)
     metallumVertexColor = Color;
 #else
     metallumVertexColor = Color * sample_lightmap(Sampler2, UV2);

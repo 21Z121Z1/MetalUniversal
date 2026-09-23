@@ -14,6 +14,9 @@ final class WorldSnapshot {
     /** Flush/copy/hash only before warmup, on the server thread; never inside frame collection. */
     static JsonObject capture(Path source, Path destination, JsonObject recipe) {
         try {
+            require(Files.isDirectory(source) && !Files.isSymbolicLink(source), "Invalid source world directory");
+            rejectNonRegularEntries(source);
+            require(!Files.exists(destination), "Snapshot output must be a new directory");
             java.security.MessageDigest manifestDigest = java.security.MessageDigest.getInstance("SHA-256");
             JsonArray files = new JsonArray();
             Files.createDirectories(destination);
@@ -66,6 +69,10 @@ final class WorldSnapshot {
 
     static String verify(Path snapshot) {
         try {
+            require(Files.isDirectory(snapshot) && !Files.isSymbolicLink(snapshot), "Invalid snapshot directory");
+            rejectNonRegularEntries(snapshot);
+            Path manifestFile = snapshot.resolveSibling(snapshot.getFileName() + "-manifest.json");
+            require(Files.isRegularFile(manifestFile) && !Files.isSymbolicLink(manifestFile), "Invalid snapshot manifest");
             JsonObject manifest = JsonParser.parseString(Files.readString(snapshot.resolveSibling(
                     snapshot.getFileName() + "-manifest.json"))).getAsJsonObject();
             var digest = java.security.MessageDigest.getInstance("SHA-256");
@@ -75,7 +82,9 @@ final class WorldSnapshot {
                 JsonObject file = entry.getAsJsonObject();
                 String relative = file.get("path").getAsString();
                 Path path = snapshot.resolve(relative).normalize();
-                require(path.startsWith(snapshot) && !relative.equals("session.lock") && listed.add(relative)
+                require(!Path.of(relative).isAbsolute() && !relative.contains("\\")
+                        && java.util.Arrays.stream(relative.split("/", -1)).allMatch(part -> !part.isEmpty() && !part.equals(".") && !part.equals(".."))
+                        && path.startsWith(snapshot) && !relative.equals("session.lock") && listed.add(relative)
                         && relative.compareTo(previous) > 0, "Invalid snapshot manifest path/order");
                 previous = relative;
                 require(Files.isRegularFile(path) && !Files.isSymbolicLink(path), "Missing snapshot file: " + relative);
@@ -110,6 +119,13 @@ final class WorldSnapshot {
                 if (Files.isDirectory(path)) Files.createDirectories(target);
                 else Files.copy(path, target);
             }
+        }
+    }
+
+    private static void rejectNonRegularEntries(Path directory) throws IOException {
+        try (var entries = Files.walk(directory)) {
+            entries.forEach(path -> require(!Files.isSymbolicLink(path)
+                    && (Files.isDirectory(path) || Files.isRegularFile(path)), "Snapshot symlinks and special files are forbidden"));
         }
     }
 

@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.bridge.IOSRuntimePreflight;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.renderpearl.api.device.BackendCreationException;
 import com.mojang.renderpearl.api.device.GpuBackend;
@@ -35,7 +36,8 @@ public final class MetalBackend implements GpuBackend {
     public void loadLibrary() {
         // The bundled Metal bridge is loaded by MetalNativeBridge itself.  Keep
         // SPIRV-Cross selection ahead of any Spvc class initialization on iOS.
-        MetalNativeBridge.ensureSpvcLibraryConfigured();
+        IOSRuntimePreflight.prepare();
+        MetalNativeBridge.ensureLoaded();
     }
 
     @Override
@@ -60,7 +62,7 @@ public final class MetalBackend implements GpuBackend {
     @Override
     public @NonNull GpuDevice createDevice(final @NonNull GpuDebugOptions debugOptions)
             throws BackendCreationException {
-        MetalNativeBridge.ensureSpvcLibraryConfigured();
+        IOSRuntimePreflight.prepare();
 
         MemorySegment deviceHandle = MetalNativeBridge.metallum_create_system_default_device();
         if (MetalNativeBridge.isNullHandle(deviceHandle)) {

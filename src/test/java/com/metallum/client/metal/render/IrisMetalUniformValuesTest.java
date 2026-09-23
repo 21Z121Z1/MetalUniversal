@@ -522,6 +522,56 @@ final class IrisMetalUniformValuesTest {
     }
 
     @Test
+    void fixedProgramAlphaReferenceBypassesDynamicSupplierOnlyWhenPresent() {
+        CustomUniformFixedInputUniformsHolder inputs =
+                new CustomUniformFixedInputUniformsHolder.Builder().build();
+        CustomUniforms customUniforms = new CustomUniforms.Builder().build(inputs);
+        IrisMetalDynamicUniforms dynamic = IrisMetalDynamicUniforms.create(() -> 0);
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0f, customUniforms, inputs, dynamic, new FrameUpdateNotifier(), () -> 0
+        );
+        MetalIrisShaderCompiler.UniformMember alpha = new MetalIrisShaderCompiler.UniformMember(
+                "float", "iris_currentAlphaTest", 0, 0, Float.BYTES
+        );
+        MetalIrisShaderCompiler.GlslProgram fixedAlphaProgram = new MetalIrisShaderCompiler.GlslProgram(
+                "cutout-fixed-alpha", "", "", "", "", List.of(alpha), 16,
+                List.of(), List.of(), List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0}, java.util.OptionalDouble.of(0.5)
+        );
+        MetalIrisShaderCompiler.GlslProgram dynamicAlphaProgram = new MetalIrisShaderCompiler.GlslProgram(
+                "dynamic-alpha", "", "", "", "", List.of(alpha), 16,
+                List.of(), List.of(), List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0}, java.util.OptionalDouble.empty()
+        );
+        Object fixedAlphaToken = new Object();
+        Object dynamicAlphaToken = new Object();
+        try {
+            assertTrue(dynamic.canMaterialize(alpha), "Iris registers this member as a draw dynamic");
+            values.register(fixedAlphaToken, "cutout-fixed-alpha", fixedAlphaProgram);
+            values.beginProgramForTests(
+                    fixedAlphaToken, IrisMetalUniformValues.DrawUniformContext.empty()
+            );
+            assertEquals(
+                    0L,
+                    dynamic.supplierCalls("iris_currentAlphaTest"),
+                    "Sodium cutout must keep its program-owned threshold out of Iris's dynamic draw plan"
+            );
+
+            values.register(dynamicAlphaToken, "dynamic-alpha", dynamicAlphaProgram);
+            values.beginProgramForTests(
+                    dynamicAlphaToken, IrisMetalUniformValues.DrawUniformContext.empty()
+            );
+            assertEquals(
+                    1L,
+                    dynamic.supplierCalls("iris_currentAlphaTest"),
+                    "programs without a fixed threshold must retain Iris's dynamic supplier"
+            );
+        } finally {
+            values.close();
+        }
+    }
+
+    @Test
     void updatesFixedInputsOutsideCustomOrderWithoutDoubleRunningDependencies() {
         AtomicInteger dependencyCalls = new AtomicInteger();
         AtomicInteger independentCalls = new AtomicInteger();

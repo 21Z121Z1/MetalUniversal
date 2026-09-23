@@ -993,13 +993,19 @@ public final class MetalValidationClient implements ClientModInitializer {
             depthReport.addProperty("pruneFailures", depth.pruneFailures());
             depthReport.addProperty("captureSkips", depth.captureSkips());
             report.add("depthLivenessRuntime", depthReport);
+            long[] nativeArgumentTableStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+            boolean nativeMainRendererEngaged = nativeArgumentTableStats[0] != 0L;
             IrisMetalArgumentBindingRuntime.Stats argumentStats = IrisMetalArgumentBindingRuntime.stats();
             JsonObject argumentReport = new JsonObject();
+            argumentReport.addProperty("enabled", IrisMetalArgumentBindingRuntime.diagnosticsEnabled());
+            argumentReport.addProperty("snapshotDiagnosticsEnabled", IrisMetalArgumentBindingRuntime.diagnosticsEnabled());
             argumentReport.addProperty(
-                    "enabled",
-                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
-                            || Boolean.getBoolean("metallum.iris.argumentTables")
+                    "executionAuthority",
+                    nativeMainRendererEngaged
+                            ? "native-metal4-argument-tables"
+                            : "java-patch-seam-native-not-negotiated"
             );
+            argumentReport.addProperty("nativeMainRendererEngaged", nativeMainRendererEngaged);
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());
             argumentReport.addProperty("encodedSnapshots", argumentStats.encodedSnapshots());

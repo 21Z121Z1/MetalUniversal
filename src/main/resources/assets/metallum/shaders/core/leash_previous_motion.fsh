@@ -1,4 +1,5 @@
 #version 330
+#extension GL_ARB_separate_shader_objects : require
 
 layout(location = 0) noperspective in vec2 metallumObjectMotion;
 layout(location = 1) flat in float metallumObjectValidity;

@@ -175,7 +175,8 @@ final class MetalTransientMemory implements TransientMemory {
                 usage,
                 block.size(),
                 this,
-                this.submitIndex
+                this.submitIndex,
+                block.allocationIdentity()
         );
         this.frameWrappers.put(block, usage, wrapper);
         MetalTransientArenaTelemetry.recordWrapperMiss();
@@ -380,9 +381,10 @@ final class MetalTransientMemory implements TransientMemory {
                 @Usage final int usage,
                 final long size,
                 final MetalTransientMemory owner,
-                final long submitIndex
+                final long submitIndex,
+                final MetalAllocationIdentity backingIdentity
         ) {
-            super(device, usage, size, handle);
+            super(device, usage, size, handle, backingIdentity);
             this.owner = owner;
             this.bufferSubmitIndex = submitIndex;
         }

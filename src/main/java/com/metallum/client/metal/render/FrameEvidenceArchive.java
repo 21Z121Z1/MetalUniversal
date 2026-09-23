@@ -27,6 +27,7 @@ final class FrameEvidenceArchive {
     private long committedFrames;
     private String previousDigest = "";
     private volatile boolean stopping;
+    private volatile boolean flushed;
     private volatile IOException failure;
 
     FrameEvidenceArchive(FrameEvidenceRecorder recorder, JsonObject identity, Path output) {
@@ -55,10 +56,16 @@ final class FrameEvidenceArchive {
                 }
             }
             flush(true);
+            flushed = true;
         } catch (IOException exception) {
             failure = exception;
         } catch (RuntimeException exception) {
             failure = new IOException("evidence export failed", exception);
+        } catch (Error error) {
+            // A terminated worker is not proof of a successful export. Preserve the
+            // cause for finish() without suppressing the thread's fatal failure.
+            failure = new IOException("evidence writer terminated abnormally", error);
+            throw error;
         }
     }
 
@@ -97,6 +104,7 @@ final class FrameEvidenceArchive {
             // Do not replace a prior session or turn a failed export into a completed archive.
             throw failure;
         }
+        if (!flushed) throw new IOException("frame evidence writer exited without completing its final flush");
         checkpoint(true, validationStatus, completionMetadata);
     }
 

@@ -33,6 +33,7 @@ import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.lwjgl.system.MemoryUtil;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
@@ -93,6 +94,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private FrameEvidenceRecorder.Submission frameEvidenceSubmission;
     @Nullable
     private MTLCommandEncoder currentEncoder;
+    @Nullable
+    private ComputeGroupingScope computeGroupingScope;
     private boolean frameGenerationEncodeInCurrentCommandBuffer;
     private long frameGenerationFrameId;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
@@ -244,6 +247,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return currentEncoder == encoder;
     }
 
+    boolean isCurrentEncoder(final MTLComputeCommandEncoder encoder) {
+        return currentEncoder == encoder;
+    }
+
     /**
      * Render-encoder fence waits. Split mode narrows by dependency type per
      * the S10 table: uploads gate vertex fetch, while prior render output is
@@ -361,9 +368,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     /**
-     * Begins a mod-private compute pass. Vanilla Blaze3D 26.2 has no compute
-     * abstraction, so this API is only reachable from metallum code (Iris
-     * backend). The pass owns the underlying compute encoder until
+     * Begins a mod-private compute pass for the Iris adapter. The common
+     * RenderPearl command surface does not own this optional API. Unless an
+     * explicit grouping scope owns it, the pass owns the native encoder until
      * {@link MetalComputePass#close()}; interleaving other encoder work while
      * a pass is open is a caller error.
      */
@@ -372,30 +379,130 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     MetalComputePass createComputePass(final String semanticPassId) {
+        return createComputePass(semanticPassId, null, null);
+    }
+
+    private MetalComputePass createComputePass(
+            final String semanticPassId,
+            final @Nullable ComputeGroupingScope scope,
+            final IrisMetalComputeGroupingRuntime.@Nullable AccessSet accesses
+    ) {
+        if (computeGroupingScope != null && computeGroupingScope.logicalPassOpen) {
+            throw new IllegalStateException("A grouped logical compute pass is still open");
+        }
         submitRenderPass();
         // Pending deferred clears materialize through transient render
         // encoders; they must all land BEFORE the compute encoder opens, since
         // flushing mid-pass would tear the pass's encoder out from under it.
         flushAllPendingClears();
-        long contractPassToken = RenderContractRuntime.beginRenderPass(
-                semanticPassId,
-                PassType.COMPUTE,
-                List.of(),
-                null,
-                null,
-                new ViewportRecord(0, 0, 0, 0),
-                ScissorRecord.disabled(),
-                "unbound",
-                List.of(),
-                Map.of(
-                        "backend", "metal",
-                        "commandBufferSubmissionId", Long.toString(currentSubmitIndex),
-                        "nativeEncoderGeneration", Long.toString(encoderGeneration + 1)
-                )
-        );
-        MTLComputeCommandEncoder nativeEncoder = computeCommandEncoder();
-        beginContractTraceGroup(contractPassToken);
-        return new MetalComputePass(this, nativeEncoder, contractPassToken);
+        MTLComputeCommandEncoder nativeEncoder;
+        if (scope != null) {
+            scope.ensureActive();
+            java.util.Objects.requireNonNull(accesses, "grouped compute accesses");
+            boolean reuse = scope.nativeEncoder != null
+                    && currentEncoder == scope.nativeEncoder
+                    && scope.window.admits(accesses);
+            if (scope.hadPass) {
+                IrisMetalComputeGroupingRuntime.recordAdmission(reuse);
+            }
+            if (reuse) {
+                nativeEncoder = scope.nativeEncoder;
+            } else {
+                // An allocation hazard or an intervening clear/upload requires
+                // the ordinary fence boundary. Never guess from resource names.
+                nativeEncoder = computeCommandEncoder();
+                scope.window.reset();
+            }
+            scope.window.append(accesses);
+            scope.nativeEncoder = nativeEncoder;
+            scope.hadPass = true;
+        } else {
+            nativeEncoder = computeCommandEncoder();
+        }
+        long contractPassToken = -1L;
+        try {
+            contractPassToken = RenderContractRuntime.beginRenderPass(
+                    semanticPassId,
+                    PassType.COMPUTE,
+                    List.of(),
+                    null,
+                    null,
+                    new ViewportRecord(0, 0, 0, 0),
+                    ScissorRecord.disabled(),
+                    "unbound",
+                    List.of(),
+                    Map.of(
+                            "backend", "metal",
+                            "commandBufferSubmissionId", Long.toString(currentSubmitIndex),
+                            "nativeEncoderGeneration", Long.toString(encoderGeneration)
+                    )
+            );
+            beginContractTraceGroup(contractPassToken);
+            MetalComputePass pass = new MetalComputePass(this, nativeEncoder, contractPassToken);
+            if (scope != null) scope.logicalPassOpen = true;
+            return pass;
+        } catch (RuntimeException | Error failure) {
+            try {
+                endEncoder();
+            } finally {
+                RenderContractRuntime.endPass(contractPassToken);
+            }
+            throw failure;
+        }
+    }
+
+    /** Lexically owned scope; callers must resolve accesses before opening each pass. */
+    ComputeGroupingScope beginComputeGrouping() {
+        if (computeGroupingScope != null) {
+            throw new IllegalStateException("Compute grouping scopes cannot nest on one encoder");
+        }
+        ComputeGroupingScope scope = new ComputeGroupingScope();
+        computeGroupingScope = scope;
+        return scope;
+    }
+
+    final class ComputeGroupingScope implements AutoCloseable {
+        private final IrisMetalComputeGroupingRuntime.IndependenceWindow window =
+                new IrisMetalComputeGroupingRuntime.IndependenceWindow();
+        @Nullable
+        private MTLComputeCommandEncoder nativeEncoder;
+        private boolean hadPass;
+        private boolean logicalPassOpen;
+        private boolean closed;
+
+        private ComputeGroupingScope() {
+        }
+
+        MetalComputePass createPass(final String semanticPassId,
+                                    final IrisMetalComputeGroupingRuntime.AccessSet accesses) {
+            ensureActive();
+            return createComputePass(semanticPassId, this,
+                    java.util.Objects.requireNonNull(accesses, "compute accesses"));
+        }
+
+        private void ensureActive() {
+            if (closed || computeGroupingScope != this) {
+                throw new IllegalStateException("Compute grouping scope is not active on its owner");
+            }
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            ensureActive();
+            boolean unfinished = logicalPassOpen;
+            closed = true;
+            logicalPassOpen = false;
+            computeGroupingScope = null;
+            window.reset();
+            if (nativeEncoder != null && currentEncoder == nativeEncoder) {
+                endEncoder();
+            }
+            nativeEncoder = null;
+            if (unfinished) {
+                throw new IllegalStateException("Compute grouping closed with a live logical pass");
+            }
+        }
     }
 
     void beginContractTraceGroup(final long passToken) {
@@ -431,13 +538,26 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return pendingColorClears.containsKey(texture) || pendingDepthClears.containsKey(texture);
     }
 
+    /** Allocation-retirement hook, not a logical texture-owner close hook. */
+    void discardPendingClears(final MetalGpuTexture texture) {
+        pendingColorClears.remove(texture);
+        pendingDepthClears.remove(texture);
+    }
+
     void endComputePass(final MTLComputeCommandEncoder encoder) {
+        ComputeGroupingScope scope = computeGroupingScope;
+        boolean grouped = scope != null && scope.logicalPassOpen && scope.nativeEncoder == encoder;
+        if (grouped) scope.logicalPassOpen = false;
         if (currentEncoder != encoder) {
             throw new IllegalStateException(
                     "Compute pass closed after another encoder was started; passes must be closed before other encoding"
             );
         }
-        endEncoder();
+        if (grouped) {
+            IrisMetalComputeGroupingRuntime.recordDeferredClose();
+        } else {
+            endEncoder();
+        }
     }
 
     /**
@@ -1654,35 +1774,115 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int height
     ) {
         MetalGpuTexture metalDst = (MetalGpuTexture) destination;
-        flushPendingClearForWrite(metalDst);
 
         // Heap buffers have no stable native address; the transient-memory
         // staging upload memcpys from memAddress(source) and would SIGBUS.
         if (!source.isDirect()) {
             throw new IllegalArgumentException("writeToTexture requires a direct ByteBuffer");
         }
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("writeToTexture dimensions must be positive: " + width + "x" + height);
+        }
 
         int pixelSize = metalDst.pixelSize();
-        int rowBytes = Math.multiplyExact(width, pixelSize);
-        int bytesPerImage = Math.multiplyExact(rowBytes, height);
-        GpuBufferSlice slice = transientMemory.uploadStaging(
-                source.slice(source.position(), bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC
-        );
+        if (pixelSize <= 0) {
+            throw new IllegalStateException("Texture format has a non-positive pixel size: " + pixelSize);
+        }
 
-        MTLBlitCommandEncoder blit = blitCommandEncoder();
-        blit.copyFromBufferToTexture(
-                ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
-                slice.offset(),
-                metalDst.nativeHandle(),
-                mipLevel,
-                depthOrLayer,
-                destX,
-                destY,
-                width,
-                height,
-                rowBytes,
-                bytesPerImage
-        );
+        int sourceRowBytes = Math.multiplyExact(width, pixelSize);
+        int sourceBytes = Math.multiplyExact(sourceRowBytes, height);
+        if (source.remaining() < sourceBytes) {
+            throw new IllegalArgumentException(
+                    "writeToTexture source has " + source.remaining() + " remaining bytes; requires " + sourceBytes
+            );
+        }
+
+        // iOS Metal buffer-to-texture blits require a 16-byte row stride. Keep
+        // the compact source layout at the API boundary and repack only when
+        // a row needs padding; uploadStaging copies this temporary buffer into
+        // the frame-owned transient allocation before it is freed below.
+        int rowBytes = Math.multiplyExact(Math.addExact(sourceRowBytes, 15) / 16, 16);
+        int bytesPerImage = Math.multiplyExact(rowBytes, height);
+        int sourceEnd = Math.addExact(source.position(), sourceBytes);
+        ByteBuffer uploadSource = source.duplicate();
+        uploadSource.limit(sourceEnd);
+        uploadSource.position(source.position());
+        uploadSource = uploadSource.slice();
+
+        ByteBuffer paddedSource = null;
+        try {
+            if (rowBytes != sourceRowBytes) {
+                paddedSource = packTextureUploadRows(source, sourceRowBytes, rowBytes, height);
+                uploadSource = paddedSource;
+            }
+
+            flushPendingClearForWrite(metalDst);
+            GpuBufferSlice slice = transientMemory.uploadStaging(
+                    uploadSource, pixelSize, GpuBuffer.USAGE_COPY_SRC
+            );
+
+            MTLBlitCommandEncoder blit = blitCommandEncoder();
+            blit.copyFromBufferToTexture(
+                    ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
+                    slice.offset(),
+                    metalDst.nativeHandle(),
+                    mipLevel,
+                    depthOrLayer,
+                    destX,
+                    destY,
+                    width,
+                    height,
+                    rowBytes,
+                    bytesPerImage
+            );
+        } finally {
+            if (paddedSource != null) {
+                MemoryUtil.memFree(paddedSource);
+            }
+        }
+    }
+
+    static ByteBuffer packTextureUploadRows(
+            final ByteBuffer source,
+            final int sourceRowBytes,
+            final int destinationRowBytes,
+            final int height
+    ) {
+        if (sourceRowBytes <= 0 || height <= 0 || destinationRowBytes < sourceRowBytes
+                || (destinationRowBytes & 15) != 0) {
+            throw new IllegalArgumentException("Invalid texture upload row layout: source=" + sourceRowBytes
+                    + ", destination=" + destinationRowBytes + ", height=" + height);
+        }
+
+        int sourceBytes = Math.multiplyExact(sourceRowBytes, height);
+        int destinationBytes = Math.multiplyExact(destinationRowBytes, height);
+        if (source.remaining() < sourceBytes) {
+            throw new IllegalArgumentException("Texture upload source has " + source.remaining()
+                    + " remaining bytes; requires " + sourceBytes);
+        }
+
+        ByteBuffer packed = MemoryUtil.memCalloc(destinationBytes);
+        try {
+            ByteBuffer sourceRow = source.duplicate();
+            int sourceStart = source.position();
+            int sourceLimit = source.limit();
+            for (int row = 0; row < height; row++) {
+                int rowOffset = Math.multiplyExact(row, sourceRowBytes);
+                int rowStart = Math.addExact(sourceStart, rowOffset);
+                int rowEnd = Math.addExact(rowStart, sourceRowBytes);
+                sourceRow.limit(sourceLimit);
+                sourceRow.position(rowStart);
+                sourceRow.limit(rowEnd);
+                packed.position(Math.multiplyExact(row, destinationRowBytes));
+                packed.put(sourceRow);
+            }
+            packed.position(0);
+            packed.limit(destinationBytes);
+            return packed;
+        } catch (RuntimeException | Error failure) {
+            MemoryUtil.memFree(packed);
+            throw failure;
+        }
     }
 
     void writeToTextureVolume(

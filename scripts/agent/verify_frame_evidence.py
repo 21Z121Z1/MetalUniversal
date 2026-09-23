@@ -102,6 +102,32 @@ def load_report(path):
     report["frames"] = rows
     return report
 
+def verify_pipeline_creations(frame, mode, cpu_ns):
+    """Additive diagnostics: absence in old captures is not a zero-compilation claim."""
+    if "pipelineCreations" not in frame:
+        return
+    attempts = frame["pipelineCreations"]
+    require(isinstance(attempts, list) and len(attempts) <= 64, "invalid pipeline attempt buffer")
+    require(mode == "diagnostic" or not attempts, "timing mode must not claim pipeline diagnostics")
+    for attempt in attempts:
+        require(attempt["nativeCall"] == "metallum_MTLDevice_makeRenderPipelineState", "unknown pipeline native call")
+        require(isinstance(attempt["validationPipelineId"], str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", attempt["validationPipelineId"]) is not None,
+                "invalid pipeline semantic identity")
+        require(isinstance(attempt["pipelineLocation"], str) and bool(attempt["pipelineLocation"].strip()),
+                "missing pipeline location")
+        require(attempt["creationKind"] in ("base-eager", "attachment-variant"), "unknown pipeline creation kind")
+        require(integer(attempt["durationNs"]) <= cpu_ns, "pipeline attempt exceeds its source frame")
+        require(type(attempt["succeeded"]) is bool, "unknown pipeline attempt outcome")
+        signature = attempt["signature"]
+        colors = signature["colorFormats"]
+        require(isinstance(colors, list) and len(colors) <= 8, "invalid pipeline color signature")
+        formats = [*colors, signature["depthFormat"], signature["stencilFormat"]]
+        require(all(isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", value)
+                    for value in formats), "invalid pipeline attachment format")
+        integer(signature["sampleCount"], 1)
+
+
 def verify(report, expected_head, require_packaged=False, require_comparable=False, artifact_root=None):
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "expected HEAD must be a full SHA")
     require(report["schemaVersion"] == 1, "unsupported schema")
@@ -147,6 +173,7 @@ def verify(report, expected_head, require_packaged=False, require_comparable=Fal
         require(frame["ended"] is True and frame["failure"] == "", "incomplete/invalid frame")
         duration = integer(frame["cpuFrameNs"], 1)
         require(type(frame["renderLevel"]) is bool, "invalid renderLevel")
+        verify_pipeline_creations(frame, mode, duration)
         require(isinstance(frame["producerEntries"], list) and all(isinstance(p, str) for p in frame["producerEntries"]),
                 "invalid producer labels")
         if "terrainBatchIndices" in frame:

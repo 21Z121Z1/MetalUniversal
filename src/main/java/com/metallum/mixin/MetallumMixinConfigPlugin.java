@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.client.metal.render.bridge.NativePlatform;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -42,13 +43,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
-    private boolean isMacOs;
+    private boolean isAppleRuntime;
     private boolean isDefaultGraphicsApi;
 
     @Override
     public void onLoad(String mixinPackage) {
-        String osName = System.getProperty("os.name", "");
-        this.isMacOs = osName.toLowerCase(Locale.ROOT).contains("mac");
+        this.isAppleRuntime = NativePlatform.current() != NativePlatform.UNSUPPORTED;
         this.isDefaultGraphicsApi = Boolean.getBoolean("metallum.validation.forceMetal")
                 || isDefaultGraphicsApiSelected();
     }
@@ -60,7 +60,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        if (!this.isMacOs) {
+        if (!this.isAppleRuntime) {
             return false;
         }
         if (BACKEND_FRAME_COMPARISON_MIXIN.equals(mixinClassName)

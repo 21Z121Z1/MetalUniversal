@@ -196,7 +196,7 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return alt[checkIndex(index)];
     }
 
-    /** Persistent view for the texture the next pass should sample. */
+    /** Raw unswizzled read-side view for storage images and render attachments. */
     MetalGpuTextureView readView(final int index) {
         ensureOpen();
         return flipped.get(checkIndex(index)) ? altViews[index] : mainViews[index];
@@ -206,6 +206,13 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
     MetalGpuTextureView writeView(final int index) {
         ensureOpen();
         return flipped.get(checkIndex(index)) ? mainViews[index] : altViews[index];
+    }
+
+    /** Raw view of one fixed physical side, independent of the logical flip state. */
+    MetalGpuTextureView physicalView(final int index, final boolean alternate) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return alternate ? altViews[checked] : mainViews[checked];
     }
 
     /** Sampled view of the current read side, including logical format swizzles. */

@@ -153,7 +153,7 @@ public final class MetalNativeInterfaceTable {
                 // surface. iOS exposes System.load-ed symbols through loaderLookup;
                 // macOS libraryLookup keeps a private handle, so fall back to the
                 // already-loaded dyld image without extracting another dylib.
-                MetalNativeBridge.isIOS();
+                MetalNativeBridge.ensureLoaded();
                 Optional<MemorySegment> symbol = SymbolLookup.loaderLookup().find(
                         "metallum_get_interface"
                 );

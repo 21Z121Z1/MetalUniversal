@@ -58,6 +58,8 @@ final class MetalRenderPearlBoundaryTest {
                 Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer", false, loader));
         assertThrows(ClassNotFoundException.class, () ->
                 Class.forName("net.irisshaders.iris.mixinterface.GpuTextureInterface", false, loader));
+        assertTrue(assertDoesNotThrow(IrisMetalPipelineOverrides::frameGenerationMotionSemanticsProven),
+                "Reading an inactive adapter must not eagerly resolve optional blend ABI");
         assertTrue(assertDoesNotThrow(MetalFxManager::sourceShaderMotionSemanticsProven),
                 "Vanilla frame admission must not initialize an absent Iris adapter");
         assertFalse(assertDoesNotThrow(MetalIrisDepthConvention::enabledForMetalBackend));

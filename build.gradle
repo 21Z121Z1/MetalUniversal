@@ -86,11 +86,11 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
-// encoder counter sampling, even with both Metal validation layers disabled.
-// CI still compiles the native backend and GPU harnesses, but executes only
-// headless tests which do not create an MTLDevice. Real GPU/readback/window
-// validation remains part of every local Apple Silicon `build`.
+// Ordinary hosted builds run unit tests and the shipping JVM PSO smoke.
+// The dedicated metal-capabilities lane runs additional hosted GPU readbacks.
+// Physical presentation and MetalFX visual acceptance still require a real
+// Apple Silicon display. HUD instrumentation is configured by the harness,
+// independently from Metal API and shader validation below.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
@@ -140,22 +140,20 @@ tasks.test {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
 		environment "MTL_SHADER_VALIDATION", metalShaderValidation
+		// A headless JVM test does not need optional HUD counter sampling.
+		// This does not alter API/shader validation or the native HUD tasks.
+		if (hostedCi) {
+			environment "MTL_HUD_ENABLED", "0"
+			environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
+			environment "MTLFX_HUD_ENABLED", "0"
+			environment "METALLUM_PSO_COMPILE_HOP", "0"
+		}
 		// Keep JVM crash evidence with the rest of the agent evidence so a
 		// hosted SIGSEGV yields a full native stack instead of a bare exit code.
 		def hsErrDir = providers.gradleProperty("metallum.hsErrDir").orNull
 		if (hsErrDir != null) {
 			layout.buildDirectory.dir(hsErrDir).get().asFile.mkdirs()
 			jvmArgs "-XX:ErrorFile=${layout.buildDirectory.dir(hsErrDir).get().asFile.absolutePath}/hs_err_pid%p.log"
-		}
-		// Capability gate mirrors HostedMetalGradle.init.gradle: only an exact,
-		// probe-derived verdict may move the JVM PSO smoke to environment-
-		// blocked; unset or unknown keeps the strict default.
-		if (System.getenv("METALLUM_JVM_PSO_SMOKE_MODE") == "environment-blocked") {
-			exclude "**/MetalNativeBridgeRenderPipelineSmokeTest.class"
-			doFirst {
-				println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
-						"JVM PSO smoke reported environment-blocked (E2E remains the JVM-path authority)")
-			}
 		}
 	}
 }
@@ -253,12 +251,12 @@ def frameEvidenceGit = { List<String> arguments ->
 }
 // The native input digest also distinguishes dirty builds at the same Git HEAD.
 // Keep the compiler recipe in the digest alongside every shipping Swift input.
-def frameEvidenceNativeInputs = [
-        "build.gradle",
+def shippingNativeSwiftSources = [
         "src/main/native/MetalFrameGenerationLifecycle.swift",
         "src/main/native/MetallumInterface.swift",
         "src/main/native/MetallumNative.swift"
 ]
+def frameEvidenceNativeInputs = ["build.gradle"] + shippingNativeSwiftSources
 def frameEvidenceFileSha256 = { File input ->
     def digest = java.security.MessageDigest.getInstance("SHA-256")
     input.withInputStream { stream ->
@@ -338,11 +336,7 @@ tasks.register("buildMacNative", Exec) {
 	}
 
 	workingDir project.projectDir
-	inputs.files(
-		"src/main/native/MetalFrameGenerationLifecycle.swift",
-		"src/main/native/MetallumInterface.swift",
-		"src/main/native/MetallumNative.swift"
-	)
+	inputs.files(shippingNativeSwiftSources)
 	inputs.property "frameEvidenceBuildIdentity", frameEvidenceBuildIdentity
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
 	outputs.file("src/main/resources/natives/macos/libmetallum-build-identity.json")
@@ -376,9 +370,7 @@ tasks.register("buildMacNative", Exec) {
 		"-framework", "MetalFX",
 		"-framework", "QuartzCore",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
-		"src/main/native/MetalFrameGenerationLifecycle.swift",
-		"src/main/native/MetallumInterface.swift",
-		"src/main/native/MetallumNative.swift"
+		*shippingNativeSwiftSources
 }
 
 def metalMrtSmokeBinary = file("${buildDir}/metal-tests/MetalMRTSmokeTest")
@@ -2717,14 +2709,35 @@ def iosSdkPath = {
 
 tasks.register("buildIOSNative", Exec) {
 	onlyIf { iosSdkPath != null }
-
 	workingDir project.projectDir
+	inputs.files(shippingNativeSwiftSources)
+	inputs.property "frameEvidenceBuildIdentity", frameEvidenceBuildIdentity
+	inputs.property "target", "arm64-apple-ios14.0"
+	inputs.property "sdk", iosSdkPath ?: "unavailable"
+	outputs.file("src/main/resources/natives/ios/libmetallum.dylib")
+	outputs.file("src/main/resources/natives/ios/libmetallum-build-identity.json")
 	doFirst {
 		file("src/main/resources/natives/ios").mkdirs()
+		if (frameEvidenceNativeInputHashes() != frameEvidenceNativeSources) {
+			throw new GradleException("Native sources changed after build identity capture; restart the build")
+		}
 	}
-
-	// The dylib is built with `-static`-style linking of the Swift stdlib so it
-	// can be loaded directly via dlopen on a jailbroken/signable device.
+	doLast {
+		if (frameEvidenceNativeInputHashes() != frameEvidenceNativeSources) {
+			throw new GradleException("Native sources changed during iOS compilation; refusing provenance manifest")
+		}
+		def manifest = [
+				schemaVersion: 1,
+				build: new groovy.json.JsonSlurper().parseText(frameEvidenceBuildIdentity),
+				platform: "ios",
+				target: "arm64-apple-ios14.0",
+				nativeSha256: frameEvidenceFileSha256(file("src/main/resources/natives/ios/libmetallum.dylib"))
+		]
+		file("src/main/resources/natives/ios/libmetallum-build-identity.json").text =
+				groovy.json.JsonOutput.toJson(manifest) + "\n"
+	}
+	// This is an ordinary iOS dylib. Distribution signing and the launcher's
+	// compatible JVM/LWJGL deployment remain separate device acceptance gates.
 	if (iosSdkPath != null) {
 		commandLine "swiftc",
 			"-O",
@@ -2738,8 +2751,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
-			"src/main/native/MetallumInterface.swift",
-			"src/main/native/MetallumNative.swift"
+			*shippingNativeSwiftSources
 	}
 }
 
@@ -2752,9 +2764,8 @@ tasks.register("buildIOSNative", Exec) {
 //
 // We build SPIRV-Cross from source with SPIRV_CROSS_C_API=ON and
 // SPIRV_CROSS_ENABLE_MSL=ON, then bundle the resulting libspvc.dylib in the
-// jar. At runtime, MetalCrossShaderCompiler extracts it and sets
-// Configuration.SPVC_LIBRARY_NAME so LWJGL uses our full version instead of
-// MoltenVK's stripped one.
+// jar. IOSRuntimePreflight selects it before Spvc initializes; an explicit or
+// launcher-signed full image takes precedence over this packaged fallback.
 tasks.register("buildIOSSpvc") {
 	onlyIf { iosSdkPath != null }
 

@@ -109,10 +109,16 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     }
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
+        this(device, usage, size, wrappedHandle, MetalAllocationIdentity.allocate("metal-buffer"));
+    }
+
+    /** A borrowed facade shares the backing allocation's identity, not its ownership. */
+    MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size,
+                   final @Nullable MemorySegment wrappedHandle, final MetalAllocationIdentity backingIdentity) {
         super(usage, size);
         this.device = device;
         this.logicalLabel = "metal-buffer";
-        this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
+        this.allocationIdentity = java.util.Objects.requireNonNull(backingIdentity, "backing identity");
         this.cpuAccessible = false;
         this.dynamic = false;
         this.resourceOptions = 0L;

@@ -90,8 +90,11 @@ final class IrisMetalComputeConformanceTest {
                 values.prewarm(device);
                 chain.prepare(device, targets, GpuFormat.RGBA8_UNORM, fallback);
 
-                IrisMetalPostChain.ResourceProvider resources = resources(chain, values, computeResources);
+                Map<Integer, Integer> bufferResolutions = new java.util.HashMap<>();
+                IrisMetalPostChain.ResourceProvider resources = resources(chain, values, computeResources, bufferResolutions);
                 executeContract(device, chain, targets, computeResources, resources, WIDTH, HEIGHT);
+                assertEquals(Map.of(1, 5, 2, 1), bufferResolutions,
+                        "resolve each reflected binding and indirect argument once, not once for analysis and again for execution");
 
                 GpuTextureView oldImage = computeResources.storageImage("contractImage");
                 targets.resize(RESIZED_WIDTH, RESIZED_HEIGHT);
@@ -104,9 +107,12 @@ final class IrisMetalComputeConformanceTest {
                 executeContract(
                         device, chain, targets, computeResources, resources, RESIZED_WIDTH, RESIZED_HEIGHT
                 );
+                assertEquals(Map.of(1, 10, 2, 2), bufferResolutions,
+                        "resize must not retain a binding snapshot or double-resolve its replacement");
             }
         } finally {
             MetalFxManager.close();
+            device.close();
         }
     }
 
@@ -167,7 +173,8 @@ final class IrisMetalComputeConformanceTest {
     private static IrisMetalPostChain.ResourceProvider resources(
             final IrisMetalPostChain chain,
             final IrisMetalUniformValues values,
-            final IrisMetalComputeResources computeResources
+            final IrisMetalComputeResources computeResources,
+            final Map<Integer, Integer> bufferResolutions
     ) {
         return new IrisMetalPostChain.ResourceProvider() {
             @Override
@@ -209,6 +216,7 @@ final class IrisMetalComputeConformanceTest {
 
             @Override
             public GpuBufferSlice storageBuffer(final int binding) {
+                bufferResolutions.merge(binding, 1, Integer::sum);
                 return computeResources.storageBuffer(binding);
             }
         };

@@ -263,8 +263,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 || !(metalView.texture() instanceof MetalGpuTexture texture)) {
             throw new IllegalArgumentException("Storage image " + name + " is not backed by Metal");
         }
-        GpuTextureView previous = storageImages.put(name, textureView);
+        metalView.validateStorageBinding();
         commandEncoder.flushPendingClear(texture);
+        GpuTextureView previous = storageImages.put(name, textureView);
         texture.markContentsDirty();
         markDescriptorDirty(name);
         if (previous != textureView) {

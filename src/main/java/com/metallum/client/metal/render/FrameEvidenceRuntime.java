@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.terrain.VanillaTerrainWorkTelemetry;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -20,6 +21,7 @@ import java.security.MessageDigest;
 import java.util.HexFormat;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import net.minecraft.resources.Identifier;
 
 /** Optional observer; no alternate renderer, native module, wait, or per-frame file I/O. */
 public final class FrameEvidenceRuntime {
@@ -62,6 +64,11 @@ public final class FrameEvidenceRuntime {
 
     public static void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
         if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
+    }
+
+    /** Use the driver's existing Java-clock anchor; do not resample or reinterpret the durations. */
+    public static void armWindowAt(JsonObject profile, long warmupNs, long sampleNs, long anchorNs) {
+        if (ENABLED) RECORDER.armWindowAt(profile, warmupNs, sampleNs, anchorNs);
     }
 
     public static boolean windowComplete() { return ENABLED && RECORDER.windowComplete(); }
@@ -116,6 +123,26 @@ public final class FrameEvidenceRuntime {
 
     public static void terrainBatchEncoded(long terrainFrameIndex) {
         if (ENABLED) RECORDER.terrainBatchEncoded(terrainFrameIndex);
+    }
+
+    /** Disabled and timing-only capture allocate no PSO token or signature. */
+    public static FrameEvidenceRecorder.PipelineCreation pipelineCreationStarted() {
+        return ENABLED && "diagnostic".equals(MODE) ? RECORDER.pipelineCreationStarted() : null;
+    }
+
+    public static void pipelineCreationFinished(FrameEvidenceRecorder.PipelineCreation attempt,
+            String pipelineId, Identifier location, String kind, MTLPixelFormat[] colorFormats,
+            MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat, int sampleCount, boolean succeeded) {
+        if (attempt == null) return;
+        long completedNs = System.nanoTime();
+        JsonObject signature = new JsonObject();
+        JsonArray colors = new JsonArray();
+        for (MTLPixelFormat format : colorFormats) colors.add(format.name());
+        signature.add("colorFormats", colors);
+        signature.addProperty("depthFormat", depthFormat.name());
+        signature.addProperty("stencilFormat", stencilFormat.name());
+        signature.addProperty("sampleCount", sampleCount);
+        RECORDER.pipelineCreationFinished(attempt, completedNs, pipelineId, location.toString(), kind, signature, succeeded);
     }
 
     public static FrameEvidenceRecorder.Submission commandBuffer(long submitIndex) {

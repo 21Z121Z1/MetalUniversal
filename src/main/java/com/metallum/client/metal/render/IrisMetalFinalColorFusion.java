@@ -34,7 +34,7 @@ final class IrisMetalFinalColorFusion {
 
     static Result fuse(final Candidate candidate) {
         Objects.requireNonNull(candidate, "candidate");
-        if (!IrisMetalOptimizationPlan.ENABLE_FINAL_COLOR_FUSION) {
+        if (!IrisMetalAdvancedOptimizationConfig.FINAL_COLOR_FUSION) {
             return Result.rejected("feature disabled");
         }
         if (!candidate.singleColorOutput()) {

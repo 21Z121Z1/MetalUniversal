@@ -276,16 +276,25 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             "pairs": pairs,
         }
 
+    missing_guardrails = sorted(
+        metric for metric in GUARDRAILS
+        if not comparison["metrics"][metric].get("available")
+        or comparison["metrics"][metric].get("paired_blocks", 0) < MIN_PAIRED_BLOCKS
+    )
     guardrail_regressions: list[dict[str, Any]] = []
     for metric, limit in GUARDRAILS.items():
         result = comparison["metrics"].get(metric, {})
         if not result.get("available"):
             continue
         pct = result.get("improvement_percent")
-        if pct is not None and float(pct) < -(limit * 100.0):
+        zero_tolerance_worsened = limit == 0.0 and any(
+            float(pair["after"]) > float(pair["before"])
+            for pair in result.get("pairs", [])
+        )
+        if zero_tolerance_worsened or (pct is not None and float(pct) < -(limit * 100.0)):
             guardrail_regressions.append({
                 "metric": metric,
-                "observed_regression_percent": -float(pct),
+                "observed_regression_percent": -float(pct) if pct is not None else None,
                 "allowed_regression_percent": limit * 100.0,
             })
 
@@ -296,6 +305,9 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     elif mandatory_missing:
         state = "inconclusive-noise"
         reason = "mandatory structured performance metrics are missing"
+    elif missing_guardrails:
+        state = "inconclusive-noise"
+        reason = "structured guardrail metrics are missing or have fewer than four paired blocks"
     elif len(blocks) < MIN_PAIRED_BLOCKS:
         state = "inconclusive-noise"
         reason = f"fewer than {MIN_PAIRED_BLOCKS} paired blocks"
@@ -316,6 +328,7 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "correctness_passed": correctness_passed,
         "any_stable_positive_metric": any_stable_positive,
         "missing_mandatory_metrics": mandatory_missing,
+        "missing_guardrail_metrics": missing_guardrails,
         "guardrail_regressions": guardrail_regressions,
         "minimum_paired_blocks": MIN_PAIRED_BLOCKS,
         "minimum_direction_consistency": MIN_DIRECTION_CONSISTENCY,
@@ -366,7 +379,8 @@ def write_markdown(path: Path, comparison: dict[str, Any], decision: dict[str, A
         "",
         f"The decision requires at least {MIN_PAIRED_BLOCKS} paired blocks, "
         f"at least {MIN_DIRECTION_CONSISTENCY:.0%} positive blocks for one metric, "
-        "a passing correctness gate, mandatory structured FPS, and no guardrail regression.",
+        "a passing correctness gate, mandatory structured FPS, four paired samples "
+        "for every guardrail, and no guardrail regression.",
         "",
     ])
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -395,7 +409,40 @@ def self_test() -> None:
                     encoding="utf-8",
                 )
         _, decision = analyze(root)
+        assert decision["state"] == "inconclusive-noise", decision
+        assert "peak_resident_memory_bytes" in decision["missing_guardrail_metrics"], decision
+
+        for trial in (root / "trials").glob("block-*/*"):
+            source = trial / "source.json"
+            report = json.loads(source.read_text(encoding="utf-8"))
+            report.update({
+                "cpu_render_encode_time_ms": 4.0,
+                "peak_resident_memory_bytes": 1_000_000,
+                "frame_time_stutter_count": 0,
+            })
+            source.write_text(json.dumps(report), encoding="utf-8")
+            (trial / "metrics.json").unlink()
+        _, decision = analyze(root)
         assert decision["state"] == "accepted-candidate", decision
+
+        candidate = root / "trials" / "block-001" / "candidate"
+        source = candidate / "source.json"
+        report = json.loads(source.read_text(encoding="utf-8"))
+        report.pop("peak_resident_memory_bytes")
+        source.write_text(json.dumps(report), encoding="utf-8")
+        (candidate / "metrics.json").unlink()
+        _, decision = analyze(root)
+        assert decision["state"] == "inconclusive-noise", decision
+        assert "peak_resident_memory_bytes" in decision["missing_guardrail_metrics"], decision
+
+        report["peak_resident_memory_bytes"] = 1_000_000
+        report["frame_time_stutter_count"] = 1
+        source.write_text(json.dumps(report), encoding="utf-8")
+        (candidate / "metrics.json").unlink()
+        _, decision = analyze(root)
+        assert decision["state"] == "rejected-regression", decision
+        assert any(item["metric"] == "frame_time_stutter_count"
+                   for item in decision["guardrail_regressions"]), decision
     print("self-test: PASS")
 
 

@@ -40,10 +40,10 @@ final class IrisMetalScheduledWorkQueue {
     void execute(final ScopeFactory scopes) {
         Objects.requireNonNull(scopes, "scopes");
         boolean[] consumed = new boolean[work.size()];
-        if (IrisMetalOptimizationPlan.ENABLE_PASS_FUSION) {
+        if (IrisMetalAdvancedOptimizationConfig.RENDER_PASS_FUSION) {
             executeGroups(plan.renderMergeGroups(), Kind.RENDER, scopes, consumed);
         }
-        if (IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING) {
+        if (IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING) {
             executeGroups(plan.computeMergeGroups(), Kind.COMPUTE, scopes, consumed);
         }
         for (int index = 0; index < work.size(); index++) {

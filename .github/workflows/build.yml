@@ -14,9 +14,7 @@ on:
       - 'v*'
   pull_request:
     branches:
-      - master
-      - 'integration/**'
-      - codex/frame-evidence-contract-v1-20260920
+      - main
 
 permissions:
   contents: read
@@ -92,44 +90,59 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/agent/record_sdk_contract.py --output build/agent-evidence/sdk-api-contract.txt
-      - name: Probe raw pipeline-compile threading capability
+      - name: Verify shipping pipeline compilation from native and JVM threads
         shell: bash
+        env:
+          # The dedicated native HUD tasks retain their startup/toggle tests.
+          MTL_HUD_ENABLED: '0'
+          MTL_HUD_ENCODER_TIMING_ENABLED: '0'
+          MTLFX_HUD_ENABLED: '0'
+          METALLUM_PSO_COMPILE_HOP: '0'
         run: |
           set -euo pipefail
-          ./gradlew buildMacNative
+          ./gradlew --no-daemon buildMacNative
           xcrun swiftc -O -target arm64-apple-macosx14.0 \
             -framework Foundation -framework Metal \
             src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
             -o "$RUNNER_TEMP/metallum-shipping-abi-probe"
-          # The binary disables the dylib's own compiler hop internally, so
-          # this measures raw Metal behavior. A background-thread crash is a
-          # capability verdict, not a workflow failure.
-          ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
+          # Both native phases and the fresh-process JVM background-thread
+          # sequence are mandatory. A signal or nonzero exit fails the job;
+          # a partial PASS marker can never authorize skipping another test.
+          "$RUNNER_TEMP/metallum-shipping-abi-probe" \
             src/main/resources/natives/macos/libmetallum.dylib \
-            | tee "$RUNNER_TEMP/shipping-abi-threading-probe.log") || true
-          grep -Fq SHIPPING_PIPELINE_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log"
-          (java --enable-native-access=ALL-UNNAMED \
+            2>&1 | tee build/agent-evidence/shipping-abi-threading-probe.log
+          grep -Fq SHIPPING_PIPELINE_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
+          grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
+          java --enable-native-access=ALL-UNNAMED \
+            "-XX:ErrorFile=$(pwd)/build/agent-evidence/hs_err_pid%p.log" \
             .github/ci/JvmPsoThreadingProbe.java \
             "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
-            | tee "$RUNNER_TEMP/jvm-pso-threading-probe.log") || true
-          cp "$RUNNER_TEMP/shipping-abi-threading-probe.log" build/agent-evidence/
-          cp "$RUNNER_TEMP/jvm-pso-threading-probe.log" build/agent-evidence/
-          if grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log" \
-            && grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS "$RUNNER_TEMP/jvm-pso-threading-probe.log"; then
-            echo "METALLUM_JVM_PSO_SMOKE_MODE=required" >> "$GITHUB_ENV"
-          else
-            echo "METALLUM_JVM_PSO_SMOKE_MODE=environment-blocked" >> "$GITHUB_ENV"
-          fi
+            2>&1 | tee build/agent-evidence/jvm-pso-threading-probe.log
+          grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS build/agent-evidence/jvm-pso-threading-probe.log
       - name: build
-        # The hosted virtual GPU aborts in libMTLHud counter sampling even when
-        # Metal validation is disabled. CI therefore runs compilation and
-        # headless tests only; physical-GPU readbacks and CAMetalLayer visual
-        # acceptance are local release evidence.
-        run: >-
-          ./gradlew buildMacNative build
-          -Pmetallum.hsErrDir=build/agent-evidence
-          -x metalFrameGenerationPresentationValidation
-          -x metalFxOffscreenValidation
+        # Ordinary build tests include the mandatory JVM PSO smoke. Additional
+        # hosted GPU readbacks run in metal-capabilities; physical presentation
+        # and MetalFX visual acceptance remain separate release evidence.
+        run: |
+          set -euo pipefail
+          xcrun --sdk iphoneos --show-sdk-path
+          ./gradlew buildMacNative build \
+            -Pmetallum.hsErrDir=agent-evidence \
+            -x metalFrameGenerationPresentationValidation \
+            -x metalFxOffscreenValidation
+          test -s src/main/resources/natives/ios/libmetallum.dylib
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          root = Path('src/main/resources/natives/ios')
+          image = root / 'libmetallum.dylib'
+          receipt = json.loads((root / 'libmetallum-build-identity.json').read_text())
+          if receipt.get('platform') != 'ios' or receipt.get('target') != 'arm64-apple-ios14.0':
+              raise SystemExit('iOS native build identity has the wrong platform or target')
+          if receipt.get('nativeSha256') != hashlib.sha256(image.read_bytes()).hexdigest():
+              raise SystemExit('iOS native image hash does not match its build identity')
+          PY
       - name: capture JVM crash evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -151,6 +164,7 @@ jobs:
             build/agent-evidence/source.bundle
             build/agent-evidence/sdk-api-contract.txt
             build/agent-evidence/*threading-probe.log
+            build/agent-evidence/hs_err_pid*.log
             build/test-results/
             build/reports/tests/
           if-no-files-found: error

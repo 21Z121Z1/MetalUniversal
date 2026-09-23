@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preserve exact-version window, loop and shader-binding reference files."""
+"""Preserve exact-version window, loop, shader-binding and workload reference files."""
 import argparse
 import hashlib
 import json
@@ -11,7 +11,8 @@ NAMES = {"Minecraft.java", "Window.java", "RenderSystem.java", "Timer.java", "De
          "PipelineBuilder.java", "SpvModule.java", "BindGroupLayout.java", "UniformType.java",
          "BackendRenderPipeline.java", "FrontendRenderPipeline.java", "ShaderCompiler.java",
          "ShaderSource.java", "RenderPipeline.java", "GpuBackend.java", "GlslCompiler.java",
-         "SpvUtil.java", "SpvReflection.java", "ShadercSpvModule.java"}
+         "SpvUtil.java", "SpvReflection.java", "ShadercSpvModule.java",
+         "Blocks.java", "Entity.java", "TagCommand.java", "EntitySelectorOptions.java"}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
