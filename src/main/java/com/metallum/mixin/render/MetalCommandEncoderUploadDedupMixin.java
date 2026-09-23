@@ -22,7 +22,7 @@ public abstract class MetalCommandEncoderUploadDedupMixin {
             final ByteBuffer data,
             final CallbackInfo ci
     ) {
-        destination.buffer().checkCanBeUsed();
+        if (destination.buffer().isClosed()) throw new IllegalStateException("Metal buffer is closed");
         MetalBufferUpload.validate(destination.buffer().size(), destination.offset(), destination.length(), data.remaining());
         if (!(destination.buffer() instanceof MetalUploadDedupBuffer dedup)) {
             return;
