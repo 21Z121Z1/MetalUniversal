@@ -6,28 +6,32 @@ The engineering target is at least 19 of these 20 lines passing, including every
 
 | # | Contract and minimum evidence | Class | Status |
 |---|---|---|---|
-| 1 | Exact 26.3 RenderPearl backend API/descriptor and Java–Swift ABI compile on final HEAD | critical | pending |
-| 2 | Base backend classloads and enters a Vanilla world without Iris or Sodium | critical | pending |
-| 3 | Base backend renders a deterministic world with no unexplained render-contract difference from Vulkan | critical | pending |
-| 4 | Resource reload and resize recreate usable pipelines, textures and surface | critical | pending |
-| 5 | Texture format, dimensions, layers, mip counts and view ranges obey frontend and native limits | critical | pending |
-| 6 | Color/depth clear and regional clear preserve independent expected attachment values | critical | pending |
-| 7 | Buffer/texture copy and readback preserve bytes, offsets, rows and callback completion | critical | pending |
-| 8 | Render/transfer RAW, WAR and WAW ordering and resource retirement pass native readback tests | critical | pending |
-| 9 | Direct and indirect draw offsets, base vertex and first instance pass independent expected-pixel tests | critical | pending |
-| 10 | MRT blend, depth and write masks pass independent expected-pixel tests; packed depth/stencil attachment formats obey the supported-format policy | critical | pending |
-| 11 | Shader inputs, outputs, bindings, push constants and coordinate/depth conventions match RenderPearl SPIR-V semantics | critical | pending |
-| 12 | Dynamic shader source and user resource-pack shader changes reach the Metal pipeline | critical | pending |
-| 13 | Metal 3 pipeline creation/cache and reload produce correct native PSOs | critical | pending |
-| 14 | Metal 4 pipeline route has an explicit capability gate and correct native PSO behavior on actual Metal 4 | critical | pending |
-| 15 | GPU timestamp queries use GPU samples, report pending/invalid as unavailable, and calibrate to host time without fabrication | critical | pending |
-| 16 | Device limits and feature bits match exercised native capability and fail closed otherwise | critical | pending |
-| 17 | Mipmap generation handles one-level textures without a Metal validation assertion | critical | pending |
-| 18 | Surface acquire, blit, present, iconify and error lifecycle pass production-client observation | critical | pending |
-| 19 | Native Metal 3 automated suite passes with validation enabled on final binary | critical | pending |
-| 20 | Native Metal 4 automated suite passes on true Metal 4 hardware, separately from hosted/Paravirtual results | critical | pending |
+| 1 | Exact 26.3 RenderPearl backend API/descriptor and Java–Swift ABI compile on final HEAD | critical | pass |
+| 2 | Base backend classloads and enters a Vanilla world without Iris or Sodium | critical | pass |
+| 3 | Base backend renders a deterministic world with no unexplained render-contract difference from Vulkan | critical | failed |
+| 4 | Resource reload and resize recreate usable pipelines, textures and surface | critical | partial |
+| 5 | Texture format, dimensions, layers, mip counts and view ranges obey frontend and native limits | critical | partial |
+| 6 | Color/depth clear and regional clear preserve independent expected attachment values | critical | pass |
+| 7 | Buffer/texture copy and readback preserve bytes, offsets, rows and callback completion | critical | pass |
+| 8 | Render/transfer RAW, WAR and WAW ordering and resource retirement pass native readback tests | critical | partial |
+| 9 | Direct and indirect draw offsets, base vertex and first instance pass independent expected-pixel tests | critical | pass |
+| 10 | MRT blend, depth and write masks pass independent expected-pixel tests; packed depth/stencil attachment formats obey the supported-format policy | critical | partial |
+| 11 | Shader inputs, outputs, bindings, push constants and coordinate/depth conventions match RenderPearl SPIR-V semantics | critical | partial |
+| 12 | Dynamic shader source and user resource-pack shader changes reach the Metal pipeline | critical | partial |
+| 13 | Metal 3 pipeline creation/cache and reload produce correct native PSOs | critical | pass |
+| 14 | Metal 4 pipeline route has an explicit capability gate and correct native PSO behavior on actual Metal 4 | critical | pass |
+| 15 | GPU timestamp queries use GPU samples, report pending/invalid as unavailable, and calibrate to host time without fabrication | critical | pass |
+| 16 | Device limits and feature bits match exercised native capability and fail closed otherwise | critical | partial |
+| 17 | Mipmap generation handles one-level textures without a Metal validation assertion | critical | pass |
+| 18 | Surface acquire, blit, present, iconify and error lifecycle pass production-client observation | critical | partial |
+| 19 | Native Metal 3 automated suite passes with validation enabled on final binary | critical | pass |
+| 20 | Native Metal 4 automated suite passes on true Metal 4 hardware, separately from hosted/Paravirtual results | critical | pass |
 
 Statuses will be changed only alongside the exact final artifact, command, exit status and independent observation. A hosted runner with `metallum_metal4_supported=false` cannot pass line 20. Encoder-level GPU telemetry is not line 15's arbitrary RenderPearl query contract. The existing `RenderTraceRecorder` and unified evaluation loop own cross-backend semantic identity; this document only records acceptance, not another trace format.
+
+The current result is **11/20 pass**, eight partial and one failed. The 95% target is not met. The production client independently verifies the clean, exact-source JAR and loaded native-library hash; the Vanilla 26.3 run produces eight nonblank 854x480 GPU readbacks, successful presentation and resource reload receipts. The Metal 3 and Metal 4 native suites pass separately with Metal API validation enabled on a physical Apple M1 Pro. `renderContractSyntheticValidation`, the Vanilla boundary test and `verify_unified_eval.sh` pass. Local evidence is in ignored `build/` and `.github/ci/minecraft-e2e/build/`, and must not be committed.
+
+The failed line 3 is a forced Metal/Vulkan comparison of the same copied world and recorded camera, time, weather, entity poses, lightmap inputs and terrain inputs. The comparison report is `build/renderpearl-backend-compare/comparison.json`: both requested frames differ in 308,364 of 1,639,680 pixels, with maximum channel delta 170. Most differences have magnitude one, but a smaller concentrated region has larger deltas; Metal reports 586 visible chunks and Vulkan 587. These differences are not accepted as harmless. Line 4 lacks a production window-resize receipt despite native texture resize and production resource reload passing. Lines 5, 8, 10, 11, 12 and 16 lack complete coverage of their listed subcontracts. Line 18 has successful acquire/present and reload receipts, but no production iconify/error-lifecycle observation. One isolated production run closed during the fifth sample while Gradle returned success; a fresh isolated rerun completed and its required receipts were checked independently. The Gradle exit code alone is not a GameTest pass.
 
 The 26.3 `DepthStencilState` contains depth compare, depth write and depth bias; it does not expose stencil compare or stencil write controls. Line 10 checks only the depth/stencil attachment formats that RenderPearl can describe, including fail-closed rejection of unsupported combinations. This corrects the initial wording without removing a matrix line.
 
