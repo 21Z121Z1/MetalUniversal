@@ -1,0 +1,38 @@
+name: Verify audited migration delta
+on:
+  push:
+    branches: [agent/upstream-26.3-workbench-20260923]
+    paths: ['.github/ci/upstream-delta/**', '.github/workflows/upstream-delta.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  verify-delta:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/upstream-26.3-workbench-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CANDIDATE_BASE: 7044cda40776bb563834d207d48a95542606d9eb
+      CANDIDATE_TREE: bc92c28e2bb5c6f9b6f0142708ac59ef8974f156
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: workbench
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.CANDIDATE_BASE }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify exact delta and upload content-addressed blobs
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELTA_FILE: ${{ github.workspace }}/workbench/.github/ci/upstream-delta/delta.patch
+          DELTA_RECEIPT: ${{ runner.temp }}/delta-receipt
+        run: python3 ../workbench/.github/ci/upstream-delta/apply.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-upstream-delta
+          path: ${{ runner.temp }}/delta-receipt/
+          retention-days: 7

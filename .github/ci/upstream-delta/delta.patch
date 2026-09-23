@@ -1,0 +1,118 @@
+diff --git a/.github/workflows/minecraft-client-e2e.yml b/.github/workflows/minecraft-client-e2e.yml
+index 48fcd8a..b4f5648 100644
+--- a/.github/workflows/minecraft-client-e2e.yml
++++ b/.github/workflows/minecraft-client-e2e.yml
+@@ -84,6 +84,12 @@ jobs:
+           jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+           unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+           echo "jar=$jar" >> "$GITHUB_OUTPUT"
++      - name: Configure the physical production task without launching a client
++        run: |
++          ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e \
++            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
++            -Pmetallum.renderer="${{ matrix.renderer }}" \
++            help --task runProductionClientValidation
+       - name: Run the isolated Minecraft 26.3 production client GameTest
+         run: |
+           ./gradlew --no-daemon --stacktrace \
+diff --git a/scripts/agent/physical_preflight.sh b/scripts/agent/physical_preflight.sh
+index 9648038..4143f88 100644
+--- a/scripts/agent/physical_preflight.sh
++++ b/scripts/agent/physical_preflight.sh
+@@ -33,3 +33,12 @@ production_jar_path() {
+   [[ -s "$path" ]] || { echo "Expected production JAR absent: $path" >&2; return 2; }
+   printf '%s\n' "$path"
+ }
++
++# Evidence outputs are append-once run identities. Never let an old passing
++# decision survive a failed rerun that reuses an output directory.
++prepare_physical_output() {
++  local out="$1"
++  [[ ! -e "$out" ]] || { echo "Physical output already exists: $out" >&2; return 2; }
++  mkdir -p "$(dirname "$out")"
++  mkdir "$out"
++}
+diff --git a/scripts/agent/run_metal4_main_p1_physical_correctness.sh b/scripts/agent/run_metal4_main_p1_physical_correctness.sh
+index cb70b66..ff4be28 100644
+--- a/scripts/agent/run_metal4_main_p1_physical_correctness.sh
++++ b/scripts/agent/run_metal4_main_p1_physical_correctness.sh
+@@ -24,7 +24,7 @@ if [[ -n "$(git status --porcelain=v1)" ]]; then
+ fi
+ 
+ HEAD_SHA="$(git rev-parse HEAD)"
+-mkdir -p "$OUT"
++prepare_physical_output "$OUT"
+ 
+ sha256_file() {
+   shasum -a 256 "$1" | awk '{print $1}'
+@@ -116,11 +116,6 @@ run_lane() {
+ run_lane baseline
+ run_lane candidate
+ 
+-python3 scripts/agent/check_metal4_main_e2e_pair.py \
+-  "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
+-  "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
+-  --output "$OUT/pair-decision.json"
+-
+ python3 - "$OUT" <<'PY'
+ import json, pathlib, sys
+ root = pathlib.Path(sys.argv[1])
+@@ -156,12 +151,18 @@ for lane in ("baseline", "candidate"):
+     )
+ PY
+ 
+-python3 - "$OUT/pair-decision.json" "$RENDERER_MODE" <<'PYMODE'
++python3 scripts/agent/check_metal4_main_e2e_pair.py \
++  "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
++  "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
++  --output "$OUT/.pair-decision.tmp.json"
++
++python3 - "$OUT/.pair-decision.tmp.json" "$RENDERER_MODE" <<'PYMODE'
+ import json, pathlib, sys
+ p = pathlib.Path(sys.argv[1]); d = json.loads(p.read_text())
+ d['rendererMode'] = sys.argv[2]
+ d['identity']['rendererMode'] = sys.argv[2]
+ p.write_text(json.dumps(d, indent=2) + '\n')
++p.replace(p.with_name('pair-decision.json'))
+ PYMODE
+ 
+ echo "P1 physical correctness pair: PASS ($RENDERER_MODE)"
+diff --git a/scripts/agent/run_metal4_main_p1_physical_matrix.sh b/scripts/agent/run_metal4_main_p1_physical_matrix.sh
+index fbf3e98..8738d3a 100644
+--- a/scripts/agent/run_metal4_main_p1_physical_matrix.sh
++++ b/scripts/agent/run_metal4_main_p1_physical_matrix.sh
+@@ -12,6 +12,7 @@ physical_preflight
+ HEAD_SHA="$(git rev-parse HEAD)"
+ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+ OUT="${METALLUM_P1_MATRIX_OUT:-$ROOT/build/agent-runs/p1-metal4-main-matrix-$STAMP}"
++prepare_physical_output "$OUT"
+ mkdir -p "$OUT/correctness" "$OUT/profiles"
+ # Each optional stack earns its own exact-production correctness gate.
+ for renderer in vanilla sodium iris; do
+diff --git a/scripts/agent/run_metal4_main_p1_physical_performance.sh b/scripts/agent/run_metal4_main_p1_physical_performance.sh
+index 4e4f236..4962946 100644
+--- a/scripts/agent/run_metal4_main_p1_physical_performance.sh
++++ b/scripts/agent/run_metal4_main_p1_physical_performance.sh
+@@ -119,6 +119,7 @@ if [[ -n "$(git status --porcelain=v1)" ]]; then
+ fi
+ 
+ HEAD_SHA="$(git rev-parse HEAD)"
++prepare_physical_output "$OUT"
+ mkdir -p "$OUT/correctness" "$OUT/trials"
+ 
+ read -r CORRECTNESS_JAR_SHA CORRECTNESS_DYLIB_SHA < <(
+diff --git a/scripts/agent/verify_p1_performance_route.py b/scripts/agent/verify_p1_performance_route.py
+index 11ccc03..8f834da 100644
+--- a/scripts/agent/verify_p1_performance_route.py
++++ b/scripts/agent/verify_p1_performance_route.py
+@@ -14,4 +14,10 @@ assert 'correctness gate belongs to a different renderer stack' in runner
+ assert '-Dmetallum.opt.metal4MainQueuePilot=false' in physical
+ assert '-Dfabric.client.gametest' not in physical
+ assert 'physical_preflight' in runner
++correctness = (ROOT / 'scripts/agent/run_metal4_main_p1_physical_correctness.sh').read_text()
++assert correctness.index('production E2E guardrail failed') < correctness.index('check_metal4_main_e2e_pair.py')
++assert "p.replace(p.with_name('pair-decision.json'))" in correctness
++for script in ('run_metal4_main_p1_physical_correctness.sh',
++               'run_metal4_main_p1_physical_performance.sh', 'run_metal4_main_p1_physical_matrix.sh'):
++    assert 'prepare_physical_output "$OUT"' in (ROOT / 'scripts/agent' / script).read_text()
+ print('production P1 launch contract: PASS (static only)')
