@@ -1,5 +1,4 @@
-# Temporary reviewed-worktree validation and immutable blob transport.
-# This workflow cannot promote a candidate: it never changes any ref.
+# Temporary exact-source preparation. No branch, tag or setting is mutated.
 name: Convergence prepared-worktree validation
 on:
   push:
@@ -12,14 +11,10 @@ jobs:
   validate:
     runs-on: macos-26
     timeout-minutes: 45
-    env:
-      MTL_HUD_ENABLED: '0'
-      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: 7d7da04df3ff271a1157d4f3d73bb753ee95315c
+          ref: 8fb9232e3c479fe6a866b0b0082a1f9d2b7a9dc7
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -29,7 +24,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
-      - name: Materialize the exact reviewed source changes
+      - name: Apply the reviewed three-file payload with expected-blob checks
+        id: prepare
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,26 +33,14 @@ jobs:
           GIT_AUTHOR_EMAIL: validation@localhost
           GIT_COMMITTER_NAME: MetalUniversal validation
           GIT_COMMITTER_EMAIL: validation@localhost
-          GIT_AUTHOR_DATE: '2026-09-23T03:55:00+0000'
-          GIT_COMMITTER_DATE: '2026-09-23T03:55:00+0000'
         run: |
           set -euo pipefail
-          gh api repos/21Z121Z1/MetalUniversal/git/blobs/f285892b9afea680e488b24d975afc7b32480b61 > "$RUNNER_TEMP/payload-blob.json"
+          gh api repos/21Z121Z1/MetalUniversal/git/blobs/a40401ce9b58fff42faf86f690561a493a78585e > "$RUNNER_TEMP/payload-blob.json"
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
-          base = '7d7da04df3ff271a1157d4f3d73bb753ee95315c'
-          expected_tree = '4be5f57053b16ff008ee2af1b1905ef929304998'
-          expected_paths = {
-              'src/main/java/com/metallum/Metallum.java',
-              'src/main/java/com/metallum/client/metal/render/MetalBackend.java',
-              'src/main/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflight.java',
-              'src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java',
-              'src/main/java/com/metallum/client/metal/render/bridge/MetalNativeInterfaceTable.java',
-              'src/main/java/com/metallum/client/metal/render/bridge/NativePlatform.java',
-              'src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java',
-              'src/test/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflightTest.java',
-              'src/test/java/com/metallum/client/metal/render/bridge/NativePlatformTest.java',
-          }
+          base = '8fb9232e3c479fe6a866b0b0082a1f9d2b7a9dc7'
+          expected_paths = {'build.gradle', 'scripts/agent/verify_terrain_work_events.py',
+              'validation/terrain-work-events/oracle-fixtures.json'}
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
@@ -64,67 +48,70 @@ jobs:
           blob = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'payload-blob.json').read_text())
           payload = gzip.decompress(base64.b64decode(blob['content']))
           digest = hashlib.sha256(payload).hexdigest()
-          if digest != '26dc34f90c0ac17fecf17619738b989af018e20fbed8d8fdb83b3b2e79f24353':
+          if digest != '9e7ada4f8aa7a28da1c36f8e0cde66d69cdf7b67561c461ef886e4c78bc03a28':
               raise RuntimeError('Reviewed payload checksum mismatch')
           changes = json.loads(payload)
           if set(changes) != expected_paths:
               raise RuntimeError('Reviewed path set mismatch')
           for name, change in changes.items():
-              path = pathlib.Path(name)
-              if change['base_blob'] is None:
-                  if path.exists():
-                      raise RuntimeError('New source path already exists: ' + name)
-                  text = change['content']
-              else:
-                  if git('hash-object', name) != change['base_blob']:
-                      raise RuntimeError('Source blob changed: ' + name)
-                  lines = path.read_text().splitlines(keepends=True)
-                  for edit in reversed(change['edits']):
-                      lines[edit['start']:edit['end']] = edit['lines']
-                  text = ''.join(lines)
-              path.parent.mkdir(parents=True, exist_ok=True)
-              path.write_text(text)
-          # Correct two test-environment assumptions exposed by the first actual macOS run.
-          # Assertions remain exact; a /var alias is compared by its real path and JVM tmp exists.
-          test = pathlib.Path('src/test/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflightTest.java')
-          text = test.read_text()
-          corrections = {
-              'assertEquals(second, selected.getParent());': 'assertEquals(second.toRealPath(), selected.getParent());',
-              '"-Dos.name=" + os, "-Duser.home=/test-home", "-Djava.io.tmpdir=/test-tmp",':
-                  '"-Dos.name=" + os, "-Duser.home=" + directory, "-Djava.io.tmpdir=" + directory,',
-          }
-          for old, new in corrections.items():
-              if text.count(old) != 1:
-                  raise RuntimeError('Bootstrap test correction does not match reviewed source')
-              text = text.replace(old, new)
-          test.write_text(text)
+              if git('hash-object', name) != change['base_blob']:
+                  raise RuntimeError('Source blob changed: ' + name)
+              path = pathlib.Path(name); lines = path.read_text().splitlines(keepends=True)
+              for edit in reversed(change['edits']):
+                  lines[edit['start']:edit['end']] = edit['lines']
+              path.write_text(''.join(lines))
+              if git('hash-object', name) != change['expected_blob']:
+                  raise RuntimeError('Prepared source blob mismatch: ' + name)
           subprocess.run(['git', 'add', '--', *sorted(changes)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          if set(git('diff', '--cached', '--name-only').splitlines()) != expected_paths:
+              raise RuntimeError('Unexpected staged change')
           tree = git('write-tree')
-          if tree != expected_tree:
-              raise RuntimeError('Reviewed source tree mismatch: ' + tree)
           output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
-          (output / 'mobile-payload.json').write_bytes(payload)
+          (output / 'payload.json').write_bytes(payload)
           (output / 'change.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index']))
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared mobile bootstrap contract; unpublished validation only\n', text=True).strip()
+              input='Prepared terrain oracle and iOS native recipe; unpublished validation only\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
           proof = {'schema_version': 1, 'proof_subject': 'unpublished-prepared-worktree',
               'workflow_sha': os.environ['GITHUB_SHA'], 'source_base': base,
               'tested_commit_sha': commit, 'tested_tree_sha': tree, 'payload_sha256': digest,
-              'test_corrections': corrections, 'refs_updated': False, 'main_acceptance': False, 'physical_acceptance': False}
+              'expected_blobs': {p: c['expected_blob'] for p, c in changes.items()},
+              'refs_updated': False, 'main_acceptance': False, 'physical_acceptance': False}
           (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
           subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
           print(json.dumps(proof, indent=2))
           PY
-      - name: Compile and run mobile bootstrap boundary tests without a GPU runtime
+      - name: Verify independent terrain oracle and shared Gradle recipe
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace compileJava test \
-            --tests '*IOSRuntimePreflightTest' --tests '*NativePlatformTest' \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
-            2>&1 | tee build/agent-evidence/mobile-bootstrap-tests.log
-      - name: Publish only verified immutable source blobs
+          python3 scripts/agent/verify_terrain_work_events.py --self-test
+          ./gradlew --no-daemon help
+      - name: Select and record the real iOS SDK
+        id: sdk
+        run: |
+          set -euo pipefail
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$latest"
+          { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-path; xcrun --sdk iphoneos --show-sdk-version; } \
+            | tee build/agent-evidence/ios-sdk.txt
+      - name: Compile the shared native module for iOS arm64
+        env:
+          MTL_HUD_ENABLED: '0'
+          MTLFX_HUD_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace buildIOSNative 2>&1 | tee build/agent-evidence/ios-native-build.log
+          test -s src/main/resources/natives/ios/libmetallum.dylib
+          xcrun vtool -show-build src/main/resources/natives/ios/libmetallum.dylib | tee build/agent-evidence/ios-native-platform.txt
+      - name: Independently compile the full iOS SPIRV-Cross MSL image
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.sdk.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace buildIOSSpvc 2>&1 | tee build/agent-evidence/ios-spvc-build.log
+          test -s src/main/resources/natives/ios/libspvc.dylib
+          xcrun vtool -show-build src/main/resources/natives/ios/libspvc.dylib | tee build/agent-evidence/ios-spvc-platform.txt
+      - name: Publish verified immutable source blobs only
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -133,28 +120,24 @@ jobs:
           python3 - <<'PY'
           import base64, json, pathlib, subprocess
           output = pathlib.Path('build/agent-evidence')
-          changes = json.loads((output / 'mobile-payload.json').read_text())
-          entries = []
-          for name in sorted(changes):
+          changes = json.loads((output / 'payload.json').read_text()); entries = []
+          for name, change in changes.items():
               data = pathlib.Path(name).read_bytes()
-              expected = subprocess.check_output(['git', 'hash-object', name], text=True).strip()
               request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
               response = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
                   'repos/21Z121Z1/MetalUniversal/git/blobs', '--input', '-'], input=request, text=True))
-              if response['sha'] != expected:
+              if response['sha'] != change['expected_blob']:
                   raise RuntimeError('Published blob mismatch: ' + name)
-              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': expected})
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': response['sha']})
           (output / 'source-blobs.json').write_text(json.dumps(entries, indent=2) + '\n')
-          print(json.dumps(entries, indent=2))
           PY
-      - name: Preserve exact preparation and test evidence
+      - name: Preserve prepared source and both platform diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: mobile-bootstrap-prepared-${{ github.sha }}-${{ github.run_attempt }}
+          name: terrain-ios-prepared-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
-            build/test-results/
-            build/reports/tests/
+            src/main/resources/natives/ios/
           if-no-files-found: error
           retention-days: 30
