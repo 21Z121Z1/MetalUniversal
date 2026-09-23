@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CANDIDATE_BASE: 7044cda40776bb563834d207d48a95542606d9eb
-      CANDIDATE_TREE: bc92c28e2bb5c6f9b6f0142708ac59ef8974f156
+      CANDIDATE_BASE: 300f21c41214350ec8a7c1ff7aaa891f457ff1b6
+      CANDIDATE_TREE: 7aa5aa70a50504d1d3ce68e104f3b0116f2c0d6e
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -28,9 +28,12 @@ jobs:
         working-directory: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          DELTA_FILE: ${{ github.workspace }}/workbench/.github/ci/upstream-delta/delta.patch
+          DELTA_FILE: ${{ runner.temp }}/delta.patch
           DELTA_RECEIPT: ${{ runner.temp }}/delta-receipt
-        run: python3 ../workbench/.github/ci/upstream-delta/apply.py
+        run: |
+          set -euo pipefail
+          base64 --decode < ../workbench/.github/ci/upstream-delta/delta.patch.xz.b64 | xz -d > "$DELTA_FILE"
+          python3 ../workbench/.github/ci/upstream-delta/apply.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: verified-upstream-delta
