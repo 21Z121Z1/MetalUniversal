@@ -364,8 +364,12 @@ public final class VanillaGameplay {
         windowClockAnchors.getAsJsonArray("events").add(stationaryWindow);
         try {
             if (FrameWorkloads.ENABLED) {
-                report.add("workload", FrameWorkloads.run(context, world, sampleStartNanos,
-                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT));
+                // Publish the mutable receipt before actions so a failed physical
+                // transition retains its exact observed dimensions and progress.
+                JsonObject workloadReceipt = new JsonObject();
+                report.add("workload", workloadReceipt);
+                FrameWorkloads.run(context, world, sampleStartNanos,
+                        sampleStartNanos + SAMPLE_NS, NATIVE_WIDTH, NATIVE_HEIGHT, workloadReceipt);
                 report.add("sourceSampleWindow", context.computeOnClient(client -> sourceWindow.finish()));
                 if (STABLE_SCENE) {
                     JsonObject finalTerrain = context.computeOnClient(StationaryTerrain::capture);
