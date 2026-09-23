@@ -661,10 +661,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
      * completes in the error state or is abandoned during shutdown.
      */
     void onCurrentSubmit(final Runnable committed, final Runnable failed) {
+        onCurrentSubmit(committed, () -> { }, failed);
+    }
+
+    void onCurrentSubmit(final Runnable committed, final Runnable completed, final Runnable failed) {
         if (commandBuffer == null) {
             throw new IllegalStateException("Cannot register a submit callback without an encoded command buffer");
         }
-        currentSubmitCallbacks.add(new SubmitCallback(committed, failed));
+        currentSubmitCallbacks.add(new SubmitCallback(committed, completed, failed));
     }
 
     MTLRenderCommandEncoder renderCommandEncoder(
@@ -1687,6 +1691,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int length = data.remaining();
         buffer.checkCanBeUsed();
         MetalBufferUpload.validate(buffer.size(), destination.offset(), destination.length(), length);
+        // RenderPearl permits empty uploads; Metal validation rejects a zero-byte blit.
         if (length == 0) return;
 
         if (buffer.isDynamic()) {
@@ -1767,6 +1772,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void copyToBuffer(final GpuBufferSlice source, final GpuBufferSlice target) {
+        if (source.length() == 0) {
+            // RenderPearl permits empty slices; Metal's copy API does not.
+            return;
+        }
         MetalGpuBuffer sourceBuffer = (MetalGpuBuffer) source.buffer();
         MetalGpuBuffer targetBuffer = (MetalGpuBuffer) target.buffer();
         MTLBlitCommandEncoder blit = blitCommandEncoder();
@@ -2150,6 +2159,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return true;
     }
 
+    void pollCompletedSubmissions() {
+        for (InFlight submitted : inFlight) {
+            if (submitted != null && !submitted.completionHandled) {
+                awaitInFlightCompletion(submitted, 0L);
+            }
+        }
+    }
+
     void close() {
         submitRenderPass();
         endEncoder();
@@ -2206,8 +2223,22 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void writeTimestamp(final @NonNull GpuQueryPool pool, final int index) {
-        if (pool instanceof MetalGpuQueryPool metalPool && index >= 0 && index < pool.size()) {
-            metalPool.setValue(index, device.getTimestampNow());
+        if (!(pool instanceof MetalGpuQueryPool metalPool)) {
+            throw new IllegalArgumentException("Expected a Metal timestamp query pool");
+        }
+        metalPool.requireDevice(device);
+        long generation = metalPool.beginWrite(index);
+        try {
+            submitRenderPass();
+            endEncoder();
+            int backend = MetalNativeBridge.renderPearlTimestampWriteCommand(
+                    commandBuffer().nativeHandle(), metalPool.nativeHandle(), index,
+                    fence, SPLIT_FENCE ? transferFence : MemorySegment.NULL
+            );
+            metalPool.written(this, index, generation, backend);
+        } catch (RuntimeException | Error failure) {
+            metalPool.failed(index, generation);
+            throw failure;
         }
     }
 
@@ -2322,10 +2353,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();
                 }
+            } else {
+                for (SubmitCallback callback : callbacks) {
+                    callback.completed.run();
+                }
             }
         }
     }
 
-    private record SubmitCallback(Runnable committed, Runnable failed) {
+    private record SubmitCallback(Runnable committed, Runnable completed, Runnable failed) {
     }
 }

@@ -107,6 +107,115 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void timestampQueriesWaitForGpuCompletionAndCalibrateToJvmClock() {
+        ByteBuffer data = ByteBuffer.allocateDirect(256);
+        for (int i = 0; i < data.capacity(); i++) data.put(i, (byte) (i * 7));
+        try (var queries = device.createTimestampQueryPool(2);
+             MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                     () -> "timestamp upload", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, data.capacity())) {
+            assertEquals(2, queries.size());
+            assertTrue(queries.getValue(0).isEmpty());
+            if (device.getDeviceInfo().timestampPeriod() == 0.0F) {
+                assertThrows(UnsupportedOperationException.class, () -> encoder.writeTimestamp(queries, 0),
+                        "a device without counter storage must reject GPU timestamp writes");
+                assertTrue(queries.getValue(0).isEmpty(), "unsupported queries cannot fabricate samples");
+                assertThrows(UnsupportedOperationException.class, device::getTimestampCalibrationOffset,
+                        "a device without GPU samples cannot calibrate their clock");
+                return;
+            }
+            encoder.writeTimestamp(queries, 0);
+            encoder.writeToBuffer(destination.slice(0, data.capacity()), data);
+            encoder.writeTimestamp(queries, 1);
+            assertTrue(queries.getValue(0).isEmpty(), "unsubmitted GPU work must not return a timestamp");
+            assertThrows(IllegalStateException.class, () -> encoder.writeTimestamp(queries, 1),
+                    "an in-flight slot cannot be silently overwritten");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            var values = queries.getValues(0, 2);
+            assertTrue(values[0].isPresent(), "first GPU sample must resolve");
+            assertTrue(values[1].isPresent(), "second GPU sample must resolve");
+            assertTrue(values[1].getAsLong() >= values[0].getAsLong(),
+                    "GPU samples must preserve command-stream order");
+            long offset = device.getTimestampCalibrationOffset();
+            long hostEquivalent = Math.round(values[1].getAsLong()
+                    * (double) device.getDeviceInfo().timestampPeriod()) + offset;
+            assertTrue(Math.abs(hostEquivalent - System.nanoTime()) < 5_000_000_000L,
+                    () -> "calibrated GPU sample must be near the completed JVM timeline: gpu="
+                            + values[1].getAsLong() + ", period=" + device.getDeviceInfo().timestampPeriod()
+                            + ", offset=" + offset + ", hostEquivalent=" + hostEquivalent
+                            + ", now=" + System.nanoTime());
+            for (int i = 0; i < data.capacity(); i++) {
+                assertEquals(data.get(i), destination.currentStorage().get(i));
+            }
+            assertThrows(IndexOutOfBoundsException.class, () -> queries.getValue(2));
+            encoder.writeTimestamp(queries, 0);
+            assertTrue(queries.getValue(0).isEmpty(), "a reused slot must discard its previous result");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertTrue(queries.getValue(0).orElseThrow() >= values[1].getAsLong());
+        }
+    }
+
+    @Test
+    void timestampQueryPoolSupportsProfilerCapacity() {
+        try (var queries = device.createTimestampQueryPool(1024)) {
+            assertEquals(1024, queries.size());
+            if (device.getDeviceInfo().timestampPeriod() == 0.0F) {
+                assertThrows(UnsupportedOperationException.class, () -> encoder.writeTimestamp(queries, 1023));
+                assertTrue(queries.getValues(1022, 2)[1].isEmpty());
+                return;
+            }
+            encoder.writeTimestamp(queries, 1023);
+            assertTrue(queries.getValues(1022, 2)[1].isEmpty());
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            var values = queries.getValues(1022, 2);
+            assertTrue(values[0].isEmpty());
+            assertTrue(values[1].isPresent());
+        }
+    }
+
+    @Test
+    void renderPassTimestampIsGpuSampleOrExplicitlyUnsupported() {
+        try (var queries = device.createTimestampQueryPool(1);
+             MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                     "timestamp attachment", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1)) {
+            MetalRenderPass pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "timestamp pass")
+                    .withColorAttachment(view, Optional.of(new Vector4f(0.25F, 0.5F, 0.75F, 1.0F))).build());
+            boolean supported = true;
+            try {
+                pass.writeTimestamp(queries, 0);
+            } catch (UnsupportedOperationException unavailable) {
+                supported = false;
+                assertFalse(Boolean.getBoolean("metallum.test.mrtMetal4Commands"),
+                        "Metal 4 counter heaps must support render-pass timestamps");
+            }
+            encoder.submitRenderPass();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals(supported, queries.getValue(0).isPresent(),
+                    "unavailable render-pass samples must never become host timestamps");
+            assertByteNear(readback(texture).get(0), 64, "timestamp pass must still clear red");
+        }
+    }
+
+    @Test
+    void emptyBufferTransfersAreNoOpsUnderMetalValidation() {
+        try (MetalGpuBuffer source = (MetalGpuBuffer) device.createBuffer(
+                () -> "empty copy source", GpuBuffer.USAGE_COPY_SRC, 16);
+             MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                     () -> "empty copy destination", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, 16)) {
+            destination.currentStorage().put(0, (byte) 0x5A);
+            encoder.writeToBuffer(destination.slice(0, 0), ByteBuffer.allocateDirect(0));
+            encoder.copyToBuffer(source.slice(0, 0), destination.slice(0, 0));
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals((byte) 0x5A, destination.currentStorage().get(0));
+        }
+    }
+
+    @Test
     void pollingUnsubmittedFencePreservesTransientUploadsUntilExplicitSubmit() {
         ByteBuffer source = ByteBuffer.allocateDirect(64);
         for (int i = 0; i < 64; i++) source.put(i, (byte) (i * 17));
@@ -274,6 +383,39 @@ final class MetalMrtBackendIntegrationTest {
             device.waitForSubmittedGpuWork();
             ByteBuffer copied = destination.currentStorage();
             for (int i = 0; i < 64; i++) assertEquals((byte) (i * 31), copied.get(i));
+        }
+    }
+
+    @Test
+    void shaderSourceReplacementRebuildsNativePipelineAfterResourceReload() {
+        String name = "resource_reload_fragment";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "shader source replacement", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1)) {
+            render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
+            ByteBuffer before = readback(texture);
+            assertByteNear(before.get(0), 255, "original shader red");
+            assertByteNear(before.get(4), 255, "original shader red at another pixel");
+            assertByteNear(before.get(1), 0, "original shader green");
+
+            // Keep the same RenderPearl shader identifier and pipeline key;
+            // a resource-pack reload replaces the source behind that name.
+            fragmentShaders.put(name, """
+                    #version 450
+                    layout(location=0) out vec4 color;
+                    void main() { color = vec4(0.0, 1.0, 0.0, 1.0); }
+                    """);
+            device.clearPipelineCache();
+            render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
+            ByteBuffer after = readback(texture);
+            assertByteNear(after.get(0), 0, "replacement shader red");
+            assertByteNear(after.get(4), 0, "replacement shader red at another pixel");
+            assertByteNear(after.get(1), 255, "replacement shader green");
         }
     }
 

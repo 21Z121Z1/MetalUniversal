@@ -811,17 +811,38 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuQueryPool createTimestampQueryPool(final int size) {
-        return new MetalGpuQueryPool(size);
-    }
-
-    public long getTimestampNow() {
-        return System.nanoTime();
+        return new MetalGpuQueryPool(this, size);
     }
 
     @Override
     public long getTimestampCalibrationOffset() {
-        // MetalGpuQueryPool records host monotonic nanoseconds.
-        return 0L;
+        float period = deviceInfo.timestampPeriod();
+        if (!(period > 0.0F) || !Float.isFinite(period)) {
+            throw new UnsupportedOperationException("GPU timestamp clock calibration is unavailable");
+        }
+        MetalNativeBridge.TimestampCalibrationPair best = null;
+        long shortest = Long.MAX_VALUE;
+        // Bracket Apple's paired CPU/GPU sample in System.nanoTime's domain.
+        // This avoids assuming Apple's CPU clock shares the JVM clock origin.
+        for (int attempt = 0; attempt < 3; attempt++) {
+            MetalNativeBridge.TimestampCalibrationPair pair =
+                    MetalNativeBridge.renderPearlTimestampPair(metalDeviceHandle);
+            if (pair == null) continue;
+            long span = pair.javaAfter() - pair.javaBefore();
+            if (span >= 0L && span < shortest) {
+                shortest = span;
+                best = pair;
+            }
+        }
+        if (best == null || shortest > 5_000_000L) {
+            throw new IllegalStateException("Cannot calibrate GPU timestamps within a bounded CPU sample window");
+        }
+        long midpoint = best.javaBefore() + shortest / 2L;
+        double gpuNanos = best.gpu() * (double) period;
+        if (!Double.isFinite(gpuNanos) || gpuNanos > Long.MAX_VALUE) {
+            throw new IllegalStateException("GPU timestamp calibration overflow");
+        }
+        return midpoint - Math.round(gpuNanos);
     }
 
     @Override
@@ -952,6 +973,12 @@ final class MetalDevice implements GpuDeviceBackend {
     private record MslFunctionKey(String msl, String entryPoint) {
     }
 
+    private float timestampPeriod() {
+        double period = MetalNativeBridge.renderPearlTimestampPeriod(metalDeviceHandle);
+        return period > 0.0 && Double.isFinite(period) && period <= Float.MAX_VALUE
+                ? (float) period : 0.0F;
+    }
+
     private DeviceInfo buildDeviceInfo(final String deviceName) {
         DeviceType type = DeviceType.INTEGRATED;
         Set<String> underlyingExtensions = Set.of("CAMetalLayer", "MTLDevice");
@@ -965,7 +992,7 @@ final class MetalDevice implements GpuDeviceBackend {
                 driverDescription,
                 true,
                 "Metal",
-                1.0F,
+                timestampPeriod(),
                 // Metal exposes eight color attachment slots and Minecraft's
                 // ColorTargetState contract has the same upper bound. Keep
                 // the advertised limit aligned with both APIs so the generic

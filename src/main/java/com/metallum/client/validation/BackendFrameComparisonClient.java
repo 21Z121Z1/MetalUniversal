@@ -23,12 +23,19 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.Lightmap;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
+import net.minecraft.client.renderer.chunk.SectionMesh;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
@@ -64,6 +71,9 @@ public final class BackendFrameComparisonClient {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.backend.compare.enabled");
     private static final boolean AUTO_STOP = Boolean.parseBoolean(
             System.getProperty("metallum.backend.compare.auto-stop", "true")
+    );
+    private static final boolean DUMP_BLOCK_ATLAS = Boolean.getBoolean(
+            "metallum.backend.compare.dump-block-atlas"
     );
     private static final Path ROOT = Path.of(System.getProperty(
             "metallum.backend.compare.output",
@@ -1162,6 +1172,23 @@ public final class BackendFrameComparisonClient {
                             String.format(Locale.ROOT, "frame-%05d-lightmap.bin", frame)), bytes);
                 }
             }
+            if (!SODIUM_LOADED) {
+                // A count cannot prove that two runs rendered the same visible
+                // sections. Record section identity and CPU mesh draw signatures
+                // at the captured frame before interpreting pixel differences.
+                Files.write(ROOT.resolve(backendName()).resolve(
+                        String.format(Locale.ROOT, "frame-%05d-visible-sections.txt", frame)),
+                        visibleSectionRows(Minecraft.getInstance()), StandardCharsets.UTF_8);
+            }
+            if (DUMP_BLOCK_ATLAS && COMPLETED_FRAMES.size() + 1 == CAPTURE_FRAMES.size()) {
+                var atlas = Minecraft.getInstance().getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS);
+                if (!(atlas instanceof TextureAtlas blockAtlas)) {
+                    throw new IllegalStateException("block atlas is not a TextureAtlas");
+                }
+                Path dumpDirectory = ROOT.resolve(backendName()).resolve("atlas-dump");
+                Files.createDirectories(dumpDirectory);
+                blockAtlas.dumpContents(TextureAtlas.LOCATION_BLOCKS, dumpDirectory);
+            }
             COMPLETED_FRAMES.add(frame);
             if (COMPLETED_FRAMES.size() == CAPTURE_FRAMES.size()) {
                 stopRequested = true;
@@ -1235,6 +1262,22 @@ public final class BackendFrameComparisonClient {
             minecraft.level.setRainLevel(0.0F);
             minecraft.level.setThunderLevel(0.0F);
         }
+        // Hud.tick() eases this value by 1% per client tick even while the
+        // level simulation is frozen. The two backends can reach a capture
+        // frame after different numbers of client ticks, so use the same
+        // settled value that vanilla's updateVignetteBrightness() approaches.
+        Entity cameraEntity = minecraft.getCameraEntity();
+        if (cameraEntity != null) {
+            minecraft.gui.hud.vignetteBrightness = vignetteTargetBrightness(cameraEntity);
+        }
+    }
+
+    private static float vignetteTargetBrightness(final Entity cameraEntity) {
+        BlockPos eyeBlock = BlockPos.containing(
+                cameraEntity.getX(), cameraEntity.getEyeY(), cameraEntity.getZ());
+        float localBrightness = Lightmap.getBrightness(cameraEntity.level().dimensionType(),
+                cameraEntity.level().getMaxLocalRawBrightness(eyeBlock));
+        return Mth.clamp(1.0F - localBrightness, 0.0F, 1.0F);
     }
 
     /**
@@ -1541,6 +1584,9 @@ public final class BackendFrameComparisonClient {
                 "viewRotation", cameraState.viewRotationMatrix.get(new float[16]),
                 "gameTime", levelState.gameTime,
                 "worldPartialTicks", levelState.worldPartialTicks));
+        Entity cameraEntity = minecraft.getCameraEntity();
+        String vignetteTarget = cameraEntity == null
+                ? "null" : Float.toString(vignetteTargetBrightness(cameraEntity));
         return String.format(
                 Locale.ROOT,
                 "{\n"
@@ -1583,6 +1629,9 @@ public final class BackendFrameComparisonClient {
                         + "  \"fixedLightmapBlockFactor\": %s,\n"
                         + "  \"lightmapInputs\": %s,\n"
                         + "  \"terrainInputs\": %s,\n"
+                        + "  \"hudTickCount\": %d,\n"
+                        + "  \"vignetteBrightness\": %s,\n"
+                        + "  \"vignetteTargetBrightness\": %s,\n"
                         + "  \"integratedServerScenarioConfigured\": %s,\n"
                         + "  \"serverSimulationFrozen\": %s,\n"
                         + "  \"clientSimulationFrozen\": %s,\n"
@@ -1651,6 +1700,9 @@ public final class BackendFrameComparisonClient {
                 FREEZE_SIMULATION ? "1.4" : "null",
                 new Gson().toJson(minecraft.gameRenderer.gameRenderState().lightmapRenderState),
                 terrainInputs,
+                minecraft.gui.hud.getGuiTicks(),
+                Float.toString(minecraft.gui.hud.vignetteBrightness),
+                vignetteTarget,
                 integratedServerConfigured,
                 serverSimulationFrozen,
                 clientSimulationFrozen,
@@ -2236,6 +2288,50 @@ public final class BackendFrameComparisonClient {
         }
         states.sort(String::compareTo);
         return new EntityReceipt(states.size(), sha256(states), List.copyOf(states));
+    }
+
+    private static List<String> visibleSectionRows(final Minecraft minecraft) {
+        List<String> rows = new ArrayList<>();
+        for (var section : minecraft.levelRenderer.visibleSections()) {
+            SectionMesh mesh = section.getSectionMesh();
+            StringBuilder row = new StringBuilder(Long.toUnsignedString(section.getSectionNode()));
+            for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
+                SectionMesh.SectionDraw draw = mesh.getSectionDraw(layer);
+                row.append('|').append(layer.name()).append('=');
+                if (draw == null) row.append('-');
+                else row.append(draw.indexCount()).append(':').append(draw.indexType())
+                        .append(':').append(draw.hasCustomIndexBuffer());
+            }
+            row.append("|blockStates=").append(sectionBlockStateSha256(minecraft, section.getSectionNode()));
+            rows.add(row.toString());
+        }
+        rows.sort(String::compareTo);
+        return rows;
+    }
+
+    private static String sectionBlockStateSha256(final Minecraft minecraft, final long node) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            int sectionX = (int) (node >> 42);
+            int sectionZ = (int) (node << 22 >> 42);
+            int sectionY = (int) (node << 44 >> 44);
+            BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        int state = Block.getId(minecraft.level.getBlockState(position.set(
+                                sectionX * 16 + x, sectionY * 16 + y, sectionZ * 16 + z)));
+                        digest.update((byte) (state >>> 24));
+                        digest.update((byte) (state >>> 16));
+                        digest.update((byte) (state >>> 8));
+                        digest.update((byte) state);
+                    }
+                }
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("JDK has no SHA-256 provider", impossible);
+        }
     }
 
     private static String sha256(final List<String> values) {

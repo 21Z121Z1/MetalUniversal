@@ -23,6 +23,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.BackendFrameComparisonServerMixin";
     private static final String BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN =
             "com.metallum.mixin.render.BackendFrameComparisonDeltaTrackerMixin";
+    private static final String BACKEND_COMPARISON_ATLAS_MIXIN =
+            "com.metallum.mixin.render.TextureAtlasAnimationValidationMixin";
+    private static final String BACKEND_COMPARISON_LIGHTMAP_MIXIN =
+            "com.metallum.mixin.render.LightmapFlickerValidationMixin";
     private static final String VANILLA_TERRAIN_TASK_ACCESSOR =
             "com.metallum.mixin.terrain.SectionTaskTerrainAdmissionAccessor";
     private static final Set<String> VANILLA_TERRAIN_ADMISSION_MIXINS = Set.of(
@@ -66,7 +70,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (BACKEND_FRAME_COMPARISON_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_GAME_RENDERER_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_SERVER_MIXIN.equals(mixinClassName)
-                || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
+                || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)
+                || BACKEND_COMPARISON_ATLAS_MIXIN.equals(mixinClassName)
+                || BACKEND_COMPARISON_LIGHTMAP_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
         }
         if (VANILLA_TERRAIN_TASK_ACCESSOR.equals(mixinClassName)) {

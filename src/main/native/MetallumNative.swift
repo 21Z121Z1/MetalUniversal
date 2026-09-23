@@ -708,6 +708,205 @@ private struct CompletedGpuEncoderTiming {
     let milliseconds: Double
 }
 
+// RenderPearl query pools are separate from the optional encoder timing recorder.
+// The latter reports whole-encoder durations and cannot stand in for a query
+// inserted at a particular point in the command stream.
+private final class RenderPearlTimestampPool {
+    let device: MTLDevice
+    let count: Int
+    let metal3Samples: MTLCounterSampleBuffer?
+    let metal4Heap: AnyObject?
+
+    init?(_ device: MTLDevice, count: Int) {
+        guard count > 0, count <= 4096 else { return nil }
+        self.device = device
+        self.count = count
+
+        if device.supportsCounterSampling(.atStageBoundary),
+           let timestampSet = device.counterSets?.first(where: { $0.name == "timestamp" }) {
+            let descriptor = MTLCounterSampleBufferDescriptor()
+            descriptor.label = "RenderPearl timestamp queries"
+            descriptor.counterSet = timestampSet
+            descriptor.storageMode = .shared
+            descriptor.sampleCount = count
+            metal3Samples = try? device.makeCounterSampleBuffer(descriptor: descriptor)
+        } else {
+            metal3Samples = nil
+        }
+
+        if #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) {
+            let descriptor = MTL4CounterHeapDescriptor()
+            descriptor.type = .timestamp
+            descriptor.count = count
+            metal4Heap = try? device.makeCounterHeap(descriptor: descriptor)
+        } else {
+            metal4Heap = nil
+        }
+        guard metal3Samples != nil || metal4Heap != nil else { return nil }
+    }
+
+    func readMetal3(_ index: Int) -> UInt64? {
+        guard let metal3Samples,
+              let data = try? metal3Samples.resolveCounterRange(index..<(index + 1)) else { return nil }
+        return data.withUnsafeBytes { bytes in
+            guard let value = bytes.bindMemory(to: MTLCounterResultTimestamp.self).first?.timestamp,
+                  value != MTLCounterErrorValue, value != 0 else { return nil }
+            return value
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, *)
+    func readMetal4(_ index: Int) -> UInt64? {
+        guard let heap = metal4Heap as? any MTL4CounterHeap,
+              let data = try? heap.resolveCounterRange(index..<(index + 1)) else { return nil }
+        return data.withUnsafeBytes { bytes in
+            guard let value = bytes.bindMemory(to: MTL4TimestampHeapEntry.self).first?.timestamp,
+                  value != 0, value != UInt64.max else { return nil }
+            // MTL4 counter heaps resolve device ticks; sampleTimestamps() and
+            // Metal 3 counter samples on this API use GPU nanoseconds. Expose
+            // one unit to RenderPearl across both encoder implementations.
+            let frequency = device.queryTimestampFrequency()
+            guard frequency > 0 else { return nil }
+            let nanoseconds = Double(value) * (1_000_000_000.0 / Double(frequency))
+            guard nanoseconds.isFinite, nanoseconds > 0, nanoseconds < Double(UInt64.max) else { return nil }
+            return UInt64(nanoseconds.rounded())
+        }
+    }
+}
+
+private func renderPearlMetalDevice(_ pointer: UnsafeMutableRawPointer) -> MTLDevice {
+    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLDevice
+}
+
+private func renderPearlMetalFence(_ pointer: UnsafeMutableRawPointer) -> MTLFence {
+    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLFence
+}
+
+@_cdecl("metallum_renderpearl_timestamp_period_v1")
+public func metallum_renderpearl_timestamp_period_v1(_ devicePointer: UnsafeMutableRawPointer) -> Double {
+    let device = renderPearlMetalDevice(devicePointer)
+    // A virtual Metal device may expose the method but abort inside
+    // queryTimestampFrequency(). Probe actual counter storage first, and only
+    // ask for the Metal 4 tick frequency when a Metal 4 heap exists.
+    guard let pool = RenderPearlTimestampPool(device, count: 1) else { return 0 }
+    if #available(macOS 26.0, iOS 26.0, *), pool.metal4Heap != nil {
+        let frequency = device.queryTimestampFrequency()
+        // Metal 4 ticks are normalized in readMetal4, so public samples and
+        // sampleTimestamps() share nanoseconds per timestamp unit.
+        return frequency > 0 ? 1.0 : 0
+    }
+    return pool.metal3Samples != nil ? 1.0 : 0
+}
+
+@_cdecl("metallum_renderpearl_timestamp_pair_v1")
+public func metallum_renderpearl_timestamp_pair_v1(
+    _ devicePointer: UnsafeMutableRawPointer,
+    _ output: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard let output else { return 0 }
+    let pair = renderPearlMetalDevice(devicePointer).sampleTimestamps()
+    guard pair.cpu != 0, pair.gpu != 0 else { return 0 }
+    output[0] = pair.cpu
+    output[1] = pair.gpu
+    return 1
+}
+
+@_cdecl("metallum_renderpearl_timestamp_pool_create_v1")
+public func metallum_renderpearl_timestamp_pool_create_v1(
+    _ devicePointer: UnsafeMutableRawPointer,
+    _ count: Int32
+) -> UnsafeMutableRawPointer? {
+    guard let pool = RenderPearlTimestampPool(renderPearlMetalDevice(devicePointer), count: Int(count)) else { return nil }
+    return retainedPointer(pool)
+}
+
+@_cdecl("metallum_renderpearl_timestamp_write_command_v1")
+public func metallum_renderpearl_timestamp_write_command_v1(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ poolPointer: UnsafeMutableRawPointer,
+    _ index: Int32,
+    _ renderFencePointer: UnsafeMutableRawPointer?,
+    _ transferFencePointer: UnsafeMutableRawPointer?
+) -> Int32 {
+    let pool = Unmanaged<RenderPearlTimestampPool>.fromOpaque(poolPointer).takeUnretainedValue()
+    let slot = Int(index)
+    guard slot >= 0, slot < pool.count else { return 0 }
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+        guard let heap = pool.metal4Heap as? any MTL4CounterHeap else { return 0 }
+        lease.commandBuffer.writeTimestamp(counterHeap: heap, index: slot)
+        return 2
+    }
+    guard let samples = pool.metal3Samples else { return 0 }
+    let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+    let descriptor = MTLBlitPassDescriptor()
+    guard let attachment = descriptor.sampleBufferAttachments[0] else { return 0 }
+    attachment.sampleBuffer = samples
+    attachment.startOfEncoderSampleIndex = MTLCounterDontSample
+    attachment.endOfEncoderSampleIndex = slot
+    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else { return 0 }
+    if let renderFencePointer {
+        encoder.waitForFence(renderPearlMetalFence(renderFencePointer))
+    }
+    if let transferFencePointer {
+        encoder.waitForFence(renderPearlMetalFence(transferFencePointer))
+    }
+    if let renderFencePointer {
+        encoder.updateFence(renderPearlMetalFence(renderFencePointer))
+    }
+    if let transferFencePointer {
+        encoder.updateFence(renderPearlMetalFence(transferFencePointer))
+    }
+    encoder.endEncoding()
+    encodingCounters(commandBuffer)?.blitEncoders += 1
+    return 1
+}
+
+@_cdecl("metallum_renderpearl_timestamp_write_render_v1")
+public func metallum_renderpearl_timestamp_write_render_v1(
+    _ encoderPointer: UnsafeMutableRawPointer,
+    _ poolPointer: UnsafeMutableRawPointer,
+    _ index: Int32
+) -> Int32 {
+    let pool = Unmanaged<RenderPearlTimestampPool>.fromOpaque(poolPointer).takeUnretainedValue()
+    let slot = Int(index)
+    guard slot >= 0, slot < pool.count else { return 0 }
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(encoderPointer) {
+        guard let heap = pool.metal4Heap as? any MTL4CounterHeap else { return 0 }
+        bridge.encoder.writeTimestamp(granularity: .precise, after: .fragment, counterHeap: heap, index: slot)
+        return 2
+    }
+    guard pool.device.supportsCounterSampling(.atDrawBoundary),
+          let samples = pool.metal3Samples else { return 0 }
+    metal3RenderEncoder(encoderPointer).sampleCounters(sampleBuffer: samples, sampleIndex: slot, barrier: true)
+    return 1
+}
+
+@_cdecl("metallum_renderpearl_timestamp_read_v1")
+public func metallum_renderpearl_timestamp_read_v1(
+    _ poolPointer: UnsafeMutableRawPointer,
+    _ index: Int32,
+    _ metal4: Int32,
+    _ output: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard let output else { return 0 }
+    let pool = Unmanaged<RenderPearlTimestampPool>.fromOpaque(poolPointer).takeUnretainedValue()
+    let slot = Int(index)
+    guard slot >= 0, slot < pool.count else { return 0 }
+    let value: UInt64?
+    if metal4 != 0 {
+        if #available(macOS 26.0, iOS 26.0, *) {
+            value = pool.readMetal4(slot)
+        } else {
+            value = nil
+        }
+    } else {
+        value = pool.readMetal3(slot)
+    }
+    guard let value else { return 0 }
+    output[0] = value
+    return 1
+}
+
 private final class GpuEncoderTimingContext {
     struct Record {
         let label: String
@@ -13180,6 +13379,9 @@ public func metallum_MTLBlitCommandEncoder_generateMipmaps(
     _ pointer: UnsafeMutableRawPointer,
     _ texture: MTLTexture
 ) {
+    // Metal validation rejects generateMipmaps on a one-level texture. This
+    // native guard also protects direct ABI callers, below Java's no-op check.
+    guard texture.mipmapLevelCount > 1 else { return }
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
         bridge.encoder.generateMipmaps(texture: texture)
         return
