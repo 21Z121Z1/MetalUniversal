@@ -1,9 +1,11 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.joml.Vector2f;
+import org.joml.Matrix4fc;
 
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -62,6 +64,9 @@ final class FrameSynthesisContract {
             if (coverage == ProducerCoverage.REAL_MOTION && samples == 0) {
                 throw new IllegalArgumentException("Real-motion coverage requires at least one sample");
             }
+            if (coverage == ProducerCoverage.NOT_PRESENT && samples != 0) {
+                throw new IllegalArgumentException("An observed producer cannot claim to be absent");
+            }
         }
     }
 
@@ -92,41 +97,21 @@ final class FrameSynthesisContract {
         }
 
         boolean frameGenerationEligible() {
-            if (!temporalEligible()) {
-                return false;
-            }
-            // A reactive-only receipt is sufficient for Temporal, but it is not a
-            // safe substitute for first-person swing/bob/equip motion. When the
-            // hand producer was observed in this source frame, interpolation
-            // requires a real previous-vertex sample; otherwise reject the
-            // entire source frame rather than relying on a reactive mask.
+            // Frame interpolation has no reactive-mask input. A reactive-only
+            // particle, transparency, weather or modded draw is just as unsafe
+            // as a reactive-only entity. Absence is an explicit zero-sample
+            // receipt, never inferred from a missing motion replay.
+            boolean cameraMotion = false;
             for (ProducerReceipt receipt : receipts) {
-                if (receipt.domain() == ProducerDomain.FIRST_PERSON
-                        && receipt.samples() > 0
-                        && receipt.coverage() != ProducerCoverage.REAL_MOTION) {
+                if (receipt.coverage() != ProducerCoverage.REAL_MOTION
+                        && receipt.coverage() != ProducerCoverage.NOT_PRESENT) {
                     return false;
                 }
-            }
-            boolean cameraMotion = false;
-            boolean dynamicContentSafe = false;
-            boolean blockEntitiesSafe = false;
-            for (ProducerReceipt receipt : receipts) {
-                if (receipt.domain() == ProducerDomain.CAMERA_DEPTH
-                        && receipt.coverage() == ProducerCoverage.REAL_MOTION) {
-                    cameraMotion = true;
-                }
-                if (receipt.domain() == ProducerDomain.DYNAMIC_CONTENT
-                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
-                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
-                    dynamicContentSafe = true;
-                }
-                if (receipt.domain() == ProducerDomain.BLOCK_ENTITIES
-                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
-                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
-                    blockEntitiesSafe = true;
+                if (receipt.domain() == ProducerDomain.CAMERA_DEPTH) {
+                    cameraMotion = receipt.coverage() == ProducerCoverage.REAL_MOTION;
                 }
             }
-            return cameraMotion && dynamicContentSafe && blockEntitiesSafe;
+            return cameraMotion;
         }
     }
 
@@ -149,6 +134,50 @@ final class FrameSynthesisContract {
                 throw new IllegalArgumentException("Invalid camera input for Frame Generation");
             }
         }
+    }
+
+    /**
+     * The symmetric, finite, reversed-Z [0,1] perspective used by Vanilla.
+     * Recover the actual frustum rather than substituting 70 degrees, 1000
+     * blocks or the drawable aspect when metadata is absent. Bob/hurt are
+     * rigid view transforms; a skewed/non-perspective base is not representable
+     * by the Frame Interpolator camera fields and is deliberately rejected.
+     */
+    record Perspective(float fieldOfViewDegrees, float nearPlane, float farPlane, float aspectRatio) {
+        static Perspective fromProjection(final Matrix4fc projection) {
+            if (!MetalFxMath.isFinite(projection)
+                    || !(projection.m00() > 0.0F && projection.m11() > 0.0F)
+                    || projection.m23() != -1.0F || projection.m33() != 0.0F
+                    || projection.m01() != 0.0F || projection.m02() != 0.0F
+                    || projection.m03() != 0.0F || projection.m10() != 0.0F
+                    || projection.m12() != 0.0F || projection.m13() != 0.0F
+                    || projection.m20() != 0.0F || projection.m21() != 0.0F
+                    || projection.m30() != 0.0F || projection.m31() != 0.0F
+                    || !(projection.m22() > 0.0F && projection.m32() > 0.0F)) {
+                throw new IllegalArgumentException("Frame Generation requires a finite reversed-Z perspective");
+            }
+            float near = projection.m32() / (projection.m22() + 1.0F);
+            float far = projection.m32() / projection.m22();
+            float fov = MetalFxMath.verticalFieldOfViewDegrees(projection);
+            float aspect = projection.m11() / projection.m00();
+            // Reuse the SDK-facing range checks without manufacturing source
+            // timing: this literal is a validation witness, never frame data.
+            new CameraFrameInput(fov, near, far, aspect, 1.0F);
+            return new Perspective(fov, near, far, aspect);
+        }
+
+        CameraFrameInput atSourceInterval(final float deltaSeconds) {
+            return new CameraFrameInput(fieldOfViewDegrees, nearPlane, farPlane, aspectRatio, deltaSeconds);
+        }
+    }
+
+    static boolean sourceDepthMatches(final GpuTexture texture, final int width, final int height) {
+        return texture != null && !texture.isClosed()
+                && width > 0 && height > 0
+                && texture.getFormat() == GpuFormat.D32_FLOAT
+                && texture.getMipLevels() == 1 && texture.getDepthOrLayers() == 1
+                && texture.getWidth(0) == width && texture.getHeight(0) == height
+                && (texture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) != 0;
     }
 
     /**
