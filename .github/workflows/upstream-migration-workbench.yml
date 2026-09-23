@@ -10,42 +10,61 @@ permissions:
   contents: read
 
 jobs:
-  export-pinned-history:
-    if: github.repository == '21Z121Z1/MetalUniversal'
+  assemble-reviewed-migration:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/upstream-26.3-workbench-20260923'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Export exact audited source history
+      - name: Apply audited module import and byte-verified amendments
         env:
-          FORK_SHA: 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1
-          UPSTREAM_SHA: f8294b2fb6ce2edc56d418510294111c9276091e
-          START_SHA: 825226f2e747ec557629866232e5b55c99d34a2e
+          BASE: f8294b2fb6ce2edc56d418510294111c9276091e
+          SOURCE: 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1
+          EXPECTED_TREE: 1eb2321e0aeaa39d89f7de07a0b43a0ed25f92d4
+          EXPECTED_PATCH: fcbb116933fe26540ccf72467fbe0c1fd682c12d5e3bcb3034fe7a4010503705
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags https://github.com/EternityQwQ/MetalUniversal.git refs/heads/26.3-fabric-dev:refs/heads/export-upstream
-          test "$(git rev-parse refs/heads/export-upstream)" = "$UPSTREAM_SHA"
-          git cat-file -e "$FORK_SHA^{commit}"
-          git cat-file -e "$START_SHA^{commit}"
-          git update-ref refs/heads/export-fork "$FORK_SHA"
-          git update-ref refs/heads/export-start "$START_SHA"
-          mkdir -p "$RUNNER_TEMP/migration-source"
-          git bundle create "$RUNNER_TEMP/migration-source/source.bundle" refs/heads/export-fork refs/heads/export-upstream refs/heads/export-start
-          git bundle verify "$RUNNER_TEMP/migration-source/source.bundle"
-          git log --all --format='%H %P %s' > "$RUNNER_TEMP/migration-source/history.txt"
-          git diff --stat "$UPSTREAM_SHA" "$FORK_SHA" > "$RUNNER_TEMP/migration-source/direct-stat.txt"
-          git diff --name-status "$UPSTREAM_SHA" "$FORK_SHA" > "$RUNNER_TEMP/migration-source/direct-paths.txt"
-          git diff "$UPSTREAM_SHA" "$FORK_SHA" -- gradle.properties gradle/wrapper/gradle-wrapper.properties build.gradle settings.gradle src/main/resources/fabric.mod.json > "$RUNNER_TEMP/migration-source/build.diff"
-          (cd "$RUNNER_TEMP/migration-source" && sha256sum source.bundle > SHA256SUMS)
-          cat "$RUNNER_TEMP/migration-source/direct-stat.txt"
-          du -h "$RUNNER_TEMP/migration-source/source.bundle"
+          cp -R .github/upstream-migration "$RUNNER_TEMP/upstream-migration"
+          git fetch --no-tags https://github.com/EternityQwQ/MetalUniversal.git refs/heads/26.3-fabric-dev:refs/remotes/upstream/26.3-fabric-dev
+          test "$(git rev-parse refs/remotes/upstream/26.3-fabric-dev)" = "$BASE"
+          git cat-file -e "$SOURCE^{commit}"
+          python3 - <<'PY'
+          import base64, hashlib, lzma, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'upstream-migration'
+          encoded = ''.join((root / f'amendments.part{i}').read_text().strip() for i in range(3))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == os.environ['EXPECTED_PATCH'], 'amendment bytes changed in transport'
+          (root / 'amendments.patch').write_bytes(patch)
+          PY
+          git switch --detach "$BASE"
+          python3 "$RUNNER_TEMP/upstream-migration/import.py"
+          git apply --check --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
+          git apply --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git diff --cached --check
+          git diff --cached --quiet "$BASE" -- gradle/wrapper/ settings.gradle README.md README_zh-CN.md LICENSE src/main/resources/metallum.accesswidener .github/workflows/build.yml
+          python3 scripts/agent/test_production_identity.py
+          python3 scripts/agent/verify_upstream_migration.py
+          for script in scripts/agent/run_metal4_main_p1_physical_*.sh scripts/agent/physical_preflight.sh; do bash -n "$script"; done
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          git commit -m 'Port RenderPearl 26.3 backend and exact-artifact validation onto upstream' -m 'Base: EternityQwQ/MetalUniversal:26.3-fabric-dev at f8294b2fb6ce2edc56d418510294111c9276091e. Reviewed migration starts at 825226f2e747ec557629866232e5b55c99d34a2e; selected renderer/adapter/validation modules from 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1 with explicit upstream-preserving amendments. No fork-tree merge, no upstream toolchain downgrade, no physical acceptance claim.'
+          test -z "$(git status --porcelain)"
+          git push origin HEAD:refs/heads/agent/upstream-26.3-prepared-20260923
+          mkdir -p "$RUNNER_TEMP/migration-result"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/migration-result/head-sha.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/migration-result/tree-sha.txt"
+          git diff --stat "$BASE" HEAD > "$RUNNER_TEMP/migration-result/diff-stat.txt"
+          git format-patch --stdout "$BASE"..HEAD > "$RUNNER_TEMP/migration-result/upstream-migration.patch"
+          cat "$RUNNER_TEMP/migration-result/diff-stat.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pinned-upstream-migration-source
-          path: ${{ runner.temp }}/migration-source/
+          name: prepared-upstream-migration
+          path: ${{ runner.temp }}/migration-result/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
