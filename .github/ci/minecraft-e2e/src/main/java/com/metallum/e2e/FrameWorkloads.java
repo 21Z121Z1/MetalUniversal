@@ -7,6 +7,9 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Blocks;
+import org.lwjgl.sdl.SDLError;
+import org.lwjgl.sdl.SDLVideo;
+import org.lwjgl.system.MemoryStack;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -122,9 +125,8 @@ final class FrameWorkloads {
         return result;
     }
 
-    static JsonObject run(ClientGameTestContext context, TestSingleplayerContext world,
-                          long sampleStart, long sampleEnd, int width, int height) {
-        JsonObject receipt = new JsonObject();
+    static void run(ClientGameTestContext context, TestSingleplayerContext world,
+                    long sampleStart, long sampleEnd, int width, int height, JsonObject receipt) {
         JsonArray actions = new JsonArray();
         receipt.addProperty("workloadId", ID); receipt.addProperty("protocolVersion", 1);
         receipt.addProperty("sourceSampleStartNs", sampleStart); receipt.addProperty("sourceSampleEndNs", sampleEnd);
@@ -156,18 +158,18 @@ final class FrameWorkloads {
             receipt.addProperty("horizontalDisplacementBlocks", traveled);
         } else if (TRANSITIONS) {
             action(actions, "windowed-resize-half-output");
+            receipt.add("beforeWindowedResize", context.computeOnClient(FrameWorkloads::windowObservation));
             context.runOnClient(client -> {
                 client.options.fullscreen().set(false);
-                // Window.setWindowed owns the exact 26.3 SDL size/mode change.
-                // Fabric's input size below updates its independent virtual framebuffer.
-                client.getWindow().setWindowed(Math.max(320, client.getWindow().getScreenWidth() / 2),
-                        Math.max(240, client.getWindow().getScreenHeight() / 2));
+                client.getWindow().setFullscreen(false);
+                client.getWindow().updateFullscreenIfChanged();
             });
             input.resizeWindow(Math.max(320, width / 2), Math.max(240, height / 2));
+            // Fabric intercepts setWindowed and treats its virtual framebuffer pixels
+            // as logical window units. Resize SDL separately using its actual scale.
+            context.runOnClient(client -> resizeActualWindow(client, Math.max(320, width / 2), Math.max(240, height / 2)));
             context.runOnClient(Minecraft::invalidateSurfaceConfiguration);
-            context.waitFor(client -> !client.options.fullscreen().get()
-                    && client.getWindow().getWidth() == Math.max(320, width / 2)
-                    && client.getWindow().getHeight() == Math.max(240, height / 2), 1200);
+            waitForWindowDimensions(context, receipt, "windowed", false, Math.max(320, width / 2), Math.max(240, height / 2));
             var resized = context.computeOnClient(client -> client.getWindow().queryFramebufferSize());
             receipt.addProperty("windowedPixelWidth", resized.width());
             receipt.addProperty("windowedPixelHeight", resized.height());
@@ -188,7 +190,10 @@ final class FrameWorkloads {
             context.runOnClient(client -> { client.options.fullscreen().set(true); client.getWindow().setFullscreen(true); });
             input.resizeWindow(width, height);
             context.runOnClient(Minecraft::invalidateSurfaceConfiguration);
-            context.waitFor(client -> client.getWindow().getWidth() == width && client.getWindow().getHeight() == height, 1200);
+            waitForWindowDimensions(context, receipt, "restored", true, width, height);
+            var restored = context.computeOnClient(client -> client.getWindow().queryFramebufferSize());
+            receipt.addProperty("restoredPixelWidth", restored.width());
+            receipt.addProperty("restoredPixelHeight", restored.height());
             world.getConnection().waitForChunksRender(false, 1200);
             require(System.nanoTime() < sampleEnd, "X0 exceeded its declared window; the failed transition remains evidence");
             receipt.addProperty("displayMigration", "physical-validation-required: move the same SDL window between real displays");
@@ -207,7 +212,72 @@ final class FrameWorkloads {
         receipt.add("jvmAfter", jvmObservation());
         receipt.addProperty("completed", true);
         receipt.addProperty("completionNs", System.nanoTime());
-        return receipt;
+    }
+
+    private static void waitForWindowDimensions(ClientGameTestContext context, JsonObject receipt, String phase,
+                                               boolean fullscreen, int width, int height) {
+        receipt.add(phase + "BeforeWait", context.computeOnClient(FrameWorkloads::windowObservation));
+        try {
+            context.waitFor(client -> {
+                var actual = client.getWindow().queryFramebufferSize();
+                return client.options.fullscreen().get() == fullscreen
+                        && client.getWindow().getWidth() == width && client.getWindow().getHeight() == height
+                        && actual.width() == width && actual.height() == height;
+            }, 1200);
+        } finally {
+            // Keep the native/virtual mismatch even when the strict wait fails.
+            receipt.add(phase + "AfterWait", context.computeOnClient(FrameWorkloads::windowObservation));
+        }
+    }
+
+    private static JsonObject windowObservation(Minecraft client) {
+        var result = new JsonObject();
+        var window = client.getWindow();
+        var actual = window.queryFramebufferSize();
+        result.addProperty("sourceClockNs", System.nanoTime());
+        result.addProperty("fullscreenOption", client.options.fullscreen().get());
+        result.addProperty("virtualWidth", window.getWidth());
+        result.addProperty("virtualHeight", window.getHeight());
+        result.addProperty("pixelWidth", actual.width());
+        result.addProperty("pixelHeight", actual.height());
+        long flags = SDLVideo.SDL_GetWindowFlags(window.handle());
+        result.addProperty("sdlFlags", flags);
+        result.addProperty("nativeFullscreen", (flags & SDLVideo.SDL_WINDOW_FULLSCREEN) != 0);
+        result.addProperty("nativeMaximized", (flags & SDLVideo.SDL_WINDOW_MAXIMIZED) != 0);
+        result.addProperty("nativeMinimized", (flags & SDLVideo.SDL_WINDOW_MINIMIZED) != 0);
+        try (var stack = MemoryStack.stackPush()) {
+            var width = stack.mallocInt(1);
+            var height = stack.mallocInt(1);
+            require(SDLVideo.SDL_GetWindowSize(window.handle(), width, height),
+                    "SDL logical window query failed: " + SDLError.SDL_GetError());
+            result.addProperty("logicalWidth", width.get(0));
+            result.addProperty("logicalHeight", height.get(0));
+        }
+        return result;
+    }
+
+    private static void resizeActualWindow(Minecraft client, int pixelWidth, int pixelHeight) {
+        var window = client.getWindow();
+        // Cocoa can leave fullscreen as a maximized window; size requests then
+        // only change its future restored size. Restore before measuring scale.
+        require(SDLVideo.SDL_RestoreWindow(window.handle()),
+                "SDL window restore failed: " + SDLError.SDL_GetError());
+        require(SDLVideo.SDL_SyncWindow(window.handle()),
+                "SDL window restore did not synchronize: " + SDLError.SDL_GetError());
+        try (var stack = MemoryStack.stackPush()) {
+            var logicalWidth = stack.mallocInt(1);
+            var logicalHeight = stack.mallocInt(1);
+            require(SDLVideo.SDL_GetWindowSize(window.handle(), logicalWidth, logicalHeight),
+                    "SDL logical window query failed: " + SDLError.SDL_GetError());
+            var actual = window.queryFramebufferSize();
+            require(logicalWidth.get(0) > 0 && logicalHeight.get(0) > 0, "SDL returned an empty logical window");
+            int width = Math.max(320, (int) Math.round((double) pixelWidth * logicalWidth.get(0) / actual.width()));
+            int height = Math.max(240, (int) Math.round((double) pixelHeight * logicalHeight.get(0) / actual.height()));
+            require(SDLVideo.SDL_SetWindowSize(window.handle(), width, height),
+                    "SDL physical window resize failed: " + SDLError.SDL_GetError());
+            require(SDLVideo.SDL_SyncWindow(window.handle()),
+                    "SDL physical window resize did not synchronize: " + SDLError.SDL_GetError());
+        }
     }
 
     private static JsonObject jvmObservation() {

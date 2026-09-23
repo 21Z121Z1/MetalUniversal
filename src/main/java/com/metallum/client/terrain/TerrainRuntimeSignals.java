@@ -30,7 +30,7 @@ public final class TerrainRuntimeSignals {
                 presentIntervalNanos,
                 drawableWaitNanos,
                 framesInFlight
-        );
+        ).withUserTarget(com.metallum.client.metal.render.MetalFramePacing.targetIntervalNanos());
         return new TerrainSchedulingController.FrameInputs(
                 frameNanos,
                 cpuNanos,

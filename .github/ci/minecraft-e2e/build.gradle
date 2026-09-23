@@ -274,6 +274,12 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
         jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
+        ['dynamicUploadRangeCopy', 'nativeMultiDrawBatch', 'asyncPrecompile'].each { flag ->
+            jvmArgs.add("-Dmetallum.opt.${flag}=${providers.gradleProperty(flag).orElse('false').get()}")
+        }
+        jvmArgs.add("-Dmetallum.hotpath.telemetry=${providers.gradleProperty('efficiencyTelemetry').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.pacing.enabled=${providers.gradleProperty('pacingPolicy').orElse('false').get()}")
+        jvmArgs.add("-Dmetallum.pacing.targetFps=${providers.gradleProperty('targetFps').orElse('60').get()}")
         jvmArgs.add("-Dmetallum.terrain.verifySliceCache=${providers.gradleProperty('verifyTerrainSliceCache').orElse('false').get()}")
         jvmArgs.add("-Dmetallum.ci.presentationMetrics=${presentationMetrics}")
         jvmArgs.add("-Dmetallum.ci.nativeWidth=${providers.gradleProperty('nativeWidth').get()}")

@@ -1,5 +1,24 @@
 {
   "schema_version": 2,
+  "efficiency_profiles": {
+    "fixed-cadence-energy-v1": {
+      "version": 1,
+      "runner": "scripts/agent/run_frame_trials.py --energy-profile fixed-cadence-energy-v1",
+      "analyzer": "scripts/agent/fixed_cadence_energy.py",
+      "minimum_paired_blocks": 4,
+      "minimum_positive_block_fraction": 0.75,
+      "minimum_target_fps_fraction": 0.98,
+      "source_fps_relative_regression_max": 0.02,
+      "source_p99_relative_regression_max": 0.02,
+      "maximum_clock_uncertainty_ns": 1000000,
+      "maximum_sample_interval_ns": 1000000000,
+      "minimum_warmup_ns": 30000000000,
+      "minimum_sample_ns": 120000000000,
+      "measurement": "Instrument interval-mean watts integrated over the exact source-clock sample window; domain, clock correlation and raw trace required.",
+      "missing_source": "unavailable; never infer power from utilization, battery percentage or generated FPS",
+      "acceptance": "Energy direction is additional evidence. Existing correctness, activation, CPU/GPU/memory/stutter guardrails and a prior matched A/A observation remain mandatory. The energy comparator alone cannot promote a product candidate."
+    }
+  },
   "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
   "reference_branch": "main",
   "suite_model": {

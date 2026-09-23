@@ -192,6 +192,8 @@ final class MetalMrtBackendIntegrationTest {
             var pending = builder.compilePipeline(pipeline, source, executor).join();
             device.clearPipelineCache();
             assertNull(pending.finishCompile(), "a cleared generation must not publish its prepared native PSO");
+            assertThrows(IllegalStateException.class, pending::finishCompile,
+                    "a consumed pending must not compile again using retired shader modules");
         }
         MetalCompiledRenderPipeline first = device.getOrCompilePipeline(pipeline);
         first.close();
@@ -200,6 +202,37 @@ final class MetalMrtBackendIntegrationTest {
         MetalCompiledRenderPipeline replacement = device.getOrCompilePipeline(pipeline);
         assertNotSame(first, replacement);
         assertTrue(replacement.isValid());
+    }
+
+    @Test
+    void partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes() {
+        ByteBuffer original = ByteBuffer.allocateDirect(64);
+        for (int i = 0; i < 64; i++) original.put(i, (byte) i);
+        ByteBuffer patch = ByteBuffer.allocateDirect(11);
+        for (int i = 0; i < 11; i++) patch.put(i, (byte) (100 + i));
+        patch.position(2).limit(9);
+        try (MetalGpuBuffer source = (MetalGpuBuffer) device.createBuffer(
+                    () -> "dynamic source", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_SRC | GpuBuffer.USAGE_COPY_DST, 64);
+             MetalGpuBuffer before = (MetalGpuBuffer) device.createBuffer(
+                    () -> "old consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64);
+             MetalGpuBuffer after = (MetalGpuBuffer) device.createBuffer(
+                    () -> "new consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64)) {
+            encoder.writeToBuffer(source.slice(0, 64), original);
+            MemorySegment oldBacking = source.nativeHandle();
+            encoder.copyToBuffer(source.slice(0, 64), before.slice(0, 64));
+            encoder.writeToBuffer(source.slice(17, 7), patch);
+            assertNotEquals(oldBacking, source.nativeHandle());
+            encoder.copyToBuffer(source.slice(0, 64), after.slice(0, 64));
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            for (int i = 0; i < 64; i++) {
+                assertEquals((byte) i, before.currentStorage().get(i), "prior GPU consumer byte " + i);
+                byte expected = i >= 17 && i < 24 ? (byte) (102 + i - 17) : (byte) i;
+                assertEquals(expected, after.currentStorage().get(i), "updated consumer byte " + i);
+            }
+            assertEquals(2, patch.position());
+            assertEquals(9, patch.limit());
+        }
     }
 
     @Test

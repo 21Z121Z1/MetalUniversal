@@ -285,85 +285,97 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final boolean retainNativeHandle
     ) {
         MemorySegment retainedHandle = MemorySegment.NULL;
-        if (currentEncoder != null) {
-            if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
-                if (renderEncoderDeferredStore) {
-                    // The descriptor used storeAction=.unknown, so the store
-                    // decision is owed before endEncoding. The depth contents
-                    // are dead when a clear is already pending for the texture
-                    // (any later reader goes through flushPendingClear) or the
-                    // pass breaking this encoder clears the same attachment.
-                    boolean deadDepth = incomingClearsSameDepth
-                            || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
-                    renderEncoder.setDeferredDepthStore(!deadDepth);
-                    if (deadDepth && renderDepthTexture != null) {
-                        RenderGraphTelemetry.onDepthStoreKilled(
-                                (long) renderDepthTexture.getWidth(0) * renderDepthTexture.getHeight(0),
-                                renderDepthTexture.pixelSize()
+        MTLCommandEncoder ending = currentEncoder;
+        try {
+            if (ending != null) {
+                boolean prepared = false;
+                try {
+                    if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
+                        if (renderEncoderDeferredStore) {
+                            // The descriptor used storeAction=.unknown, so the store
+                            // decision is owed before endEncoding. The depth contents
+                            // are dead when a clear is already pending for the texture
+                            // (any later reader goes through flushPendingClear) or the
+                            // pass breaking this encoder clears the same attachment.
+                            boolean deadDepth = incomingClearsSameDepth
+                                    || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
+                            renderEncoder.setDeferredDepthStore(!deadDepth);
+                            if (deadDepth && renderDepthTexture != null) {
+                                RenderGraphTelemetry.onDepthStoreKilled(
+                                        (long) renderDepthTexture.getWidth(0) * renderDepthTexture.getHeight(0),
+                                        renderDepthTexture.pixelSize()
+                                );
+                            }
+                        }
+                        if (renderEncoderDeferredColorStores != null) {
+                            // Resolve every deferred color store before endEncoding;
+                            // a full-clear same-texture successor proved the
+                            // predecessor's store dead, everything else keeps its
+                            // contents alive. Accounting counts ONLY the slots whose
+                            // evidence resolved them to dontCare.
+                            int[] killedPixelBytes = new int[renderEncoderDeferredColorStores.length];
+                            int killedSlotCount = 0;
+                            for (int index = 0; index < renderEncoderDeferredColorStores.length; index++) {
+                                if (!renderEncoderDeferredColorStores[index]) {
+                                    continue;
+                                }
+                                boolean killed = colorStoresKilled != null
+                                        && index < colorStoresKilled.length
+                                        && colorStoresKilled[index]
+                                        && index < deferredColorStorePixelBytes.length
+                                        && deferredColorStorePixelBytes[index] > 0;
+                                renderEncoder.setDeferredColorStore(index, !killed);
+                                if (killed) {
+                                    killedPixelBytes[index] = deferredColorStorePixelBytes[index];
+                                    killedSlotCount++;
+                                }
+                            }
+                            if (killedSlotCount > 0) {
+                                RenderGraphTelemetry.onColorStoresKilled(
+                                        deferredColorStorePixels,
+                                        killedPixelBytes,
+                                        killedSlotCount
+                                );
+                            }
+                        }
+                        // Signal timing is identical either way (the fence fires
+                        // after the last listed stage); the split form documents the
+                        // consumer contract: prior render output gates fragment work.
+                        renderEncoder.updateFence(
+                                fence,
+                                SPLIT_FENCE ? MTLRenderStages.Fragment : MTLRenderStages.VertexAndFragment
                         );
+                    } else if (currentEncoder instanceof MTLBlitCommandEncoder blitEncoder) {
+                        blitEncoder.updateFence(SPLIT_FENCE ? transferFence : fence);
+                    } else if (currentEncoder instanceof MTLComputeCommandEncoder computeEncoder) {
+                        // Render fence in both modes; see computeCommandEncoder().
+                        computeEncoder.updateFence(fence);
+                    }
+                    prepared = true;
+                } finally {
+                    // Even a failed deferred-store/fence update owes a terminal
+                    // native end and CPU scratch release. A failed transition
+                    // cannot transfer its native lease to a nonexistent caller.
+                    currentEncoder = null;
+                    if (prepared && retainNativeHandle) {
+                        retainedHandle = ending.endEncodingRetainingHandle();
+                    } else {
+                        ending.endEncoding();
                     }
                 }
-                if (renderEncoderDeferredColorStores != null) {
-                    // Resolve every deferred color store before endEncoding;
-                    // a full-clear same-texture successor proved the
-                    // predecessor's store dead, everything else keeps its
-                    // contents alive. Accounting counts ONLY the slots whose
-                    // evidence resolved them to dontCare.
-                    int[] killedPixelBytes = new int[renderEncoderDeferredColorStores.length];
-                    int killedSlotCount = 0;
-                    for (int index = 0; index < renderEncoderDeferredColorStores.length; index++) {
-                        if (!renderEncoderDeferredColorStores[index]) {
-                            continue;
-                        }
-                        boolean killed = colorStoresKilled != null
-                                && index < colorStoresKilled.length
-                                && colorStoresKilled[index]
-                                && index < deferredColorStorePixelBytes.length
-                                && deferredColorStorePixelBytes[index] > 0;
-                        renderEncoder.setDeferredColorStore(index, !killed);
-                        if (killed) {
-                            killedPixelBytes[index] = deferredColorStorePixelBytes[index];
-                            killedSlotCount++;
-                        }
-                    }
-                    if (killedSlotCount > 0) {
-                        RenderGraphTelemetry.onColorStoresKilled(
-                                deferredColorStorePixels,
-                                killedPixelBytes,
-                                killedSlotCount
-                        );
-                    }
-                }
-                // Signal timing is identical either way (the fence fires
-                // after the last listed stage); the split form documents the
-                // consumer contract: prior render output gates fragment work.
-                renderEncoder.updateFence(
-                        fence,
-                        SPLIT_FENCE ? MTLRenderStages.Fragment : MTLRenderStages.VertexAndFragment
-                );
-            } else if (currentEncoder instanceof MTLBlitCommandEncoder blitEncoder) {
-                blitEncoder.updateFence(SPLIT_FENCE ? transferFence : fence);
-            } else if (currentEncoder instanceof MTLComputeCommandEncoder computeEncoder) {
-                // Render fence in both modes; see computeCommandEncoder().
-                computeEncoder.updateFence(fence);
             }
-            if (retainNativeHandle) {
-                retainedHandle = currentEncoder.endEncodingRetainingHandle();
-            } else {
-                currentEncoder.endEncoding();
-            }
-            currentEncoder = null;
+        } finally {
+            renderColorAttachments = new MemorySegment[0];
+            renderColorTextures = new MetalGpuTexture[0];
+            renderDepthAttachment = MemorySegment.NULL;
+            killedColorAttachments = new MemorySegment[0];
+            killedColorTextures = new MetalGpuTexture[0];
+            deferredColorStorePixels = 0;
+            deferredColorStorePixelBytes = new int[0];
+            renderDepthTexture = null;
+            renderEncoderDeferredStore = false;
+            renderEncoderDeferredColorStores = null;
         }
-        renderColorAttachments = new MemorySegment[0];
-        renderColorTextures = new MetalGpuTexture[0];
-        renderDepthAttachment = MemorySegment.NULL;
-        killedColorAttachments = new MemorySegment[0];
-        killedColorTextures = new MetalGpuTexture[0];
-        deferredColorStorePixels = 0;
-        deferredColorStorePixelBytes = new int[0];
-        renderDepthTexture = null;
-        renderEncoderDeferredStore = false;
-        renderEncoderDeferredColorStores = null;
         return retainedHandle;
     }
 
@@ -1673,6 +1685,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public void writeToBuffer(final GpuBufferSlice destination, final ByteBuffer data) {
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination.buffer();
         int length = data.remaining();
+        buffer.checkCanBeUsed();
+        MetalBufferUpload.validate(buffer.size(), destination.offset(), destination.length(), length);
+        if (length == 0) return;
 
         if (buffer.isDynamic()) {
             orphanWrite(buffer, destination.offset(), data);
@@ -1702,24 +1717,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         long size = buffer.allocationSize();
         MemorySegment old = buffer.nativeHandle();
         MemorySegment fresh = acquireDynamicBacking(size, buffer.resourceOptions());
-        if (fresh.address() == 0L) {
-            return;
+        boolean published = false;
+        try {
+            MemorySegment contents = MetalNativeBridge.metallum_get_buffer_contents(fresh);
+            if (MetalNativeBridge.isNullHandle(contents)) {
+                throw new IllegalStateException("Dynamic upload backing has no CPU storage");
+            }
+            ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(contents, size).order(ByteOrder.nativeOrder());
+            boolean rangeCopy = DynamicUploadPolicy.RANGE_COPY;
+            MetalBufferUpload.copy(buffer.currentStorage(), freshStorage, buffer.size(), offset, data, rangeCopy);
+            buffer.swapBacking(fresh, freshStorage);
+            published = true;
+            com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.recordDynamicUpload(
+                    rangeCopy && (offset != 0 || data.remaining() != buffer.size()), data.remaining());
+        } finally {
+            if (!published) MetalNativeBridge.metallum_release_object(fresh);
         }
-        ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(
-                MetalNativeBridge.metallum_get_buffer_contents(fresh), size).order(ByteOrder.nativeOrder());
-
-        if (offset != 0 || data.remaining() != buffer.size()) {
-            ByteBuffer previous = buffer.currentStorage();
-            previous.clear();
-            freshStorage.duplicate().put(previous);
-        }
-
-        ByteBuffer dst = freshStorage.duplicate().order(ByteOrder.nativeOrder());
-        dst.position(Math.toIntExact(offset));
-        dst.put(data.duplicate());
-
-        buffer.swapBacking(fresh, freshStorage);
         recycleDynamicBacking(old, size, buffer.resourceOptions());
+    }
+
+    private static final class DynamicUploadPolicy {
+        static final boolean RANGE_COPY = Boolean.getBoolean("metallum.opt.dynamicUploadRangeCopy");
     }
 
     private MemorySegment acquireDynamicBacking(final long size, final long resourceOptions) {
@@ -1730,8 +1748,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         final MemorySegment handle = MetalNativeBridge.metallum_create_buffer(device.metalDeviceHandle(), size, resourceOptions);
         if (MetalNativeBridge.isNullHandle(handle)) {
-            Metallum.LOGGER.warn("dynamic backing OOM, skipping uniform update this frame");
-            return MemorySegment.NULL;
+            throw new IllegalStateException("Failed to allocate dynamic upload backing (bytes=" + size + ")");
         }
         return handle;
     }
