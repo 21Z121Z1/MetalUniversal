@@ -1,0 +1,97 @@
+name: MetalFX reviewed parameter transport
+on:
+  push:
+    branches: [agent/metalfx-contract-completion-20260924]
+    paths: [.github/workflows/metalfx-reviewed-parameters.yml]
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: github.repository == '21Z121Z1/MetalUniversal'
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Apply reviewed patch and create Git objects without moving refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 00819cb6cc893639ddd91ed7a148bea08c5e74ee
+          mkdir -p /tmp/metalfx-reviewed-tree
+          python3 - <<'PY'
+          import base64, hashlib, json, pathlib, subprocess, zlib
+          repo = 'repos/21Z121Z1/MetalUniversal'
+          data = json.loads(subprocess.check_output(['gh', 'api', repo + '/git/blobs/1cc20be0d625bf13d0a87ec1ac1ab9bb69085258'], text=True))
+          patch = zlib.decompress(base64.b64decode(data['content']))
+          assert hashlib.sha256(patch).hexdigest() == '5c1913c156b2df9bc562ce3ca2f865753e406da4296653f6c4fddc180c8b6d31'
+          patchfile = pathlib.Path('/tmp/metalfx-reviewed.patch')
+          patchfile.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(patchfile)], check=True)
+          subprocess.run(['git', 'apply', str(patchfile)], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          paths = ['src/main/java/com/metallum/client/metal/render/MetalFxManager.java', 'src/main/native/MetalFrameGenerationLifecycle.swift', 'src/main/native/MetallumNative.swift', 'src/test/native/MetalFrameGenerationLifecycleTest.swift']
+          assert set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()) == set(paths)
+          def api(endpoint, payload):
+              result = subprocess.run(['gh', 'api', '--method', 'POST', repo + endpoint, '--input', '-'], input=json.dumps(payload), text=True, capture_output=True, check=True)
+              return json.loads(result.stdout)
+          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          entries = []
+          for path in paths:
+              blob = api('/git/blobs', {'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})['sha']
+              assert blob == subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob})
+          remove = '.github/workflows/metalfx-reviewed-parameters.yml'
+          entries.append({'path': remove, 'mode': '100644', 'type': 'blob', 'sha': None})
+          tree = api('/git/trees', {'base_tree': base, 'tree': entries})['sha']
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          subprocess.run(['git', 'rm', '--', remove], check=True)
+          assert tree == subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          receipt = {'parentSha': parent, 'treeSha': tree, 'entries': entries}
+          pathlib.Path('/tmp/metalfx-reviewed-tree/tree.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt))
+          PY
+      - name: Test deterministic native source parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc -O src/main/native/MetalFrameGenerationLifecycle.swift src/test/native/MetalFrameGenerationLifecycleTest.swift -o /tmp/metalfx-lifecycle
+          /tmp/metalfx-lifecycle | tee /tmp/metalfx-reviewed-tree/lifecycle.log
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Recover exact world camera construction
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$(bash scripts/minecraft-reference.sh --print-path)"
+          SOURCE_ROOT="$source" python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['SOURCE_ROOT'])
+          out = pathlib.Path('/tmp/metalfx-reviewed-tree/camera-source')
+          out.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(root.parent / 'REFERENCE_INFO.txt', out / 'REFERENCE_INFO.txt')
+          files = []
+          for p in sorted(root.rglob('*.java')):
+              if p.stem not in {'Camera', 'Projection', 'ProjectionType', 'Frustum'}:
+                  continue
+              rel = p.relative_to(root)
+              target = out / rel
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(p, target)
+              files.append({'path': str(rel), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()})
+          (out / 'manifest.json').write_text(json.dumps(files, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: metalfx-reviewed-tree-${{ github.sha }}
+          path: /tmp/metalfx-reviewed-tree/
+          retention-days: 3
+          if-no-files-found: error
