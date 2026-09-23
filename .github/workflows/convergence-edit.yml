@@ -1,5 +1,6 @@
-# Temporary exact-source verification and immutable blob transport; remove before main acceptance.
-name: Convergence prepared-worktree validation
+# Temporary execution-workspace export; remove before final main acceptance.
+# Source validation remains in build and capability workflows, not this transport job.
+name: Convergence execution workspace
 on:
   push:
     branches: [convergence/main-unification-20260923]
@@ -7,205 +8,42 @@ on:
 permissions:
   contents: read
 jobs:
-  iris-resources:
-    runs-on: macos-26
-    timeout-minutes: 45
-    permissions:
-      contents: write
-    env:
-      MTL_DEBUG_LAYER: '0'
-      MTL_SHADER_VALIDATION: '0'
-      MTL_HUD_ENABLED: '0'
-      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
+  export-workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: e577a7cce134f3f6ff6e3bceb4eed3a019518fb7
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '25'
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-        with:
-          cache-read-only: true
-      - name: Prepare exact reviewed eight-file source
-        id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GIT_AUTHOR_NAME: MetalUniversal validation
-          GIT_AUTHOR_EMAIL: validation@localhost
-          GIT_COMMITTER_NAME: MetalUniversal validation
-          GIT_COMMITTER_EMAIL: validation@localhost
+      - name: Export real toolchain bytes and exact current history
+        shell: bash
         run: |
           set -euo pipefail
-          gh api repos/21Z121Z1/MetalUniversal/git/blobs/9b9194b67444b19e98b0655d54a2611bb7169cd4 > "$RUNNER_TEMP/patch-blob.json"
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess
-          base = 'e577a7cce134f3f6ff6e3bceb4eed3a019518fb7'
-          expected_tree = 'edbd7704af9f9f7c43cc31a08a6734e27206c7b5'
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
-              raise RuntimeError('Unexpected source base or dirty checkout')
-          blob = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'patch-blob.json').read_text())
-          patch = base64.b64decode(blob['content'])
-          if hashlib.sha256(patch).hexdigest() != '1a616497968e43f1110647c638e649d896de9f0cbd7063bae24dca0e0bdbedd6':
-              raise RuntimeError('Patch checksum mismatch')
-          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
-          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
-          tree = git('write-tree')
-          if tree != expected_tree:
-              raise RuntimeError('Unexpected reviewed source tree: ' + tree)
-          paths = git('diff', '--cached', '--name-only').splitlines()
-          if len(paths) != 8:
-              raise RuntimeError('Unexpected source path count')
-          commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared Iris resource ownership regression; unpublished validation only\n', text=True).strip()
-          subprocess.run(['git', 'reset', '--hard', commit], check=True)
-          output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
-          proof = {'proof_subject': 'unpublished-prepared-worktree', 'source_base': base,
-              'tested_commit_sha': commit, 'tested_tree_sha': tree, 'workflow_sha': os.environ['GITHUB_SHA'],
-              'paths': paths, 'main_acceptance': False, 'physical_display_acceptance': False, 'refs_updated': False}
-          (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
-          (output / 'change.patch').write_bytes(patch)
-          subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
-          print(json.dumps(proof, indent=2))
-          PY
-      - name: Probe the hosted Metal execution capability
-        run: |
-          set -euo pipefail
-          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
-          sudo xcode-select -s "$latest"
-          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/metal-probe"
-          "$RUNNER_TEMP/metal-probe" | tee build/agent-evidence/hosted-metal-probe.log
-          grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
-      - name: Prove that removing the retirement hook makes the regression fail
-        run: |
-          set -euo pipefail
-          source=src/main/java/com/metallum/client/metal/render/MetalGpuTexture.java
-          cp "$source" "$RUNNER_TEMP/fixed-texture.java"
-          git show e577a7cce134f3f6ff6e3bceb4eed3a019518fb7:"$source" > "$source"
-          set +e
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalIrisIntegrationTest \
-            --tests '*MetalIrisTargetsIntegrationTest.retiredAllocationsCannotLeaveDeferredClears' \
-            --tests '*MetalIrisTargetsIntegrationTest.closingTextureOwnerPreservesClearsUntilTheLastViewRetires' \
-            2>&1 | tee build/agent-evidence/retirement-without-hook.log
-          result=${PIPESTATUS[0]}
-          set -e
-          cp "$RUNNER_TEMP/fixed-texture.java" "$source"
-          test "$result" -ne 0
-          mkdir -p build/agent-evidence/regression-red
-          cp -R build/test-results/hostedMetalIrisIntegrationTest/. build/agent-evidence/regression-red/
-          python3 - <<'PY'
-          import pathlib, xml.etree.ElementTree as ET
-          expected = {'retiredAllocationsCannotLeaveDeferredClears()',
-              'closingTextureOwnerPreservesClearsUntilTheLastViewRetires()'}
-          failed = set()
-          for path in pathlib.Path('build/agent-evidence/regression-red').glob('TEST*.xml'):
-              for case in ET.parse(path).getroot().iter('testcase'):
-                  if case.find('failure') is not None:
-                      failed.add(case.attrib['name'])
-          if failed != expected:
-              raise RuntimeError(f'Expected the two retirement assertion failures, got {failed}')
-          print('RETIREMENT_WITHOUT_HOOK_REGRESSION_CONFIRMED')
-          PY
-      - name: Validate fixed resource views, all target lifecycle readbacks and store contracts
-        run: |
-          set -euo pipefail
-          git diff --exit-code
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalIrisIntegrationTest --tests '*MetalIrisTargetsIntegrationTest' \
-            2>&1 | tee build/agent-evidence/iris-targets-fixed.log
-          ./gradlew --no-daemon --stacktrace test --tests '*MetalDeferredColorStoreContractTest' \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
-            2>&1 | tee build/agent-evidence/store-contracts.log
-      - name: Publish verified immutable source blobs only
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import base64, json, pathlib, subprocess
-          output = pathlib.Path('build/agent-evidence')
-          proof = json.loads((output / 'prepared-subject.json').read_text()); entries = []
-          if subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip():
-              raise RuntimeError('Test execution modified tracked source')
-          for name in proof['paths']:
-              expected = subprocess.check_output(['git', 'hash-object', name], text=True).strip()
-              request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode()})
-              response = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
-                  'repos/21Z121Z1/MetalUniversal/git/blobs', '--input', '-'], input=request, text=True))
-              if response['sha'] != expected:
-                  raise RuntimeError('Published blob mismatch: ' + name)
-              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': expected})
-          (output / 'source-blobs.json').write_text(json.dumps(entries, indent=2) + '\n')
-          PY
+          out="$RUNNER_TEMP/convergence-workspace"
+          mkdir -p "$out/jdk"
+          # setup-java's JAVA_HOME may itself be a symlink. Copying that link
+          # gives an unusable archive outside the runner; dereference its bytes.
+          cp -aL "$JAVA_HOME"/. "$out/jdk/"
+          test -x "$out/jdk/bin/java"
+          "$out/jdk/bin/java" -version 2>&1 | tee "$out/java-version.txt"
+          "$out/jdk/bin/javac" -version 2>&1 | tee "$out/javac-version.txt"
+          git bundle create "$out/source.bundle" --all
+          git bundle verify "$out/source.bundle"
+          git ls-remote --heads origin > "$out/remote-heads.tsv"
+          git rev-parse HEAD HEAD^{tree} > "$out/source-identity.txt"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/convergence-workspace.tar.gz" convergence-workspace
+          sha256sum "$RUNNER_TEMP/convergence-workspace.tar.gz" > "$RUNNER_TEMP/workspace-SHA256SUMS"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
         with:
-          name: iris-resources-prepared-${{ github.sha }}-${{ github.run_attempt }}
+          name: convergence-workspace-${{ github.sha }}
           path: |
-            build/agent-evidence/
-            build/test-results/
-            build/reports/tests/
-          if-no-files-found: error
-          retention-days: 30
-  portable-java-validation-workspace:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: e577a7cce134f3f6ff6e3bceb4eed3a019518fb7
-          persist-credentials: false
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: '25'
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-        with:
-          cache-read-only: true
-      - name: Export exact dependency classpath for network-isolated local validation
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/export.init.gradle" <<'GRADLE'
-          gradle.projectsEvaluated {
-              def p = gradle.rootProject
-              p.tasks.register('exportPortableValidation') {
-                  dependsOn p.tasks.named('testClasses')
-                  doLast {
-                      def target = p.layout.buildDirectory.dir('portable-validation').get().asFile
-                      target.mkdirs()
-                      def files = (p.sourceSets.main.compileClasspath.files + p.sourceSets.test.runtimeClasspath.files).toSet()
-                      def console = p.configurations.detachedConfiguration(p.dependencies.create('org.junit.platform:junit-platform-console-standalone:1.12.2'))
-                      files.addAll(console.files)
-                      def manifest = []
-                      files.toList().sort { it.absolutePath }.eachWithIndex { file, index ->
-                          if (file.exists()) {
-                              def name = "classpath/${index}-${file.name}"
-                              p.copy { from file; into new File(target, file.isDirectory() ? name : 'classpath'); if (!file.isDirectory()) rename { "${index}-${file.name}" } }
-                              manifest.add(name)
-                          }
-                      }
-                      new File(target, 'classpath.txt').text = manifest.join('\n') + '\n'
-                      new File(target, 'source-sha.txt').text = 'e577a7cce134f3f6ff6e3bceb4eed3a019518fb7\n'
-                  }
-              }
-          }
-          GRADLE
-          ./gradlew --no-daemon --stacktrace -I "$RUNNER_TEMP/export.init.gradle" exportPortableValidation \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
-          cp -a "$JAVA_HOME" build/portable-validation/jdk
-          tar -C build -czf "$RUNNER_TEMP/portable-java-validation.tar.gz" portable-validation
-          sha256sum "$RUNNER_TEMP/portable-java-validation.tar.gz"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: portable-java-validation-${{ github.sha }}
-          path: ${{ runner.temp }}/portable-java-validation.tar.gz
+            ${{ runner.temp }}/convergence-workspace.tar.gz
+            ${{ runner.temp }}/workspace-SHA256SUMS
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
