@@ -67,6 +67,16 @@ final class MetalGpuTextureView implements GpuTextureView {
         return this.texture.getHeight(this.baseMipLevel + mipLevel);
     }
 
+    /** Storage images must expose physical channels, never a sampling swizzle. */
+    void validateStorageBinding() {
+        if (this.closed) {
+            throw new IllegalStateException("Storage image view is closed");
+        }
+        if (this.alphaOneSwizzle) {
+            throw new IllegalArgumentException("A sampled alpha-one view cannot be bound as a storage image");
+        }
+    }
+
     MemorySegment nativeHandle() {
         if (this.closed) {
             throw new IllegalStateException("Texture view is closed");

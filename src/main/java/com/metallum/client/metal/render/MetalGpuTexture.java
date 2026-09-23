@@ -225,6 +225,10 @@ final class MetalGpuTexture implements GpuTexture {
             throw new IllegalStateException("Too many views removed from texture");
         }
         if (this.closed && this.views == 0 && this.nativeHandle != null) {
+            // No owner/view can observe a clear after the allocation retires.
+            // Keep queued clears while a view still owns the texture; discarding
+            // them in close() would lose contents visible through that view.
+            this.device.commandEncoder().discardPendingClears(this);
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
             if (!this.validationAllocationInvalidated && RenderContractRuntime.observing()) {

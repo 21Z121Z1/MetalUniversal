@@ -431,6 +431,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return pendingColorClears.containsKey(texture) || pendingDepthClears.containsKey(texture);
     }
 
+    /** Allocation-retirement hook, not a logical texture-owner close hook. */
+    void discardPendingClears(final MetalGpuTexture texture) {
+        pendingColorClears.remove(texture);
+        pendingDepthClears.remove(texture);
+    }
+
     void endComputePass(final MTLComputeCommandEncoder encoder) {
         if (currentEncoder != encoder) {
             throw new IllegalStateException(

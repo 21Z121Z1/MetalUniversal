@@ -1307,6 +1307,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 case STORAGE_IMAGE -> {
                     GpuTextureView view = storageImage(compute, resource.name(), targets, resources);
                     MetalGpuTextureView metalView = metalView(view, compute, resource.name());
+                    metalView.validateStorageBinding();
                     ((MetalGpuTexture) metalView.texture()).markContentsDirty();
                     pass.bindTextureView(resource.binding(), metalView);
                 }
@@ -1368,9 +1369,9 @@ final class IrisMetalPostChain implements AutoCloseable {
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
-        int target = colorImageIndex(name);
-        if (target >= 0) {
-            return targets.colorTargets().sampleReadView(target);
+        GpuTextureView standard = standardStorageImage(name, targets);
+        if (standard != null) {
+            return standard;
         }
         GpuTextureView view = resources.storageImage(compute.info, name);
         if (view == null) {
@@ -1599,15 +1600,9 @@ final class IrisMetalPostChain implements AutoCloseable {
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
-        int target = colorImageIndex(name);
-        if (target >= 0) {
-            if (target >= targets.colorTargets().targetCount()) {
-                throw new IllegalStateException(
-                        "Iris pass " + info.name() + " storage image '" + name
-                                + "' exceeds generation target count"
-                );
-            }
-            return targets.colorTargets().sampleReadView(target);
+        GpuTextureView standard = standardStorageImage(name, targets);
+        if (standard != null) {
+            return standard;
         }
         GpuTextureView view = resources.storageImage(info, name);
         if (view == null) {
@@ -1616,6 +1611,20 @@ final class IrisMetalPostChain implements AutoCloseable {
             );
         }
         return view;
+    }
+
+    /** Shared by raster and compute: images address the current physical read side. */
+    static @Nullable GpuTextureView standardStorageImage(
+            final String name, final IrisMetalRenderTargets targets
+    ) {
+        int target = colorImageIndex(name);
+        if (target < 0) {
+            return null;
+        }
+        if (target >= targets.colorTargets().targetCount()) {
+            throw new IllegalStateException("Storage image '" + name + "' exceeds generation target count");
+        }
+        return targets.colorTargets().readView(target);
     }
 
     static @Nullable TextureBinding externalTexture(

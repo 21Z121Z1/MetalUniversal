@@ -177,7 +177,8 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest",
             "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest",
             "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest",
-            "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+            "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest",
+            "com.metallum.client.metal.render.MetalIrisTargetsIntegrationTest"
         ]
     )
     hostedIris.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
