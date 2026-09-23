@@ -36,6 +36,16 @@
     "failed_present_command_buffers": 0,
     "nil_drawables": 0,
     "framebuffer_equivalence_required": true,
+    "framebuffer_equivalence": {
+      "scenario_id": "p1-stationary-framebuffer-equivalence-v1",
+      "capture_source": "production RenderContractRuntime raw FINAL_DRAWABLE RGBA8_UNORM payload",
+      "extent": [854, 480],
+      "sample_count": 8,
+      "camera_pose_and_world_identity_must_match": true,
+      "samples_must_be_byte_identical_within_each_lane": true,
+      "baseline_candidate_comparison": "byte-identical payload for every matching frameId",
+      "first_pixel_divergence_is_rejected": true
+    },
     "resource_reload_recovery_required": true
   },
   "required_runtime_metrics": [
@@ -111,6 +121,7 @@
     "runner_uses_normal_physical_presentation_path": true,
     "hosted_offscreen_override_forbidden": true,
     "runner_checks_runtime_framebuffer_present_reload_and_readback_guardrails": true,
+    "runner_compares_all_final_drawable_payloads_across_lanes": true,
     "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
     "same_exact_product_sha_required": true,
     "same_exact_production_jar_required": true,
