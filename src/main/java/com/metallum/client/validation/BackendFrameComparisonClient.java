@@ -23,6 +23,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.Lightmap;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionMesh;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -31,6 +32,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -1260,6 +1262,22 @@ public final class BackendFrameComparisonClient {
             minecraft.level.setRainLevel(0.0F);
             minecraft.level.setThunderLevel(0.0F);
         }
+        // Hud.tick() eases this value by 1% per client tick even while the
+        // level simulation is frozen. The two backends can reach a capture
+        // frame after different numbers of client ticks, so use the same
+        // settled value that vanilla's updateVignetteBrightness() approaches.
+        Entity cameraEntity = minecraft.getCameraEntity();
+        if (cameraEntity != null) {
+            minecraft.gui.hud.vignetteBrightness = vignetteTargetBrightness(cameraEntity);
+        }
+    }
+
+    private static float vignetteTargetBrightness(final Entity cameraEntity) {
+        BlockPos eyeBlock = BlockPos.containing(
+                cameraEntity.getX(), cameraEntity.getEyeY(), cameraEntity.getZ());
+        float localBrightness = Lightmap.getBrightness(cameraEntity.level().dimensionType(),
+                cameraEntity.level().getMaxLocalRawBrightness(eyeBlock));
+        return Mth.clamp(1.0F - localBrightness, 0.0F, 1.0F);
     }
 
     /**
@@ -1566,6 +1584,9 @@ public final class BackendFrameComparisonClient {
                 "viewRotation", cameraState.viewRotationMatrix.get(new float[16]),
                 "gameTime", levelState.gameTime,
                 "worldPartialTicks", levelState.worldPartialTicks));
+        Entity cameraEntity = minecraft.getCameraEntity();
+        String vignetteTarget = cameraEntity == null
+                ? "null" : Float.toString(vignetteTargetBrightness(cameraEntity));
         return String.format(
                 Locale.ROOT,
                 "{\n"
@@ -1608,6 +1629,9 @@ public final class BackendFrameComparisonClient {
                         + "  \"fixedLightmapBlockFactor\": %s,\n"
                         + "  \"lightmapInputs\": %s,\n"
                         + "  \"terrainInputs\": %s,\n"
+                        + "  \"hudTickCount\": %d,\n"
+                        + "  \"vignetteBrightness\": %s,\n"
+                        + "  \"vignetteTargetBrightness\": %s,\n"
                         + "  \"integratedServerScenarioConfigured\": %s,\n"
                         + "  \"serverSimulationFrozen\": %s,\n"
                         + "  \"clientSimulationFrozen\": %s,\n"
@@ -1676,6 +1700,9 @@ public final class BackendFrameComparisonClient {
                 FREEZE_SIMULATION ? "1.4" : "null",
                 new Gson().toJson(minecraft.gameRenderer.gameRenderState().lightmapRenderState),
                 terrainInputs,
+                minecraft.gui.hud.getGuiTicks(),
+                Float.toString(minecraft.gui.hud.vignetteBrightness),
+                vignetteTarget,
                 integratedServerConfigured,
                 serverSimulationFrozen,
                 clientSimulationFrozen,
