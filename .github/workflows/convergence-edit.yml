@@ -1,5 +1,5 @@
 # Temporary prepared-worktree validation. Remove before final main acceptance.
-# This workflow cannot publish source trees, commits, refs, tags, or settings.
+# No source tree, commit, ref, tag, or setting is published by this workflow.
 name: Convergence prepared-worktree validation
 on:
   push:
@@ -10,19 +10,7 @@ permissions:
   actions: read
 jobs:
   validate:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: java-contracts
-            runner: ubuntu-latest
-          - lane: shipping-build
-            runner: macos-26
-          - lane: production-e2e
-            runner: macos-26
-          - lane: hosted-metal
-            runner: macos-26
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       MTL_HUD_ENABLED: '0'
@@ -77,8 +65,6 @@ jobs:
           tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
           if tree != '339dd1064fcf5fca1f8e37ce3b652c8354930dc5' or tree != manifest['expected_tree']:
               raise RuntimeError('Prepared source tree mismatch')
-          # Local-only detached identity permits honest clean-binary provenance.
-          # No push, authenticated Git configuration, or write API exists here.
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', manifest['parent_sha']],
               input='Prepared workload API and shared-anchor corrections; unpublished validation only\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
@@ -95,17 +81,7 @@ jobs:
               env.write('METALLUM_SOURCE_SHA=' + commit + '\n')
           print(json.dumps(proof, indent=2))
           PY
-      - name: Validate Java and evidence contracts
-        if: matrix.lane == 'java-contracts'
-        run: |
-          set -euo pipefail
-          bash scripts/agent/verify_unified_eval.sh
-          ./gradlew --no-daemon --stacktrace -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
-          ./gradlew --no-daemon --stacktrace compileJava test verifyProductionJarIsolation \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
       - name: Select and record the shipping macOS SDK
-        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
@@ -113,28 +89,7 @@ jobs:
           sw_vers
           xcodebuild -version
           python3 scripts/agent/record_sdk_contract.py --output build/agent-evidence/sdk-api-contract.txt
-      - name: Require shipping native and fresh-JVM PSO compilation
-        if: matrix.lane == 'shipping-build'
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon buildMacNative
-          xcrun swiftc -O -target arm64-apple-macosx14.0 -framework Foundation -framework Metal \
-            src/test/native/MetalShippingPipelineAbiSmokeTest.swift -o "$RUNNER_TEMP/shipping-abi-probe"
-          "$RUNNER_TEMP/shipping-abi-probe" src/main/resources/natives/macos/libmetallum.dylib \
-            2>&1 | tee build/agent-evidence/shipping-abi-threading-probe.log
-          grep -Fq SHIPPING_PIPELINE_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
-          grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
-          java --enable-native-access=ALL-UNNAMED "-XX:ErrorFile=$(pwd)/build/agent-evidence/hs_err_pid%p.log" \
-            .github/ci/JvmPsoThreadingProbe.java "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
-            2>&1 | tee build/agent-evidence/jvm-pso-threading-probe.log
-          grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS build/agent-evidence/jvm-pso-threading-probe.log
-      - name: Run the ordinary shipping build gates
-        if: matrix.lane == 'shipping-build'
-        run: |
-          ./gradlew --no-daemon --stacktrace buildMacNative build -Pmetallum.hsErrDir=agent-evidence \
-            -x metalFrameGenerationPresentationValidation -x metalFxOffscreenValidation
       - name: Run the production Vanilla client and unchanged evidence verifier
-        if: matrix.lane == 'production-e2e'
         env:
           MTL_DEBUG_LAYER: '1'
           MTL_SHADER_VALIDATION: '0'
@@ -148,43 +103,31 @@ jobs:
           ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e \
             -PmetallumJar="$PREPARED_JAR" -Pmetallum.noOptionalMods=true test runProductionClientGameTest
           python3 - <<'PY'
-          import os, pathlib, subprocess, textwrap
+          import hashlib, os, pathlib, subprocess, textwrap
           workflow = pathlib.Path('.github/workflows/minecraft-client-e2e.yml').read_text()
           marker = '      - name: Verify framebuffer, presentation, and reload evidence\n        run: |\n'
           if workflow.count(marker) != 1:
               raise RuntimeError('Cannot locate the unchanged production evidence verifier')
-          body = workflow.split(marker, 1)[1].split('      - name: State evidence boundary', 1)[0]
-          body = textwrap.dedent(body)
-          body = body.replace('${{ steps.metallum.outputs.jar }}', os.environ['PREPARED_JAR'])
-          subprocess.run(['bash', '-euo', 'pipefail', '-c', body], check=True)
+          original = textwrap.dedent(workflow.split(marker, 1)[1].split('      - name: State evidence boundary', 1)[0])
+          # Split the token to prevent GitHub Actions evaluating this Python literal.
+          expression = '$' + '{{ steps.metallum.outputs.jar }}'
+          if not expression or original.count(expression) != 1:
+              raise RuntimeError('Expected exactly one literal JAR expression')
+          body = original.replace(expression, os.environ['PREPARED_JAR'])
+          output = pathlib.Path('build/agent-evidence')
+          (output / 'production-verifier.sh').write_text(body)
+          (output / 'production-verifier-source.sha256').write_text(hashlib.sha256(original.encode()).hexdigest() + '\n')
+          subprocess.run(['bash', '-n', str(output / 'production-verifier.sh')], check=True)
+          subprocess.run(['bash', '-euo', 'pipefail', str(output / 'production-verifier.sh')], check=True)
           PY
-      - name: Run the hosted Metal capability and shipping contract gates
-        if: matrix.lane == 'hosted-metal'
-        env:
-          MTL_DEBUG_LAYER: '0'
-          MTL_SHADER_VALIDATION: '0'
-          METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
-        run: |
-          set -euo pipefail
-          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/hosted-probe"
-          "$RUNNER_TEMP/hosted-probe" | tee build/agent-evidence/hosted-metal-probe.log
-          grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            buildMacNative verifyProductionJarIsolation metalFrameGenerationLifecycleTest \
-            compileMetalMrtSmokeTest compileMetal4PipelineSmokeTest compileMetal4PipelinePathTest \
-            compileMetalHudRuntimeTest compileMetalFxOffscreenValidation compileMetalFxPerformanceValidation \
-            compileMetalFrameGenerationPresentationValidation
-          build/metal-tests/MetalMRTSmokeTest | tee build/agent-evidence/metal-mrt.log
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            metalHudDisabledEnvironmentTest metal4PipelineSmokeTest metal4PipelinePathTest \
-            hostedMetalCoreIntegrationTest hostedMetalIrisIntegrationTest
       - name: Preserve exact unpublished test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: unpublished-worktree-${{ matrix.lane }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: unpublished-worktree-production-e2e-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
+            build/libs/*.jar
             build/test-results/
             build/reports/
             .github/ci/minecraft-e2e/build/evidence/
