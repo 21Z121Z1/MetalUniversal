@@ -1,0 +1,52 @@
+name: Sodium render diagnostic
+on:
+  push:
+    branches: [agent/upstream-26.3-workbench-20260923]
+    paths: [.github/workflows/sodium-render-diagnostic.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    if: github.repository == '21Z121Z1/MetalUniversal'
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      METALLUM_SOURCE_SHA: 300f21c41214350ec8a7c1ff7aaa891f457ff1b6
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      METALLUM_MSL_CACHE_DIR: ${{ runner.temp }}/shader-cache
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+      - name: Run exact production Sodium client
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace jar -x buildIOSNative -x buildIOSSpvc
+          jar="$(find "$PWD/build/libs" -maxdepth 1 -name '*.jar' ! -name '*sources*' ! -name '*validation*' ! -name '*dev*' | head -1)"
+          ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e -PmetallumJar="$jar" -Pmetallum.renderer=sodium test runProductionClientGameTest
+      - name: Preserve translation and dependency evidence
+        if: always()
+        run: |
+          mkdir -p build/sodium-diagnostic
+          cp -R "$METALLUM_MSL_CACHE_DIR" build/sodium-diagnostic/ || true
+          find "$HOME/.gradle/caches" -type f \( -name '*renderpearl*.jar' -o -name '*sodium*0.9.2*sources.jar' \) -exec cp {} build/sodium-diagnostic/ \;
+          find "$HOME/.gradle/caches" -name '*.jar' | grep -E 'renderpearl|sodium|minecraft' > build/sodium-diagnostic/dependency-paths.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: sodium-diagnostic-300f21c
+          path: |
+            build/sodium-diagnostic/
+            .github/ci/minecraft-e2e/build/evidence/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
+          retention-days: 7
