@@ -114,19 +114,37 @@ final class MetalFxMath {
         projection.m30(projection.m30() * ratio);
     }
 
-    static float verticalFieldOfViewDegrees(final Matrix4fc projection, final float fallback) {
+    static float verticalFieldOfViewDegrees(final Matrix4fc projection) {
         float focalLength = projection.m11();
-        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)) {
-            return fallback;
+        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)
+                || projection.m23() != -1.0F || projection.m33() != 0.0F) {
+            return Float.NaN;
         }
         float fieldOfView = (float) Math.toDegrees(2.0D * Math.atan(1.0D / focalLength));
-        // Minecraft's perspective FOV slider and its camera effects stay well
-        // above 15 degrees. During world initialization the camera state can
-        // briefly expose a valid but stale projection (for example ~8
-        // degrees); passing that to frame interpolation produces an invalid
-        // camera model for the first queued frame.
-        return fieldOfView >= 15.0F && fieldOfView < 170.0F && Float.isFinite(fieldOfView)
-                ? fieldOfView : fallback;
+        // A narrow perspective may be a real zoom. Never replace it with a
+        // guessed normal FOV; invalid initialization is represented by NaN.
+        return fieldOfView > 0.0F && fieldOfView < 180.0F && Float.isFinite(fieldOfView)
+                ? fieldOfView : Float.NaN;
+    }
+
+    static boolean isRigidViewTransform(final Matrix4fc matrix) {
+        if (!isFinite(matrix) || Math.abs(matrix.m03()) > 1.0E-5F
+                || Math.abs(matrix.m13()) > 1.0E-5F || Math.abs(matrix.m23()) > 1.0E-5F
+                || Math.abs(matrix.m33() - 1.0F) > 1.0E-5F) {
+            return false;
+        }
+        for (int first = 0; first < 3; first++) {
+            for (int second = first; second < 3; second++) {
+                float dot = 0;
+                for (int row = 0; row < 3; row++) {
+                    dot += matrix.get(first, row) * matrix.get(second, row);
+                }
+                if (Math.abs(dot - (first == second ? 1.0F : 0.0F)) > 1.0E-4F) {
+                    return false;
+                }
+            }
+        }
+        return Math.abs(matrix.determinant3x3() - 1.0F) <= 1.0E-4F;
     }
 
     static Matrix4f viewMatrix(final Matrix4fc viewRotation, final double cameraX, final double cameraY, final double cameraZ) {
