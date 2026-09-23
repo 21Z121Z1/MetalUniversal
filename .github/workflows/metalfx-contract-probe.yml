@@ -1,0 +1,63 @@
+name: MetalFX contract source probe
+on:
+  push:
+    branches: [agent/metalfx-contract-completion-20260924]
+    paths: [.github/workflows/metalfx-contract-probe.yml]
+permissions:
+  contents: read
+jobs:
+  source-contracts:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Capture exact Minecraft producer source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$(bash scripts/minecraft-reference.sh --print-path)"
+          python3 scripts/agent/extract_minecraft_motion_reference.py --source-root "$source" --output build/metalfx-contract-probe/motion-reference.json
+          SOURCE_ROOT="$source" python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          root = pathlib.Path(os.environ['SOURCE_ROOT'])
+          out = pathlib.Path('build/metalfx-contract-probe/minecraft')
+          out.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(root.parent / 'REFERENCE_INFO.txt', out / 'REFERENCE_INFO.txt')
+          names = set('Minecraft GameRenderer LevelRenderer MainTarget RenderTarget TextureTarget ProjectionMatrixBuffer CameraRenderState LevelTargetBundle RenderPipelines ShaderSource RenderPipeline ColorTargetState DepthStencilState RenderPass CommandEncoder RenderPassDescriptor RenderPassColorAttachment GpuFormat GpuTexture GpuTextureView StagedVertexBuffer StagedVertexDraw PreparedFeatureFrame PreparedRenderType FeatureRenderDispatcher ModelFeatureRenderer RenderTypeFeatureRenderer RenderTypeFeatureGroup QuadParticleFeatureRenderer QuadParticleRenderState SingleQuadParticle ItemInHandRenderer GuiRenderer GuiRenderState PostChain PostPass RenderSystem FogRenderer LightTexture CloudRenderer WeatherEffectRenderer ChunkSectionsToRender SectionRenderDispatcher ChunkSectionLayer OitRenderTargetBundle OitRenderTarget TransparentRenderTarget'.split())
+          manifest = {'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'files': []}
+          for path in sorted(root.rglob('*')):
+              if not path.is_file():
+                  continue
+              rel = path.relative_to(root)
+              if not ((path.suffix == '.java' and (path.stem in names or str(rel).startswith('com/mojang/renderpearl/api/'))) or (str(rel).startswith('assets/minecraft/shaders/') and path.suffix in ('.vsh', '.fsh', '.glsl'))):
+                  continue
+              target = out / rel
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(path, target)
+              manifest['files'].append({'path': str(rel), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print('Captured', len(manifest['files']), 'producer source files')
+          PY
+      - name: Capture compilation SDK authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$latest"
+          mkdir -p build/metalfx-contract-probe/sdk
+          xcodebuild -version > build/metalfx-contract-probe/sdk/identity.txt
+          xcrun --show-sdk-version >> build/metalfx-contract-probe/sdk/identity.txt
+          for name in MTLFXTemporalScaler MTLFXFrameInterpolator; do
+            cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/$name.h" > "build/metalfx-contract-probe/sdk/$name.h"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: metalfx-contract-probe-${{ github.sha }}
+          path: build/metalfx-contract-probe/
+          retention-days: 3
+          if-no-files-found: error
