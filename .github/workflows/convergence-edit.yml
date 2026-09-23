@@ -1,5 +1,5 @@
 # Temporary convergence machinery. Remove before final main acceptance.
-# This job prepares reviewed content blobs only; the connected app publishes refs.
+# Prepare only exact, locally reviewed source blobs. The connector publishes refs.
 name: Convergence edit
 on:
   push:
@@ -23,105 +23,176 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request, urllib.error
+          import hashlib, json, os, pathlib, subprocess, urllib.request
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
-          if os.environ['GITHUB_REPOSITORY'] != '21Z121Z1/MetalUniversal':
-              raise RuntimeError('Unexpected repository')
+          assert os.environ['GITHUB_REPOSITORY'] == '21Z121Z1/MetalUniversal'
           def git(*args):
               return subprocess.check_output(['git', *args])
-          def api(path, data=None):
-              request = urllib.request.Request('https://api.github.com/repos/21Z121Z1/MetalUniversal' + path,
-                  data=None if data is None else json.dumps(data).encode(),
-                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
-                  method='GET' if data is None else 'POST')
-              try:
-                  with urllib.request.urlopen(request, timeout=60) as response:
-                      return json.load(response)
-              except urllib.error.HTTPError as error:
-                  print('GitHub API failure:', request.method, path, error.code, error.read().decode())
-                  raise
-          def blob_hash(data):
-              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-          def read_blob(sha):
-              if sha == blob_hash(b''):
-                  return b''
-              result = api('/git/blobs/' + sha)
-              data = base64.b64decode(result['content'])
-              if blob_hash(data) != sha:
-                  raise RuntimeError('Blob identity mismatch: ' + sha)
-              return data
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = 'c1e5c88e95af17c93ed9c9d525888258e6b4471a'
-          changed = git('diff', '--name-only', base, parent).decode().splitlines()
-          if changed != ['.github/workflows/convergence-edit.yml']:
-              raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          parts = ['87985b6fd418176f85a9b4f63a7f7a37fda5f8f3',
-                   '0fafed0e5dfa17c673918ddebee8d002ec19beb3']
-          raw = lzma.decompress(b''.join(read_blob(sha) for sha in parts))
-          if hashlib.sha256(raw).hexdigest() != 'eff5af59c14b3e4727fc8c3467ace0a4b243af04474f1bea4eca6b4a30ce1c3b':
-              raise RuntimeError('Reviewed capsule digest mismatch')
-          capsule = json.loads(raw)
-          if capsule['base_commit'] != base or len(capsule['files']) != 17:
-              raise RuntimeError('Unexpected reviewed capsule base or file count')
-          paths = []
-          for entry in capsule['files']:
-              path = pathlib.PurePosixPath(entry['path'])
-              if path.is_absolute() or '..' in path.parts or str(path) in paths or entry['mode'] != '100644':
-                  raise RuntimeError('Invalid reviewed path or mode')
-              if not str(path).startswith(('.github/ci/minecraft-e2e/', 'scripts/agent/',
-                      'src/main/java/com/metallum/client/metal/render/bridge/')) and str(path) not in {
-                      '.gitignore', 'docs/agent/frame-evidence-contract.md'}:
-                  raise RuntimeError('Path outside reviewed subsystem')
-              original = read_blob(entry['base_sha']).decode('utf-8')
-              chunks = []
-              for operation in entry['ops']:
-                  if isinstance(operation, str):
-                      chunks.append(operation)
-                  elif (isinstance(operation, list) and len(operation) == 2
-                        and all(type(value) is int for value in operation)
-                        and 0 <= operation[0] <= operation[1] <= len(original)):
-                      chunks.append(original[operation[0]:operation[1]])
-                  else:
-                      raise RuntimeError('Invalid reviewed delta operation')
-              content = ''.join(chunks).encode('utf-8')
-              if blob_hash(content) != entry['sha']:
-                  raise RuntimeError('Reviewed output identity mismatch: ' + str(path))
-              destination = root / path
-              destination.parent.mkdir(parents=True, exist_ok=True)
-              destination.write_bytes(content)
-              paths.append(str(path))
-          subprocess.run(['git', 'add', '--', *paths], check=True)
+          base = 'be6fd8e36be3195c395f4af37a62b65aadfa6880'
+          if git('diff', '--name-only', base, parent).decode().splitlines() != ['.github/workflows/convergence-edit.yml']:
+              raise RuntimeError('Concurrent source change: refusing stale prepared edits')
+          expected = {
+              '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/FrameWorkloads.java': '923dbde1d72ce470219f465e9fd812ac88a2e3cf',
+              '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/VanillaGameplay.java': '5e9934fe6eb9b2c8f619c3d86d2460295c8a5623',
+              'scripts/agent/test_frame_runner.py': 'b354b249e7ac65495f1bedbd29a0d1de94bd5660',
+              'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java': 'e5eb4bdcabeab0f240687ce3c2d3ba8149bf9efa',
+              'src/test/java/com/metallum/client/metal/render/FrameEvidenceRuntimeWindowTest.java': '69cd215544412d8a6a7ab45c055d5e7bec7226aa'}
+          def replace(path, old, new):
+              if path not in expected:
+                  raise RuntimeError('Unreviewed path')
+              target = root / path
+              content = target.read_text()
+              if content.count(old) != 1:
+                  raise RuntimeError('Edit precondition differs: ' + path)
+              target.write_text(content.replace(old, new))
+          workload = '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/FrameWorkloads.java'
+          replace(workload, 'Blocks.RED_STAINED_GLASS', 'Blocks.STAINED_GLASS.red()')
+          replace(workload, 'Blocks.BLUE_STAINED_GLASS', 'Blocks.STAINED_GLASS.blue()')
+          replace(workload, 'entity.getTags()', 'entity.entityTags()')
+          replace(workload,
+              '        receipt.addProperty("serverTickAtCompletion", world.getServer().computeOnServer(server -> server.getTickCount()));',
+              '        int serverTickAtCompletion = world.getServer().computeOnServer(server -> server.getTickCount());\n        receipt.addProperty("serverTickAtCompletion", serverTickAtCompletion);')
+          replace('.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/VanillaGameplay.java',
+              'FrameEvidenceRuntime.armWindowAt(profile, armedAtNs, WARMUP_NS, SAMPLE_NS);',
+              'FrameEvidenceRuntime.armWindowAt(profile, WARMUP_NS, SAMPLE_NS, armedAtNs);')
+          runtime = 'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java'
+          original = '''    public static void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
+                  if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
+              }
+          '''
+          replace(runtime, original, original + '''
+              /** Use the driver's existing Java-clock anchor; do not resample or reinterpret the durations. */
+              public static void armWindowAt(JsonObject profile, long warmupNs, long sampleNs, long anchorNs) {
+                  if (ENABLED) RECORDER.armWindowAt(profile, warmupNs, sampleNs, anchorNs);
+              }
+          ''')
+          test = 'scripts/agent/test_frame_runner.py'
+          replace(test, 'self.assertIn("-PmetallumJar=" + str(args.jar), command)',
+              'self.assertIn("-PmetallumJar=" + str(args.jar.resolve()), command)')
+          marker = '    def test_physical_lock_rejects_concurrent_independent_open_but_allows_a_declared_child(self):'
+          replace(test, marker, '''    def test_command_resolves_jar_symlinks_without_splitting_space_containing_paths(self):
+                  args = self.arguments(); spec, _ = self.fixture()
+                  actual_jar = args.jar.resolve()
+                  alias = self.root / "artifact alias with spaces.jar"
+                  alias.symlink_to(actual_jar)
+                  args.jar = alias
+                  command = workload_command(args, self.root, args.output, {"build": {"sourceSha": "a" * 40}}, spec)
+                  jar_arguments = [item for item in command if item.startswith("-PmetallumJar=")]
+                  self.assertEqual(["-PmetallumJar=" + str(actual_jar)], jar_arguments)
+                  self.assertNotIn("-PmetallumJar=" + str(alias), command)
+          
+          ''' + marker)
+          test = root / 'src/test/java/com/metallum/client/metal/render/FrameEvidenceRuntimeWindowTest.java'
+          if test.exists():
+              raise RuntimeError('New test already exists; refusing overwrite')
+          test.write_text('''package com.metallum.client.metal.render;
+          
+          import com.google.gson.JsonObject;
+          import java.lang.reflect.InvocationTargetException;
+          import java.net.URL;
+          import java.net.URLClassLoader;
+          import java.util.HashMap;
+          import org.junit.jupiter.api.Test;
+          import org.junit.jupiter.api.parallel.ResourceLock;
+          import org.junit.jupiter.api.parallel.Resources;
+          import static org.junit.jupiter.api.Assertions.*;
+          
+          @ResourceLock(Resources.SYSTEM_PROPERTIES)
+          final class FrameEvidenceRuntimeWindowTest {
+              @Test void runtimeUsesTheExactDriverAnchorAndDisabledCaptureHasNoRecorder() throws Exception {
+                  String[] keys = {"metallum.frameEvidence.enabled", "metallum.frameEvidence.windowed",
+                          "metallum.frameEvidence.mode", "metallum.frameEvidence.segmented"};
+                  var previous = new HashMap<String, String>();
+                  for (String key : keys) previous.put(key, System.getProperty(key));
+                  try {
+                      for (boolean enabled : new boolean[]{false, true}) {
+                          System.setProperty(keys[0], Boolean.toString(enabled));
+                          System.setProperty(keys[1], "true");
+                          System.setProperty(keys[2], "timing");
+                          System.setProperty(keys[3], "false");
+                          // Reload only the static runtime facade. Dependencies and the recorder
+                          // remain shared; no Minecraft window, native module, or GPU is started.
+                          String name = FrameEvidenceRuntime.class.getName();
+                          URL location = FrameEvidenceRuntime.class.getProtectionDomain().getCodeSource().getLocation();
+                          try (var isolated = new URLClassLoader(new URL[]{location}, getClass().getClassLoader()) {
+                              @Override protected Class<?> loadClass(String requested, boolean resolve) throws ClassNotFoundException {
+                                  synchronized (getClassLoadingLock(requested)) {
+                                      if (!requested.equals(name)) return super.loadClass(requested, resolve);
+                                      Class<?> type = findLoadedClass(requested);
+                                      if (type == null) type = findClass(requested);
+                                      if (resolve) resolveClass(type);
+                                      return type;
+                                  }
+                              }
+                          }) {
+                              Class<?> runtime = Class.forName(name, true, isolated);
+                              var method = runtime.getMethod("armWindowAt", JsonObject.class, long.class, long.class, long.class);
+                              var field = runtime.getDeclaredField("RECORDER");
+                              field.setAccessible(true);
+                              if (!enabled) {
+                                  method.invoke(null, null, -1L, -1L, Long.MAX_VALUE);
+                                  assertNull(field.get(null), "Disabled capture must not allocate a recorder");
+                              } else {
+                                  var profile = new JsonObject(); profile.addProperty("route", "fixture");
+                                  method.invoke(null, profile, 10L, 20L, 100L);
+                                  profile.addProperty("route", "mutated");
+                                  var recorder = (FrameEvidenceRecorder) field.get(null);
+                                  var window = recorder.snapshot(new JsonObject()).getAsJsonObject("window");
+                                  assertEquals(110L, window.get("startNs").getAsLong());
+                                  assertEquals(130L, window.get("endNs").getAsLong());
+                                  assertEquals("fixture", window.getAsJsonObject("profile").get("route").getAsString());
+                                  var failure = assertThrows(InvocationTargetException.class,
+                                          () -> method.invoke(null, new JsonObject(), 0L, 1L, 200L));
+                                  assertInstanceOf(IllegalStateException.class, failure.getCause());
+                                  assertEquals(window, recorder.snapshot(new JsonObject()).getAsJsonObject("window"));
+                              }
+                          }
+                      }
+                  } finally {
+                      for (String key : keys) {
+                          if (previous.get(key) == null) System.clearProperty(key);
+                          else System.setProperty(key, previous.get(key));
+                      }
+                  }
+              }
+          }
+          ''')
+          for path, sha in expected.items():
+              data = (root / path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if sha != actual:
+                  raise RuntimeError('Reviewed source hash mismatch: ' + path + ' ' + actual)
+          subprocess.run(['git', 'add', '--', *expected], check=True)
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
           patch = git('diff', '--binary', '--full-index', 'HEAD')
-          digest = '20e832504bf0c750dbd3fb98ffcaad36c9792723c7fe1b719e90a7093dd5f3c2'
-          if capsule['final_diff_sha256'] != digest or hashlib.sha256(patch).hexdigest() != digest:
-              raise RuntimeError('Reconstructed changes differ from the locally reviewed patch')
+          digest = '12184a246327cd265aad8af3420c291994c9dc5130380c4b942d78f4cca9f32d'
+          if hashlib.sha256(patch).hexdigest() != digest:
+              raise RuntimeError('Final diff differs from local reviewed artifact')
           (output / 'change.patch').write_bytes(patch)
-          tests = [
-              ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'],
-              ['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test']]
+          tests = [['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'],
+                   ['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test']]
           with (output / 'python-tests.log').open('w') as log:
               for command in tests:
-                  log.write('$ ' + ' '.join(command) + '\n')
-                  log.flush()
+                  log.write('$ ' + ' '.join(command) + '\n'); log.flush()
                   subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
           entries = []
-          for path in paths:
-              mode, expected_sha = git('ls-files', '--stage', '--', path).decode().split()[:2]
-              if mode != '100644':
-                  raise RuntimeError('Unexpected file mode')
-              blob = api('/git/blobs', {'content': (root / path).read_text(), 'encoding': 'utf-8'})
-              if blob['sha'] != expected_sha:
-                  raise RuntimeError('Prepared blob differs from reviewed content')
-              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': blob['sha']})
+          for path, sha in expected.items():
+              request = urllib.request.Request('https://api.github.com/repos/21Z121Z1/MetalUniversal/git/blobs',
+                  data=json.dumps({'content': (root / path).read_text(), 'encoding': 'utf-8'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  blob = json.load(response)
+              if blob['sha'] != sha:
+                  raise RuntimeError('GitHub blob differs from reviewed source')
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
           result = {'parent_sha': parent, 'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
-              'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest,
-              'entries': entries, 'refs_updated': False, 'tests_executed': tests,
-              'java_native_validation': 'not executed; required after connector publication',
-              'physical_trial_validation': 'not executed; requires physical Apple Silicon display'}
+              'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest, 'entries': entries,
+              'refs_updated': False, 'tests_executed': tests,
+              'java_native_validation': 'required after connector publication; not executed by this preparation job'}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
