@@ -13,24 +13,84 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write
-      contents: read
     steps:
-      - name: Cancel redundant builds of this isolated workbench only
-        env:
+      - env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: 21Z121Z1/MetalUniversal
-          WORKBENCH: agent/upstream-26.3-workbench-20260923
-        shell: bash
         run: |
-          set -euo pipefail
-          # The source-only staging ref and PR branch are deliberately excluded.
-          # The fork's general build.yml otherwise consumes macOS slots for every
-          # transport-only commit. Never cancel main, upstream, or another agent.
-          gh api --method GET "repos/$GH_REPO/actions/runs" -f branch="$WORKBENCH" -f per_page=100 \
-            --jq '.workflow_runs[] | select(.head_branch == "agent/upstream-26.3-workbench-20260923") | select(.path == ".github/workflows/build.yml") | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending") | .id' \
-            > "$RUNNER_TEMP/workbench-builds.txt"
+          gh api --method GET repos/21Z121Z1/MetalUniversal/actions/runs -f branch=agent/upstream-26.3-workbench-20260923 -f per_page=100 --jq '.workflow_runs[] | select(.head_branch == "agent/upstream-26.3-workbench-20260923" and .path == ".github/workflows/build.yml") | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending") | .id' > "$RUNNER_TEMP/runs"
           while read -r run; do
             [[ -n "$run" ]] || continue
-            printf 'Cancel redundant workbench build %s\n' "$run"
-            gh api --method POST "repos/$GH_REPO/actions/runs/$run/cancel" || true
-          done < "$RUNNER_TEMP/workbench-builds.txt"
+            gh api --method POST "repos/21Z121Z1/MetalUniversal/actions/runs/$run/cancel" || true
+          done < "$RUNNER_TEMP/runs"
+  geometry-diagnostic:
+    if: github.repository == '21Z121Z1/MetalUniversal'
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      METALLUM_SOURCE_SHA: 4403a941091ecb7c25d41b8398d6ddf270b8c0cd
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+      - name: Build exact candidate and inspect dependency ABI
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p build/dependency-audit
+          cat > "$RUNNER_TEMP/export.init.gradle" <<'GROOVY'
+          allprojects {
+            afterEvaluate {
+              if (plugins.hasPlugin('java')) {
+                tasks.register('exportAuditClasspath') {
+                  doLast { file('build/dependency-audit/classpath.txt').text = sourceSets.main.compileClasspath.asPath }
+                }
+              }
+            }
+          }
+          GROOVY
+          ./gradlew --no-daemon --stacktrace -I "$RUNNER_TEMP/export.init.gradle" jar exportAuditClasspath -x buildIOSNative -x buildIOSSpvc
+          cp="$(cat build/dependency-audit/classpath.txt)"
+          for cls in 'com.mojang.renderpearl.api.vertex.VertexFormat' 'com.mojang.renderpearl.api.vertex.VertexFormat$Builder' 'com.mojang.renderpearl.api.vertex.VertexFormatElement' 'com.mojang.renderpearl.backend.api.BackendRenderPipeline$CreateInfo' 'com.mojang.renderpearl.api.buffers.GpuBufferSlice' 'net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex' 'net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer' 'net.caffeinemc.mods.sodium.client.gpu.device.context.VKMultiDrawContext'; do
+            javap -classpath "$cp" -p -c "$cls" > "build/dependency-audit/$cls.txt"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import os
+          root=Path('build/dependency-audit')
+          for p in (root/'classpath.txt').read_text().split(os.pathsep):
+              jar=Path(p)
+              if jar.suffix != '.jar' or 'sodium' not in jar.name.lower(): continue
+              with ZipFile(jar) as z:
+                  for name in z.namelist():
+                      if name.startswith('assets/sodium/shaders/') and not name.endswith('/'):
+                          out=root/name; out.parent.mkdir(parents=True,exist_ok=True); out.write_bytes(z.read(name))
+          PY
+          jar="$(find "$PWD/build/libs" -maxdepth 1 -name '*.jar' ! -name '*-sources.jar' ! -name '*-validation.jar' | head -1)"
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+      - name: Reproduce Sodium geometry with shader validation
+        run: |
+          ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e \
+            -PmetallumJar="${{ steps.build.outputs.jar }}" -Pmetallum.renderer=sodium \
+            test runProductionClientGameTest
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: sodium-geometry-diagnostic-4403a94
+          path: |
+            build/dependency-audit/
+            .github/ci/minecraft-e2e/build/evidence/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/metallum-cache/msl/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
+            .github/ci/minecraft-e2e/build/reports/
+          if-no-files-found: warn
+          retention-days: 3
