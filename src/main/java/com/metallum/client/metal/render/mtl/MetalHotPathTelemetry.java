@@ -18,6 +18,8 @@ public final class MetalHotPathTelemetry {
     private static final LongAdder computeSuppressed = new LongAdder();
     private static final LongAdder nativeMultiDrawBatches = new LongAdder();
     private static final LongAdder nativeMultiDrawCommands = new LongAdder();
+    private static final LongAdder dynamicRangeCopies = new LongAdder();
+    private static final LongAdder dynamicCopyBytesAvoided = new LongAdder();
 
     private MetalHotPathTelemetry() {
     }
@@ -67,7 +69,9 @@ public final class MetalHotPathTelemetry {
                 computeForwarded.sum(),
                 computeSuppressed.sum(),
                 nativeMultiDrawBatches.sum(),
-                nativeMultiDrawCommands.sum()
+                nativeMultiDrawCommands.sum(),
+                dynamicRangeCopies.sum(),
+                dynamicCopyBytesAvoided.sum()
         );
     }
 
@@ -79,6 +83,15 @@ public final class MetalHotPathTelemetry {
         computeSuppressed.reset();
         nativeMultiDrawBatches.reset();
         nativeMultiDrawCommands.reset();
+        dynamicRangeCopies.reset();
+        dynamicCopyBytesAvoided.reset();
+    }
+
+    public static void recordDynamicUpload(boolean rangeCopy, int bytes) {
+        if (ENABLED && rangeCopy) {
+            dynamicRangeCopies.increment();
+            dynamicCopyBytesAvoided.add(bytes);
+        }
     }
 
     public record Snapshot(
@@ -88,7 +101,9 @@ public final class MetalHotPathTelemetry {
             long computeForwardedCalls,
             long computeSuppressedCalls,
             long nativeMultiDrawBatches,
-            long nativeMultiDrawCommands
+            long nativeMultiDrawCommands,
+            long dynamicRangeCopies,
+            long dynamicCopyBytesAvoided
     ) {
         public long totalSuppressedFfmCalls() {
             return renderSuppressedCalls + computeSuppressedCalls;

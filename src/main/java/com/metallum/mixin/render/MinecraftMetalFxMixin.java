@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalFxManager;
 import com.metallum.client.metal.render.FrameEvidenceRuntime;
+import com.metallum.client.metal.render.MetalFramePacing;
 import com.metallum.client.validation.MetalValidationClient;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
@@ -17,6 +18,8 @@ public abstract class MinecraftMetalFxMixin {
     @Inject(method = "renderFrame", at = @At("HEAD"))
     private void metallum$beginFrameBeforeExtraction(final boolean advanceGameTime, final CallbackInfo ci) {
         Minecraft minecraft = (Minecraft) (Object) this;
+        var window = minecraft.getWindow();
+        MetalFramePacing.observeWindow(window.isFocused(), window.isIconified(), window.getWidth(), window.getHeight());
         FrameEvidenceRuntime.beginFrame(advanceGameTime);
         MetalFxManager.beginFrame();
         MetalValidationClient.beforeFrame(minecraft.gameRenderer);

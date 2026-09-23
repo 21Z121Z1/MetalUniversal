@@ -480,7 +480,9 @@ public final class TerrainSchedulingController {
                 || !PresentationPacingSnapshot.NANOS_UNIT.equals(target.unit())) {
             return new BudgetTarget(TARGET_FRAME_NANOS, TARGET_SOURCE_UNAVAILABLE_FALLBACK);
         }
-        String source = target.fallbackReason() == null
+        String source = PresentationPacingSnapshot.USER_TARGET_PROVENANCE.equals(target.provenance())
+                ? "user-target"
+                : target.fallbackReason() == null
                 && PresentationPacingSnapshot.REFRESH_RATE_PROVENANCE.equals(target.provenance())
                 ? TARGET_SOURCE_DISPLAY_DERIVED
                 : TARGET_SOURCE_CONSERVATIVE_FALLBACK;

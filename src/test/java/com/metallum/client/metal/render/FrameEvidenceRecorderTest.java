@@ -13,6 +13,21 @@ class FrameEvidenceRecorderTest {
     private final AtomicLong clock = new AtomicLong(100);
     private final FrameEvidenceRecorder recorder = new FrameEvidenceRecorder(4, clock::get);
 
+    @Test void policyAtFrameEndIsCopiedToItsOwnNestedScope() {
+        JsonObject policy = new JsonObject();
+        recorder.beginFrame(true);
+        recorder.beginFrame(true);
+        policy.addProperty("effectiveFps", 30);
+        recorder.pacingPolicy(policy);
+        recorder.endFrame();
+        policy.addProperty("effectiveFps", 60);
+        recorder.pacingPolicy(policy);
+        recorder.endFrame();
+        policy.addProperty("effectiveFps", 10);
+        assertEquals(60, frame(0).getAsJsonObject("context").getAsJsonObject("pacingPolicy").get("effectiveFps").getAsInt());
+        assertEquals(30, frame(1).getAsJsonObject("context").getAsJsonObject("pacingPolicy").get("effectiveFps").getAsInt());
+    }
+
     @Test void preservesPrimitivePointerVoidAndExceptionalAbiShapes() throws Throwable {
         recorder.beginFrame(true);
         for (Class<?> type : new Class<?>[]{int.class, long.class, float.class, double.class, MemorySegment.class}) {

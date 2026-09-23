@@ -107,9 +107,14 @@ public final class FrameEvidenceRuntime {
 
     public static void endFrame() {
         if (ENABLED) {
+            RECORDER.pacingPolicy(MetalFramePacing.snapshot());
             RECORDER.endFrame();
             if (++sourceScopes % 64 == 0) collectPresented();
         }
+    }
+
+    public static void surfaceChanged() {
+        if (ENABLED) RECORDER.advanceEpoch();
     }
 
     private static void collectPresented() {

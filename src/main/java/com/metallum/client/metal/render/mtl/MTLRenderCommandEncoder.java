@@ -508,28 +508,12 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
     }
 
     @Override
-    public void endEncoding() {
-        if (!MetalNativeBridge.isNullHandle(this.handle)) {
-            flushState(this.handle);
-        }
-        try {
-            super.endEncoding();
-        } finally {
-            releaseCpuState();
-        }
+    protected void beforeEndEncoding(final MemorySegment encoder) {
+        flushState(encoder);
     }
 
     @Override
-    public MemorySegment endEncodingRetainingHandle() {
-        if (!MetalNativeBridge.isNullHandle(this.handle)) flushState(this.handle);
-        try {
-            return super.endEncodingRetainingHandle();
-        } finally {
-            releaseCpuState();
-        }
-    }
-
-    private void releaseCpuState() {
+    protected void releaseCpuState() {
         if (this.statePacket != null) {
             this.statePacket.close();
             this.statePacket = null;

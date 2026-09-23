@@ -163,6 +163,20 @@ final class TerrainSchedulingControllerTest {
     }
 
     @Test
+    void explicitCadenceChangesBudgetWithoutPretendingToMeasurePresentation() {
+        TerrainSchedulingController controller = new TerrainSchedulingController(true, 0);
+        PresentationPacingSnapshot pacing = PresentationPacingSnapshot.capture(1L, 120, -1L, -1L)
+                .withUserTarget(33_333_333L);
+        runFrame(controller, 1L, 0.0, 0.0, 1.0,
+                withCpu(input(40_000_000L, 0, -1, -1, 0.0, pacing), 0L));
+        assertEquals(33_333_333L, controller.decision().budgetTargetFrameNanos());
+        assertEquals("user-target", controller.decision().budgetTargetSource());
+        assertFalse(pacing.targetPresentInterval().measured());
+        assertFalse(pacing.measuredPresentInterval().available());
+        assertSame(pacing, pacing.withUserTarget(0L));
+    }
+
+    @Test
     void warmupDoesNotActuatePacingTarget() {
         TerrainSchedulingController controller = new TerrainSchedulingController(true, 2);
         TerrainSchedulingController.FrameInputs input = input(

@@ -193,6 +193,9 @@ final class MetalDevice implements GpuDeviceBackend {
     private volatile boolean closed;
     /** Prepared native pipelines remain owned here until RenderPearl takes or cancels them. */
     private final Set<PreparedPipeline> pendingPipelines = new HashSet<>();
+    private static final java.util.concurrent.atomic.LongAdder PREPARED_PIPELINES = new java.util.concurrent.atomic.LongAdder();
+
+    public static long preparedPipelineCount() { return PREPARED_PIPELINES.sum(); }
     @Nullable
     private final ExecutorService prewarmExecutor;
     private static boolean renderPipelineUsesIdentityEquals() {
@@ -314,11 +317,12 @@ final class MetalDevice implements GpuDeviceBackend {
             );
         }
         this.prewarmExecutor = ASYNC_PRECOMPILE && RENDER_PIPELINE_IDENTITY_EQUALS
-                ? Executors.newSingleThreadExecutor(runnable -> {
+                ? new java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(64), runnable -> {
                     Thread thread = new Thread(runnable, "metallum-pso-prewarm-compile");
                     thread.setDaemon(true);
                     return thread;
-                })
+                }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy())
                 : null;
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
@@ -596,15 +600,15 @@ final class MetalDevice implements GpuDeviceBackend {
             int generation = this.pipelineCacheGeneration;
             BackendRenderPipeline.Pending pending = MetalCrossShaderCompiler.compilePending(this, pipelineCreateInfo);
             if (!asyncPrewarmEnabled()) {
-                return () -> {
-                    synchronized (COMPILE_CHAIN_LOCK) {
-                        return this.closed || generation != this.pipelineCacheGeneration ? null : pending.finishCompile();
-                    }
-                };
+                PreparedPipeline prepared = new PreparedPipeline(null, generation);
+                prepared.pending = pending;
+                this.pendingPipelines.add(prepared);
+                return prepared;
             }
             // RenderPearl invokes this on its caller-supplied loading executor.
             // Do native work here, not on the reload/render executor's finishCompile.
             PreparedPipeline prepared = new PreparedPipeline(pending.finishCompile(), generation);
+            if (prepared.pipeline != null) PREPARED_PIPELINES.increment();
             this.pendingPipelines.add(prepared);
             return prepared;
         }
@@ -612,6 +616,7 @@ final class MetalDevice implements GpuDeviceBackend {
 
     private final class PreparedPipeline implements BackendRenderPipeline.Pending {
         private @Nullable BackendRenderPipeline pipeline;
+        private BackendRenderPipeline.@Nullable Pending pending;
         private final int generation;
         private boolean consumed;
 
@@ -627,6 +632,11 @@ final class MetalDevice implements GpuDeviceBackend {
                 consumed = true;
                 pendingPipelines.remove(this);
                 if (closed || generation != pipelineCacheGeneration) discard();
+                if (pending != null) {
+                    BackendRenderPipeline.Pending work = pending;
+                    pending = null;
+                    pipeline = work.finishCompile();
+                }
                 BackendRenderPipeline result = pipeline;
                 pipeline = null; // Ownership passes to the RenderPearl frontend.
                 return result;
@@ -634,6 +644,7 @@ final class MetalDevice implements GpuDeviceBackend {
         }
 
         void discard() {
+            pending = null;
             if (pipeline != null) {
                 pipeline.close();
                 pipeline = null;
@@ -718,9 +729,15 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     void submitPrewarmTask(final Runnable task) {
         if (this.prewarmExecutor != null) {
+            int generation = this.pipelineCacheGeneration;
             try {
-                this.prewarmExecutor.execute(task);
-            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                this.prewarmExecutor.execute(() -> {
+                    synchronized (COMPILE_CHAIN_LOCK) {
+                        if (!closed && generation == pipelineCacheGeneration) task.run();
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                Metallum.LOGGER.debug("PSO prewarm queue full or closed; exact variant remains on-demand");
             }
         }
     }
@@ -732,6 +749,9 @@ final class MetalDevice implements GpuDeviceBackend {
         this.stableTerrainSamplerLogged = false;
         synchronized (COMPILE_CHAIN_LOCK) {
             this.pipelineCacheGeneration++;
+            if (this.prewarmExecutor instanceof java.util.concurrent.ThreadPoolExecutor executor) {
+                executor.getQueue().clear();
+            }
             this.pendingPipelines.forEach(PreparedPipeline::discard);
             this.pendingPipelines.clear();
             this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
