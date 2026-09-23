@@ -45,7 +45,7 @@ jobs:
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
           base = '7d7da04df3ff271a1157d4f3d73bb753ee95315c'
-          expected_tree = '451e47059a02bbb800ec0f07bf997903d9be1f8d'
+          expected_tree = '4be5f57053b16ff008ee2af1b1905ef929304998'
           expected_paths = {
               'src/main/java/com/metallum/Metallum.java',
               'src/main/java/com/metallum/client/metal/render/MetalBackend.java',
@@ -84,6 +84,20 @@ jobs:
                   text = ''.join(lines)
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_text(text)
+          # Correct two test-environment assumptions exposed by the first actual macOS run.
+          # Assertions remain exact; a /var alias is compared by its real path and JVM tmp exists.
+          test = pathlib.Path('src/test/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflightTest.java')
+          text = test.read_text()
+          corrections = {
+              'assertEquals(second, selected.getParent());': 'assertEquals(second.toRealPath(), selected.getParent());',
+              '"-Dos.name=" + os, "-Duser.home=/test-home", "-Djava.io.tmpdir=/test-tmp",':
+                  '"-Dos.name=" + os, "-Duser.home=" + directory, "-Djava.io.tmpdir=" + directory,',
+          }
+          for old, new in corrections.items():
+              if text.count(old) != 1:
+                  raise RuntimeError('Bootstrap test correction does not match reviewed source')
+              text = text.replace(old, new)
+          test.write_text(text)
           subprocess.run(['git', 'add', '--', *sorted(changes)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           tree = git('write-tree')
@@ -98,7 +112,7 @@ jobs:
           proof = {'schema_version': 1, 'proof_subject': 'unpublished-prepared-worktree',
               'workflow_sha': os.environ['GITHUB_SHA'], 'source_base': base,
               'tested_commit_sha': commit, 'tested_tree_sha': tree, 'payload_sha256': digest,
-              'refs_updated': False, 'main_acceptance': False, 'physical_acceptance': False}
+              'test_corrections': corrections, 'refs_updated': False, 'main_acceptance': False, 'physical_acceptance': False}
           (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
           subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
           print(json.dumps(proof, indent=2))
