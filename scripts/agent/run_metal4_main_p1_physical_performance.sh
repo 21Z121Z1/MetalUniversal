@@ -119,6 +119,7 @@ if [[ -n "$(git status --porcelain=v1)" ]]; then
 fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
+prepare_physical_output "$OUT"
 mkdir -p "$OUT/correctness" "$OUT/trials"
 
 read -r CORRECTNESS_JAR_SHA CORRECTNESS_DYLIB_SHA < <(

@@ -25,6 +25,10 @@ assert 'instanceof MetalGpuTexture metalTexture' in render_pass
 assert 'flushPendingClear((MetalGpuTexture)' not in render_pass
 plugin = (ROOT / 'src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java').read_text()
 assert 'isModLoaded("sodium")' in plugin and 'isModLoaded("iris")' in plugin
+readback = (ROOT / '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/MetalReadbackControlGameTest.java').read_text()
+assert 'validateRenderer(System.getProperty("metallum.ci.rendererMode", "")' in readback
+assert 'FrameWorkloads.validateProducer(mode, sodium, iris)' in readback
+assert 'metallum.ci.noOptionalMods' not in readback
 for name in ('minecraft-client-e2e.yml','minecraft-26.3-migration.yml','metal-capabilities.yml'):
     workflow = (ROOT / '.github/workflows' / name).read_text()
     assert '26.3-fabric-dev' in workflow and 'pull_request_target' not in workflow

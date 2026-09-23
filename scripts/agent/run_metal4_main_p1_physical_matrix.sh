@@ -12,6 +12,7 @@ physical_preflight
 HEAD_SHA="$(git rev-parse HEAD)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_P1_MATRIX_OUT:-$ROOT/build/agent-runs/p1-metal4-main-matrix-$STAMP}"
+prepare_physical_output "$OUT"
 mkdir -p "$OUT/correctness" "$OUT/profiles"
 # Each optional stack earns its own exact-production correctness gate.
 for renderer in vanilla sodium iris; do

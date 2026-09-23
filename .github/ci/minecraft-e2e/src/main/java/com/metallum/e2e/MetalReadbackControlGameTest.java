@@ -17,11 +17,9 @@ public final class MetalReadbackControlGameTest implements FabricClientGameTest 
                 .toAbsolutePath().normalize();
 
         require(FabricLoader.getInstance().isModLoaded("metallum"), "MetalUniversal was not loaded");
-        boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
-        require(FabricLoader.getInstance().isModLoaded("sodium") == !vanillaOnly,
-                "Sodium runtime presence disagrees with the requested lane");
-        require(FabricLoader.getInstance().isModLoaded("iris") == !vanillaOnly,
-                "Iris runtime presence disagrees with the requested lane");
+        validateRenderer(System.getProperty("metallum.ci.rendererMode", ""),
+                FabricLoader.getInstance().isModLoaded("sodium"),
+                FabricLoader.getInstance().isModLoaded("iris"));
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getConnection().waitForChunksRender();
@@ -43,6 +41,11 @@ public final class MetalReadbackControlGameTest implements FabricClientGameTest 
             require(suite.renderClear().exact(),
                     "GPU render clear did not survive texture readback: " + suite.renderClear());
         }
+    }
+
+    // Shared truth table: Sodium-only is distinct from Sodium plus optional Iris.
+    static void validateRenderer(String mode, boolean sodium, boolean iris) {
+        FrameWorkloads.validateProducer(mode, sodium, iris);
     }
 
     private static void require(boolean condition, String message) {

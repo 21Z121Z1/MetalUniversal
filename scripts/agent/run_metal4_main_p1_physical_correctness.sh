@@ -24,7 +24,7 @@ if [[ -n "$(git status --porcelain=v1)" ]]; then
 fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
-mkdir -p "$OUT"
+prepare_physical_output "$OUT"
 
 sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
@@ -116,11 +116,6 @@ run_lane() {
 run_lane baseline
 run_lane candidate
 
-python3 scripts/agent/check_metal4_main_e2e_pair.py \
-  "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
-  "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
-  --output "$OUT/pair-decision.json"
-
 python3 - "$OUT" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -156,12 +151,18 @@ for lane in ("baseline", "candidate"):
     )
 PY
 
-python3 - "$OUT/pair-decision.json" "$RENDERER_MODE" <<'PYMODE'
+python3 scripts/agent/check_metal4_main_e2e_pair.py \
+  "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
+  "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
+  --output "$OUT/.pair-decision.tmp.json"
+
+python3 - "$OUT/.pair-decision.tmp.json" "$RENDERER_MODE" <<'PYMODE'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d = json.loads(p.read_text())
 d['rendererMode'] = sys.argv[2]
 d['identity']['rendererMode'] = sys.argv[2]
 p.write_text(json.dumps(d, indent=2) + '\n')
+p.replace(p.with_name('pair-decision.json'))
 PYMODE
 
 echo "P1 physical correctness pair: PASS ($RENDERER_MODE)"

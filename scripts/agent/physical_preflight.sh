@@ -33,3 +33,12 @@ production_jar_path() {
   [[ -s "$path" ]] || { echo "Expected production JAR absent: $path" >&2; return 2; }
   printf '%s\n' "$path"
 }
+
+# Evidence outputs are append-once run identities. Never let an old passing
+# decision survive a failed rerun that reuses an output directory.
+prepare_physical_output() {
+  local out="$1"
+  [[ ! -e "$out" ]] || { echo "Physical output already exists: $out" >&2; return 2; }
+  mkdir -p "$(dirname "$out")"
+  mkdir "$out"
+}
