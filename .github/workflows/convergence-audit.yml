@@ -22,7 +22,7 @@ jobs:
         shell: bash
         env:
           BASE_SHA: 969bf537d4ffd2b99a75f71f17e40fa2b58fd42c
-          START_SHA: f33746b672064331efaf98fba7471da6b0eed52f
+          START_SHA: 4e8509248109a11ee647c3cb9eda9ac2527c7f6c
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -35,6 +35,10 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY" > "$AUDIT_DIR/repository.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls?state=all&per_page=100" > "$AUDIT_DIR/pull-requests.pages.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" > "$AUDIT_DIR/recent-actions.json"
+          for pr in 73 78 79 80; do
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$pr/comments?per_page=100" > "$AUDIT_DIR/pr-$pr-comments.json"
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$pr/reviews?per_page=100" > "$AUDIT_DIR/pr-$pr-reviews.json"
+          done
           python3 - <<'PY'
           import datetime, hashlib, json, os, pathlib, subprocess
           root = pathlib.Path(os.environ['AUDIT_DIR'])
@@ -73,9 +77,8 @@ jobs:
               'task_start_sha': os.environ['START_SHA'],
               'workflow_commit': git('rev-parse', 'HEAD').decode().strip(), 'branches': branches}, indent=2) + '\n')
           (root / 'dag.txt').write_bytes(git('log', '--all', '--graph', '--decorate', '--format=%h %d %s'))
-          # Net-empty branches are not semantically accepted: preserve every commit for archaeology.
           (root / 'all-commits.tsv').write_bytes(git('log', '--all', '--format=%H%x09%P%x09%aI%x09%s'))
-          print(f'Captured {len(branches)} branches. All remain UNCLASSIFIED; no deletion or semantic acceptance is inferred.')
+          print(f'Captured {len(branches)} branches. No semantic acceptance or deletion is inferred.')
           PY
           (cd "$AUDIT_DIR" && sha256sum source.bundle inventory.json remote-heads.tsv > SHA256SUMS)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -83,4 +86,4 @@ jobs:
           name: convergence-audit-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/convergence-audit/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
