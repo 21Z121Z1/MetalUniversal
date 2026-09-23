@@ -7,74 +7,30 @@ on:
 permissions:
   contents: read
 jobs:
-  assemble-reviewed-migration:
+  release-workbench-capacity:
     if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/upstream-26.3-workbench-20260923'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     permissions:
-      contents: write
+      actions: write
+      contents: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          fetch-depth: 0
-      - name: Assemble and publish source-only staging ref
+      - name: Cancel redundant builds of this isolated workbench only
         env:
-          BASE: f8294b2fb6ce2edc56d418510294111c9276091e
-          SOURCE: 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1
-          EXPECTED_TREE: 62ea78dbae1e7107dc8c8a47ee917dc34749f3a2
-          EXPECTED_SOURCE_TREE: bee57018fbd85c9894ac2fcfcb77914d41976fe6
-          EXPECTED_PATCH: fcbb116933fe26540ccf72467fbe0c1fd682c12d5e3bcb3034fe7a4010503705
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: 21Z121Z1/MetalUniversal
+          WORKBENCH: agent/upstream-26.3-workbench-20260923
         shell: bash
         run: |
           set -euo pipefail
-          cp -R .github/upstream-migration "$RUNNER_TEMP/upstream-migration"
-          git fetch --no-tags https://github.com/EternityQwQ/MetalUniversal.git refs/heads/26.3-fabric-dev:refs/remotes/upstream/26.3-fabric-dev
-          test "$(git rev-parse refs/remotes/upstream/26.3-fabric-dev)" = "$BASE"
-          git cat-file -e "$SOURCE^{commit}"
-          python3 - <<'PY'
-          import base64, hashlib, lzma, os, pathlib
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'upstream-migration'
-          encoded = ''.join((root / f'amendments.part{i}').read_text().strip() for i in range(3))
-          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == os.environ['EXPECTED_PATCH']
-          (root / 'amendments.patch').write_bytes(patch)
-          PY
-          git switch --detach "$BASE"
-          python3 "$RUNNER_TEMP/upstream-migration/import.py"
-          git apply --check --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
-          git apply --index "$RUNNER_TEMP/upstream-migration/amendments.patch"
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('build.gradle')
-          p.write_text(''.join(line.rstrip() + '\n' for line in p.read_text().splitlines()))
-          PY
-          git add build.gradle
-          test "$(git write-tree)" = "$EXPECTED_TREE"
-          git diff --cached --check
-          git diff --cached --quiet "$BASE" -- gradle/wrapper/ settings.gradle README.md README_zh-CN.md LICENSE src/main/resources/metallum.accesswidener .github/workflows/build.yml
-          python3 scripts/agent/test_production_identity.py
-          python3 scripts/agent/verify_upstream_migration.py
-          for script in scripts/agent/run_metal4_main_p1_physical_*.sh scripts/agent/physical_preflight.sh; do bash -n "$script"; done
-          mkdir -p "$RUNNER_TEMP/migration-result/workflows"
-          for workflow in metal-capabilities.yml minecraft-26.3-migration.yml minecraft-client-e2e.yml; do
-            cp ".github/workflows/$workflow" "$RUNNER_TEMP/migration-result/workflows/$workflow"
-            git rm -f ".github/workflows/$workflow"
-          done
-          test "$(git write-tree)" = "$EXPECTED_SOURCE_TREE"
-          git config user.name '21Z121Z1'
-          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
-          git commit -q -m 'Port RenderPearl 26.3 backend and exact-artifact validation onto upstream' -m 'Base: EternityQwQ/MetalUniversal:26.3-fabric-dev at f8294b2fb6ce2edc56d418510294111c9276091e. Reviewed migration starts at 825226f2e747ec557629866232e5b55c99d34a2e; selected renderer/adapter/validation modules from 790f9cb2a4c7195158e7b2f71a030fcbf8db43e1 with explicit upstream-preserving amendments. No fork-tree merge, no upstream toolchain downgrade, no physical acceptance claim. Hosted workflows are published separately with the authorized connector.'
-          test -z "$(git status --porcelain)"
-          git push origin HEAD:refs/heads/agent/upstream-26.3-prepared-20260923
-          git rev-parse HEAD | tee "$RUNNER_TEMP/migration-result/head-sha.txt"
-          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/migration-result/tree-sha.txt"
-          git diff --stat "$BASE" HEAD > "$RUNNER_TEMP/migration-result/diff-stat.txt"
-          git format-patch --stdout "$BASE"..HEAD > "$RUNNER_TEMP/migration-result/upstream-migration.patch"
-          git bundle create "$RUNNER_TEMP/migration-result/prepared.bundle" HEAD "$BASE"^!
-          git diff --shortstat "$BASE" HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: prepared-upstream-migration
-          path: ${{ runner.temp }}/migration-result/
-          if-no-files-found: error
-          retention-days: 7
+          # The source-only staging ref and PR branch are deliberately excluded.
+          # The fork's general build.yml otherwise consumes macOS slots for every
+          # transport-only commit. Never cancel main, upstream, or another agent.
+          gh api --method GET "repos/$GH_REPO/actions/runs" -f branch="$WORKBENCH" -f per_page=100 \
+            --jq '.workflow_runs[] | select(.head_branch == "agent/upstream-26.3-workbench-20260923") | select(.path == ".github/workflows/build.yml") | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending") | .id' \
+            > "$RUNNER_TEMP/workbench-builds.txt"
+          while read -r run; do
+            [[ -n "$run" ]] || continue
+            printf 'Cancel redundant workbench build %s\n' "$run"
+            gh api --method POST "repos/$GH_REPO/actions/runs/$run/cancel" || true
+          done < "$RUNNER_TEMP/workbench-builds.txt"
