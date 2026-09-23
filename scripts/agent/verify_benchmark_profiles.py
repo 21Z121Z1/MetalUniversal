@@ -17,8 +17,8 @@ def main() -> None:
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1:
         fail("schema_version must be 1")
-    if data.get("reference_branch") != "integration/iris-metal-next":
-        fail("reference_branch must be integration/iris-metal-next")
+    if data.get("reference_branch") != "main":
+        fail("reference_branch must be main")
 
     rules = data.get("rules", {})
     required_rules = {
@@ -58,10 +58,10 @@ def main() -> None:
     }
     for profile_id, profile in by_id.items():
         stack = profile.get("stack", {})
-        if stack.get("minecraft") != "26.2":
-            fail(f"{profile_id} must target Minecraft 26.2")
-        if stack.get("sodium") is not True:
-            fail(f"{profile_id} must keep Sodium in the production stack")
+        if stack.get("minecraft") != "26.3":
+            fail(f"{profile_id} must target Minecraft 26.3")
+        if stack.get("sodium") is not True or stack.get("iris_loaded") is not True:
+            fail(f"{profile_id} must retain the declared optional-adapter benchmark stack")
         if stack.get("metalfx_mode") != "OFF" or stack.get("frame_generation") is not False:
             fail(f"{profile_id} must isolate the base renderer from MetalFX/FG")
         identity = set(profile.get("required_identity", []))
@@ -77,15 +77,16 @@ def main() -> None:
     for profile_id in ("V0", "V1"):
         stack = by_id[profile_id]["stack"]
         if stack.get("iris_semantic") is not False or stack.get("shader_pack") is not None:
-            fail(f"{profile_id} must be the no-shader baseline")
+            fail(f"{profile_id} must be the no-shader adapter baseline")
 
     for profile_id, family in (("I0", "Potato"), ("I1", "BSL")):
         profile = by_id[profile_id]
         stack = profile["stack"]
-        if stack.get("iris_semantic") is not True or stack.get("shader_pack") != family:
+        if (stack.get("sodium") is not True or stack.get("iris_loaded") is not True
+                or stack.get("iris_semantic") is not True or stack.get("shader_pack") != family):
             fail(f"{profile_id} must enable Iris semantic with {family}")
         identity = set(profile["required_identity"])
-        for field in ("iris_version", "shader_pack_name", "shader_pack_version", "shader_pack_sha256", "shader_options_sha256"):
+        for field in ("sodium_version", "iris_version", "shader_pack_name", "shader_pack_version", "shader_pack_sha256", "shader_options_sha256"):
             if field not in identity:
                 fail(f"{profile_id} is missing shader identity field {field}")
 

@@ -5,23 +5,21 @@ on:
   push:
     branches:
       - main
-      - convergence/main-unification-20260923
-      - codex/vision-cloud-convergence-*
-      - codex/frame-evidence-contract-v1-20260920
     paths:
       - 'gradle.properties'
       - 'scripts/minecraft-reference.sh'
       - 'scripts/agent/record_minecraft_ownership.py'
+      - 'scripts/agent/verify_minecraft_terrain_reference.py'
       - '.github/workflows/minecraft-reference.yml'
   pull_request:
     branches:
       - main
-      - codex/frame-evidence-contract-v1-20260920
     paths:
       - 'gradle.properties'
       - 'scripts/minecraft-reference.sh'
       - '.github/workflows/minecraft-reference.yml'
       - 'scripts/agent/record_minecraft_ownership.py'
+      - 'scripts/agent/verify_minecraft_terrain_reference.py'
       - '.gitignore'
 
 permissions:
@@ -60,6 +58,8 @@ jobs:
           test "$count" -ge 500
           grep -Fqx "minecraft_version=$version" ".minecraft-reference/$version/REFERENCE_INFO.txt"
           echo "Verified Minecraft $version reference with $count Java files"
+      - name: Verify 26.3 terrain source and mixin contracts
+        run: python3 scripts/agent/verify_minecraft_terrain_reference.py
       - name: Ensure generated sources stay untracked
         run: test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
       - name: Preserve exact ownership reference

@@ -2318,7 +2318,7 @@ public final class IrisMetalPipelineOverrides {
                                         "Iris storage image '" + imageName + "' exceeds generation target count"
                                 );
                             }
-                            return targets.colorTargets().sampleReadView(colorTarget);
+                            return targets.colorTargets().readView(colorTarget);
                         }
                         IrisMetalComputeResources compute = computeResources;
                         return compute == null ? null : compute.storageImage(imageName);
@@ -2456,7 +2456,7 @@ public final class IrisMetalPipelineOverrides {
                 IrisMetalRenderTargets targets = this.renderTargets;
                 return targets == null || colorTarget >= targets.colorTargets().targetCount()
                         ? null
-                        : targets.colorTargets().sampleReadView(colorTarget);
+                        : targets.colorTargets().readView(colorTarget);
             }
             if (name.startsWith("shadowcolorimg")) {
                 IrisMetalShadowPipeline shadows = this.shadowPipeline;

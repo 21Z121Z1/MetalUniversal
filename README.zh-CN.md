@@ -13,7 +13,7 @@ MetalUniversal 是一个 Fabric 渲染后端。它保留 Minecraft Java 的可�
 | 渲染器 | Vanilla 使用公共渲染器。Sodium 和 Iris 是可选适配器。 |
 | Metal | Metal 3 是受维护的回退路径。Metal 4 是实验性的能力专属执行路径。 |
 | MetalFX | 时域缩放和帧生成是可选实验功能。 |
-| 移动平台 | iOS 和 Amethyst 保持独立平台演进线，不属于当前 macOS 产物。 |
+| 移动平台 | macOS 构建会编译 iOS 原生代码；启动器签名、打包和设备运行需要单独验证。 |
 
 仓库不会把 Vulkan 或 MoltenVK 用作 Metal 执行运行时。SPIR-V 可继续作为生成 Metal Shading Language 前的着色器中间表示。
 
@@ -75,7 +75,7 @@ GitHub 托管检查可以对指定 commit 证明编译、单元与契约行为�
 
 先阅读 `AGENTS.md`，再检查行为所有者和最近的测试。不要从旧分支名、日期化报告或迁移计划推断当前架构。
 
-`integration/metaluniversal` 是规范开发线。`master` 保留为现有稳定线。`research/modernization-backlog` 保存研究历史；移动平台工作保持隔离。
+`main` 是规范开发线。历史分支仅作为溯源；`research/modernization-backlog` 保存已退休提交历史。移动平台生命周期契约与 macOS 渲染器保持隔离。
 
 ## 许可证
 

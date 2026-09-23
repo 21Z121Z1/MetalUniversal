@@ -33,6 +33,7 @@ import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.lwjgl.system.MemoryUtil;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
@@ -1773,35 +1774,115 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int height
     ) {
         MetalGpuTexture metalDst = (MetalGpuTexture) destination;
-        flushPendingClearForWrite(metalDst);
 
         // Heap buffers have no stable native address; the transient-memory
         // staging upload memcpys from memAddress(source) and would SIGBUS.
         if (!source.isDirect()) {
             throw new IllegalArgumentException("writeToTexture requires a direct ByteBuffer");
         }
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("writeToTexture dimensions must be positive: " + width + "x" + height);
+        }
 
         int pixelSize = metalDst.pixelSize();
-        int rowBytes = Math.multiplyExact(width, pixelSize);
-        int bytesPerImage = Math.multiplyExact(rowBytes, height);
-        GpuBufferSlice slice = transientMemory.uploadStaging(
-                source.slice(source.position(), bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC
-        );
+        if (pixelSize <= 0) {
+            throw new IllegalStateException("Texture format has a non-positive pixel size: " + pixelSize);
+        }
 
-        MTLBlitCommandEncoder blit = blitCommandEncoder();
-        blit.copyFromBufferToTexture(
-                ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
-                slice.offset(),
-                metalDst.nativeHandle(),
-                mipLevel,
-                depthOrLayer,
-                destX,
-                destY,
-                width,
-                height,
-                rowBytes,
-                bytesPerImage
-        );
+        int sourceRowBytes = Math.multiplyExact(width, pixelSize);
+        int sourceBytes = Math.multiplyExact(sourceRowBytes, height);
+        if (source.remaining() < sourceBytes) {
+            throw new IllegalArgumentException(
+                    "writeToTexture source has " + source.remaining() + " remaining bytes; requires " + sourceBytes
+            );
+        }
+
+        // iOS Metal buffer-to-texture blits require a 16-byte row stride. Keep
+        // the compact source layout at the API boundary and repack only when
+        // a row needs padding; uploadStaging copies this temporary buffer into
+        // the frame-owned transient allocation before it is freed below.
+        int rowBytes = Math.multiplyExact(Math.addExact(sourceRowBytes, 15) / 16, 16);
+        int bytesPerImage = Math.multiplyExact(rowBytes, height);
+        int sourceEnd = Math.addExact(source.position(), sourceBytes);
+        ByteBuffer uploadSource = source.duplicate();
+        uploadSource.limit(sourceEnd);
+        uploadSource.position(source.position());
+        uploadSource = uploadSource.slice();
+
+        ByteBuffer paddedSource = null;
+        try {
+            if (rowBytes != sourceRowBytes) {
+                paddedSource = packTextureUploadRows(source, sourceRowBytes, rowBytes, height);
+                uploadSource = paddedSource;
+            }
+
+            flushPendingClearForWrite(metalDst);
+            GpuBufferSlice slice = transientMemory.uploadStaging(
+                    uploadSource, pixelSize, GpuBuffer.USAGE_COPY_SRC
+            );
+
+            MTLBlitCommandEncoder blit = blitCommandEncoder();
+            blit.copyFromBufferToTexture(
+                    ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
+                    slice.offset(),
+                    metalDst.nativeHandle(),
+                    mipLevel,
+                    depthOrLayer,
+                    destX,
+                    destY,
+                    width,
+                    height,
+                    rowBytes,
+                    bytesPerImage
+            );
+        } finally {
+            if (paddedSource != null) {
+                MemoryUtil.memFree(paddedSource);
+            }
+        }
+    }
+
+    static ByteBuffer packTextureUploadRows(
+            final ByteBuffer source,
+            final int sourceRowBytes,
+            final int destinationRowBytes,
+            final int height
+    ) {
+        if (sourceRowBytes <= 0 || height <= 0 || destinationRowBytes < sourceRowBytes
+                || (destinationRowBytes & 15) != 0) {
+            throw new IllegalArgumentException("Invalid texture upload row layout: source=" + sourceRowBytes
+                    + ", destination=" + destinationRowBytes + ", height=" + height);
+        }
+
+        int sourceBytes = Math.multiplyExact(sourceRowBytes, height);
+        int destinationBytes = Math.multiplyExact(destinationRowBytes, height);
+        if (source.remaining() < sourceBytes) {
+            throw new IllegalArgumentException("Texture upload source has " + source.remaining()
+                    + " remaining bytes; requires " + sourceBytes);
+        }
+
+        ByteBuffer packed = MemoryUtil.memCalloc(destinationBytes);
+        try {
+            ByteBuffer sourceRow = source.duplicate();
+            int sourceStart = source.position();
+            int sourceLimit = source.limit();
+            for (int row = 0; row < height; row++) {
+                int rowOffset = Math.multiplyExact(row, sourceRowBytes);
+                int rowStart = Math.addExact(sourceStart, rowOffset);
+                int rowEnd = Math.addExact(rowStart, sourceRowBytes);
+                sourceRow.limit(sourceLimit);
+                sourceRow.position(rowStart);
+                sourceRow.limit(rowEnd);
+                packed.position(Math.multiplyExact(row, destinationRowBytes));
+                packed.put(sourceRow);
+            }
+            packed.position(0);
+            packed.limit(destinationBytes);
+            return packed;
+        } catch (RuntimeException | Error failure) {
+            MemoryUtil.memFree(packed);
+            throw failure;
+        }
     }
 
     void writeToTextureVolume(

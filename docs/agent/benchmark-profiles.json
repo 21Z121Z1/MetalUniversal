@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "p0-minecraft-metal-benchmarks",
-  "reference_branch": "integration/iris-metal-next",
+  "reference_branch": "main",
   "rules": {
     "mutable_latest_inputs_forbidden": true,
     "external_files_are_content_addressed": true,
@@ -14,9 +14,9 @@
   "profiles": [
     {
       "id": "V0",
-      "purpose": "No-shader Metal renderer baseline and launch sanity profile",
+      "purpose": "No-shader Sodium/Iris-loaded adapter baseline and launch sanity profile",
       "stack": {
-        "minecraft": "26.2",
+        "minecraft": "26.3",
         "sodium": true,
         "iris_loaded": true,
         "iris_semantic": false,
@@ -43,9 +43,9 @@
     },
     {
       "id": "V1",
-      "purpose": "Deterministic Sodium fixed-world/fixed-camera no-shader performance profile",
+      "purpose": "Deterministic Sodium/Iris-loaded fixed-world/fixed-camera no-shader performance profile",
       "stack": {
-        "minecraft": "26.2",
+        "minecraft": "26.3",
         "sodium": true,
         "iris_loaded": true,
         "iris_semantic": false,
@@ -75,7 +75,7 @@
       "id": "I0",
       "purpose": "Iris semantic path with the externally supplied Potato shader-pack baseline",
       "stack": {
-        "minecraft": "26.2",
+        "minecraft": "26.3",
         "sodium": true,
         "iris_loaded": true,
         "iris_semantic": true,
@@ -110,7 +110,7 @@
       "id": "I1",
       "purpose": "Iris semantic path with the externally supplied BSL shader-pack performance profile",
       "stack": {
-        "minecraft": "26.2",
+        "minecraft": "26.3",
         "sodium": true,
         "iris_loaded": true,
         "iris_semantic": true,

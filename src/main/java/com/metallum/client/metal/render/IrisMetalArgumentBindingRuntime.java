@@ -17,12 +17,23 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Shared Java ownership layer for Metal 3 argument buffers and Metal 4 argument
- * tables. Existing native setters remain the execution mechanism; this class
- * freezes the ABI, owns one snapshot per in-flight slot and records only actual
- * logical mutations.
+ * Optional diagnostics mirror for Iris resource-binding mutations.
+ *
+ * <p>This class is deliberately not the argument-table execution authority.
+ * The real render path batches admitted Java state through
+ * {@code MetalRenderStatePacket}; on Metal 4 the native render bridge owns one
+ * vertex, fragment, and compute {@code MTL4ArgumentTable} per in-flight slot.
+ * This WeakHashMap/reflection snapshot duplicates bookkeeping and does not
+ * replace any native binding.</p>
+ *
+ * <p>The mirror remains available behind the explicit
+ * {@code metallum.iris.argumentSnapshotDiagnostics} switch for differential
+ * diagnostics only. Its counters must never be accepted as performance-lane
+ * activation evidence.</p>
  */
 public final class IrisMetalArgumentBindingRuntime {
+    private static final boolean SNAPSHOT_DIAGNOSTICS =
+            Boolean.getBoolean("metallum.iris.argumentSnapshotDiagnostics");
     private static final Map<Object, State> PASSES = java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final LongAdder LAYOUTS = new LongAdder();
     private static final LongAdder UPDATES = new LongAdder();
@@ -45,7 +56,7 @@ public final class IrisMetalArgumentBindingRuntime {
                 }
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
-            Metallum.LOGGER.warn("[metallum-iris-opt] argument layout attachment failed", failure);
+            Metallum.LOGGER.warn("[metallum-iris-opt] argument snapshot diagnostics failed", failure);
         }
     }
 
@@ -128,7 +139,11 @@ public final class IrisMetalArgumentBindingRuntime {
     }
 
     private static boolean enabled() {
-        return IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES;
+        return SNAPSHOT_DIAGNOSTICS;
+    }
+
+    public static boolean diagnosticsEnabled() {
+        return SNAPSHOT_DIAGNOSTICS;
     }
 
     private static State state(final Object pass) {

@@ -13,7 +13,7 @@ MetalUniversal is a Fabric rendering backend that preserves Minecraft Java rende
 | Renderer | Vanilla uses the common renderer. Sodium and Iris are optional adapters. |
 | Metal | Metal 3 is the maintained fallback. Metal 4 is an experimental capability-specific execution path. |
 | MetalFX | Temporal scaling and frame generation are optional and experimental. |
-| Mobile | iOS and Amethyst work remains on an isolated platform lineage and is not part of the current macOS artifact. |
+| Mobile | iOS native code compiles in the macOS build; launcher signing, packaging, and device runtime require separate validation. |
 
 The repository does not use Vulkan or MoltenVK as the Metal execution runtime. SPIR-V remains useful as shader intermediate representation before Metal Shading Language generation.
 
@@ -75,7 +75,7 @@ Use `bash scripts/agent/verify_unified_eval.sh` for the maintained static eviden
 
 Read `AGENTS.md`, then inspect the source that owns the behavior and its nearest tests. Do not infer current architecture from old branch names, dated reports, or migration plans.
 
-The canonical development line is `integration/metaluniversal`. `master` remains the existing stable line. Research history is preserved by `research/modernization-backlog`; mobile work remains isolated.
+The canonical development line is `main`. Historical branches are provenance; `research/modernization-backlog` preserves retired commit history. Mobile lifecycle contracts remain isolated from the macOS renderer.
 
 ## License
 
