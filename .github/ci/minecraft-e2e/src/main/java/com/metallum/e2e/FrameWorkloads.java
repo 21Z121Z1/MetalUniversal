@@ -240,7 +240,11 @@ final class FrameWorkloads {
         result.addProperty("virtualHeight", window.getHeight());
         result.addProperty("pixelWidth", actual.width());
         result.addProperty("pixelHeight", actual.height());
-        result.addProperty("sdlFlags", SDLVideo.SDL_GetWindowFlags(window.handle()));
+        long flags = SDLVideo.SDL_GetWindowFlags(window.handle());
+        result.addProperty("sdlFlags", flags);
+        result.addProperty("nativeFullscreen", (flags & SDLVideo.SDL_WINDOW_FULLSCREEN) != 0);
+        result.addProperty("nativeMaximized", (flags & SDLVideo.SDL_WINDOW_MAXIMIZED) != 0);
+        result.addProperty("nativeMinimized", (flags & SDLVideo.SDL_WINDOW_MINIMIZED) != 0);
         try (var stack = MemoryStack.stackPush()) {
             var width = stack.mallocInt(1);
             var height = stack.mallocInt(1);
@@ -254,6 +258,12 @@ final class FrameWorkloads {
 
     private static void resizeActualWindow(Minecraft client, int pixelWidth, int pixelHeight) {
         var window = client.getWindow();
+        // Cocoa can leave fullscreen as a maximized window; size requests then
+        // only change its future restored size. Restore before measuring scale.
+        require(SDLVideo.SDL_RestoreWindow(window.handle()),
+                "SDL window restore failed: " + SDLError.SDL_GetError());
+        require(SDLVideo.SDL_SyncWindow(window.handle()),
+                "SDL window restore did not synchronize: " + SDLError.SDL_GetError());
         try (var stack = MemoryStack.stackPush()) {
             var logicalWidth = stack.mallocInt(1);
             var logicalHeight = stack.mallocInt(1);
