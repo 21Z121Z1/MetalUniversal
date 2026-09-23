@@ -201,6 +201,21 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void emptyBufferTransfersAreNoOpsUnderMetalValidation() {
+        try (MetalGpuBuffer source = (MetalGpuBuffer) device.createBuffer(
+                () -> "empty copy source", GpuBuffer.USAGE_COPY_SRC, 16);
+             MetalGpuBuffer destination = (MetalGpuBuffer) device.createBuffer(
+                     () -> "empty copy destination", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, 16)) {
+            destination.currentStorage().put(0, (byte) 0x5A);
+            encoder.writeToBuffer(destination.slice(0, 0), ByteBuffer.allocateDirect(0));
+            encoder.copyToBuffer(source.slice(0, 0), destination.slice(0, 0));
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals((byte) 0x5A, destination.currentStorage().get(0));
+        }
+    }
+
+    @Test
     void pollingUnsubmittedFencePreservesTransientUploadsUntilExplicitSubmit() {
         ByteBuffer source = ByteBuffer.allocateDirect(64);
         for (int i = 0; i < 64; i++) source.put(i, (byte) (i * 17));

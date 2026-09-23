@@ -1677,6 +1677,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public void writeToBuffer(final GpuBufferSlice destination, final ByteBuffer data) {
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination.buffer();
         int length = data.remaining();
+        if (length == 0) {
+            // Metal validation rejects a zero-byte blit. An empty upload has
+            // no resource effect and must not open a native blit encoder.
+            return;
+        }
 
         if (buffer.isDynamic()) {
             orphanWrite(buffer, destination.offset(), data);
@@ -1754,6 +1759,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void copyToBuffer(final GpuBufferSlice source, final GpuBufferSlice target) {
+        if (source.length() == 0) {
+            // RenderPearl permits empty slices; Metal's copy API does not.
+            return;
+        }
         MetalGpuBuffer sourceBuffer = (MetalGpuBuffer) source.buffer();
         MetalGpuBuffer targetBuffer = (MetalGpuBuffer) target.buffer();
         MTLBlitCommandEncoder blit = blitCommandEncoder();
