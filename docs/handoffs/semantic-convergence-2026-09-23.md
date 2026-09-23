@@ -57,7 +57,8 @@ ref retirement, verify PR #80 is merged, all required CI checks are green,
 every divergent tip above is reachable from the research anchor, and every
 remote ref still matches the recorded exact tip. The 26.3 terrain source
 checker runs after reference materialization in the permanent CI workflow;
-its local self-test alone is not source validation. The current unified
+its corrected contract passed 32 checks against the checksum-verified local
+26.3 decompiled tree, in addition to its negative self-test. The current unified
 performance normalizer has no structured peak resident-memory sample and
 therefore cannot establish the memory guardrail or accept a performance
 candidate. iOS native compilation does not establish launcher or device
