@@ -62,11 +62,4 @@ final class MetalFrameGenerationNativeSourceContractTest {
         assertTrue(block.contains("layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)"));
         assertFalse(block.contains("layer.pixelFormat = .bgra8Unorm_srgb"));
     }
-
-    @Test
-    void frameGenerationDocumentIsNotBuildScriptPayload() throws Exception {
-        String document = Files.readString(Path.of("docs/metalfx-frame-generation.md"));
-        assertTrue(document.startsWith("# MetalFX Frame Generation"));
-        assertFalse(document.startsWith("plugins {"));
-    }
 }

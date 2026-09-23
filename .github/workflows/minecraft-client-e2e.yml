@@ -73,6 +73,13 @@ jobs:
           jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
           unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
+      - name: Configure the packaged physical task without launching it
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -p .github/ci/minecraft-e2e \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            -Pmetallum.renderer=${{ matrix.renderer }} \
+            help --task runProductionPhysicalPerformance
       - name: Run the ${{ matrix.renderer }} production client GameTest
         run: |
           ./gradlew --no-daemon --stacktrace \

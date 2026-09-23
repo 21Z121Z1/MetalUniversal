@@ -18,8 +18,19 @@ if [[ "$(stat -f %u /dev/console)" != "$(id -u)" ]]; then
   echo 'Run as the active logged-in console user, not a launch daemon or SSH-only session.' >&2; exit 2
 fi
 launchctl print "gui/$(id -u)" >/dev/null
-xcodebuild -version
-java -version
+xcode_version="$(xcodebuild -version)"
+printf '%s\n' "$xcode_version"
+xcode_major="$(printf '%s\n' "$xcode_version" | awk '/^Xcode / {split($2,v,"."); print v[1]; exit}')"
+sdk_major="$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)"
+java_version="$(java -XshowSettings:properties -version 2>&1)"
+printf '%s\n' "$java_version"
+java_major="$(printf '%s\n' "$java_version" | awk '/^[[:space:]]*java.specification.version = / {print $3; exit}')"
+if [[ ! "$xcode_major" =~ ^[0-9]+$ || ! "$sdk_major" =~ ^[0-9]+$ || ! "$java_major" =~ ^[0-9]+$ ]]; then
+  echo 'Cannot identify the selected Xcode/macOS SDK/JDK toolchain.' >&2; exit 2
+fi
+if (( xcode_major < 26 || sdk_major < 26 || java_major != 25 )); then
+  echo 'Physical acceptance requires selected Xcode/macOS SDK 26+ and JDK 25.' >&2; exit 2
+fi
 python3 --version
 # Probe an unlocked foreground GUI session and a non-paravirtual Apple GPU.
 xcrun swift - <<'SWIFT'
