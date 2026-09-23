@@ -16,13 +16,19 @@
   "license": "MIT",
   "accessWidener": "metallum.accesswidener",
   "icon": "assets/metallum/icon.png",
-  "environment": "*",
+  "environment": "client",
   "entrypoints": {
     "preLaunch": [
       "com.metallum.Metallum"
     ],
     "main": [
       "com.metallum.Metallum"
+    ],
+    "client": [
+      "com.metallum.client.validation.MetalValidationClient"
+    ],
+    "sodium:config_api_user": [
+      "com.metallum.client.metal.render.MetalFxSodiumConfig"
     ]
   },
   "mixins": [

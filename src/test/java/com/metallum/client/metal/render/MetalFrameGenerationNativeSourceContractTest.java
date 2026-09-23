@@ -1,0 +1,75 @@
+package com.metallum.client.metal.render;
+
+import org.junit.jupiter.api.Test;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+final class MetalFrameGenerationNativeSourceContractTest {
+    @Test
+    void motionDepthResampleStaysInTextureCoordinateOrientation() throws Exception {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int start = nativeSource.indexOf("private func buildMotionDepthResamplePipeline(");
+        int end = nativeSource.indexOf("private func buildDepthResampleState", start);
+        assertTrue(start >= 0 && end > start);
+
+        String block = nativeSource.substring(start, end);
+        assertTrue(block.contains("device.makeLibrary(source: copyMslSource(), options: nil)"));
+        assertFalse(block.contains("device.makeLibrary(source: presentMslSource(), options: nil)"));
+    }
+
+    @Test
+    void scalerReleaseRemovesTrackedHistoryBeforeDroppingCacheReferences() throws Exception {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int start = nativeSource.indexOf("@_cdecl(\"metallum_metalfx_release_scalers\")");
+        int end = nativeSource.indexOf(
+                "@_cdecl(\"metallum_metalfx_frame_generation_scaler_link_status\")",
+                start
+        );
+        assertTrue(start >= 0 && end > start);
+
+        String block = nativeSource.substring(start, end);
+        int previousDepthRelease = block.indexOf(
+                "for texture in NativeState.metalFxPreviousDepthTextures.values"
+        );
+        int previousDepthRemove = block.indexOf(
+                "NativeState.metalFxPreviousDepthTextures.removeAll()"
+        );
+        int reactiveRelease = block.indexOf(
+                "for texture in NativeState.metalFxValidationReactiveTextures.values"
+        );
+        int reactiveRemove = block.indexOf(
+                "NativeState.metalFxValidationReactiveTextures.removeAll()"
+        );
+
+        assertTrue(previousDepthRelease >= 0 && previousDepthRelease < previousDepthRemove);
+        assertTrue(reactiveRelease >= 0 && reactiveRelease < reactiveRemove);
+        assertTrue(block.contains("residencyTrackReleased(texture)"));
+    }
+
+    @Test
+    void drawableLayerTagsSrgbContentWithoutSrgbAttachmentEncoding() throws Exception {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int start = nativeSource.indexOf("@_cdecl(\"metallum_configure_layer\")");
+        int end = nativeSource.indexOf("\n@_cdecl(", start + 1);
+        assertTrue(start >= 0 && end > start);
+
+        String block = nativeSource.substring(start, end);
+        assertTrue(block.contains("layer.pixelFormat = .bgra8Unorm"));
+        assertTrue(block.contains("layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)"));
+        assertFalse(block.contains("layer.pixelFormat = .bgra8Unorm_srgb"));
+    }
+
+    @Test
+    void physicalTimingConsumesProductionJarInsteadOfDevelopmentClasses() throws Exception {
+        String build = Files.readString(Path.of(".github/ci/minecraft-e2e/build.gradle"));
+        String task = build.substring(build.indexOf("tasks.register(\"runProductionClientValidation\""));
+        assertTrue(task.contains("mods.from(metallumJarProvider)"));
+        assertTrue(task.contains("requireProductionArtifact"));
+        assertFalse(task.contains("dependsOn tasks.named(\"runClient\")"));
+        assertFalse(task.contains("-Dfabric.client.gametest"));
+    }
+}

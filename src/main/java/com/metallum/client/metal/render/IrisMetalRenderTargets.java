@@ -1,0 +1,506 @@
+package com.metallum.client.metal.render;
+
+import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.api.textures.AddressMode;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings;
+import org.joml.Vector4f;
+import org.joml.Vector4fc;
+import org.jspecify.annotations.Nullable;
+
+import java.util.BitSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Set;
+
+/**
+ * Metal-side equivalent of Iris {@code targets.RenderTargets}: the colortexN
+ * main/alt ping-pong set plus depthtex0/1/2 and descriptor construction for
+ * compact Iris DRAWBUFFERS lists.
+ */
+@Environment(EnvType.CLIENT)
+final class IrisMetalRenderTargets implements AutoCloseable {
+    private static final int DEPTH_USAGE = GpuTexture.USAGE_RENDER_ATTACHMENT
+            | GpuTexture.USAGE_TEXTURE_BINDING
+            | GpuTexture.USAGE_COPY_SRC
+            | GpuTexture.USAGE_COPY_DST;
+    private static final Vector4fc CLEAR_WHITE = new Vector4f(1.0F, 1.0F, 1.0F, 1.0F);
+    private static final Vector4fc CLEAR_ZERO = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
+
+    private final MetalDevice device;
+    private final IrisMetalPingPongTargets colorTargets;
+    private final Map<Integer, RenderTargetSettings> targetSettings;
+    private final BitSet nearestColorTargets;
+    private MetalGpuTexture mainDepth;
+    private MetalGpuTexture noTranslucentsDepth;
+    private MetalGpuTexture noHandDepth;
+    private MetalGpuTextureView mainDepthView;
+    private MetalGpuTextureView noTranslucentsDepthView;
+    private MetalGpuTextureView noHandDepthView;
+    private final MetalGpuSampler colorSampler;
+    private final MetalGpuSampler nearestSampler;
+    private final MetalGpuSampler colorMipSampler;
+    private final MetalGpuSampler nearestMipSampler;
+    private int width;
+    private int height;
+    private boolean fullClearRequired = true;
+    private boolean closed;
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height
+    ) {
+        this(device, colorFormats, width, height, Map.of(), Set.of());
+    }
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height,
+            final Map<Integer, RenderTargetSettings> targetSettings
+    ) {
+        this(device, colorFormats, width, height, targetSettings, Set.of());
+    }
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height,
+            final Map<Integer, RenderTargetSettings> targetSettings,
+            final Set<Integer> mipmappedTargets
+    ) {
+        this(device, colorFormats, width, height, targetSettings, mipmappedTargets, Set.of());
+    }
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height,
+            final Map<Integer, RenderTargetSettings> targetSettings,
+            final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets
+    ) {
+        this.device = device;
+        this.targetSettings = Map.copyOf(targetSettings);
+        this.nearestColorTargets = nearestColorTargets(colorFormats);
+        this.colorTargets = new IrisMetalPingPongTargets(
+                device,
+                "iris-colortex",
+                colorFormats,
+                width,
+                height,
+                mipmappedTargets,
+                storageImageTargets,
+                alphaOneSampleTargets(colorFormats.length, this.targetSettings)
+        );
+        this.colorSampler = new MetalGpuSampler(
+                device,
+                AddressMode.CLAMP_TO_EDGE,
+                AddressMode.CLAMP_TO_EDGE,
+                FilterMode.LINEAR,
+                FilterMode.LINEAR,
+                1,
+                OptionalDouble.empty(),
+                null,
+                MTLSamplerMipFilter.NotMipmapped
+        );
+        this.nearestSampler = new MetalGpuSampler(
+                device,
+                AddressMode.CLAMP_TO_EDGE,
+                AddressMode.CLAMP_TO_EDGE,
+                FilterMode.NEAREST,
+                FilterMode.NEAREST,
+                1,
+                OptionalDouble.empty(),
+                null,
+                MTLSamplerMipFilter.NotMipmapped
+        );
+        this.colorMipSampler = new MetalGpuSampler(
+                device,
+                AddressMode.CLAMP_TO_EDGE,
+                AddressMode.CLAMP_TO_EDGE,
+                FilterMode.LINEAR,
+                FilterMode.LINEAR,
+                1,
+                OptionalDouble.empty(),
+                null,
+                MTLSamplerMipFilter.Linear
+        );
+        this.nearestMipSampler = new MetalGpuSampler(
+                device,
+                AddressMode.CLAMP_TO_EDGE,
+                AddressMode.CLAMP_TO_EDGE,
+                FilterMode.NEAREST,
+                FilterMode.NEAREST,
+                1,
+                OptionalDouble.empty(),
+                null,
+                MTLSamplerMipFilter.Linear
+        );
+        createDepthTextures(width, height);
+    }
+
+    private static BitSet nearestColorTargets(final GpuFormat[] formats) {
+        BitSet result = new BitSet(formats.length);
+        for (int index = 0; index < formats.length; index++) {
+            String componentType = formats[index].componentType().name();
+            if (componentType.startsWith("UINT") || componentType.startsWith("SINT")) {
+                result.set(index);
+            }
+        }
+        return result;
+    }
+
+    private static Set<Integer> alphaOneSampleTargets(
+            final int targetCount,
+            final Map<Integer, RenderTargetSettings> settings
+    ) {
+        java.util.LinkedHashSet<Integer> targets = new java.util.LinkedHashSet<>();
+        for (Map.Entry<Integer, RenderTargetSettings> entry : settings.entrySet()) {
+            Integer target = entry.getKey();
+            RenderTargetSettings targetSettings = entry.getValue();
+            if (target == null || target < 0 || target >= targetCount
+                    || targetSettings == null || targetSettings.getInternalFormat() == null) {
+                continue;
+            }
+            if (logicalRgbBackedByRgba(targetSettings.getInternalFormat().name())) {
+                targets.add(target);
+            }
+        }
+        return Set.copyOf(targets);
+    }
+
+    static boolean logicalRgbBackedByRgba(final String internalFormat) {
+        return switch (internalFormat) {
+            case "RGB8", "RGB8_SNORM", "RGB16", "RGB16_SNORM", "RGB16F", "RGB32F",
+                    "RGB8I", "RGB8UI", "RGB16I", "RGB16UI", "RGB32I", "RGB32UI" -> true;
+            default -> false;
+        };
+    }
+
+    boolean clearForFrame(final MetalCommandEncoder encoder, final Vector4fc fogColor) {
+        ensureOpen();
+        Vector4f fog = new Vector4f(fogColor.x(), fogColor.y(), fogColor.z(), 1.0F);
+        boolean fullClear = this.fullClearRequired;
+        for (int index = 0; index < colorTargets.targetCount(); index++) {
+            RenderTargetSettings settings = targetSettings.get(index);
+            if (!fullClear && (settings == null || !settings.shouldClear())) {
+                continue;
+            }
+            Vector4fc clear = settings == null || settings.getClearColor().isEmpty()
+                    ? defaultClearColor(index, fog)
+                    : settings.getClearColor().get();
+            encoder.clearColorTexture(colorTargets.mainTexture(index), clear);
+            encoder.clearColorTexture(colorTargets.altTexture(index), clear);
+        }
+        this.fullClearRequired = false;
+        return fullClear;
+    }
+
+    private static Vector4fc defaultClearColor(final int index, final Vector4fc fogColor) {
+        if (index == 0) {
+            return fogColor;
+        }
+        return index == 1 ? CLEAR_WHITE : CLEAR_ZERO;
+    }
+
+    private void createDepthTextures(final int newWidth, final int newHeight) {
+        this.width = newWidth;
+        this.height = newHeight;
+        this.mainDepth = (MetalGpuTexture) device.createTexture(
+                "iris-depthtex0", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
+        this.noTranslucentsDepth = (MetalGpuTexture) device.createTexture(
+                "iris-depthtex1", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
+        this.noHandDepth = (MetalGpuTexture) device.createTexture(
+                "iris-depthtex2", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
+        this.mainDepth.registerAllocationIdentity();
+        this.noTranslucentsDepth.registerAllocationIdentity();
+        this.noHandDepth.registerAllocationIdentity();
+        this.mainDepthView = new MetalGpuTextureView(this.mainDepth, 0, 1);
+        this.noTranslucentsDepthView = new MetalGpuTextureView(this.noTranslucentsDepth, 0, 1);
+        this.noHandDepthView = new MetalGpuTextureView(this.noHandDepth, 0, 1);
+    }
+
+    IrisMetalPingPongTargets colorTargets() {
+        return colorTargets;
+    }
+
+    MetalGpuTexture mainDepthTexture() {
+        ensureOpen();
+        return mainDepth;
+    }
+
+    MetalGpuTexture noTranslucentsDepthTexture() {
+        ensureOpen();
+        return noTranslucentsDepth;
+    }
+
+    MetalGpuTexture noHandDepthTexture() {
+        ensureOpen();
+        return noHandDepth;
+    }
+
+    MetalGpuTextureView mainDepthView() {
+        ensureOpen();
+        return mainDepthView;
+    }
+
+    MetalGpuTextureView noTranslucentsDepthView() {
+        ensureOpen();
+        return noTranslucentsDepthView;
+    }
+
+    MetalGpuTextureView noHandDepthView() {
+        ensureOpen();
+        return noHandDepthView;
+    }
+
+    GpuSampler colorSampler() {
+        ensureOpen();
+        return colorSampler;
+    }
+
+    GpuSampler colorSampler(final int logicalTarget) {
+        ensureOpen();
+        int checked = Math.toIntExact(logicalTarget);
+        boolean nearest = nearestColorTargets.get(checked);
+        boolean mipmapped = colorTargets.readMipmapsEnabled(checked);
+        if (nearest) {
+            return mipmapped ? nearestMipSampler : nearestSampler;
+        }
+        return mipmapped ? colorMipSampler : colorSampler;
+    }
+
+    void enableReadMipmaps(final int logicalTarget) {
+        ensureOpen();
+        colorTargets.enableReadMipmaps(logicalTarget);
+    }
+
+    void resetMipmaps() {
+        ensureOpen();
+        colorTargets.resetMipmaps();
+    }
+
+    GpuSampler depthSampler() {
+        ensureOpen();
+        return nearestSampler;
+    }
+
+    int width() {
+        return width;
+    }
+
+    int height() {
+        return height;
+    }
+
+    /** O(1) authoritative stamp for the current live color allocation set. */
+    long allocationStamp() {
+        ensureOpen();
+        return colorTargets.mainTexture(0).allocationId();
+    }
+
+    void captureNoTranslucentsDepth(final MetalCommandEncoder encoder) {
+        ensureOpen();
+        encoder.copyTextureToTexture(mainDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
+    }
+
+    void captureNoTranslucentsDepth(final MetalCommandEncoder encoder, final GpuTexture sourceDepth) {
+        ensureOpen();
+        checkDepthExtent(sourceDepth);
+        encoder.copyTextureToTexture(sourceDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
+    }
+
+    void captureNoHandDepth(final MetalCommandEncoder encoder) {
+        ensureOpen();
+        encoder.copyTextureToTexture(mainDepth, noHandDepth, 0, 0, 0, 0, 0, width, height);
+    }
+
+    void captureNoHandDepth(final MetalCommandEncoder encoder, final GpuTexture sourceDepth) {
+        ensureOpen();
+        checkDepthExtent(sourceDepth);
+        encoder.copyTextureToTexture(sourceDepth, noHandDepth, 0, 0, 0, 0, 0, width, height);
+    }
+
+    private void checkDepthExtent(final GpuTexture sourceDepth) {
+        if (sourceDepth.getWidth(0) != width || sourceDepth.getHeight(0) != height) {
+            throw new IllegalArgumentException(
+                    "Scene depth extent " + sourceDepth.getWidth(0) + "x" + sourceDepth.getHeight(0)
+                            + " does not match Iris targets " + width + "x" + height
+            );
+        }
+    }
+
+    RenderPassDescriptorWithViews createWriteDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            @Nullable final Vector4fc[] clearColors,
+            final boolean withDepth,
+            @Nullable final Double clearDepth,
+            final int @Nullable [] readTargets
+    ) {
+        ensureOpen();
+        if (drawBuffers.length == 0) {
+            throw new IllegalArgumentException("A pass must write at least one draw buffer");
+        }
+        if (clearColors != null && clearColors.length != drawBuffers.length) {
+            throw new IllegalArgumentException("Clear color array must match draw buffer count");
+        }
+        if (readTargets != null) {
+            colorTargets.checkNoFeedbackLoop(drawBuffers, readTargets);
+        }
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
+        MetalGpuTextureView[] ownedViews = new MetalGpuTextureView[drawBuffers.length + (withDepth ? 1 : 0)];
+        for (int slot = 0; slot < drawBuffers.length; slot++) {
+            MetalGpuTextureView view = colorTargets.writeView(drawBuffers[slot]);
+            descriptor.withColorAttachment(
+                    view,
+                    clearColors == null || clearColors[slot] == null
+                            ? Optional.empty()
+                            : Optional.of(clearColors[slot])
+            );
+        }
+        if (withDepth) {
+            MetalGpuTextureView depthView = new MetalGpuTextureView(mainDepth, 0, 1);
+            ownedViews[drawBuffers.length] = depthView;
+            descriptor.withDepthAttachment(
+                    depthView,
+                    clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
+            );
+        }
+        descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
+        return new RenderPassDescriptorWithViews(descriptor.build(), ownedViews);
+    }
+
+    RenderPassDescriptor createTerrainWriteDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            final GpuTextureView mainColor,
+            @Nullable final Vector4fc mainClearColor,
+            @Nullable final GpuTextureView sceneDepth,
+            @Nullable final Double clearDepth
+    ) {
+        ensureOpen();
+        if (drawBuffers.length == 0) {
+            throw new IllegalArgumentException("A gbuffer pass must write at least one draw buffer");
+        }
+        if (mainColor.getWidth(0) != width || mainColor.getHeight(0) != height) {
+            throw new IllegalArgumentException(
+                    "Scene color extent " + mainColor.getWidth(0) + "x" + mainColor.getHeight(0)
+                            + " does not match Iris targets " + width + "x" + height
+            );
+        }
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
+        boolean[] written = new boolean[colorTargets.targetCount()];
+        for (int logicalTarget : drawBuffers) {
+            if (logicalTarget < 0 || logicalTarget >= colorTargets.targetCount()) {
+                throw new IllegalArgumentException("Terrain DRAWBUFFERS target out of range: " + logicalTarget);
+            }
+            if (written[logicalTarget]) {
+                throw new IllegalArgumentException("Terrain DRAWBUFFERS repeats logical target " + logicalTarget);
+            }
+            written[logicalTarget] = true;
+            GpuTextureView view = colorTargets.readView(logicalTarget);
+            Optional<Vector4fc> clear = logicalTarget == 0 && mainClearColor != null
+                    ? Optional.of(mainClearColor)
+                    : Optional.empty();
+            descriptor.withColorAttachment(view, clear);
+        }
+        if (sceneDepth != null) {
+            descriptor.withDepthAttachment(
+                    sceneDepth,
+                    clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
+            );
+        }
+        descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
+        return descriptor.build();
+    }
+
+    void resize(final int newWidth, final int newHeight) {
+        ensureOpen();
+        if (newWidth == width && newHeight == height) {
+            return;
+        }
+        long oldStamp = allocationStamp();
+        colorTargets.resize(newWidth, newHeight);
+        releaseDepthTextures();
+        createDepthTextures(newWidth, newHeight);
+        this.fullClearRequired = true;
+        IrisMetalOptimizationBootstrap.onTargetsReallocated(this, oldStamp);
+    }
+
+    private void releaseDepthTextures() {
+        if (mainDepthView != null) {
+            mainDepthView.close();
+            mainDepthView = null;
+        }
+        if (noTranslucentsDepthView != null) {
+            noTranslucentsDepthView.close();
+            noTranslucentsDepthView = null;
+        }
+        if (noHandDepthView != null) {
+            noHandDepthView.close();
+            noHandDepthView = null;
+        }
+        if (mainDepth != null) {
+            mainDepth.close();
+            mainDepth = null;
+        }
+        if (noTranslucentsDepth != null) {
+            noTranslucentsDepth.close();
+            noTranslucentsDepth = null;
+        }
+        if (noHandDepth != null) {
+            noHandDepth.close();
+            noHandDepth = null;
+        }
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("Iris render targets are closed");
+        }
+    }
+
+    @Override
+    public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        colorTargets.close();
+        releaseDepthTextures();
+        colorSampler.close();
+        nearestSampler.close();
+        colorMipSampler.close();
+        nearestMipSampler.close();
+    }
+
+    record RenderPassDescriptorWithViews(
+            RenderPassDescriptor descriptor,
+            MetalGpuTextureView[] views
+    ) implements AutoCloseable {
+        @Override
+        public void close() {
+            for (MetalGpuTextureView view : views) {
+                if (view != null) {
+                    view.close();
+                }
+            }
+        }
+    }
+}

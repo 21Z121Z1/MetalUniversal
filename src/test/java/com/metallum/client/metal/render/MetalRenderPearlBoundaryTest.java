@@ -1,0 +1,88 @@
+package com.metallum.client.metal.render;
+
+import com.mojang.renderpearl.api.pipeline.CompareOp;
+import org.junit.jupiter.api.Test;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.lwjgl.system.MemoryUtil.memAlloc;
+import static org.lwjgl.system.MemoryUtil.memFree;
+
+final class MetalRenderPearlBoundaryTest {
+    @Test
+    void mutableSpirvCopyNeverAliasesRenderPearlOwnedStorage() {
+        ByteBuffer original = memAlloc(24).order(ByteOrder.nativeOrder());
+        ByteBuffer copy = null;
+        try {
+            original.putInt(0x07230203);
+            original.putInt(0x00010600);
+            original.putInt(7);
+            original.putInt(8);
+            original.putInt(9);
+            original.putInt(10);
+            original.flip();
+
+            int originalPosition = original.position();
+            int originalLimit = original.limit();
+            int originalWord = original.getInt(8);
+
+            copy = MetalCrossShaderCompiler.mutableSpirvCopy(original);
+            copy.putInt(8, originalWord ^ 0x55aa55aa);
+
+            assertEquals(originalWord, original.getInt(8));
+            assertNotEquals(original.getInt(8), copy.getInt(8));
+            assertEquals(originalPosition, original.position());
+            assertEquals(originalLimit, original.limit());
+            assertEquals(original.order(), copy.order());
+        } finally {
+            if (copy != null) memFree(copy);
+            memFree(original);
+        }
+    }
+
+    @Test
+    void canonicalMetalBackendLinksWithoutOptionalRenderMods() {
+        assumeTrue(Boolean.getBoolean("metallum.test.noOptionalMods"));
+
+        ClassLoader loader = MetalRenderPearlBoundaryTest.class.getClassLoader();
+        assertThrows(ClassNotFoundException.class, () ->
+                Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer", false, loader));
+        assertThrows(ClassNotFoundException.class, () ->
+                Class.forName("net.irisshaders.iris.mixinterface.GpuTextureInterface", false, loader));
+        assertTrue(assertDoesNotThrow(IrisMetalPipelineOverrides::frameGenerationMotionSemanticsProven),
+                "Reading an inactive adapter must not eagerly resolve optional blend ABI");
+        assertTrue(assertDoesNotThrow(MetalFxManager::sourceShaderMotionSemanticsProven),
+                "Vanilla frame admission must not initialize an absent Iris adapter");
+        assertFalse(assertDoesNotThrow(MetalIrisDepthConvention::enabledForMetalBackend));
+        assertEquals(0.0, assertDoesNotThrow(() -> MetalIrisDepthConvention.hardwareClear(0.0)));
+        assertEquals(CompareOp.GREATER_THAN, assertDoesNotThrow(() ->
+                MetalIrisDepthConvention.hardwareCompare(CompareOp.GREATER_THAN)));
+        assertEquals(-1.0F, assertDoesNotThrow(() -> MetalIrisDepthConvention.hardwareDepthBias(-1.0F)));
+
+        for (String className : List.of(
+                "com.metallum.client.metal.render.MetalBackend",
+                "com.metallum.client.metal.render.MetalDevice",
+                "com.metallum.client.metal.render.MetalGpuTexture",
+                "com.metallum.client.metal.render.MetalGpuTextureView",
+                "com.metallum.client.metal.render.MetalRenderPass",
+                "com.metallum.client.metal.render.MetalCompiledRenderPipeline",
+                "com.metallum.client.metal.render.MetalCrossShaderCompiler",
+                "com.metallum.client.validation.MetalValidationClient",
+                "com.metallum.client.validation.BackendFrameComparisonClient"
+        )) {
+            Class<?> type = assertDoesNotThrow(() -> Class.forName(className, false, loader), className);
+            assertDoesNotThrow(type::getDeclaredConstructors, className + " constructors");
+            assertDoesNotThrow(type::getDeclaredMethods, className + " methods");
+            assertDoesNotThrow(type::getDeclaredFields, className + " fields");
+        }
+    }
+}

@@ -1,0 +1,321 @@
+package com.metallum.client.metal.render;
+
+import com.mojang.renderpearl.api.GpuFormat;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import org.joml.Vector2f;
+
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * Fail-closed contracts shared by Temporal and Frame Generation producers.
+ *
+ * <p>This class intentionally contains no global state and performs no native
+ * calls. The current MetalFX manager can adopt the records incrementally
+ * without replacing its render graph or presenter in one large merge.</p>
+ */
+@Environment(EnvType.CLIENT)
+final class FrameSynthesisContract {
+    private FrameSynthesisContract() {
+    }
+
+    /** Monotonic source-frame identity scoped to one history generation. */
+    record FrameStamp(long frameId, long historyEpoch) {
+        FrameStamp {
+            if (frameId <= 0L || historyEpoch <= 0L) {
+                throw new IllegalArgumentException("Frame id and history epoch must be positive");
+            }
+        }
+    }
+
+    enum ProducerCoverage {
+        REAL_MOTION,
+        REACTIVE_ONLY,
+        /**
+         * The domain was not observed in this source frame. This is different
+         * from a present producer whose exact motion was not encoded.
+         */
+        NOT_PRESENT,
+        UNSUPPORTED
+    }
+
+    enum ProducerDomain {
+        CAMERA_DEPTH,
+        DYNAMIC_CONTENT,
+        BLOCK_ENTITIES,
+        FIRST_PERSON,
+        TRANSPARENCY,
+        PARTICLES_WEATHER,
+        MODDED_RENDERERS
+    }
+
+    record ProducerReceipt(ProducerDomain domain, ProducerCoverage coverage, int samples) {
+        ProducerReceipt {
+            Objects.requireNonNull(domain, "domain");
+            Objects.requireNonNull(coverage, "coverage");
+            if (samples < 0) {
+                throw new IllegalArgumentException("Producer sample count must not be negative");
+            }
+            if (coverage == ProducerCoverage.REAL_MOTION && samples == 0) {
+                throw new IllegalArgumentException("Real-motion coverage requires at least one sample");
+            }
+        }
+    }
+
+    /** Exactly one receipt for every observable producer domain. */
+    record ProducerCoverageSet(List<ProducerReceipt> receipts) {
+        ProducerCoverageSet {
+            receipts = List.copyOf(Objects.requireNonNull(receipts, "receipts"));
+            EnumMap<ProducerDomain, Integer> counts = new EnumMap<>(ProducerDomain.class);
+            for (ProducerReceipt receipt : receipts) {
+                counts.merge(receipt.domain(), 1, Integer::sum);
+            }
+            EnumSet<ProducerDomain> missing = EnumSet.allOf(ProducerDomain.class);
+            missing.removeAll(counts.keySet());
+            if (!missing.isEmpty()) {
+                throw new IllegalArgumentException("Missing producer receipts: " + missing);
+            }
+            counts.forEach((domain, count) -> {
+                if (count != 1) {
+                    throw new IllegalArgumentException("Duplicate producer receipt for " + domain);
+                }
+            });
+        }
+
+        boolean temporalEligible() {
+            return receipts.stream().noneMatch(
+                    receipt -> receipt.coverage() == ProducerCoverage.UNSUPPORTED
+            );
+        }
+
+        boolean frameGenerationEligible() {
+            if (!temporalEligible()) {
+                return false;
+            }
+            // A reactive-only receipt is sufficient for Temporal, but it is not a
+            // safe substitute for first-person swing/bob/equip motion. When the
+            // hand producer was observed in this source frame, interpolation
+            // requires a real previous-vertex sample; otherwise reject the
+            // entire source frame rather than relying on a reactive mask.
+            for (ProducerReceipt receipt : receipts) {
+                if (receipt.domain() == ProducerDomain.FIRST_PERSON
+                        && receipt.samples() > 0
+                        && receipt.coverage() != ProducerCoverage.REAL_MOTION) {
+                    return false;
+                }
+            }
+            boolean cameraMotion = false;
+            boolean dynamicContentSafe = false;
+            boolean blockEntitiesSafe = false;
+            for (ProducerReceipt receipt : receipts) {
+                if (receipt.domain() == ProducerDomain.CAMERA_DEPTH
+                        && receipt.coverage() == ProducerCoverage.REAL_MOTION) {
+                    cameraMotion = true;
+                }
+                if (receipt.domain() == ProducerDomain.DYNAMIC_CONTENT
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    dynamicContentSafe = true;
+                }
+                if (receipt.domain() == ProducerDomain.BLOCK_ENTITIES
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    blockEntitiesSafe = true;
+                }
+            }
+            return cameraMotion && dynamicContentSafe && blockEntitiesSafe;
+        }
+    }
+
+    record CameraFrameInput(
+            float fieldOfViewDegrees,
+            float nearPlane,
+            float farPlane,
+            float aspectRatio,
+            float deltaSeconds
+    ) {
+        CameraFrameInput {
+            if (!(fieldOfViewDegrees > 0.0F && fieldOfViewDegrees < 180.0F)
+                    || !(nearPlane > 0.0F && farPlane > nearPlane)
+                    || !(aspectRatio > 0.0F && deltaSeconds > 0.0F)
+                    || !Float.isFinite(fieldOfViewDegrees)
+                    || !Float.isFinite(nearPlane)
+                    || !Float.isFinite(farPlane)
+                    || !Float.isFinite(aspectRatio)
+                    || !Float.isFinite(deltaSeconds)) {
+                throw new IllegalArgumentException("Invalid camera input for Frame Generation");
+            }
+        }
+    }
+
+    /**
+     * Evidence for the transfer function and composition contract consumed by
+     * Frame Generation. RGBA8_UNORM storage does not prove whether the bound
+     * view applies sRGB decoding or preserves linear values.
+     */
+    enum ColorEncodingEvidence {
+        UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, false),
+        DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, true),
+        LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI(true, false);
+
+        private final boolean provenForFrameGeneration;
+        private final boolean diagnosticAssumption;
+
+        ColorEncodingEvidence(
+                boolean provenForFrameGeneration,
+                boolean diagnosticAssumption
+        ) {
+            this.provenForFrameGeneration = provenForFrameGeneration;
+            this.diagnosticAssumption = diagnosticAssumption;
+        }
+
+        boolean provenForFrameGeneration() {
+            return provenForFrameGeneration;
+        }
+
+        boolean diagnosticAssumption() {
+            return diagnosticAssumption;
+        }
+    }
+
+    record FinalizedMotionFrame(
+            FrameStamp stamp,
+            MetalGpuTexture depth,
+            MetalGpuTexture motion,
+            MetalGpuTexture reactive,
+            int inputWidth,
+            int inputHeight,
+            Vector2f jitterPixels,
+            Vector2f motionScale,
+            boolean reset,
+            ProducerCoverageSet producerCoverage
+    ) {
+        FinalizedMotionFrame {
+            Objects.requireNonNull(stamp, "stamp");
+            Objects.requireNonNull(depth, "depth");
+            Objects.requireNonNull(motion, "motion");
+            Objects.requireNonNull(reactive, "reactive");
+            Objects.requireNonNull(jitterPixels, "jitterPixels");
+            Objects.requireNonNull(motionScale, "motionScale");
+            Objects.requireNonNull(producerCoverage, "producerCoverage");
+            jitterPixels = new Vector2f(jitterPixels);
+            motionScale = new Vector2f(motionScale);
+            if (inputWidth <= 0 || inputHeight <= 0) {
+                throw new IllegalArgumentException("Motion dimensions must be positive");
+            }
+            validateTexture(depth, GpuFormat.D32_FLOAT, inputWidth, inputHeight, "depth");
+            validateTexture(motion, GpuFormat.RG16_FLOAT, inputWidth, inputHeight, "motion");
+            validateTexture(reactive, GpuFormat.R8_UNORM, inputWidth, inputHeight, "reactive");
+            if (!Float.isFinite(jitterPixels.x) || !Float.isFinite(jitterPixels.y)) {
+                throw new IllegalArgumentException("Motion jitter must be finite");
+            }
+            Vector2f expectedScale = MetalMotionContract.motionVectorScale(inputWidth, inputHeight);
+            if (!motionScale.equals(expectedScale, 1.0E-6F)) {
+                throw new IllegalArgumentException("Motion scale must be input size divided by two");
+            }
+        }
+
+        @Override
+        public Vector2f jitterPixels() {
+            return new Vector2f(jitterPixels);
+        }
+
+        @Override
+        public Vector2f motionScale() {
+            return new Vector2f(motionScale);
+        }
+    }
+
+    /**
+     * Pure admission decision before texture-view roles are attached.
+     *
+     * <p>Color transfer evidence is explicit. The current backend records
+     * {@code RGBA8_UNORM} storage with an unproven sRGB/linear view, so the
+     * Frame Generation gate remains closed until a texture-view contract proves
+     * the transfer function and composition order.</p>
+     */
+    record FrameGenerationAdmission(
+            FrameStamp stamp,
+            ProducerCoverageSet producerCoverage,
+            CameraFrameInput camera,
+            boolean reset,
+            ColorEncodingEvidence colorEncoding
+    ) {
+        FrameGenerationAdmission {
+            Objects.requireNonNull(stamp, "stamp");
+            Objects.requireNonNull(producerCoverage, "producerCoverage");
+            Objects.requireNonNull(camera, "camera");
+            Objects.requireNonNull(colorEncoding, "colorEncoding");
+            if (!producerCoverage.frameGenerationEligible()) {
+                throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
+            }
+        }
+
+        /**
+         * Compatibility constructor for pure coverage tests. Production callers
+         * must select the explicit color evidence when the texture-view contract
+         * becomes proven.
+         */
+        FrameGenerationAdmission(
+                FrameStamp stamp,
+                ProducerCoverageSet producerCoverage,
+                CameraFrameInput camera,
+                boolean reset
+        ) {
+            this(
+                    stamp,
+                    producerCoverage,
+                    camera,
+                    reset,
+                    ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+            );
+        }
+
+        boolean frameGenerationEligible() {
+            return frameGenerationEligible(false);
+        }
+
+        /**
+         * Diagnostic combined validation may assume the unproven RGBA8 view,
+         * but the flag is intentionally explicit and production callers use the
+         * no-argument fail-closed form above.
+         */
+        boolean frameGenerationEligible(boolean allowDiagnosticColorAssumption) {
+            return producerCoverage.frameGenerationEligible()
+                    && (colorEncoding.provenForFrameGeneration()
+                    || allowDiagnosticColorAssumption && colorEncoding.diagnosticAssumption());
+        }
+
+        boolean colorContractProven() {
+            return colorEncoding.provenForFrameGeneration();
+        }
+
+        boolean diagnosticColorAssumption() {
+            return colorEncoding.diagnosticAssumption();
+        }
+    }
+
+    private static void validateTexture(
+            final MetalGpuTexture texture,
+            final GpuFormat expectedFormat,
+            final int width,
+            final int height,
+            final String role
+    ) {
+        if (texture.isClosed()) {
+            throw new IllegalArgumentException(role + " references a closed texture");
+        }
+        if (texture.getFormat() != expectedFormat) {
+            throw new IllegalArgumentException(role + " requires " + expectedFormat);
+        }
+        if (texture.getWidth(0) != width || texture.getHeight(0) != height
+                || texture.getDepthOrLayers() != 1 || texture.getMipLevels() != 1) {
+            throw new IllegalArgumentException(
+                    role + " must match the input dimensions and be single-layer, single-mip"
+            );
+        }
+    }
+}
