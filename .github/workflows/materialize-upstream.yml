@@ -1,0 +1,37 @@
+name: Materialize audited upstream candidate
+on:
+  push:
+    branches: [agent/upstream-26.3-workbench-20260923]
+    paths:
+      - '.github/ci/upstream-materialize/**'
+      - '.github/workflows/materialize-upstream.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/upstream-26.3-workbench-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify upstream base has not moved
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/EternityQwQ/MetalUniversal.git refs/heads/26.3-fabric-dev
+          test "$(git rev-parse FETCH_HEAD)" = f8294b2fb6ce2edc56d418510294111c9276091e
+      - name: Reconstruct and verify the explicit migration manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MATERIALIZE_OUTPUT: ${{ runner.temp }}/upstream-candidate
+        run: python3 .github/ci/upstream-materialize/materialize.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: upstream-candidate-materialization
+          path: ${{ runner.temp }}/upstream-candidate/build/materialization/
+          if-no-files-found: error
+          retention-days: 7
