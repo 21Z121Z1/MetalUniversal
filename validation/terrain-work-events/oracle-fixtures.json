@@ -267,6 +267,23 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "8",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "300",
             "bytes": 0,
@@ -276,7 +293,7 @@
             "meshGeneration": "2"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "key": {
               "worldEpoch": "1",
               "sectionId": "8",
@@ -333,6 +350,23 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "9",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "300",
             "bytes": 0,
@@ -342,7 +376,7 @@
             "meshGeneration": "5"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "key": {
               "worldEpoch": "1",
               "sectionId": "9",
@@ -396,6 +430,23 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "700",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "10",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "700",
             "bytes": 0,
@@ -405,7 +456,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "key": {
               "worldEpoch": "1",
               "sectionId": "10",
@@ -558,6 +609,23 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "200",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "12",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "200",
             "bytes": 0,
@@ -567,7 +635,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "key": {
               "worldEpoch": "1",
               "sectionId": "12",
@@ -584,7 +652,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 3,
+            "sequence": 4,
             "key": {
               "worldEpoch": "1",
               "sectionId": "12",
@@ -687,6 +755,23 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "200",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "14",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "200",
             "bytes": 0,
@@ -696,7 +781,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "key": {
               "worldEpoch": "1",
               "sectionId": "14",
@@ -786,6 +871,24 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "150",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "workId": "101",
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "21",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "150",
             "bytes": 0,
@@ -795,7 +898,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "workId": "101",
             "key": {
               "worldEpoch": "1",
@@ -813,7 +916,7 @@
             "meshGeneration": "1"
           },
           {
-            "sequence": 3,
+            "sequence": 4,
             "workId": "102",
             "key": {
               "worldEpoch": "1",
@@ -831,7 +934,25 @@
             "meshGeneration": null
           },
           {
-            "sequence": 4,
+            "sequence": 5,
+            "workId": "102",
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "21",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "350",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 6,
             "workId": "102",
             "key": {
               "worldEpoch": "1",
@@ -849,7 +970,7 @@
             "meshGeneration": "2"
           },
           {
-            "sequence": 5,
+            "sequence": 7,
             "workId": "102",
             "key": {
               "worldEpoch": "1",
@@ -913,6 +1034,24 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "150",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "workId": "201",
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "22",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "150",
             "bytes": 0,
@@ -922,7 +1061,7 @@
             "meshGeneration": "5"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "workId": "201",
             "key": {
               "worldEpoch": "1",
@@ -940,7 +1079,7 @@
             "meshGeneration": "5"
           },
           {
-            "sequence": 3,
+            "sequence": 4,
             "workId": "202",
             "key": {
               "worldEpoch": "1",
@@ -958,7 +1097,25 @@
             "meshGeneration": null
           },
           {
-            "sequence": 4,
+            "sequence": 5,
+            "workId": "202",
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "23",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "350",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 6,
             "workId": "202",
             "key": {
               "worldEpoch": "1",
@@ -976,7 +1133,7 @@
             "meshGeneration": "6"
           },
           {
-            "sequence": 5,
+            "sequence": 7,
             "workId": "202",
             "key": {
               "worldEpoch": "1",
@@ -994,7 +1151,7 @@
             "meshGeneration": "6"
           },
           {
-            "sequence": 6,
+            "sequence": 8,
             "workId": "202",
             "key": {
               "worldEpoch": "1",
@@ -1109,6 +1266,24 @@
               "lightingRevision": "1",
               "materialGeneration": "1"
             },
+            "stage": "BUILD_END",
+            "monotonicNanos": "150",
+            "bytes": 0,
+            "reason": "fixture-build-ended",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "workId": "401",
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "26",
+              "geometryRevision": "1",
+              "lightingRevision": "1",
+              "materialGeneration": "1"
+            },
             "stage": "PUBLISHED",
             "monotonicNanos": "150",
             "bytes": 0,
@@ -1118,7 +1293,7 @@
             "meshGeneration": "7"
           },
           {
-            "sequence": 2,
+            "sequence": 3,
             "workId": "401",
             "key": {
               "worldEpoch": "1",
@@ -1183,6 +1358,651 @@
         "accepted": false,
         "state": "rejected-invalid-evidence",
         "errorContains": "report must contain exactly"
+      }
+    },
+    {
+      "name": "publication-requires-ready-predecessor",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ]
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "no prior ready predecessor"
+      }
+    },
+    {
+      "name": "equal-clock-value-does-not-prove-ready-order",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "450",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ]
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "no prior ready predecessor"
+      }
+    },
+    {
+      "name": "published-work-cannot-be-relabelled-cancelled",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "CANCELLED",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 4,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ]
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "coexists with CANCELLED"
+      }
+    },
+    {
+      "name": "malformed-origin-is-rejected-before-arithmetic",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "not-a-number",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ]
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "unsigned 64-bit decimal string"
+      }
+    },
+    {
+      "name": "unhashable-stage-is-rejected-with-verdict",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": [],
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ]
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "stage is unknown"
+      }
+    },
+    {
+      "name": "unhashable-status-is-rejected-with-verdict",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ],
+        "status": []
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "status must be"
+      }
+    },
+    {
+      "name": "boolean-schema-version-is-not-an-integer-version",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ],
+        "schemaVersion": true
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "schemaVersion must be"
+      }
+    },
+    {
+      "name": "mixed-clock-source-is-rejected",
+      "reportOverrides": {
+        "events": [
+          {
+            "sequence": 0,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "DATA_READY",
+            "monotonicNanos": "100",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 1,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "BUILD_END",
+            "monotonicNanos": "300",
+            "bytes": 65536,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": null
+          },
+          {
+            "sequence": 2,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "PUBLISHED",
+            "monotonicNanos": "450",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": null,
+            "meshGeneration": "11"
+          },
+          {
+            "sequence": 3,
+            "key": {
+              "worldEpoch": "1",
+              "sectionId": "7",
+              "geometryRevision": "2",
+              "lightingRevision": "3",
+              "materialGeneration": "4"
+            },
+            "stage": "FIRST_VALID_DRAW",
+            "monotonicNanos": "500",
+            "bytes": 0,
+            "reason": "fixture",
+            "domain": "main",
+            "frameIndex": 42,
+            "meshGeneration": "11"
+          }
+        ],
+        "source": {
+          "clock": "GPU.timestamp"
+        }
+      },
+      "expect": {
+        "accepted": false,
+        "state": "rejected-invalid-evidence",
+        "errorContains": "clock must be System.nanoTime"
       }
     }
   ]
