@@ -1,205 +1,195 @@
-# Temporary convergence machinery. Remove before final main acceptance.
-# Prepare only exact, locally reviewed source blobs. The connector publishes refs.
-name: Convergence edit
+# Temporary prepared-worktree validation. Remove before final main acceptance.
+# This workflow cannot publish source trees, commits, refs, tags, or settings.
+name: Convergence prepared-worktree validation
 on:
   push:
     branches: [convergence/main-unification-20260923]
     paths: [.github/workflows/convergence-edit.yml]
 permissions:
-  contents: write
+  contents: read
+  actions: read
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: java-contracts
+            runner: ubuntu-latest
+          - lane: shipping-build
+            runner: macos-26
+          - lane: production-e2e
+            runner: macos-26
+          - lane: hosted-metal
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_PSO_COMPILE_HOP: '0'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: e493bcab34b3d3613db7eade0b5e6c40ddc69f95
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare exact reviewed blobs without updating refs
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: true
+      - name: Materialize the exact reviewed patch in this disposable workspace only
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: MetalUniversal validation
+          GIT_AUTHOR_EMAIL: validation@localhost
+          GIT_COMMITTER_NAME: MetalUniversal validation
+          GIT_COMMITTER_EMAIL: validation@localhost
+          GIT_AUTHOR_DATE: '2026-09-23T01:20:00+0000'
+          GIT_COMMITTER_DATE: '2026-09-23T01:20:00+0000'
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = e493bcab34b3d3613db7eade0b5e6c40ddc69f95
+          test -z "$(git status --porcelain)"
+          gh api repos/21Z121Z1/MetalUniversal/actions/artifacts/10727517785/zip > "$RUNNER_TEMP/reviewed.zip"
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess, urllib.request
-          root = pathlib.Path.cwd()
-          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
-          output.mkdir()
-          assert os.environ['GITHUB_REPOSITORY'] == '21Z121Z1/MetalUniversal'
-          def git(*args):
-              return subprocess.check_output(['git', *args])
-          parent = git('rev-parse', 'HEAD').decode().strip()
-          base = 'be6fd8e36be3195c395f4af37a62b65aadfa6880'
-          if git('diff', '--name-only', base, parent).decode().splitlines() != ['.github/workflows/convergence-edit.yml']:
-              raise RuntimeError('Concurrent source change: refusing stale prepared edits')
-          expected = {
-              '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/FrameWorkloads.java': '923dbde1d72ce470219f465e9fd812ac88a2e3cf',
-              '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/VanillaGameplay.java': '5e9934fe6eb9b2c8f619c3d86d2460295c8a5623',
-              'scripts/agent/test_frame_runner.py': 'b354b249e7ac65495f1bedbd29a0d1de94bd5660',
-              'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java': 'e5eb4bdcabeab0f240687ce3c2d3ba8149bf9efa',
-              'src/test/java/com/metallum/client/metal/render/FrameEvidenceRuntimeWindowTest.java': '69cd215544412d8a6a7ab45c055d5e7bec7226aa'}
-          def replace(path, old, new):
-              if path not in expected:
-                  raise RuntimeError('Unreviewed path')
-              target = root / path
-              content = target.read_text()
-              if content.count(old) != 1:
-                  raise RuntimeError('Edit precondition differs: ' + path)
-              target.write_text(content.replace(old, new))
-          workload = '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/FrameWorkloads.java'
-          replace(workload, 'Blocks.RED_STAINED_GLASS', 'Blocks.STAINED_GLASS.red()')
-          replace(workload, 'Blocks.BLUE_STAINED_GLASS', 'Blocks.STAINED_GLASS.blue()')
-          replace(workload, 'entity.getTags()', 'entity.entityTags()')
-          replace(workload,
-              '        receipt.addProperty("serverTickAtCompletion", world.getServer().computeOnServer(server -> server.getTickCount()));',
-              '        int serverTickAtCompletion = world.getServer().computeOnServer(server -> server.getTickCount());\n        receipt.addProperty("serverTickAtCompletion", serverTickAtCompletion);')
-          replace('.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/VanillaGameplay.java',
-              'FrameEvidenceRuntime.armWindowAt(profile, armedAtNs, WARMUP_NS, SAMPLE_NS);',
-              'FrameEvidenceRuntime.armWindowAt(profile, WARMUP_NS, SAMPLE_NS, armedAtNs);')
-          runtime = 'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java'
-          original = '''    public static void armWindow(JsonObject profile, long warmupNs, long sampleNs) {
-                  if (ENABLED) RECORDER.armWindow(profile, warmupNs, sampleNs);
-              }
-          '''
-          replace(runtime, original, original + '''
-              /** Use the driver's existing Java-clock anchor; do not resample or reinterpret the durations. */
-              public static void armWindowAt(JsonObject profile, long warmupNs, long sampleNs, long anchorNs) {
-                  if (ENABLED) RECORDER.armWindowAt(profile, warmupNs, sampleNs, anchorNs);
-              }
-          ''')
-          test = 'scripts/agent/test_frame_runner.py'
-          replace(test, 'self.assertIn("-PmetallumJar=" + str(args.jar), command)',
-              'self.assertIn("-PmetallumJar=" + str(args.jar.resolve()), command)')
-          marker = '    def test_physical_lock_rejects_concurrent_independent_open_but_allows_a_declared_child(self):'
-          replace(test, marker, '''    def test_command_resolves_jar_symlinks_without_splitting_space_containing_paths(self):
-                  args = self.arguments(); spec, _ = self.fixture()
-                  actual_jar = args.jar.resolve()
-                  alias = self.root / "artifact alias with spaces.jar"
-                  alias.symlink_to(actual_jar)
-                  args.jar = alias
-                  command = workload_command(args, self.root, args.output, {"build": {"sourceSha": "a" * 40}}, spec)
-                  jar_arguments = [item for item in command if item.startswith("-PmetallumJar=")]
-                  self.assertEqual(["-PmetallumJar=" + str(actual_jar)], jar_arguments)
-                  self.assertNotIn("-PmetallumJar=" + str(alias), command)
-          
-          ''' + marker)
-          test = root / 'src/test/java/com/metallum/client/metal/render/FrameEvidenceRuntimeWindowTest.java'
-          if test.exists():
-              raise RuntimeError('New test already exists; refusing overwrite')
-          test.write_text('''package com.metallum.client.metal.render;
-          
-          import com.google.gson.JsonObject;
-          import java.lang.reflect.InvocationTargetException;
-          import java.net.URL;
-          import java.net.URLClassLoader;
-          import java.util.HashMap;
-          import org.junit.jupiter.api.Test;
-          import org.junit.jupiter.api.parallel.ResourceLock;
-          import org.junit.jupiter.api.parallel.Resources;
-          import static org.junit.jupiter.api.Assertions.*;
-          
-          @ResourceLock(Resources.SYSTEM_PROPERTIES)
-          final class FrameEvidenceRuntimeWindowTest {
-              @Test void runtimeUsesTheExactDriverAnchorAndDisabledCaptureHasNoRecorder() throws Exception {
-                  String[] keys = {"metallum.frameEvidence.enabled", "metallum.frameEvidence.windowed",
-                          "metallum.frameEvidence.mode", "metallum.frameEvidence.segmented"};
-                  var previous = new HashMap<String, String>();
-                  for (String key : keys) previous.put(key, System.getProperty(key));
-                  try {
-                      for (boolean enabled : new boolean[]{false, true}) {
-                          System.setProperty(keys[0], Boolean.toString(enabled));
-                          System.setProperty(keys[1], "true");
-                          System.setProperty(keys[2], "timing");
-                          System.setProperty(keys[3], "false");
-                          // Reload only the static runtime facade. Dependencies and the recorder
-                          // remain shared; no Minecraft window, native module, or GPU is started.
-                          String name = FrameEvidenceRuntime.class.getName();
-                          URL location = FrameEvidenceRuntime.class.getProtectionDomain().getCodeSource().getLocation();
-                          try (var isolated = new URLClassLoader(new URL[]{location}, getClass().getClassLoader()) {
-                              @Override protected Class<?> loadClass(String requested, boolean resolve) throws ClassNotFoundException {
-                                  synchronized (getClassLoadingLock(requested)) {
-                                      if (!requested.equals(name)) return super.loadClass(requested, resolve);
-                                      Class<?> type = findLoadedClass(requested);
-                                      if (type == null) type = findClass(requested);
-                                      if (resolve) resolveClass(type);
-                                      return type;
-                                  }
-                              }
-                          }) {
-                              Class<?> runtime = Class.forName(name, true, isolated);
-                              var method = runtime.getMethod("armWindowAt", JsonObject.class, long.class, long.class, long.class);
-                              var field = runtime.getDeclaredField("RECORDER");
-                              field.setAccessible(true);
-                              if (!enabled) {
-                                  method.invoke(null, null, -1L, -1L, Long.MAX_VALUE);
-                                  assertNull(field.get(null), "Disabled capture must not allocate a recorder");
-                              } else {
-                                  var profile = new JsonObject(); profile.addProperty("route", "fixture");
-                                  method.invoke(null, profile, 10L, 20L, 100L);
-                                  profile.addProperty("route", "mutated");
-                                  var recorder = (FrameEvidenceRecorder) field.get(null);
-                                  var window = recorder.snapshot(new JsonObject()).getAsJsonObject("window");
-                                  assertEquals(110L, window.get("startNs").getAsLong());
-                                  assertEquals(130L, window.get("endNs").getAsLong());
-                                  assertEquals("fixture", window.getAsJsonObject("profile").get("route").getAsString());
-                                  var failure = assertThrows(InvocationTargetException.class,
-                                          () -> method.invoke(null, new JsonObject(), 0L, 1L, 200L));
-                                  assertInstanceOf(IllegalStateException.class, failure.getCause());
-                                  assertEquals(window, recorder.snapshot(new JsonObject()).getAsJsonObject("window"));
-                              }
-                          }
-                      }
-                  } finally {
-                      for (String key : keys) {
-                          if (previous.get(key) == null) System.clearProperty(key);
-                          else System.setProperty(key, previous.get(key));
-                      }
-                  }
-              }
-          }
-          ''')
-          for path, sha in expected.items():
-              data = (root / path).read_bytes()
-              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-              if sha != actual:
-                  raise RuntimeError('Reviewed source hash mismatch: ' + path + ' ' + actual)
-          subprocess.run(['git', 'add', '--', *expected], check=True)
-          subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
-          patch = git('diff', '--binary', '--full-index', 'HEAD')
-          digest = '12184a246327cd265aad8af3420c291994c9dc5130380c4b942d78f4cca9f32d'
-          if hashlib.sha256(patch).hexdigest() != digest:
-              raise RuntimeError('Final diff differs from local reviewed artifact')
-          (output / 'change.patch').write_bytes(patch)
-          tests = [['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'],
-                   ['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test']]
-          with (output / 'python-tests.log').open('w') as log:
-              for command in tests:
-                  log.write('$ ' + ' '.join(command) + '\n'); log.flush()
-                  subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
-          entries = []
-          for path, sha in expected.items():
-              request = urllib.request.Request('https://api.github.com/repos/21Z121Z1/MetalUniversal/git/blobs',
-                  data=json.dumps({'content': (root / path).read_text(), 'encoding': 'utf-8'}).encode(),
-                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  blob = json.load(response)
-              if blob['sha'] != sha:
-                  raise RuntimeError('GitHub blob differs from reviewed source')
-              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
-          result = {'parent_sha': parent, 'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
-              'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest, 'entries': entries,
-              'refs_updated': False, 'tests_executed': tests,
-              'java_native_validation': 'required after connector publication; not executed by this preparation job'}
-          (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
-          print(json.dumps(result, indent=2))
+          import hashlib, json, os, pathlib, subprocess, zipfile
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed.zip'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != 'a4596292cd617e7ec182b042d942413a97a595f4a608d1073cd0cf4ac6d4c133':
+              raise RuntimeError('Reviewed artifact archive mismatch')
+          with zipfile.ZipFile(archive) as source:
+              patch = source.read('change.patch')
+              manifest = json.loads(source.read('candidate.json'))
+          if hashlib.sha256(patch).hexdigest() != '12184a246327cd265aad8af3420c291994c9dc5130380c4b942d78f4cca9f32d':
+              raise RuntimeError('Reviewed patch mismatch')
+          if manifest['parent_sha'] != 'e493bcab34b3d3613db7eade0b5e6c40ddc69f95' or manifest['refs_updated']:
+              raise RuntimeError('Unexpected preparation provenance')
+          patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed.patch'
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(patch_path)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          if tree != '339dd1064fcf5fca1f8e37ce3b652c8354930dc5' or tree != manifest['expected_tree']:
+              raise RuntimeError('Prepared source tree mismatch')
+          # Local-only detached identity permits honest clean-binary provenance.
+          # No push, authenticated Git configuration, or write API exists here.
+          commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', manifest['parent_sha']],
+              input='Prepared workload API and shared-anchor corrections; unpublished validation only\n', text=True).strip()
+          subprocess.run(['git', 'reset', '--hard', commit], check=True)
+          proof = {'schema_version': 1, 'proof_subject': 'unpublished-prepared-worktree',
+              'published': False, 'workflow_sha': os.environ['GITHUB_SHA'],
+              'source_base': manifest['parent_sha'], 'patch_sha256': manifest['patch_sha256'],
+              'tested_commit_sha': commit, 'tested_tree_sha': tree,
+              'main_acceptance': False, 'physical_acceptance': False}
+          output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
+          (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
+          subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
+          subprocess.run(['git', 'bundle', 'verify', str(output / 'prepared-source.bundle')], check=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('METALLUM_SOURCE_SHA=' + commit + '\n')
+          print(json.dumps(proof, indent=2))
           PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - name: Validate Java and evidence contracts
+        if: matrix.lane == 'java-contracts'
+        run: |
+          set -euo pipefail
+          bash scripts/agent/verify_unified_eval.sh
+          ./gradlew --no-daemon --stacktrace -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+          ./gradlew --no-daemon --stacktrace compileJava test verifyProductionJarIsolation \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+      - name: Select and record the shipping macOS SDK
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$latest"
+          sw_vers
+          xcodebuild -version
+          python3 scripts/agent/record_sdk_contract.py --output build/agent-evidence/sdk-api-contract.txt
+      - name: Require shipping native and fresh-JVM PSO compilation
+        if: matrix.lane == 'shipping-build'
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon buildMacNative
+          xcrun swiftc -O -target arm64-apple-macosx14.0 -framework Foundation -framework Metal \
+            src/test/native/MetalShippingPipelineAbiSmokeTest.swift -o "$RUNNER_TEMP/shipping-abi-probe"
+          "$RUNNER_TEMP/shipping-abi-probe" src/main/resources/natives/macos/libmetallum.dylib \
+            2>&1 | tee build/agent-evidence/shipping-abi-threading-probe.log
+          grep -Fq SHIPPING_PIPELINE_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
+          grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS build/agent-evidence/shipping-abi-threading-probe.log
+          java --enable-native-access=ALL-UNNAMED "-XX:ErrorFile=$(pwd)/build/agent-evidence/hs_err_pid%p.log" \
+            .github/ci/JvmPsoThreadingProbe.java "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
+            2>&1 | tee build/agent-evidence/jvm-pso-threading-probe.log
+          grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS build/agent-evidence/jvm-pso-threading-probe.log
+      - name: Run the ordinary shipping build gates
+        if: matrix.lane == 'shipping-build'
+        run: |
+          ./gradlew --no-daemon --stacktrace buildMacNative build -Pmetallum.hsErrDir=agent-evidence \
+            -x metalFrameGenerationPresentationValidation -x metalFxOffscreenValidation
+      - name: Run the production Vanilla client and unchanged evidence verifier
+        if: matrix.lane == 'production-e2e'
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '0'
+          METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace -x buildIOSNative -x buildIOSSpvc jar verifyIsolatedClientProfiles
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' | head -n1)"
+          test -s "$jar"
+          export PREPARED_JAR="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e \
+            -PmetallumJar="$PREPARED_JAR" -Pmetallum.noOptionalMods=true test runProductionClientGameTest
+          python3 - <<'PY'
+          import os, pathlib, subprocess, textwrap
+          workflow = pathlib.Path('.github/workflows/minecraft-client-e2e.yml').read_text()
+          marker = '      - name: Verify framebuffer, presentation, and reload evidence\n        run: |\n'
+          if workflow.count(marker) != 1:
+              raise RuntimeError('Cannot locate the unchanged production evidence verifier')
+          body = workflow.split(marker, 1)[1].split('      - name: State evidence boundary', 1)[0]
+          body = textwrap.dedent(body)
+          body = body.replace('${{ steps.metallum.outputs.jar }}', os.environ['PREPARED_JAR'])
+          subprocess.run(['bash', '-euo', 'pipefail', '-c', body], check=True)
+          PY
+      - name: Run the hosted Metal capability and shipping contract gates
+        if: matrix.lane == 'hosted-metal'
+        env:
+          MTL_DEBUG_LAYER: '0'
+          MTL_SHADER_VALIDATION: '0'
+          METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/hosted-probe"
+          "$RUNNER_TEMP/hosted-probe" | tee build/agent-evidence/hosted-metal-probe.log
+          grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            buildMacNative verifyProductionJarIsolation metalFrameGenerationLifecycleTest \
+            compileMetalMrtSmokeTest compileMetal4PipelineSmokeTest compileMetal4PipelinePathTest \
+            compileMetalHudRuntimeTest compileMetalFxOffscreenValidation compileMetalFxPerformanceValidation \
+            compileMetalFrameGenerationPresentationValidation
+          build/metal-tests/MetalMRTSmokeTest | tee build/agent-evidence/metal-mrt.log
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            metalHudDisabledEnvironmentTest metal4PipelineSmokeTest metal4PipelinePathTest \
+            hostedMetalCoreIntegrationTest hostedMetalIrisIntegrationTest
+      - name: Preserve exact unpublished test evidence
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: convergence-edit-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/convergence-edit/
+          name: unpublished-worktree-${{ matrix.lane }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/
+            build/test-results/
+            build/reports/
+            .github/ci/minecraft-e2e/build/evidence/
+            .github/ci/minecraft-e2e/build/reports/
+            .github/ci/minecraft-e2e/build/test-results/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
           if-no-files-found: error
           retention-days: 7
