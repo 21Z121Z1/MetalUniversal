@@ -307,6 +307,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=${requireMetal4MainRenderer}")
         jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
         jvmArgs.add("-Dmetallum.opt.residencySet=true")
+        jvmArgs.add("-Dmetallum.ci.p1StationaryFramebufferCapture=true")
     } else {
         // Hosted P0 regression keeps the already-validated shipping path. The
         // GitHub Apple Paravirtual device does not expose residency sets, so it

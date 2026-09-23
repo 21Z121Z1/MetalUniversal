@@ -11,6 +11,7 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
@@ -37,6 +38,12 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
+    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v1";
+    private static final int P1_FRAMEBUFFER_X = 832;
+    private static final int P1_FRAMEBUFFER_Y = 128;
+    private static final int P1_FRAMEBUFFER_Z = 496;
+    private static final int P1_FRAMEBUFFER_YAW = -65;
+    private static final int P1_FRAMEBUFFER_PITCH = 25;
 
     private static void requestStationaryServerHalt(TestSingleplayerContext singleplayer) {
         // Fabric's TestSingleplayerContext.close() disconnects the client and then
@@ -112,6 +119,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
         try (TestSingleplayerContext singleplayer = openGameplayWorld(context, evidenceDir)) {
+            boolean p1FramebufferScenario = Boolean.getBoolean("metallum.ci.p1StationaryFramebufferCapture");
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
             JsonObject worldEvidence = singleplayer.getServer().computeOnServer(server -> {
@@ -125,6 +133,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 world.addProperty("preset", "minecraft:normal");
                 world.addProperty("generateStructures", true);
                 world.addProperty("minecraftVersion", "26.3");
+                world.addProperty("framebufferEquivalenceScenario",
+                        p1FramebufferScenario ? P1_FRAMEBUFFER_SCENARIO : "moving-waypoint-diagnostic-v1");
+                world.addProperty("simulationFrozenDuringFramebufferCapture", false);
+                world.addProperty("serverSimulationFrozenDuringFramebufferCapture", false);
+                world.addProperty("clientSimulationFrozenDuringFramebufferCapture", false);
                 String snapshot = System.getProperty("metallum.ci.initialWorld", "");
                 if (!snapshot.isEmpty()) world.addProperty("replaySourceSnapshotSha256",
                         WorldSnapshot.verify(Path.of(snapshot).toAbsolutePath().normalize()));
@@ -162,50 +175,121 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             startRenderContract(metalCaptureRoot);
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
 
-            List<CaptureSample> samples = new ArrayList<>();
-            for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
-                // Move beyond the spawn region, allowing ordinary generation and chunk upload.
-                // A fixed seed still has a randomized player spawn within the spawn radius.
-                int x = 160 + (int) (frameId - 1) * 96;
-                int z = 160 + (int) (frameId - 1) * 48;
-                // Keep camera coordinates independent of spawn timing and vegetation heightmaps.
-                // Teleporting still exercises ordinary generation and uploads along the route.
-                int y = 128;
-                singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
-                if (frameId == 1) {
-                    singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
-                            + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
-                }
+            if (p1FramebufferScenario) {
+                // P1 compares real GPU readbacks across two independent client launches. Use the
+                // same generated terrain point, freeze world/weather/texture animation, and pin
+                // the vanilla vignette state so client tick timing cannot masquerade as pixels.
+                singleplayer.getServer().runCommand("gamerule doDaylightCycle false");
+                singleplayer.getServer().runCommand("gamerule doWeatherCycle false");
+                singleplayer.getServer().runCommand("gamerule randomTickSpeed 0");
+                singleplayer.getServer().runCommand("gamerule doMobSpawning false");
+                singleplayer.getServer().runCommand("difficulty peaceful");
+                singleplayer.getServer().runCommand("weather clear 1000000");
+                singleplayer.getServer().runCommand("time set noon");
+                singleplayer.getServer().runCommand("tp @a " + P1_FRAMEBUFFER_X + " " + P1_FRAMEBUFFER_Y
+                        + " " + P1_FRAMEBUFFER_Z + " " + P1_FRAMEBUFFER_YAW + " " + P1_FRAMEBUFFER_PITCH);
                 context.waitFor(client -> client.player != null
-                        && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
-                context.waitTicks(10);
-                singleplayer.getConnection().waitForChunksRender();
+                        && Math.abs(client.player.getX() - P1_FRAMEBUFFER_X) < 1
+                        && Math.abs(client.player.getY() - P1_FRAMEBUFFER_Y) < 1
+                        && Math.abs(client.player.getZ() - P1_FRAMEBUFFER_Z) < 1);
+                chunkRenderTicks += singleplayer.getConnection().waitForChunksRender();
+                context.waitTicks(20);
                 JsonObject waypoint = new JsonObject();
-                waypoint.addProperty("frameId", frameId);
-                waypoint.addProperty("x", x);
-                waypoint.addProperty("y", y);
-                waypoint.addProperty("z", z);
+                waypoint.addProperty("frameId", 1);
+                waypoint.addProperty("x", P1_FRAMEBUFFER_X);
+                waypoint.addProperty("y", P1_FRAMEBUFFER_Y);
+                waypoint.addProperty("z", P1_FRAMEBUFFER_Z);
+                waypoint.addProperty("yaw", P1_FRAMEBUFFER_YAW);
+                waypoint.addProperty("pitch", P1_FRAMEBUFFER_PITCH);
                 waypoints.add(waypoint);
-                RenderContractSnapshot before = renderContractSnapshot();
-                beginRenderContractFrame(frameId);
-                try {
-                    requestFinalDrawableCapture(frameId);
-                    waitForCaptureCompletion(context, before.completedCaptures() + 1, frameId, 100);
-                } finally {
-                    endRenderContractFrame(frameId);
+            }
+
+            List<CaptureSample> samples = new ArrayList<>();
+            boolean p1SceneFrozen = false;
+            try {
+                if (p1FramebufferScenario) {
+                    boolean serverFrozen = singleplayer.getServer().computeOnServer(server -> {
+                        server.overworld().tickRateManager().setFrozen(true);
+                        return server.overworld().tickRateManager().isFrozen();
+                    });
+                    p1SceneFrozen = true;
+                    require(serverFrozen, "P1 server simulation did not freeze for the stationary framebuffer samples");
+                    boolean clientFrozen = context.computeOnClient(client -> {
+                        if (client.level != null) {
+                            client.level.tickRateManager().setFrozen(true);
+                            pinVignette(client.getCameraEntity());
+                            return client.level.tickRateManager().isFrozen();
+                        }
+                        return false;
+                    });
+                    require(clientFrozen, "P1 client simulation did not freeze for the stationary framebuffer samples");
+                    worldEvidence.addProperty("simulationFrozenDuringFramebufferCapture", true);
+                    worldEvidence.addProperty("serverSimulationFrozenDuringFramebufferCapture", serverFrozen);
+                    worldEvidence.addProperty("clientSimulationFrozenDuringFramebufferCapture", clientFrozen);
                 }
 
-                Path png = findFrameArtifact(metalCaptureRoot, frameId, "actual.png");
-                Path raw = findFrameArtifact(metalCaptureRoot, frameId, "actual.bin");
-                require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
-                require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
-                CaptureSample sample = inspectCapture(frameId, png, raw);
-                samples.add(sample);
+                for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
+                    int x = p1FramebufferScenario ? P1_FRAMEBUFFER_X : 160 + (int) (frameId - 1) * 96;
+                    int y = p1FramebufferScenario ? P1_FRAMEBUFFER_Y : 128;
+                    int z = p1FramebufferScenario ? P1_FRAMEBUFFER_Z : 160 + (int) (frameId - 1) * 48;
+                    if (!p1FramebufferScenario) {
+                        // Keep camera coordinates independent of spawn timing and vegetation heightmaps.
+                        // Teleporting still exercises ordinary generation and uploads along the route.
+                        singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+                        if (frameId == 1) {
+                            singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
+                                    + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
+                        }
+                        context.waitFor(client -> client.player != null
+                                && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
+                        context.waitTicks(10);
+                        singleplayer.getConnection().waitForChunksRender();
+                        JsonObject waypoint = new JsonObject();
+                        waypoint.addProperty("frameId", frameId);
+                        waypoint.addProperty("x", x);
+                        waypoint.addProperty("y", y);
+                        waypoint.addProperty("z", z);
+                        waypoint.addProperty("yaw", -65);
+                        waypoint.addProperty("pitch", 25);
+                        waypoints.add(waypoint);
+                    } else {
+                        context.computeOnClient(client -> {
+                            pinVignette(client.getCameraEntity());
+                            return null;
+                        });
+                    }
 
-                // Sampling is deliberately spaced. This rejects the possibility that a single
-                // transitional frame (world load, resize, GUI hand-off) is mistaken for the
-                // renderer's steady-state output.
-                context.waitTicks(4);
+                    RenderContractSnapshot before = renderContractSnapshot();
+                    beginRenderContractFrame(frameId);
+                    try {
+                        requestFinalDrawableCapture(frameId);
+                        waitForCaptureCompletion(context, before.completedCaptures() + 1, frameId, 100);
+                    } finally {
+                        endRenderContractFrame(frameId);
+                    }
+
+                    Path png = findFrameArtifact(metalCaptureRoot, frameId, "actual.png");
+                    Path raw = findFrameArtifact(metalCaptureRoot, frameId, "actual.bin");
+                    require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
+                    require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
+                    CaptureSample sample = inspectCapture(frameId, png, raw);
+                    samples.add(sample);
+
+                    // Sampling is deliberately spaced. This rejects the possibility that a single
+                    // transitional frame (world load, resize, GUI hand-off) is mistaken for steady output.
+                    context.waitTicks(4);
+                }
+            } finally {
+                if (p1SceneFrozen) {
+                    context.computeOnClient(client -> {
+                        if (client.level != null) client.level.tickRateManager().setFrozen(false);
+                        return null;
+                    });
+                    singleplayer.getServer().computeOnServer(server -> {
+                        server.overworld().tickRateManager().setFrozen(false);
+                        return null;
+                    });
+                }
             }
 
             CaptureSample selected = selectBestCapture(samples);
@@ -616,6 +700,15 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         if (!condition) {
             throw new IllegalStateException(message);
         }
+    }
+
+    private static void pinVignette(Entity cameraEntity) {
+        if (cameraEntity == null || !cameraEntity.level().isClientSide()) return;
+        // The scenario is fixed to a clear noon, sky-lit camera position. That
+        // makes vanilla's target vignette brightness exactly zero; pin the same
+        // settled value without adding a dependency on Blaze3D's Lightmap type
+        // to this separate CI source set.
+        net.minecraft.client.Minecraft.getInstance().gui.hud.vignetteBrightness = 0.0F;
     }
 
     private static String escape(String value) {
