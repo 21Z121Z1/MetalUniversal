@@ -100,12 +100,15 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         require(metallumLoaded, "MetalUniversal mod was not loaded in the production client");
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
+        boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
+        require(!(vanillaOnly && sodiumOnly), "Vanilla and Sodium-only lanes cannot both be selected");
         if (FrameWorkloads.ENABLED) FrameWorkloads.validateProducer(FrameWorkloads.PRODUCER, sodiumLoaded, irisLoaded);
         else {
             require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
-            require(irisLoaded == !vanillaOnly, "Iris runtime presence disagrees with the requested lane");
+            require(irisLoaded == (!vanillaOnly && !sodiumOnly),
+                    "Iris runtime presence disagrees with the requested lane");
         }
-        writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly);
+        writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly, sodiumOnly);
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
         try (TestSingleplayerContext singleplayer = openGameplayWorld(context, evidenceDir)) {
@@ -477,13 +480,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     }
 
     /** Read the artifact that actually defined the backend, not a requested path or SHA. */
-    private static void writeLoadedArtifactIdentity(Path output, boolean vanillaOnly) {
+    private static void writeLoadedArtifactIdentity(Path output, boolean vanillaOnly, boolean sodiumOnly) {
         try {
             Class<?> backend = Class.forName("com.metallum.client.metal.render.MetalDevice");
             Path jar = Path.of(backend.getProtectionDomain().getCodeSource().getLocation().toURI());
             require(Files.isRegularFile(jar), "Production test loaded development classes instead of a JAR: " + jar);
             JsonObject report = new JsonObject();
-            report.addProperty("rendererMode", FrameWorkloads.ENABLED ? FrameWorkloads.PRODUCER : vanillaOnly ? "vanilla" : "sodium-iris");
+            report.addProperty("rendererMode", FrameWorkloads.ENABLED ? FrameWorkloads.PRODUCER
+                    : vanillaOnly ? "vanilla" : sodiumOnly ? "sodium" : "sodium-iris");
             report.addProperty("loadedJavaArtifact", jar.toString());
             try (var input = Files.newInputStream(jar)) {
                 report.addProperty("javaArtifactSha256", sha256(input));
