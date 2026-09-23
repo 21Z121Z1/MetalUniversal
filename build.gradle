@@ -2518,7 +2518,7 @@ if (nonIrisCaptureRequested && org.gradle.internal.os.OperatingSystem.current().
 		systemProperty "metallum.backend.compare.fixed-camera", fixedCamera
 		systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
 		systemProperty "metallum.backend.compare.freeze-simulation", "true"
-		systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
+			systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
 		systemProperty "metallum.backend.compare.fixed-weather", "clear"
 		systemProperty "metallum.backend.compare.stable-scene-frames", "240"
 		systemProperty "metallum.backend.compare.stable-scene-millis", "8000"
@@ -2641,6 +2641,8 @@ if (backendCaptureRequested) {
 				systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
 				systemProperty "metallum.backend.compare.freeze-simulation", "true"
 				systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
+				systemProperty "metallum.backend.compare.dump-block-atlas",
+					(findProperty("backendCompareDumpBlockAtlas") ?: "false").toString()
 				systemProperty "metallum.backend.compare.fixed-weather", "clear"
 				systemProperty "metallum.backend.compare.stable-scene-frames", "120"
 				systemProperty "metallum.backend.compare.stable-scene-millis", "4000"

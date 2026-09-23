@@ -25,6 +25,7 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionMesh;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -68,6 +69,9 @@ public final class BackendFrameComparisonClient {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.backend.compare.enabled");
     private static final boolean AUTO_STOP = Boolean.parseBoolean(
             System.getProperty("metallum.backend.compare.auto-stop", "true")
+    );
+    private static final boolean DUMP_BLOCK_ATLAS = Boolean.getBoolean(
+            "metallum.backend.compare.dump-block-atlas"
     );
     private static final Path ROOT = Path.of(System.getProperty(
             "metallum.backend.compare.output",
@@ -1173,6 +1177,15 @@ public final class BackendFrameComparisonClient {
                 Files.write(ROOT.resolve(backendName()).resolve(
                         String.format(Locale.ROOT, "frame-%05d-visible-sections.txt", frame)),
                         visibleSectionRows(Minecraft.getInstance()), StandardCharsets.UTF_8);
+            }
+            if (DUMP_BLOCK_ATLAS && COMPLETED_FRAMES.size() + 1 == CAPTURE_FRAMES.size()) {
+                var atlas = Minecraft.getInstance().getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS);
+                if (!(atlas instanceof TextureAtlas blockAtlas)) {
+                    throw new IllegalStateException("block atlas is not a TextureAtlas");
+                }
+                Path dumpDirectory = ROOT.resolve(backendName()).resolve("atlas-dump");
+                Files.createDirectories(dumpDirectory);
+                blockAtlas.dumpContents(TextureAtlas.LOCATION_BLOCKS, dumpDirectory);
             }
             COMPLETED_FRAMES.add(frame);
             if (COMPLETED_FRAMES.size() == CAPTURE_FRAMES.size()) {
