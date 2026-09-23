@@ -31,7 +31,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
-      - name: Materialize exact reviewed source
+      - name: Materialize exact reviewed source and the diagnosed SDK label correction
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,7 +44,7 @@ jobs:
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
           base = 'd40b8b3ed2f7438e2dece9d5f2836bdc0a967961'
-          expected_tree = 'dfafe6a2d1b00e66f72a838e1a04949bb1e7d904'
+          expected_tree = 'afb3bc7207f322c8b76f2583d62a9d4c3a96b0a4'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
@@ -83,6 +83,16 @@ jobs:
               path.write_text(text)
               if git('hash-object', name) != change['expected_blob']:
                   raise RuntimeError('Reviewed output blob mismatch: ' + name)
+          name = 'src/main/native/MetallumNative.swift'
+          path = pathlib.Path(name); text = path.read_text()
+          old = 'bridge.encoder.generateMipmaps(for: texture)'
+          new = 'bridge.encoder.generateMipmaps(texture: texture)'
+          if text.count(old) != 1:
+              raise RuntimeError('SDK label correction no longer matches reviewed source')
+          path.write_text(text.replace(old, new))
+          changes[name]['expected_blob'] = '8cad80914ef1098951c2c598245b905abc4eeb5a'
+          if git('hash-object', name) != changes[name]['expected_blob']:
+              raise RuntimeError('Corrected native blob mismatch')
           subprocess.run(['git', 'add', '--', *sorted(changes)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           tree = git('write-tree')
@@ -90,12 +100,13 @@ jobs:
               raise RuntimeError('Reviewed source tree mismatch: ' + tree)
           patch = subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index'])
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared shared compute ABI; unpublished validation only\n', text=True).strip()
+              input='Prepared shared compute ABI with SDK-correct mipmap label; unpublished validation only\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
           output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
           proof = {'proof_subject': 'unpublished-prepared-worktree', 'source_base': base,
               'tested_commit_sha': commit, 'tested_tree_sha': tree, 'workflow_sha': os.environ['GITHUB_SHA'],
               'expected_blobs': {p: c['expected_blob'] for p, c in changes.items()}, 'payload_sha256': checksum,
+              'sdk_label_correction': {'old': old, 'new': new},
               'main_acceptance': False, 'physical_display_acceptance': False, 'refs_updated': False}
           (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
           (output / 'change.patch').write_bytes(patch)
