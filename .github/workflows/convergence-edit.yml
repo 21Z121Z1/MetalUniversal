@@ -1,4 +1,4 @@
-# Temporary exact-source verification and immutable transport; remove before main acceptance.
+# Temporary reviewed-source verification and immutable transport. No refs are changed.
 name: Convergence prepared-worktree validation
 on:
   push:
@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 jobs:
-  compute-grouping:
+  generic-compute:
     runs-on: macos-26
     timeout-minutes: 45
     permissions:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: 5da34721ae25a3acf6add24c7a1c0f071eb14921
+          ref: d40b8b3ed2f7438e2dece9d5f2836bdc0a967961
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -31,7 +31,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
-      - name: Materialize the reviewed source and tests with complete identity checks
+      - name: Materialize exact reviewed source
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,26 +43,29 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess
-          base = '5da34721ae25a3acf6add24c7a1c0f071eb14921'
-          expected_tree = '5a3d3724bee63ccc4a5c0759ec7da61c98b71348'
+          base = 'd40b8b3ed2f7438e2dece9d5f2836bdc0a967961'
+          expected_tree = 'dfafe6a2d1b00e66f72a838e1a04949bb1e7d904'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != base or git('status', '--porcelain'):
               raise RuntimeError('Unexpected source base or dirty checkout')
-          changes = {}
-          for blob_sha, checksum in [
-              ('e7fe69874020897eccbdf2c6f8a6a9d22a10681c', '3294a29fa7e8fffc16783bdd2de3fe3fe1abdbe03fcf5b821075e44e73f53a32'),
-              ('902ec21e7ffaea4948aebafab5ffb7eb25929c89', 'db85594eda60ca24becbc62605c44213324acddc6e51ebf61d9ff21d7e801777')]:
-              blob = json.loads(subprocess.check_output(['gh', 'api', 'repos/21Z121Z1/MetalUniversal/git/blobs/' + blob_sha]))
-              payload = gzip.decompress(base64.b64decode(blob['content']))
-              if hashlib.sha256(payload).hexdigest() != checksum:
-                  raise RuntimeError('Reviewed payload checksum mismatch')
-              incoming = json.loads(payload)
-              if changes.keys() & incoming.keys():
-                  raise RuntimeError('Duplicate prepared path')
-              changes.update(incoming)
-          if len(changes) != 16:
-              raise RuntimeError('Unexpected path count')
+          parts = []
+          for sha in ['3bfc4f5be75f43414f3e55ba1a75949ef41e0428',
+                      'c54e0e7269e56ab57b5987ed37ffec6eb2480e3b',
+                      'f5159eb5102c2588e900faf784835818690924d3',
+                      '37c880ed9eaedc87e7c0289fa52acdf405156607']:
+              blob = json.loads(subprocess.check_output(['gh', 'api', 'repos/21Z121Z1/MetalUniversal/git/blobs/' + sha]))
+              data = base64.b64decode(blob['content'])
+              if subprocess.check_output(['git', 'hash-object', '--stdin'], input=data).decode().strip() != sha:
+                  raise RuntimeError('Transport blob mismatch')
+              parts.append(data)
+          payload = gzip.decompress(b''.join(parts))
+          checksum = hashlib.sha256(payload).hexdigest()
+          if checksum != '4dc491bd6ff58a7d31d19e8dc81e2b9de8708232eb66877da5c95a541435fef3':
+              raise RuntimeError('Reviewed payload checksum mismatch')
+          changes = json.loads(payload)
+          if len(changes) != 4 or any(not p.startswith(('src/main/', 'src/test/')) for p in changes):
+              raise RuntimeError('Unexpected source path set')
           for name, change in changes.items():
               path = pathlib.Path(name)
               if change['base_blob'] is None:
@@ -72,9 +75,6 @@ jobs:
               else:
                   if git('hash-object', name) != change['base_blob']:
                       raise RuntimeError('Base blob changed: ' + name)
-                  if change['expected_blob'] is None:
-                      path.unlink()
-                      continue
                   lines = path.read_text().splitlines(keepends=True)
                   for edit in reversed(change['edits']):
                       lines[edit['start']:edit['end']] = edit['lines']
@@ -87,79 +87,56 @@ jobs:
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           tree = git('write-tree')
           if tree != expected_tree:
-              raise RuntimeError('Reviewed tree mismatch: ' + tree)
+              raise RuntimeError('Reviewed source tree mismatch: ' + tree)
           patch = subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index'])
           commit = subprocess.check_output(['git', 'commit-tree', tree, '-p', base],
-              input='Prepared typed compute grouping and allocation-scope tests; unpublished validation only\n', text=True).strip()
+              input='Prepared shared compute ABI; unpublished validation only\n', text=True).strip()
           subprocess.run(['git', 'reset', '--hard', commit], check=True)
           output = pathlib.Path('build/agent-evidence'); output.mkdir(parents=True, exist_ok=True)
           proof = {'proof_subject': 'unpublished-prepared-worktree', 'source_base': base,
               'tested_commit_sha': commit, 'tested_tree_sha': tree, 'workflow_sha': os.environ['GITHUB_SHA'],
-              'expected_blobs': {p: c['expected_blob'] for p, c in changes.items()},
+              'expected_blobs': {p: c['expected_blob'] for p, c in changes.items()}, 'payload_sha256': checksum,
               'main_acceptance': False, 'physical_display_acceptance': False, 'refs_updated': False}
           (output / 'prepared-subject.json').write_text(json.dumps(proof, indent=2) + '\n')
           (output / 'change.patch').write_bytes(patch)
           subprocess.run(['git', 'bundle', 'create', str(output / 'prepared-source.bundle'), 'HEAD'], check=True)
           print(json.dumps(proof, indent=2))
           PY
-      - name: Verify pure access, generation and frozen-binding contracts
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace test \
-            --tests '*IrisMetalComputeGroupingRuntimeTest' --tests '*IrisMetalPreparedComputeBindingsTest' \
-            --tests '*MetalGpuBufferFrontendContractTest' \
-            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
-            2>&1 | tee build/agent-evidence/compute-grouping-unit.log
-      - name: Probe hosted Metal before running shipping GPU tests
+      - name: Record real SDK declaration authority and hosted GPU capability
         run: |
           set -euo pipefail
           latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
           sudo xcode-select -s "$latest"
+          xcodebuild -version | tee build/agent-evidence/xcode-version.txt
+          headers="$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/Metal.framework/Headers"
+          grep -n -A8 -B4 -E 'gpuResourceID|supportArgumentBuffers' "$headers/MTLSampler.h" > build/agent-evidence/sampler-sdk-contract.txt
+          grep -n -A10 -B4 -E 'dispatchThreadgroups|generateMipmaps' "$headers/MTL4ComputeCommandEncoder.h" > build/agent-evidence/metal4-compute-sdk-contract.txt
           xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/metal-probe"
           "$RUNNER_TEMP/metal-probe" | tee build/agent-evidence/hosted-metal-probe.log
           grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
-      - name: Prove historical transient facades hide a real allocation alias
+      - name: Compile both shipping Apple native targets and the real ABI regression
         run: |
           set -euo pipefail
-          source=src/main/java/com/metallum/client/metal/render/MetalTransientMemory.java
-          cp "$source" "$RUNNER_TEMP/fixed-transient.java"
-          git show 5da34721ae25a3acf6add24c7a1c0f071eb14921:"$source" > "$source"
-          set +e
+          ./gradlew --no-daemon --stacktrace buildMacNative buildIOSNative compileMetal4PipelinePathTest \
+            2>&1 | tee build/agent-evidence/compute-native-build.log
+      - name: Verify fixed-width Java binding and indirect layout boundaries
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace test --tests '*MetalComputeArgumentContractTest' \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
+            2>&1 | tee build/agent-evidence/compute-arguments.log
+      - name: Execute the identical public ABI before and after genuine Metal 4 admission
+        run: |
+          set -euo pipefail
           ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalCoreIntegrationTest \
-            --tests '*MetalComputeBackendIntegrationTest.transientUsageWrappersCannotHideOnePhysicalAllocationFromAdmission' \
-            2>&1 | tee build/agent-evidence/transient-identity-before.log
-          result=${PIPESTATUS[0]}
-          set -e
-          cp "$RUNNER_TEMP/fixed-transient.java" "$source"
-          test "$result" -ne 0
-          mkdir -p build/agent-evidence/transient-identity-red
-          cp -R build/test-results/hostedMetalCoreIntegrationTest/. build/agent-evidence/transient-identity-red/
-          python3 - <<'PY'
-          import pathlib, xml.etree.ElementTree as ET
-          failed = {case.attrib['name'] for path in pathlib.Path('build/agent-evidence/transient-identity-red').glob('TEST*.xml')
-              for case in ET.parse(path).getroot().iter('testcase') if case.find('failure') is not None}
-          expected = {'transientUsageWrappersCannotHideOnePhysicalAllocationFromAdmission()'}
-          if failed != expected:
-              raise RuntimeError(f'Expected only the allocation-alias assertion failure, got {failed}')
-          print('TRANSIENT_ALLOCATION_ALIAS_REGRESSION_CONFIRMED')
-          PY
-      - name: Verify native dispatch reuse, fences, indirect reads and exceptional cleanup
+            metal4PipelinePathTest 2>&1 | tee build/agent-evidence/compute-common-abi.log
+          grep -Fq 'GENERIC_COMPUTE_ABI_PASS Metal 3' build/agent-evidence/compute-common-abi.log
+      - name: Revalidate shipping Java FFM compute and texture integration
         run: |
           set -euo pipefail
-          git diff --exit-code
           ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
             hostedMetalCoreIntegrationTest --tests '*MetalComputeBackendIntegrationTest' \
-            2>&1 | tee build/agent-evidence/compute-grouping-gpu.log
-      - name: Check the same real Iris execution graph with grouping disabled and enabled
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalIrisIntegrationTest --tests '*IrisMetalComputeConformanceTest' \
-            2>&1 | tee build/agent-evidence/iris-compute-baseline.log
-          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalIrisComputeGroupingTest \
-            2>&1 | tee build/agent-evidence/iris-compute-grouped.log
+            2>&1 | tee build/agent-evidence/compute-java-ffm.log
       - name: Publish verified immutable source blobs only
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,21 +147,20 @@ jobs:
           output = pathlib.Path('build/agent-evidence')
           proof = json.loads((output / 'prepared-subject.json').read_text()); entries = []
           if subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip():
-              raise RuntimeError('Test execution changed tracked source')
+              raise RuntimeError('Validation changed tracked source')
           for name, expected in proof['expected_blobs'].items():
-              if expected is not None:
-                  request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode()})
-                  response = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
-                      'repos/21Z121Z1/MetalUniversal/git/blobs', '--input', '-'], input=request, text=True))
-                  if response['sha'] != expected:
-                      raise RuntimeError('Published blob mismatch: ' + name)
+              request = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode()})
+              response = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
+                  'repos/21Z121Z1/MetalUniversal/git/blobs', '--input', '-'], input=request, text=True))
+              if response['sha'] != expected:
+                  raise RuntimeError('Published source blob mismatch: ' + name)
               entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': expected})
           (output / 'source-blobs.json').write_text(json.dumps(entries, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: compute-grouping-prepared-${{ github.sha }}-${{ github.run_attempt }}
+          name: generic-compute-prepared-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             build/test-results/
