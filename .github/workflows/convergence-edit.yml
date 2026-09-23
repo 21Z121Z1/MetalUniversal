@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request, urllib.error
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request, urllib.error
           root = pathlib.Path.cwd()
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'convergence-edit'
           output.mkdir()
@@ -43,35 +43,63 @@ jobs:
               except urllib.error.HTTPError as error:
                   print('GitHub API failure:', request.method, path, error.code, error.read().decode())
                   raise
+          def blob_hash(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          def read_blob(sha):
+              if sha == blob_hash(b''):
+                  return b''
+              result = api('/git/blobs/' + sha)
+              data = base64.b64decode(result['content'])
+              if blob_hash(data) != sha:
+                  raise RuntimeError('Blob identity mismatch: ' + sha)
+              return data
           parent = git('rev-parse', 'HEAD').decode().strip()
-          base = '14964d953f629329795f3229a2cc1fce46f75566'
+          base = 'c1e5c88e95af17c93ed9c9d525888258e6b4471a'
           changed = git('diff', '--name-only', base, parent).decode().splitlines()
           if changed != ['.github/workflows/convergence-edit.yml']:
               raise RuntimeError('Unexpected intervening source changes: ' + repr(changed))
-          blob_sha = 'c7f9103139e5df83e17dc87bb413ad5c5a08cbf1'
-          blob = api('/git/blobs/' + blob_sha)
-          compressed = base64.b64decode(blob['content'])
-          if hashlib.sha1(b'blob ' + str(len(compressed)).encode() + b'\0' + compressed).hexdigest() != blob_sha:
-              raise RuntimeError('Reviewed transport blob identity mismatch')
-          patch = gzip.decompress(compressed)
-          digest = '9b0f586641bbaef40bec0e1cb9d0e169d3658536926ed7c2a96c7ae132a38602'
-          if hashlib.sha256(patch).hexdigest() != digest:
-              raise RuntimeError('Reviewed patch digest mismatch')
-          patch_path = output / 'change.patch'
-          patch_path.write_bytes(patch)
-          subprocess.run(['git', 'apply', '--check', '--index', str(patch_path)], check=True)
-          subprocess.run(['git', 'apply', '--index', str(patch_path)], check=True)
+          parts = ['87985b6fd418176f85a9b4f63a7f7a37fda5f8f3',
+                   '0fafed0e5dfa17c673918ddebee8d002ec19beb3']
+          raw = lzma.decompress(b''.join(read_blob(sha) for sha in parts))
+          if hashlib.sha256(raw).hexdigest() != 'eff5af59c14b3e4727fc8c3467ace0a4b243af04474f1bea4eca6b4a30ce1c3b':
+              raise RuntimeError('Reviewed capsule digest mismatch')
+          capsule = json.loads(raw)
+          if capsule['base_commit'] != base or len(capsule['files']) != 17:
+              raise RuntimeError('Unexpected reviewed capsule base or file count')
+          paths = []
+          for entry in capsule['files']:
+              path = pathlib.PurePosixPath(entry['path'])
+              if path.is_absolute() or '..' in path.parts or str(path) in paths or entry['mode'] != '100644':
+                  raise RuntimeError('Invalid reviewed path or mode')
+              if not str(path).startswith(('.github/ci/minecraft-e2e/', 'scripts/agent/',
+                      'src/main/java/com/metallum/client/metal/render/bridge/')) and str(path) not in {
+                      '.gitignore', 'docs/agent/frame-evidence-contract.md'}:
+                  raise RuntimeError('Path outside reviewed subsystem')
+              original = read_blob(entry['base_sha']).decode('utf-8')
+              chunks = []
+              for operation in entry['ops']:
+                  if isinstance(operation, str):
+                      chunks.append(operation)
+                  elif (isinstance(operation, list) and len(operation) == 2
+                        and all(type(value) is int for value in operation)
+                        and 0 <= operation[0] <= operation[1] <= len(original)):
+                      chunks.append(original[operation[0]:operation[1]])
+                  else:
+                      raise RuntimeError('Invalid reviewed delta operation')
+              content = ''.join(chunks).encode('utf-8')
+              if blob_hash(content) != entry['sha']:
+                  raise RuntimeError('Reviewed output identity mismatch: ' + str(path))
+              destination = root / path
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes(content)
+              paths.append(str(path))
+          subprocess.run(['git', 'add', '--', *paths], check=True)
           subprocess.run(['git', 'diff', '--check', 'HEAD'], check=True)
-          if git('diff', '--binary', '--full-index', 'HEAD') != patch:
-              raise RuntimeError('Applied patch differs from reviewed patch')
-          allowed = {'src/main/java/com/metallum/client/metal/render/FrameEvidenceRecorder.java',
-              'src/main/java/com/metallum/client/metal/render/FrameEvidenceRuntime.java',
-              'src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java',
-              'src/test/java/com/metallum/client/metal/render/FramePipelineCreationEvidenceTest.java',
-              'scripts/agent/verify_frame_evidence.py', 'scripts/agent/test_frame_pipeline_creations.py'}
-          paths = git('diff', '--cached', '--no-renames', '--name-only', '-z').decode().rstrip('\0').split('\0')
-          if set(paths) != allowed:
-              raise RuntimeError('Unexpected patch paths: ' + repr(paths))
+          patch = git('diff', '--binary', '--full-index', 'HEAD')
+          digest = '20e832504bf0c750dbd3fb98ffcaad36c9792723c7fe1b719e90a7093dd5f3c2'
+          if capsule['final_diff_sha256'] != digest or hashlib.sha256(patch).hexdigest() != digest:
+              raise RuntimeError('Reconstructed changes differ from the locally reviewed patch')
+          (output / 'change.patch').write_bytes(patch)
           tests = [
               ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/agent', '-p', 'test_frame_*.py'],
               ['python3', 'scripts/agent/verify_frame_evidence.py', '--self-test']]
@@ -92,7 +120,8 @@ jobs:
           result = {'parent_sha': parent, 'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
               'expected_tree': git('write-tree').decode().strip(), 'patch_sha256': digest,
               'entries': entries, 'refs_updated': False, 'tests_executed': tests,
-              'java_native_validation': 'not executed; required after connector publication'}
+              'java_native_validation': 'not executed; required after connector publication',
+              'physical_trial_validation': 'not executed; requires physical Apple Silicon display'}
           (output / 'candidate.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
