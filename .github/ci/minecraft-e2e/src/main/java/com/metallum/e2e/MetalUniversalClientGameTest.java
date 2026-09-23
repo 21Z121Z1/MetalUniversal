@@ -12,6 +12,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
@@ -179,10 +180,26 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 // P1 compares real GPU readbacks across two independent client launches. Use the
                 // same generated terrain point, freeze world/weather/texture animation, and pin
                 // the vanilla vignette state so client tick timing cannot masquerade as pixels.
-                singleplayer.getServer().runCommand("gamerule doDaylightCycle false");
-                singleplayer.getServer().runCommand("gamerule doWeatherCycle false");
-                singleplayer.getServer().runCommand("gamerule randomTickSpeed 0");
-                singleplayer.getServer().runCommand("gamerule doMobSpawning false");
+                JsonObject p1GameRules = singleplayer.getServer().computeOnServer(server -> {
+                    var rules = server.overworld().getGameRules();
+                    rules.set(GameRules.ADVANCE_TIME, false, server);
+                    rules.set(GameRules.ADVANCE_WEATHER, false, server);
+                    rules.set(GameRules.RANDOM_TICK_SPEED, 0, server);
+                    rules.set(GameRules.SPAWN_MOBS, false, server);
+
+                    JsonObject configured = new JsonObject();
+                    configured.addProperty("advance_time", rules.get(GameRules.ADVANCE_TIME));
+                    configured.addProperty("advance_weather", rules.get(GameRules.ADVANCE_WEATHER));
+                    configured.addProperty("random_tick_speed", rules.get(GameRules.RANDOM_TICK_SPEED));
+                    configured.addProperty("spawn_mobs", rules.get(GameRules.SPAWN_MOBS));
+                    return configured;
+                });
+                require(!p1GameRules.get("advance_time").getAsBoolean()
+                                && !p1GameRules.get("advance_weather").getAsBoolean()
+                                && p1GameRules.get("random_tick_speed").getAsInt() == 0
+                                && !p1GameRules.get("spawn_mobs").getAsBoolean(),
+                        "P1 framebuffer gamerules were not applied to the 26.3 world");
+                worldEvidence.add("p1GameRules", p1GameRules);
                 singleplayer.getServer().runCommand("difficulty peaceful");
                 singleplayer.getServer().runCommand("weather clear 1000000");
                 singleplayer.getServer().runCommand("time set noon");

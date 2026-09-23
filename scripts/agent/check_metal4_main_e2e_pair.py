@@ -75,6 +75,17 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         or world.get("clientSimulationFrozenDuringFramebufferCapture") is not True
     ):
         raise ValueError("P1 stationary framebuffer scene did not prove both simulations frozen")
+    expected_game_rules = {
+        "advance_time": False,
+        "advance_weather": False,
+        "random_tick_speed": 0,
+        "spawn_mobs": False,
+    }
+    if world.get("p1GameRules") != expected_game_rules:
+        raise ValueError(
+            "P1 stationary framebuffer scene has unexpected or unverified Minecraft 26.3 gamerules: "
+            f"{world.get('p1GameRules')!r}"
+        )
 
     waypoints = world.get("waypoints")
     if not isinstance(waypoints, list) or len(waypoints) != 1:
@@ -92,6 +103,7 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         "simulationFrozenDuringFramebufferCapture": world.get("simulationFrozenDuringFramebufferCapture"),
         "serverSimulationFrozenDuringFramebufferCapture": world.get("serverSimulationFrozenDuringFramebufferCapture"),
         "clientSimulationFrozenDuringFramebufferCapture": world.get("clientSimulationFrozenDuringFramebufferCapture"),
+        "p1GameRules": world.get("p1GameRules"),
         "waypoints": waypoints,
         "replaySourceSnapshotSha256": world.get("replaySourceSnapshotSha256"),
     }
@@ -414,6 +426,12 @@ def self_test() -> None:
                     "simulationFrozenDuringFramebufferCapture": True,
                     "serverSimulationFrozenDuringFramebufferCapture": True,
                     "clientSimulationFrozenDuringFramebufferCapture": True,
+                    "p1GameRules": {
+                        "advance_time": False,
+                        "advance_weather": False,
+                        "random_tick_speed": 0,
+                        "spawn_mobs": False,
+                    },
                     "waypoints": [{"frameId": 1, "x": 832, "y": 128, "z": 496, "yaw": -65, "pitch": 25}],
                 },
             }), encoding="utf-8")
