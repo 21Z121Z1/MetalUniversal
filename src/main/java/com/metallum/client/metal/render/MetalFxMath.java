@@ -64,24 +64,25 @@ final class MetalFxMath {
     }
 
     /**
-     * Offsets the raster so the sampled position inside each pixel matches the
-     * {@code pixelJitter} that is reported to {@code jitterOffsetX/Y}.
+     * Applies a clip-space translation after the complete world projection:
+     * {@code clip.xy += clipJitter * clip.w}. Minecraft 26.3 folds bob/hurt
+     * transforms and portal/nausea distortion into that projection. Its W row
+     * is therefore not necessarily {@code (0, 0, -1, 0)}. Updating only m20/m21
+     * gives a position-dependent raster offset for those ordinary world frames.
      *
-     * <p>The reference convention (Apple's MetalFX sample, FSR2's
-     * {@code translate(jitter) * proj}, and the porting skill) is
-     * {@code clip.xy += clipJitter * clip.w}. Folding that into the
-     * projection's third column is only equivalent when {@code w == +z_view},
-     * which holds for D3D left-handed projections — that is where the
-     * widespread {@code proj[2][0] += ...} idiom comes from. Minecraft's JOML
-     * perspective is right handed ({@code m23 == -1}, so {@code w == -z_view}),
-     * which flips the sign of the column edit. Subtracting restores the
-     * reference offset: with pixel jitter {@code (0.25, -0.5)} the raster now
-     * moves {@code (+0.25, -0.5)} screen pixels (x right, y down), matching the
-     * value handed to MetalFX instead of negating it.
+     * <p>All four columns participate. Z and W remain unchanged, so the jitter
+     * cannot change depth, clipping or the homogeneous divide. The unjittered
+     * projection remains the motion-vector reference.
      */
     static void applyProjectionJitter(final Matrix4f projection, final Vector2f clipJitter) {
-        projection.m20(projection.m20() - clipJitter.x);
-        projection.m21(projection.m21() - clipJitter.y);
+        projection.m00(projection.m00() + clipJitter.x * projection.m03());
+        projection.m01(projection.m01() + clipJitter.y * projection.m03());
+        projection.m10(projection.m10() + clipJitter.x * projection.m13());
+        projection.m11(projection.m11() + clipJitter.y * projection.m13());
+        projection.m20(projection.m20() + clipJitter.x * projection.m23());
+        projection.m21(projection.m21() + clipJitter.y * projection.m23());
+        projection.m30(projection.m30() + clipJitter.x * projection.m33());
+        projection.m31(projection.m31() + clipJitter.y * projection.m33());
     }
 
     /**
@@ -105,7 +106,12 @@ final class MetalFxMath {
             return;
         }
         float ratio = displayAspect / renderAspect;
+        // Resolution rounding changes the aspect of the completed projection,
+        // not just the original perspective's focal-length coefficient.
         projection.m00(projection.m00() * ratio);
+        projection.m10(projection.m10() * ratio);
+        projection.m20(projection.m20() * ratio);
+        projection.m30(projection.m30() * ratio);
     }
 
     static float verticalFieldOfViewDegrees(final Matrix4fc projection, final float fallback) {
