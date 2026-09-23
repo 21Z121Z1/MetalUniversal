@@ -25,12 +25,14 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionMesh;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
@@ -2260,10 +2262,36 @@ public final class BackendFrameComparisonClient {
                 else row.append(draw.indexCount()).append(':').append(draw.indexType())
                         .append(':').append(draw.hasCustomIndexBuffer());
             }
+            row.append("|blockStates=").append(sectionBlockStateSha256(minecraft, section.getSectionNode()));
             rows.add(row.toString());
         }
         rows.sort(String::compareTo);
         return rows;
+    }
+
+    private static String sectionBlockStateSha256(final Minecraft minecraft, final long node) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            int sectionX = (int) (node >> 42);
+            int sectionZ = (int) (node << 22 >> 42);
+            int sectionY = (int) (node << 44 >> 44);
+            BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        int state = Block.getId(minecraft.level.getBlockState(position.set(
+                                sectionX * 16 + x, sectionY * 16 + y, sectionZ * 16 + z)));
+                        digest.update((byte) (state >>> 24));
+                        digest.update((byte) (state >>> 16));
+                        digest.update((byte) (state >>> 8));
+                        digest.update((byte) state);
+                    }
+                }
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("JDK has no SHA-256 provider", impossible);
+        }
     }
 
     private static String sha256(final List<String> values) {

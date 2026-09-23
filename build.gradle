@@ -2690,15 +2690,31 @@ if (backendCaptureRequested) {
 					// adapter; "metal" is not a Minecraft PreferredGraphicsApi enum.
 						replaceOption(optionsFile, "preferredGraphicsBackend", metalLane ? "\"default\"" : "\"vulkan\"")
 					replaceOption(optionsFile, "startedCleanly", "true")
-						replaceOption(optionsFile, "fullscreen", "false")
+					replaceOption(optionsFile, "fullscreen", "false")
 					replaceOption(optionsFile, "enableVsync", "false")
 					replaceOption(optionsFile, "maxFps", "260")
+					replaceOption(optionsFile, "renderDistance", "12")
 					def irisConfig = new File(new File(gameDir, "config"), "iris.properties")
 					replaceOption(irisConfig, "enableShaders", "false")
 					def outputDirectory = new File(root, lane)
 					if (outputDirectory.exists()) {
 						throw new GradleException("Refusing to overwrite existing backend evidence: ${outputDirectory}")
 					}
+					// The original comparison fixture contained partially generated
+					// chunks. Completing them independently changed block states even
+					// between two Metal runs, so reject that input before launching.
+					def fixtureReport = new File(gameDir, "backend-world-fixture.json")
+					def fixtureCheck = new ProcessBuilder(
+						"python3", file("scripts/agent/verify_backend_world_fixture.py").absolutePath,
+						"--world", worldDirectory.absolutePath,
+						"--camera", fixedCamera, "--radius", "14",
+						"--report", fixtureReport.absolutePath
+					).redirectErrorStream(true).start()
+					def fixtureResult = fixtureCheck.inputStream.getText("UTF-8").trim()
+					if (fixtureCheck.waitFor() != 0) {
+						throw new GradleException("Backend world fixture is not fully generated: ${fixtureResult}")
+					}
+					logger.lifecycle("Backend world fixture: ${fixtureResult}")
 					systemProperty "metallum.backend.compare.world-snapshot-sha256", hashWorldSnapshot(worldDirectory)
 					logger.lifecycle("Minecraft 26.3 ${backendApi} capture: gameDir=${gameDir}, world=${worldDirectory}")
 				}
