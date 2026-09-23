@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
+      - convergence/main-unification-20260923
       - codex/vision-cloud-convergence-*
       - codex/frame-evidence-contract-v1-20260920
     paths:
@@ -13,11 +15,13 @@ on:
       - '.github/workflows/minecraft-reference.yml'
   pull_request:
     branches:
+      - main
       - codex/frame-evidence-contract-v1-20260920
     paths:
       - 'gradle.properties'
       - 'scripts/minecraft-reference.sh'
       - '.github/workflows/minecraft-reference.yml'
+      - 'scripts/agent/record_minecraft_ownership.py'
       - '.gitignore'
 
 permissions:
