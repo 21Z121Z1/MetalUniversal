@@ -301,6 +301,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
         // presentation, and explicit residency identical. The only intended
         // execution-model difference is whether the main renderer is enabled.
+        jvmArgs.add("-Dmetallum.ci.p1StationaryFramebufferCapture=true")
         jvmArgs.add("-Dmetallum.opt.metal4=true")
         jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
         jvmArgs.add("-Dmetallum.opt.metal4Present=true")

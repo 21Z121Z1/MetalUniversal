@@ -99,6 +99,14 @@ run_lane() {
   test -s "$E2E_ROOT/build/evidence/reload-evidence.json"
   test -s "$E2E_ROOT/build/evidence/readback-control/suite.json"
   cp -R "$E2E_ROOT/build/evidence" "$lane_out/evidence"
+  python3 - "$lane_out/evidence/runtime-evidence.json" "$lane_out/evidence/window-screenshot.png" <<'PY'
+import json, pathlib, shutil, sys
+evidence = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+source = pathlib.Path(evidence.get("windowScreenshot", ""))
+if not source.is_file():
+    raise SystemExit(f"missing diagnostic window screenshot: {source}")
+shutil.copy2(source, sys.argv[2])
+PY
 }
 
 # Correctness A/B is intentionally ordered baseline then candidate. Performance
@@ -109,6 +117,8 @@ run_lane candidate
 python3 scripts/agent/check_metal4_main_e2e_pair.py \
   "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
   "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
+  --baseline-evidence-root "$OUT/baseline/evidence" \
+  --candidate-evidence-root "$OUT/candidate/evidence" \
   --output "$OUT/pair-decision.json"
 
 python3 - "$OUT" <<'PY'

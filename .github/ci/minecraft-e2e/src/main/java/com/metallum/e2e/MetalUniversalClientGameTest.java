@@ -11,8 +11,12 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
+import net.minecraft.world.level.storage.ServerLevelData;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -23,6 +27,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.zip.ZipFile;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -37,6 +42,13 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
+    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v2";
+    private static final long P1_FRAMEBUFFER_GAME_TIME = 6000L;
+    private static final int P1_FRAMEBUFFER_X = 832;
+    private static final int P1_FRAMEBUFFER_Y = 128;
+    private static final int P1_FRAMEBUFFER_Z = 496;
+    private static final float P1_FRAMEBUFFER_YAW = -65.0F;
+    private static final float P1_FRAMEBUFFER_PITCH = 25.0F;
 
     private static void requestStationaryServerHalt(TestSingleplayerContext singleplayer) {
         // Fabric's TestSingleplayerContext.close() disconnects the client and then
@@ -112,6 +124,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
         try (TestSingleplayerContext singleplayer = openGameplayWorld(context, evidenceDir)) {
+            boolean p1FramebufferScenario = Boolean.getBoolean("metallum.ci.p1StationaryFramebufferCapture");
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
             JsonObject worldEvidence = singleplayer.getServer().computeOnServer(server -> {
@@ -125,6 +138,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 world.addProperty("preset", "minecraft:normal");
                 world.addProperty("generateStructures", true);
                 world.addProperty("minecraftVersion", "26.3");
+                world.addProperty("framebufferEquivalenceScenario",
+                        p1FramebufferScenario ? P1_FRAMEBUFFER_SCENARIO : "moving-waypoint-diagnostic-v1");
+                world.addProperty("simulationFrozenDuringFramebufferCapture", false);
+                world.addProperty("serverSimulationFrozenDuringFramebufferCapture", false);
+                world.addProperty("clientSimulationFrozenDuringFramebufferCapture", false);
                 String snapshot = System.getProperty("metallum.ci.initialWorld", "");
                 if (!snapshot.isEmpty()) world.addProperty("replaySourceSnapshotSha256",
                         WorldSnapshot.verify(Path.of(snapshot).toAbsolutePath().normalize()));
@@ -163,49 +181,151 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
 
             List<CaptureSample> samples = new ArrayList<>();
-            for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
-                // Move beyond the spawn region, allowing ordinary generation and chunk upload.
-                // A fixed seed still has a randomized player spawn within the spawn radius.
-                int x = 160 + (int) (frameId - 1) * 96;
-                int z = 160 + (int) (frameId - 1) * 48;
-                // Keep camera coordinates independent of spawn timing and vegetation heightmaps.
-                // Teleporting still exercises ordinary generation and uploads along the route.
-                int y = 128;
-                singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
-                if (frameId == 1) {
-                    singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
-                            + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
-                }
-                context.waitFor(client -> client.player != null
-                        && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
-                context.waitTicks(10);
-                singleplayer.getConnection().waitForChunksRender();
-                JsonObject waypoint = new JsonObject();
-                waypoint.addProperty("frameId", frameId);
-                waypoint.addProperty("x", x);
-                waypoint.addProperty("y", y);
-                waypoint.addProperty("z", z);
-                waypoints.add(waypoint);
-                RenderContractSnapshot before = renderContractSnapshot();
-                beginRenderContractFrame(frameId);
-                try {
-                    requestFinalDrawableCapture(frameId);
-                    waitForCaptureCompletion(context, before.completedCaptures() + 1, frameId, 100);
-                } finally {
-                    endRenderContractFrame(frameId);
+            boolean p1SceneFrozen = false;
+            try {
+                JsonArray cameraSamples = new JsonArray();
+                if (p1FramebufferScenario) {
+                    JsonObject p1GameRules = singleplayer.getServer().computeOnServer(server -> {
+                        var rules = server.overworld().getGameRules();
+                        rules.set(GameRules.ADVANCE_TIME, false, server);
+                        rules.set(GameRules.ADVANCE_WEATHER, false, server);
+                        rules.set(GameRules.RANDOM_TICK_SPEED, 0, server);
+                        rules.set(GameRules.SPAWN_MOBS, false, server);
+                        JsonObject configured = new JsonObject();
+                        configured.addProperty("advance_time", rules.get(GameRules.ADVANCE_TIME));
+                        configured.addProperty("advance_weather", rules.get(GameRules.ADVANCE_WEATHER));
+                        configured.addProperty("random_tick_speed", rules.get(GameRules.RANDOM_TICK_SPEED));
+                        configured.addProperty("spawn_mobs", rules.get(GameRules.SPAWN_MOBS));
+                        return configured;
+                    });
+                    require(!p1GameRules.get("advance_time").getAsBoolean()
+                                    && !p1GameRules.get("advance_weather").getAsBoolean()
+                                    && p1GameRules.get("random_tick_speed").getAsInt() == 0
+                                    && !p1GameRules.get("spawn_mobs").getAsBoolean(),
+                            "P1 framebuffer gamerules were not applied to the 26.3 world");
+                    worldEvidence.add("p1GameRules", p1GameRules);
+                    singleplayer.getServer().runCommand("difficulty peaceful");
+                    singleplayer.getServer().runCommand("weather clear 1000000");
+                    singleplayer.getServer().runCommand("time set noon");
+                    singleplayer.getServer().runCommand("tp @a " + P1_FRAMEBUFFER_X + " " + P1_FRAMEBUFFER_Y
+                            + " " + P1_FRAMEBUFFER_Z + " " + P1_FRAMEBUFFER_YAW + " " + P1_FRAMEBUFFER_PITCH);
+                    context.waitFor(client -> client.player != null
+                            && Math.abs(client.player.getX() - P1_FRAMEBUFFER_X) < 1
+                            && Math.abs(client.player.getY() - P1_FRAMEBUFFER_Y) < 1
+                            && Math.abs(client.player.getZ() - P1_FRAMEBUFFER_Z) < 1);
+                    chunkRenderTicks += singleplayer.getConnection().waitForChunksRender();
+                    context.waitTicks(20);
+
+                    boolean serverFrozen = singleplayer.getServer().computeOnServer(server -> {
+                        server.overworld().tickRateManager().setFrozen(true);
+                        return server.overworld().tickRateManager().isFrozen();
+                    });
+                    p1SceneFrozen = true;
+                    require(serverFrozen, "P1 server simulation did not freeze for the stationary framebuffer samples");
+                    boolean clientFrozen = context.computeOnClient(client -> {
+                        if (client.level != null) {
+                            client.level.tickRateManager().setFrozen(true);
+                            return client.level.tickRateManager().isFrozen();
+                        }
+                        return false;
+                    });
+                    require(clientFrozen, "P1 client simulation did not freeze for the stationary framebuffer samples");
+                    long serverGameTime = singleplayer.getServer().computeOnServer(server -> {
+                        var level = server.overworld();
+                        ((ServerLevelData) level.getLevelData()).setGameTime(P1_FRAMEBUFFER_GAME_TIME);
+                        server.getPlayerList().broadcastAll(
+                                new ClientboundSetTimePacket(P1_FRAMEBUFFER_GAME_TIME, Map.of()), level.dimension());
+                        return level.getGameTime();
+                    });
+                    require(serverGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 server game time was not pinned for the stationary framebuffer samples");
+                    context.waitFor(client -> client.level != null
+                            && client.level.getGameTime() == P1_FRAMEBUFFER_GAME_TIME);
+                    long clientGameTime = context.computeOnClient(client -> client.level.getGameTime());
+                    require(clientGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 client did not receive the fixed server game time before framebuffer sampling");
+                    worldEvidence.addProperty("simulationFrozenDuringFramebufferCapture", true);
+                    worldEvidence.addProperty("serverSimulationFrozenDuringFramebufferCapture", serverFrozen);
+                    worldEvidence.addProperty("clientSimulationFrozenDuringFramebufferCapture", clientFrozen);
+                    worldEvidence.addProperty("p1FixedGameTime", P1_FRAMEBUFFER_GAME_TIME);
+                    worldEvidence.addProperty("serverGameTimeAtCapture", serverGameTime);
+                    worldEvidence.addProperty("clientGameTimeAtCapture", clientGameTime);
+                    context.waitTicks(20);
+                    context.computeOnClient(client -> {
+                        client.gui.hud.getChat().clearMessages(false);
+                        client.gui.hud.clearTitles();
+                        client.gui.hud.resetTitleTimes();
+                        return null;
+                    });
+                    worldEvidence.addProperty("clientPresentationWarmupTicks", 20);
+                    worldEvidence.addProperty("transientHudMessagesCleared", true);
+                    worldEvidence.add("cameraSamples", cameraSamples);
+                    JsonObject waypoint = new JsonObject();
+                    waypoint.addProperty("frameId", 1);
+                    waypoint.addProperty("x", P1_FRAMEBUFFER_X);
+                    waypoint.addProperty("y", P1_FRAMEBUFFER_Y);
+                    waypoint.addProperty("z", P1_FRAMEBUFFER_Z);
+                    waypoint.addProperty("yaw", P1_FRAMEBUFFER_YAW);
+                    waypoint.addProperty("pitch", P1_FRAMEBUFFER_PITCH);
+                    waypoints.add(waypoint);
                 }
 
-                Path png = findFrameArtifact(metalCaptureRoot, frameId, "actual.png");
-                Path raw = findFrameArtifact(metalCaptureRoot, frameId, "actual.bin");
-                require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
-                require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
-                CaptureSample sample = inspectCapture(frameId, png, raw);
-                samples.add(sample);
+                for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
+                    if (p1FramebufferScenario) {
+                        JsonObject cameraSample = lockAndDescribeP1Camera(context, frameId);
+                        validateP1CameraSample(cameraSample, frameId);
+                        cameraSamples.add(cameraSample);
+                    } else {
+                        // Move beyond the spawn region, allowing ordinary generation and chunk upload.
+                        // A fixed seed still has a randomized player spawn within the spawn radius.
+                        int x = 160 + (int) (frameId - 1) * 96;
+                        int z = 160 + (int) (frameId - 1) * 48;
+                        int y = 128;
+                        singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+                        if (frameId == 1) {
+                            singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
+                                    + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
+                        }
+                        context.waitFor(client -> client.player != null
+                                && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
+                        context.waitTicks(10);
+                        singleplayer.getConnection().waitForChunksRender();
+                        JsonObject waypoint = new JsonObject();
+                        waypoint.addProperty("frameId", frameId);
+                        waypoint.addProperty("x", x);
+                        waypoint.addProperty("y", y);
+                        waypoint.addProperty("z", z);
+                        waypoints.add(waypoint);
+                    }
 
-                // Sampling is deliberately spaced. This rejects the possibility that a single
-                // transitional frame (world load, resize, GUI hand-off) is mistaken for the
-                // renderer's steady-state output.
-                context.waitTicks(4);
+                    RenderContractSnapshot before = renderContractSnapshot();
+                    beginRenderContractFrame(frameId);
+                    try {
+                        requestFinalDrawableCapture(frameId);
+                        waitForCaptureCompletion(context, before.completedCaptures() + 1, frameId, 100);
+                    } finally {
+                        endRenderContractFrame(frameId);
+                    }
+
+                    Path png = findFrameArtifact(metalCaptureRoot, frameId, "actual.png");
+                    Path raw = findFrameArtifact(metalCaptureRoot, frameId, "actual.bin");
+                    require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
+                    require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
+                    CaptureSample sample = inspectCapture(frameId, png, raw);
+                    samples.add(sample);
+                    context.waitTicks(4);
+                }
+            } finally {
+                if (p1SceneFrozen) {
+                    context.computeOnClient(client -> {
+                        if (client.level != null) client.level.tickRateManager().setFrozen(false);
+                        return null;
+                    });
+                    singleplayer.getServer().computeOnServer(server -> {
+                        server.overworld().tickRateManager().setFrozen(false);
+                        return null;
+                    });
+                }
             }
 
             CaptureSample selected = selectBestCapture(samples);
@@ -616,6 +736,53 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         if (!condition) {
             throw new IllegalStateException(message);
         }
+    }
+
+    private static JsonObject lockAndDescribeP1Camera(ClientGameTestContext context, long frameId) {
+        return context.computeOnClient(client -> {
+            // A frozen Level still processes MouseHandler input on each render tick.
+            // Release the captured mouse before fixing both current and interpolated
+            // camera rotation so host pointer movement cannot change the sample.
+            client.mouseHandler.releaseMouse();
+            Entity cameraEntity = client.getCameraEntity();
+            require(cameraEntity != null, "P1 framebuffer capture has no camera entity");
+            cameraEntity.setYRot(P1_FRAMEBUFFER_YAW);
+            cameraEntity.setXRot(P1_FRAMEBUFFER_PITCH);
+            cameraEntity.setOldPosAndRot();
+            pinVignette(cameraEntity);
+
+            JsonObject sample = new JsonObject();
+            sample.addProperty("frameId", frameId);
+            sample.addProperty("x", cameraEntity.getX());
+            sample.addProperty("y", cameraEntity.getY());
+            sample.addProperty("z", cameraEntity.getZ());
+            sample.addProperty("yaw", cameraEntity.getYRot());
+            sample.addProperty("pitch", cameraEntity.getXRot());
+            sample.addProperty("gameTime", client.level.getGameTime());
+            sample.addProperty("mouseGrabbed", client.mouseHandler.isMouseGrabbed());
+            return sample;
+        });
+    }
+
+    private static void validateP1CameraSample(JsonObject sample, long frameId) {
+        require(sample.get("frameId").getAsLong() == frameId,
+                "P1 camera evidence has the wrong frame id: " + sample);
+        require(Math.abs(sample.get("x").getAsDouble() - P1_FRAMEBUFFER_X) < 1
+                        && Math.abs(sample.get("y").getAsDouble() - P1_FRAMEBUFFER_Y) < 1
+                        && Math.abs(sample.get("z").getAsDouble() - P1_FRAMEBUFFER_Z) < 1,
+                "P1 camera position drifted before frame " + frameId + ": " + sample);
+        require(Float.compare(sample.get("yaw").getAsFloat(), P1_FRAMEBUFFER_YAW) == 0
+                        && Float.compare(sample.get("pitch").getAsFloat(), P1_FRAMEBUFFER_PITCH) == 0,
+                "P1 camera orientation drifted before frame " + frameId + ": " + sample);
+        require(sample.get("gameTime").getAsLong() == P1_FRAMEBUFFER_GAME_TIME,
+                "P1 game time drifted before frame " + frameId + ": " + sample);
+        require(!sample.get("mouseGrabbed").getAsBoolean(),
+                "P1 mouse input remained captured before frame " + frameId + ": " + sample);
+    }
+
+    private static void pinVignette(Entity cameraEntity) {
+        if (!cameraEntity.level().isClientSide()) return;
+        net.minecraft.client.Minecraft.getInstance().gui.hud.vignetteBrightness = 0.0F;
     }
 
     private static String escape(String value) {

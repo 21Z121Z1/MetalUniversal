@@ -208,9 +208,26 @@ def main() -> None:
             "performance runner does not pin UI scale")
     require('pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"' in physical_performance,
             "performance runner does not pin render distance")
-    require("EXPECTED_FRAMEBUFFER_WIDTH=1708" in physical_performance
-            and "EXPECTED_FRAMEBUFFER_HEIGHT=960" in physical_performance,
-            "performance runner does not pin the validated Retina framebuffer")
+    require('pin_colon_option "$OPTIONS_FILE" "fullscreen" "true"' in physical_performance,
+            "performance runner does not force fullscreen mode")
+    require('pin_colon_option "$OPTIONS_FILE" "maxFps" "$TARGET_FPS"' in physical_performance
+            and 'pin_colon_option "$OPTIONS_FILE" "enableVsync" "true"' in physical_performance,
+            "performance runner does not pin the requested FPS/VSync display target")
+    require('pin_colon_option "$OPTIONS_FILE" "inactivityFpsLimit" "minimized"' in physical_performance,
+            "performance runner can enter the 26.3 AFK limiter during a stationary workload")
+    require("assert_pinned_render_options" in physical_performance,
+            "performance runner does not verify the fullscreen display options stayed pinned")
+    require('"pending-first-fullscreen-baseline"' in physical_performance
+            and '"first accepted fullscreen baseline native-fullscreen-baseline.json"' in physical_performance,
+            "performance runner does not capture fullscreen drawable resolution at runtime")
+    require('system_profiler SPDisplaysDataType -json' in physical_performance
+            and 'HOST_DISPLAY_WIDTH' in physical_performance and 'HOST_DISPLAY_REFRESH_HZ' in physical_performance,
+            "performance runner does not record the physical main display mode")
+    require('actual_width < math.ceil(display_width * 0.95)' in physical_performance
+            and 'actual_height < math.ceil(display_height * 0.90)' in physical_performance,
+            "performance runner does not reject a windowed drawable on the full-screen profile")
+    require('assert_console_unlocked' in physical_performance and 'IOConsoleLocked' in physical_performance,
+            "performance runner does not protect physical trials from the locked console")
     require("CAMERA_SCRIPT_SHA" in physical_performance and "CAMERA_POLICY" in physical_performance,
             "performance runner does not content-address the fixed-camera driver")
     require("P1_CORRECTNESS_GATE" in physical_performance and "sourceSha" in physical_performance,
@@ -270,7 +287,13 @@ def main() -> None:
             "profiles": ["V1", "I0", "I1"],
             "shaderProfilesContentAddressed": True,
             "shaderActivationProven": True,
-            "fixedFramebuffer": [1708, 960],
+            "fullscreen": True,
+            "drawableResolution": "captured-from-first-baseline-and-matched-across-trials-and-profiles",
+            "targetFps": 120,
+            "targetRefreshHz": 120,
+            "physicalDisplayMode": "system_profiler native pixels and active refresh",
+            "vsync": True,
+            "inactivityFpsLimit": "minimized",
             "fixedUiScale": True,
             "fixedRenderDistance": True,
             "contentAddressedCameraDriver": True,

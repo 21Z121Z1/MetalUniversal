@@ -20,6 +20,13 @@ COMMON_KEYS = (
     "render_distance",
     "camera_pose",
     "camera_script_sha256",
+    "window_mode",
+    "target_fps",
+    "target_refresh_hz",
+    "display_pixel_mode",
+    "display_refresh_hz",
+    "vsync_enabled",
+    "inactivity_fps_limit",
     "minecraft_version",
     "sodium_version",
     "macos_version",
@@ -70,6 +77,28 @@ def evaluate(root: Path, head: str, jar_sha: str, dylib_sha: str) -> tuple[dict[
             errors.append(f"{profile}: production JAR identity differs from correctness gate")
         if identity.get("native_dylib_sha256") != dylib_sha:
             errors.append(f"{profile}: native dylib identity differs from correctness gate")
+        resolution = identity.get("resolution")
+        if not (isinstance(resolution, list) and len(resolution) == 2
+                and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in resolution)):
+            errors.append(f"{profile}: fullscreen drawable resolution was not captured as two positive integers")
+        if identity.get("window_mode") != "fullscreen":
+            errors.append(f"{profile}: performance run was not fullscreen")
+        if identity.get("target_fps") != 120 or identity.get("target_refresh_hz") != 120:
+            errors.append(f"{profile}: performance identity does not pin the 120 FPS / 120 Hz target")
+        display_pixels = identity.get("display_pixel_mode")
+        if not (isinstance(display_pixels, list) and len(display_pixels) == 2
+                and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in display_pixels)):
+            errors.append(f"{profile}: physical main display pixel mode is missing")
+        if identity.get("display_refresh_hz") != 120.0:
+            errors.append(f"{profile}: physical main display refresh is not 120 Hz")
+        if identity.get("vsync_enabled") is not True:
+            errors.append(f"{profile}: VSync was not enabled")
+        if identity.get("inactivity_fps_limit") != "minimized":
+            errors.append(f"{profile}: inactivity FPS limit is not minimized-only")
+        if (isinstance(resolution, list) and len(resolution) == 2
+                and isinstance(display_pixels, list) and len(display_pixels) == 2
+                and (resolution[0] < display_pixels[0] * 0.95 or resolution[1] < display_pixels[1] * 0.90)):
+            errors.append(f"{profile}: fullscreen drawable does not fill the physical display")
         if decision.get("state") != "accepted-candidate":
             errors.append(f"{profile}: decision={decision.get('state')!r}")
         identities[profile] = identity
@@ -121,11 +150,18 @@ def synthetic_identity(profile: str, head: str, jar: str, dylib: str) -> dict[st
         "native_dylib_sha256": dylib,
         "world_sha256": "4" * 64,
         "world_scenario_id": "fixed-camera-v1",
-        "resolution": [1708, 960],
+        "resolution": [3024, 1898],
         "ui_scale": 3,
         "render_distance": 16,
         "camera_pose": "fixed",
         "camera_script_sha256": "5" * 64,
+        "window_mode": "fullscreen",
+        "target_fps": 120,
+        "target_refresh_hz": 120,
+        "display_pixel_mode": [3024, 1964],
+        "display_refresh_hz": 120.0,
+        "vsync_enabled": True,
+        "inactivity_fps_limit": "minimized",
         "minecraft_version": "26.2",
         "sodium_version": "test",
         "macos_version": "26.6",
@@ -170,6 +206,14 @@ def self_test() -> None:
         i1_environment.write_text(json.dumps(broken), encoding="utf-8")
         result, code = evaluate(root, head, jar, dylib)
         assert code == 3 and any("world_sha256" in error for error in result["errors"]), result
+
+        write_profile(root, "I1", synthetic_identity("I1", head, jar, dylib))
+        i1_environment = root / "profiles/I1/environment.json"
+        broken = load_object(i1_environment)
+        broken["identity"]["resolution"] = "pending-first-fullscreen-baseline"
+        i1_environment.write_text(json.dumps(broken), encoding="utf-8")
+        result, code = evaluate(root, head, jar, dylib)
+        assert code == 3 and any("fullscreen drawable resolution" in error for error in result["errors"]), result
 
         write_profile(root, "I1", synthetic_identity("I1", head, jar, dylib))
         (root / "profiles/I0/decision.json").write_text(
