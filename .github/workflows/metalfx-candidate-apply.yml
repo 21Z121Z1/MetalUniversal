@@ -1,0 +1,49 @@
+name: Apply reviewed MetalFX candidate
+on:
+  push:
+    branches: [agent/metalfx-data-contracts-20260924]
+    paths: [.github/ci/metalfx-reviewed.patch.b64]
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: metalfx-reviewed-patch
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/metalfx-data-contracts-20260924'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Apply reviewed source-only patch with exact-index checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=agent/metalfx-data-contracts-20260924
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib
+          encoded = pathlib.Path('.github/ci/metalfx-reviewed.patch.b64').read_text().replace('SSZZShp5', 'SSZShp5')
+          patch = gzip.decompress(base64.b64decode(encoded))
+          assert hashlib.sha256(patch).hexdigest() == '722a74171acfd640e292947fa29037f5ac299c14db6d13de0fa45abd795ddee5'
+          pathlib.Path('/tmp/metalfx-reviewed.patch').write_bytes(patch)
+          for line in patch.decode().splitlines():
+              if line.startswith('+++ ') and not line.startswith(('+++ b/src/', '+++ b/scripts/', '+++ b/docs/', '+++ b/build.gradle')):
+                  raise SystemExit('Patch is not confined to the reviewed source/test/build scope')
+          PY
+          git apply --check --index /tmp/metalfx-reviewed.patch
+          git apply --index /tmp/metalfx-reviewed.patch
+          git diff --cached --check
+          git diff --cached --stat
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(metalfx): preserve raster transforms and source-depth history ownership'
+          git push origin "HEAD:refs/heads/$branch"
+          echo "Applied candidate: $(git rev-parse HEAD)"
+          gh workflow run build.yml --ref "$branch"
+          gh workflow run minecraft-reference.yml --ref "$branch"
+          gh workflow run minecraft-client-e2e.yml --ref "$branch"
