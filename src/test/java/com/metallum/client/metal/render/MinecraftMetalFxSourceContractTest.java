@@ -106,6 +106,24 @@ final class MinecraftMetalFxSourceContractTest {
         assertTrue(fieldWrites(end).containsAll(List.of("currentVertexBuffer", "currentIndexBuffer")));
     }
 
+    @Test
+    void unconnectedCutoutMrtCannotBeEnabledByAllocationOrLaunchProperty() {
+        MethodNode gate = method("com/metallum/client/metal/render/MetalFxManager", "usesCutoutReactiveTerrain");
+        List<Integer> opcodes = new ArrayList<>();
+        for (var instruction : gate.instructions) {
+            if (instruction.getOpcode() >= 0) opcodes.add(instruction.getOpcode());
+        }
+        assertEquals(List.of(Opcodes.ICONST_0, Opcodes.IRETURN), opcodes,
+                "CUTOUT remains fail-closed until the actual shared pass declares/stores coverage");
+        var manager = load("com/metallum/client/metal/render/MetalFxManager");
+        assertTrue(manager.methods.stream().noneMatch(m -> m.name.equals("cutoutReactiveAttachment")),
+                "a texture getter must not manufacture a same-frame producer receipt");
+        for (var m : manager.methods) {
+            assertFalse(strings(m).contains("metallum.metalfx.cutoutReactiveTerrain"),
+                    "the old flag selected a two-output pipeline in a one-color pass");
+        }
+    }
+
     private static ClassNode load(String owner) {
         try (InputStream input = MinecraftMetalFxSourceContractTest.class.getClassLoader().getResourceAsStream(owner + ".class")) {
             assertNotNull(input, owner + " missing from the compile dependency");

@@ -367,6 +367,7 @@ private enum NativeState {
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
     static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
+    static var metalFxColorTransferPipelines: [ObjectIdentifier: MTLComputePipelineState] = [:]
     #if os(macOS)
     // Present mode the game last asked for, so stopping the frame-generation
     // presenter can hand the layer back in the state Minecraft expects instead
@@ -7498,6 +7499,103 @@ public func metallum_metalfx_encode_v2(
     )
 }
 
+// SDR display values are not scene-linear radiance. This transfer pair only
+// linearizes the authored sRGB display signal for Temporal, then restores that
+// signal before FrameInterpolator/UI/presentation. It does not recover HDR or
+// invert Minecraft's artistic lightmap/brightness operations.
+private let metalFxColorTransferSource = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void metallum_metalfx_color_transfer(
+    texture2d<float, access::read> source [[texture(0)]],
+    texture2d<float, access::write> destination [[texture(1)]],
+    constant uint4 &parameters [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= parameters.x || p.y >= parameters.y) return;
+    float4 pixel = source.read(p);
+    float3 c = max(pixel.rgb, float3(0.0f));
+    float3 transformed;
+    if (parameters.z == 1u) {
+        transformed = select(pow((c + 0.055f) / 1.055f, float3(2.4f)),
+                             c / 12.92f, c <= 0.04045f);
+    } else {
+        transformed = select(1.055f * pow(c, float3(1.0f / 2.4f)) - 0.055f,
+                             c * 12.92f, c <= 0.0031308f);
+    }
+    // Alpha is coverage, never a transfer-encoded color channel. These are
+    // scene textures; no premultiply/unpremultiply is performed here.
+    destination.write(float4(transformed, pixel.a), p);
+}
+"""
+
+private func metalFxColorTransferPipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    let key = ObjectIdentifier(device as AnyObject)
+    if let cached = NativeState.metalFxColorTransferPipelines[key] { return cached }
+    do {
+        let library = try device.makeLibrary(source: metalFxColorTransferSource, options: nil)
+        guard let function = library.makeFunction(name: "metallum_metalfx_color_transfer") else { return nil }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        NativeState.metalFxColorTransferPipelines[key] = pipeline
+        return pipeline
+    } catch {
+        NSLog("[Metallum] MetalFX SDR transfer pipeline creation failed: %@", String(describing: error))
+        return nil
+    }
+}
+
+@_cdecl("metallum_metalfx_color_transfer_encode")
+public func metallumMetalFxColorTransferEncodeEntry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ source: MTLTexture,
+    _ destination: MTLTexture,
+    _ direction: Int32,
+    _ fence: MTLFence?
+) -> Int32 {
+    guard source.width == destination.width, source.height == destination.height,
+          source.textureType == .type2D, destination.textureType == .type2D,
+          source.sampleCount == 1, destination.sampleCount == 1,
+          source.usage.contains(.shaderRead), destination.usage.contains(.shaderWrite),
+          destination.storageMode == .private,
+          (direction == 1 && source.pixelFormat == .rgba8Unorm && destination.pixelFormat == .rgba16Float)
+            || (direction == 2 && source.pixelFormat == .rgba16Float && destination.pixelFormat == .rgba8Unorm),
+          let pipeline = metalFxColorTransferPipeline(device) else { return 0 }
+    let parameters = SIMD4<UInt32>(UInt32(source.width), UInt32(source.height), UInt32(direction), 0)
+    let label = direction == 1 ? "MetalFX sRGB Decode" : "MetalFX SDR Output Transfer"
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+        return encodeMetal4Compute(
+            lease: lease, label: label, pipeline: pipeline, uniforms: parameters,
+            textures: [(0, source), (1, destination)], width: source.width, height: source.height,
+            producerBarrierBeforeStages: [.vertex, .fragment, .dispatch, .blit]
+        ) ? 1 : 0
+    }
+    let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return 0 }
+    encoder.label = label
+    if let fence { encoder.waitForFence(fence) }
+    var mutableParameters = parameters
+    encoder.setComputePipelineState(pipeline)
+    encoder.setBytes(&mutableParameters, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
+    encoder.setTexture(source, index: 0)
+    encoder.setTexture(destination, index: 1)
+    let width = max(1, min(pipeline.threadExecutionWidth, 64))
+    let height = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / width))
+    encoder.dispatchThreads(MTLSize(width: source.width, height: source.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
+    if let fence { encoder.updateFence(fence) }
+    encoder.endEncoding()
+    return 1
+}
+
+@_cdecl("metallum_metalfx_invalidate_source")
+public func metallumMetalFxInvalidateSource() {
+    #if os(macOS) && canImport(MetalFX)
+    NativeState.lastTemporalScalerForInterpolation = nil
+    NativeState.metalFxHistoryLock.lock()
+    NativeState.metalFxDepthHistory.invalidateAll()
+    NativeState.metalFxHistoryLock.unlock()
+    #endif
+}
+
 private func metalFxEncodeV2EntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
     _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
@@ -7989,6 +8087,7 @@ public func metallumMetalFxFrameGenerationScalerLinkStatus() -> Int32 {
 
 @_cdecl("metallum_metalfx_shutdown")
 public func metallum_metalfx_shutdown() {
+    NativeState.metalFxColorTransferPipelines.removeAll()
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 26.0, *) {
         NativeState.frameGenerationPresenter?.shutdown()

@@ -40,6 +40,18 @@ final class FrameGenerationColorContractTest {
     }
 
     @Test
+    void successfulTransferStillDoesNotFabricateUiAlphaOrOpenProduction() {
+        var provenTransfer = FrameGenerationColorContract.withSdrTransferReceipt(
+                FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT, true);
+        assertEquals(List.of("ui-premultiplied-alpha"), provenTransfer.missingProofs());
+        assertFalse(provenTransfer.productionProven());
+        var missingReceipt = FrameGenerationColorContract.withSdrTransferReceipt(
+                FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT, false);
+        assertTrue(missingReceipt.missingProofs().contains("temporal-input-linearization"));
+        assertFalse(missingReceipt.productionProven());
+    }
+
+    @Test
     void currentNativeDirectPathRemainsProductionFailClosed() {
         FrameGenerationColorContract.Evidence evidence =
                 FrameGenerationColorContract.currentRenderer(

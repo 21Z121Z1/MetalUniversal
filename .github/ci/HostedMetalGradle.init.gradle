@@ -159,6 +159,7 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalFxColorTransferIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
         ]
