@@ -310,55 +310,93 @@ private func testPresentedTimeZeroFails() throws {
 }
 
 private func testDepthHistoryRejectsStaleCompletions() throws {
-    let history = MetalFxDepthHistoryState()
-    let first = history.beginWrite(reset: false)
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let first = history.begin(1, reset: false)
     try expect(!first.previousDepthIsValid, "first source has no previous depth")
-    history.complete(first, succeeded: true)
-    let second = history.beginWrite(reset: false)
+    history.complete(1, ticket: first.ticket, succeeded: true)
+    let second = history.begin(1, reset: false)
     try expect(second.previousDepthIsValid, "completed immediate predecessor can be read")
-    history.complete(first, succeeded: false)
-    try expect(!history.isValid, "older failure cannot settle the pending source")
-    history.complete(second, succeeded: true)
-    history.complete(first, succeeded: false)
-    try expect(history.isValid, "older failure cannot invalidate newer successful depth")
-    let reset = history.beginWrite(reset: true)
+    history.complete(1, ticket: first.ticket, succeeded: false)
+    history.complete(1, ticket: second.ticket, succeeded: true)
+    history.complete(1, ticket: first.ticket, succeeded: false)
+    let reset = history.begin(1, reset: true)
     try expect(!reset.previousDepthIsValid, "reset never reads pre-reset depth")
-    history.complete(second, succeeded: true)
-    try expect(!history.isValid, "older success cannot authorize a reset generation")
-    history.complete(reset, succeeded: false)
-    history.complete(reset, succeeded: true)
-    try expect(!history.isValid, "duplicate callback cannot reverse a failure")
+    history.complete(1, ticket: second.ticket, succeeded: true)
+    history.complete(1, ticket: reset.ticket, succeeded: false)
+    history.complete(1, ticket: reset.ticket, succeeded: true)
+    try expect(!history.begin(1, reset: false).previousDepthIsValid,
+               "duplicate callback cannot reverse a failure")
 }
 
 private func testDepthHistoryReplacementAndPendingSource() throws {
-    let retired = MetalFxDepthHistoryState()
-    let oldWrite = retired.beginWrite(reset: false)
-    let replacement = MetalFxDepthHistoryState()
-    let newWrite = replacement.beginWrite(reset: false)
-    retired.complete(oldWrite, succeeded: true)
-    replacement.complete(oldWrite, succeeded: true)
-    try expect(!replacement.isValid, "retired resource cannot authorize a replacement at the same key")
-    let pending = replacement.beginWrite(reset: false)
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let oldA = history.begin("A", reset: false)
+    history.complete("A", ticket: oldA.ticket, succeeded: true)
+    let b = history.begin("B", reset: false)
+    history.complete("B", ticket: b.ticket, succeeded: true)
+    let newA = history.begin("A", reset: false)
+    try expect(!newA.previousDepthIsValid, "A -> B -> A cannot resurrect cached source history")
+    history.complete("A", ticket: oldA.ticket, succeeded: true)
+    history.invalidate("A", ifOwnedBy: oldA.ticket)
+    let pending = history.begin("A", reset: false)
     try expect(!pending.previousDepthIsValid, "a pending copy is not a completed immediate predecessor")
-    replacement.complete(newWrite, succeeded: true)
-    try expect(!replacement.isValid, "out-of-order callback cannot make older depth current")
-    replacement.complete(pending, succeeded: true)
-    try expect(replacement.isValid, "latest successful copy owns history")
+    history.complete("A", ticket: newA.ticket, succeeded: true)
+    history.complete("A", ticket: pending.ticket, succeeded: true)
+    try expect(history.begin("A", reset: false).previousDepthIsValid,
+               "latest successful source owns the replacement history")
 }
 
 private func testDepthHistoryCompletionPermutations() throws {
     for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
         for latestSucceeded in [false, true] {
-            let history = MetalFxDepthHistoryState()
-            let writes = [history.beginWrite(reset: false), history.beginWrite(reset: true),
-                          history.beginWrite(reset: false)]
+            var history = MetalFxDepthHistoryOwnership<Int>()
+            let writes = [history.begin(1, reset: false), history.begin(1, reset: true),
+                          history.begin(1, reset: false)]
             for index in order {
-                history.complete(writes[index], succeeded: index == 2 ? latestSucceeded : !latestSucceeded)
+                history.complete(1, ticket: writes[index].ticket,
+                                 succeeded: index == 2 ? latestSucceeded : !latestSucceeded)
             }
-            try expect(history.isValid == latestSucceeded,
+            try expect(history.begin(1, reset: false).previousDepthIsValid == latestSucceeded,
                        "only the latest write may settle history, regardless of callback order")
         }
     }
+}
+
+private func testTemporalDepthEpochs() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let first = history.begin("same-format-and-size", reset: false)
+    try expect(!first.previousDepthIsValid, "first frame has no history")
+    let reset = history.begin("same-format-and-size", reset: true)
+    history.complete("same-format-and-size", ticket: first.ticket, succeeded: true)
+    let pending = history.begin("same-format-and-size", reset: false)
+    try expect(!pending.previousDepthIsValid, "late pre-reset success must not resurrect history")
+    history.complete("same-format-and-size", ticket: pending.ticket, succeeded: true)
+    history.complete("same-format-and-size", ticket: reset.ticket, succeeded: false)
+    let next = history.begin("same-format-and-size", reset: false)
+    try expect(next.previousDepthIsValid, "older failure cannot erase newer completed depth")
+    history.invalidateAll()
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    let recreated = history.begin("same-format-and-size", reset: false)
+    try expect(!recreated.previousDepthIsValid, "cache A -> eviction -> A is a new generation")
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    history.invalidate("same-format-and-size", ifOwnedBy: next.ticket)
+    history.complete("same-format-and-size", ticket: recreated.ticket, succeeded: true)
+    try expect(history.begin("same-format-and-size", reset: false).previousDepthIsValid,
+               "old completion and abort cannot mutate a recreated resource")
+}
+
+private func testTemporalDepthRequiresImmediatePredecessor() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let first = history.begin(7, reset: false)
+    history.complete(7, ticket: first.ticket, succeeded: true)
+    let second = history.begin(7, reset: false)
+    try expect(second.previousDepthIsValid, "completed immediately previous source is usable")
+    let third = history.begin(7, reset: false)
+    try expect(!third.previousDepthIsValid, "first's completion does not prove second's depth copy")
+    history.invalidate(7, ifOwnedBy: third.ticket)
+    history.complete(7, ticket: second.ticket, succeeded: true)
+    try expect(!history.begin(7, reset: false).previousDepthIsValid,
+               "failed encode cannot be repaired by an older pending callback")
 }
 
 private func makeParameters(
@@ -418,6 +456,8 @@ private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
             ("native scaler-link status", assertScalerLinkStatusContract),
+            ("temporal depth reset, eviction and reordered completions", testTemporalDepthEpochs),
+            ("temporal depth immediate predecessor", testTemporalDepthRequiresImmediatePredecessor),
             ("interpolation motion uses previous-color pixels", testInterpolationMotionUsesPreviousColorPixels),
             ("interpolation preserves source time and camera", testInterpolationPreservesRealSourceMetadata),
             ("depth history stale callbacks and reset", testDepthHistoryRejectsStaleCompletions),

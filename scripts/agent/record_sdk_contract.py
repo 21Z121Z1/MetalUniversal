@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Record the installed SDK identity and small API declaration excerpts, not an SDK copy."""
 import argparse
+import hashlib
 from pathlib import Path
 import subprocess
 
@@ -9,8 +10,9 @@ DECLARATIONS = {
     "QuartzCore/CAMetalLayer.h": ("nextDrawable", "maximumDrawableCount", "displaySyncEnabled", "allowsNextDrawableTimeout", "residencySet"),
     "Metal/MTLDrawable.h": ("presentedTime", "addPresentedHandler", "drawableID", "presentAtTime"),
     "Metal/MTL4CommandQueue.h": ("waitForDrawable", "signalDrawable", "commit:", "addResidencySet"),
-    "MetalFX/MTLFXTemporalScaler.h": ("supportsDevice", "supportsMetal4FX", "newTemporalScaler", "reset", "motionVectorScale", "depthReversed"),
-    "MetalFX/MTLFXFrameInterpolator.h": ("supportsDevice", "supportsMetal4FX", "newFrameInterpolator", "jitter", "prevColorTexture"),
+    "MetalFX/MTLFXTemporalScaler.h": ("supportsDevice", "supportsMetal4FX", "newTemporalScaler", "reset", "motionVectorScale", "depthReversed", "colorTexture", "depthTexture", "motionTexture", "outputTexture", "reactive", "exposure", "jitter", "inputWidth", "inputHeight", "outputWidth", "outputHeight", "inputContent"),
+    "MetalFX/MTLFXFrameInterpolator.h": ("supportsDevice", "supportsMetal4FX", "newFrameInterpolator", "jitter", "prevColorTexture", "colorTexture", "depthTexture", "motionTexture", "outputTexture", "inputWidth", "inputHeight", "outputWidth", "outputHeight", "scaler", "deltaTime", "fieldOfView", "nearPlane", "farPlane", "aspectRatio", "depthReversed", "shouldResetHistory", "uiTexture", "UITexture"),
+    "MetalFX/MTLFXFrameInterpolatableScaler.h": ("input", "output", "protocol"),
 }
 
 def main():
@@ -27,11 +29,12 @@ def main():
         if not header.is_file():
             parts.append("unavailable: header absent in this SDK")
             continue
+        parts.append(f"sha256: {hashlib.sha256(header.read_bytes()).hexdigest()}")
         lines = header.read_text().splitlines()
         selected = set()
         for index, line in enumerate(lines):
             if any(symbol in line for symbol in symbols):
-                selected.update(range(max(0, index - 6), min(len(lines), index + 5)))
+                selected.update(range(max(0, index - 12), min(len(lines), index + 5)))
         for index in sorted(selected):
             parts.append(f"{index + 1}: {lines[index]}")
     args.output.parent.mkdir(parents=True, exist_ok=True)

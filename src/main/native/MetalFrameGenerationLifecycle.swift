@@ -1,37 +1,5 @@
 import Foundation
-
-/// Ownership of one cached previous-depth texture, independent of Metal.
-/// The caller serializes every method with its history lock. Capturing this
-/// owner in a completion keeps callbacks for retired textures isolated from
-/// a replacement that happens to have the same scaler key.
-final class MetalFxDepthHistoryState {
-    struct Write: Equatable {
-        fileprivate let owner: ObjectIdentifier
-        fileprivate let sequence: UInt64
-        let previousDepthIsValid: Bool
-    }
-
-    private var latestSequence: UInt64 = 0
-    private var settled = true
-    private(set) var isValid = false
-
-    func beginWrite(reset: Bool) -> Write {
-        precondition(latestSequence < UInt64.max, "Depth history sequence exhausted")
-        let previousDepthIsValid = !reset && isValid
-        latestSequence += 1
-        settled = false
-        isValid = false
-        return Write(owner: ObjectIdentifier(self), sequence: latestSequence,
-                     previousDepthIsValid: previousDepthIsValid)
-    }
-
-    func complete(_ write: Write, succeeded: Bool) {
-        guard write.owner == ObjectIdentifier(self),
-              write.sequence == latestSequence, !settled else { return }
-        settled = true
-        isValid = succeeded
-    }
-}
+import CoreFoundation
 
 /// Immutable source values consumed by both Metal 3 and Metal 4 interpolation.
 /// Motion is stored as a top-left oriented NDC displacement (previous-current).
@@ -479,5 +447,72 @@ struct MetalFrameGenerationLifecycle {
         ownershipReleased = true
         phase = .released
         return [.releaseOwnership]
+    }
+}
+
+/// Ownership of the depth copied by a Temporal encode. Callers serialize this
+/// reducer with their existing history lock. A format/size cache key is not a
+/// history identity: reset, eviction and A -> B -> A must allocate a new epoch.
+struct MetalFxDepthHistoryOwnership<Key: Hashable> {
+    struct Ticket: Equatable {
+        let epoch: UInt64
+        let submission: UInt64
+    }
+    struct Submission {
+        let ticket: Ticket
+        let previousDepthIsValid: Bool
+    }
+    private struct Entry {
+        let epoch: UInt64
+        var issued: UInt64 = 0
+        var completed: UInt64 = 0
+        var succeeded = false
+    }
+    private var nextEpoch: UInt64 = 0
+    private var entries: [Key: Entry] = [:]
+    private var activeKey: Key?
+
+    mutating func begin(_ key: Key, reset: Bool) -> Submission {
+        // Returning to a cached format/extent is NOT a continuation of its old
+        // source stream. Invalidate even when an upstream reset flag was lost.
+        if activeKey != key {
+            invalidateAll()
+            activeKey = key
+        }
+        if reset || entries[key] == nil {
+            precondition(nextEpoch < UInt64.max, "Depth history epoch exhausted")
+            nextEpoch += 1
+            entries[key] = Entry(epoch: nextEpoch)
+        }
+        var entry = entries[key]!
+        // A completed older copy is not the immediately preceding source.
+        let valid = entry.succeeded && entry.completed == entry.issued
+        precondition(entry.issued < UInt64.max, "Depth history submission exhausted")
+        entry.issued += 1
+        entries[key] = entry
+        return Submission(ticket: Ticket(epoch: entry.epoch, submission: entry.issued),
+                          previousDepthIsValid: valid)
+    }
+
+    mutating func complete(_ key: Key, ticket: Ticket, succeeded: Bool) {
+        guard var entry = entries[key], entry.epoch == ticket.epoch,
+              ticket.submission > entry.completed, ticket.submission == entry.issued else { return }
+        entry.completed = ticket.submission
+        entry.succeeded = succeeded
+        entries[key] = entry
+    }
+
+    mutating func invalidate(_ key: Key) { entries.removeValue(forKey: key) }
+
+    mutating func invalidate(_ key: Key, ifOwnedBy ticket: Ticket) {
+        guard let entry = entries[key], entry.epoch == ticket.epoch,
+              entry.issued == ticket.submission else { return }
+        invalidate(key)
+    }
+
+    mutating func invalidateAll() {
+        entries.removeAll()
+        activeKey = nil
+        // Deliberately retain nextEpoch: outstanding callbacks may still exist.
     }
 }

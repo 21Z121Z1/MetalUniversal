@@ -2347,6 +2347,7 @@ public final class MetalFxManager {
         }
         boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
+            resetHistoryInternal("MetalFX source encode failed or input contract unavailable");
             this.motionStateStore.discardFrame();
             this.frameSynthesisReceipts.discardFrame();
             if (frameGenerationEnabled) {
@@ -2478,6 +2479,7 @@ public final class MetalFxManager {
                 || !(handDepth instanceof MetalGpuTexture hand)
                 || !FrameSynthesisContract.sourceDepthMatches(hand, renderWidth, renderHeight)) {
             this.frameDepthTexture = null;
+            this.frameHandDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
             return;
         }
