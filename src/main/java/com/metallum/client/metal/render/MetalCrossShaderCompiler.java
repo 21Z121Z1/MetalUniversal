@@ -7,6 +7,7 @@ import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout.UniformDescription;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
+import com.mojang.renderpearl.api.pipeline.UniformType;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormatElement;
 import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
@@ -94,22 +95,26 @@ final class MetalCrossShaderCompiler {
             }
 
             final List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>();
-            final Set<String> descriptors = new LinkedHashSet<>();
+            // 槽位编号必须与引擎 PipelineBuilder 完全一致：引擎按「顶点着色器反射顺序 →
+            // 片段着色器反射顺序」遍历 descriptor，首次出现时以 map.size() 作为槽位，
+            // buffer 与纹理共享同一个稠密编号空间。createInfo.uniforms() 正是按该顺序给出的，
+            // 因此这里直接沿用其顺序，不做任何重排。
+            final Map<String, UniformType> uniformTypes = new LinkedHashMap<>();
             for (UniformDescription uniform : createInfo.uniforms()) {
-                descriptors.add(uniform.name());
+                uniformTypes.putIfAbsent(uniform.name(), uniform.type());
             }
 
             final boolean enablePointSize =
                     createInfo.primitiveTopology() == com.mojang.renderpearl.api.pipeline.PrimitiveTopology.POINTS;
             final Map<String, GpuFormat> attributeFormats = attributeFormats(createInfo);
 
-            final MslShader vertexMsl = spirvToMsl(vertexModule.spv(), descriptors.size(), attributeFormats, enablePointSize);
-            final MslShader fragmentMsl = spirvToMsl(fragmentModule.spv(), descriptors.size(), Map.of(), true);
+            final MslShader vertexMsl = spirvToMsl(vertexModule.spv(), uniformTypes.size(), attributeFormats, enablePointSize);
+            final MslShader fragmentMsl = spirvToMsl(fragmentModule.spv(), uniformTypes.size(), Map.of(), true);
 
             final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
             final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
 
-            buildResourceBindings(resources, descriptors, vertexMsl, fragmentMsl);
+            buildResourceBindings(resources, uniformTypes, vertexMsl, fragmentMsl);
             attributeFormats.forEach((name, format) ->
                     resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                             MetalCompiledRenderPipeline.ResourceKind.VERTEX_ATTRIBUTE,
@@ -156,27 +161,45 @@ final class MetalCrossShaderCompiler {
         return formats;
     }
 
+    /**
+     * 按引擎给出的 {@code UniformType} 建立「名字 → 槽位 → 资源类型」映射。
+     *
+     * <p>槽位编号<b>必须</b>与引擎 {@code PipelineBuilder} 一致：引擎遍历
+     * {@code vertexShader.descriptors()} 再 {@code fragmentShader.descriptors()}，首次出现的
+     * 名字取 {@code map.size()} 作为槽位；buffer 与纹理共用同一个稠密编号空间。
+     * {@code uniformTypes} 已按该顺序收集，因此这里只按插入顺序递增即可。
+     *
+     * <p>资源类型判定<b>不能</b>靠着色器侧证据（如「是否出现在 texelBuffer 列表里」）来猜：
+     * {@code COMBINED_IMAGE_SAMPLER} 既不在 texelBuffer 列表里，也不等同于 UBO，
+     * 只能由引擎的 {@code UniformType} 决定。早期版本把 sampler 误判成 UNIFORM_BUFFER，
+     * 导致 {@code pushDescriptor} 走 buffer 分支取不到切片，抛出
+     * {@code Missing uniform Sampler0}。
+     */
     private static void buildResourceBindings(
             final List<MetalCompiledRenderPipeline.ResourceBinding> resources,
-            final Set<String> descriptors,
+            final Map<String, UniformType> uniformTypes,
             final MslShader vertexMsl,
             final MslShader fragmentMsl
     ) {
         int index = 0;
-        for (String name : descriptors) {
-            final MetalCompiledRenderPipeline.ResourceKind kind =
-                    vertexMsl.texelBuffers().contains(name) || fragmentMsl.texelBuffers().contains(name)
-                            ? MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER
-                            : MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER;
+        for (Map.Entry<String, UniformType> entry : uniformTypes.entrySet()) {
+            final String name = entry.getKey();
+            final MetalCompiledRenderPipeline.ResourceKind kind = switch (entry.getValue()) {
+                case COMBINED_IMAGE_SAMPLER -> MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE;
+                case TEXEL_BUFFER -> MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER;
+                case UNIFORM_BUFFER -> MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER;
+            };
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     kind, name, index++, stageMask(name, vertexMsl, fragmentMsl), null));
         }
 
-        // 采样纹理：按「着色器中出现顺序」稳定编号，索引接在 UBO 之后。
-        final Set<String> samplers = new LinkedHashSet<>(vertexMsl.activeResources());
-        samplers.addAll(fragmentMsl.activeResources());
-        samplers.removeAll(descriptors);
-        for (String name : samplers) {
+        // 兜底：着色器里参与绑定、但引擎未登记进 uniforms 的名字。
+        // 正常情况下不会走到这里；保留是为了避免因引擎侧遗漏而在绘制时抛「Missing ...」，
+        // 此时按纹理处理（这类未登记项在实践中都是采样器）。
+        final Set<String> unregistered = new LinkedHashSet<>(vertexMsl.activeResources());
+        unregistered.addAll(fragmentMsl.activeResources());
+        unregistered.removeAll(uniformTypes.keySet());
+        for (String name : unregistered) {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE,
                     name,

@@ -726,7 +726,13 @@ final class MetalRenderPass implements RenderPassBackend {
                 textureBinding = samplers.get(binding.name());
             }
             if (textureBinding == null) {
-                throw new IllegalStateException("Missing sampler " + binding.name());
+                // 走到这里通常意味着「引擎把它当纹理、后端把它当缓冲」这类类型错配，
+                // 因此把两侧的实际内容一起打出来，便于直接判断是分类错了还是没绑定。
+                throw new IllegalStateException(
+                        "Missing sampler " + binding.name() + " (slot " + slot + ")"
+                                + "; bound samplers=" + slotSamplers.keySet()
+                                + ", bound uniforms=" + slotUniforms.keySet()
+                );
             }
 
             if (VALIDATION && textureBinding.view().isClosed()) {
@@ -749,7 +755,11 @@ final class MetalRenderPass implements RenderPassBackend {
             uniformSlice = uniforms.get(binding.name());
         }
         if (uniformSlice == null) {
-            throw new IllegalStateException("Missing uniform " + binding.name());
+            throw new IllegalStateException(
+                    "Missing uniform " + binding.name() + " (slot " + slot + ")"
+                            + "; bound uniforms=" + slotUniforms.keySet()
+                            + ", bound samplers=" + slotSamplers.keySet()
+            );
         }
         if (VALIDATION && uniformSlice.buffer().isClosed()) {
             throw new IllegalStateException("Uniform " + binding.name() + " buffer has been closed");
