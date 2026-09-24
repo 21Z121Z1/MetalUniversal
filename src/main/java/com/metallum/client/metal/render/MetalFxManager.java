@@ -56,10 +56,8 @@ import java.util.UUID;
 /** Owns the per-device MetalFX resources and the frame-level history contract. */
 @Environment(EnvType.CLIENT)
 public final class MetalFxManager {
-    // Minecraft 26.3 shares a single-color world pass between SOLID and CUTOUT.
-    // No production descriptor supplies the second coverage target. Capability
-    // queries or diagnostic flags cannot turn an allocation into a producer.
-    // Until a real pass owns/stores coverage, preserve Minecraft's own pipeline.
+    // The same source owns the RenderPearl attachment, compatible pipeline,
+    // post-discard raster writes and the later Temporal coverage consumer.
     public static final int USAGE_SHADER_WRITE = 1 << 5;
     private static final double SCENE_CUT_DISTANCE = 32.0;
     private static final float FOV_SCENE_CUT_DEGREES = 5.0F;
@@ -252,6 +250,8 @@ public final class MetalFxManager {
     private boolean transparencyPhase;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
+    @Nullable
+    private MetalFxReactivePass.Source cutoutReactiveSource;
     private boolean cutoutReactivePrepared;
     private boolean motionInputsPrepared;
     private boolean loggedTransparencyTargets;
@@ -429,7 +429,8 @@ public final class MetalFxManager {
                 this.config.mergeDepthDilation ? 1.0F : 0.0F
         );
         this.motionPipelineV2Available = MetalNativeBridge.metallum_metalfx_supports_motion_v2(device.metalDeviceHandle());
-        this.cutoutReactivePipelineAvailable = false;
+        this.cutoutReactivePipelineAvailable =
+                MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
         this.handOverlayPipelineAvailable =
                 MetalNativeBridge.metallum_metalfx_supports_hand_overlay(device.metalDeviceHandle());
         this.effectiveMode = chooseMode(device, this.config);
@@ -1139,9 +1140,42 @@ public final class MetalFxManager {
     }
 
     public static boolean usesCutoutReactiveTerrain() {
-        // A two-output shader is illegal in the actual one-color world pass.
-        // Do not offer an override until descriptor-to-consumer receipts exist.
-        return false;
+        MetalFxManager manager = active;
+        return manager != null && manager.cutoutReactiveSource != null
+                && manager.cutoutReactiveSource.acceptsNewPasses();
+    }
+
+    /** Called after the complete world projection hook has bound this source's stamp. */
+    public static void bindWorldReactiveSource(final RenderTarget target) {
+        MetalFxManager manager = active;
+        if (manager == null) return;
+        if (manager.cutoutReactiveSource != null) manager.cutoutReactiveSource.invalidate();
+        manager.cutoutReactiveSource = null;
+        if (manager.effectiveMode != MetalFxConfig.Mode.TEMPORAL || manager.runtimeDisabled
+                || !manager.cutoutReactivePipelineAvailable || !manager.motionInputsPrepared
+                || manager.sourceFrameStamp == null || manager.sourceFrameStampInvalidated
+                || manager.cutoutReactiveView == null || target.getColorTexture() == null
+                || target.getDepthTexture() == null || !manager.sourceShaderMotionSemanticsProven()) return;
+        try {
+            manager.cutoutReactiveSource = new MetalFxReactivePass.Source(manager.sourceFrameStamp,
+                    target.getColorTexture(), target.getDepthTexture(), manager.cutoutReactiveView);
+        } catch (IllegalArgumentException incompatible) {
+            manager.resetHistoryInternal("reactive world attachment mismatch");
+        }
+    }
+
+    public static com.mojang.renderpearl.api.commands.RenderPassDescriptor withCutoutReactiveAttachment(
+            final com.mojang.renderpearl.api.commands.RenderPassDescriptor descriptor) {
+        MetalFxManager manager = active;
+        return manager == null || manager.cutoutReactiveSource == null ? descriptor
+                : manager.cutoutReactiveSource.decorate(descriptor);
+    }
+
+    static MetalFxReactivePass.@Nullable Pass cutoutReactivePass(
+            final com.mojang.renderpearl.api.commands.RenderPassDescriptor descriptor) {
+        MetalFxManager manager = active;
+        return manager == null || manager.cutoutReactiveSource == null ? null
+                : manager.cutoutReactiveSource.claim(descriptor);
     }
 
     private static MetalFxConfig.Mode chooseMode(final MetalDevice device, final MetalFxConfig config) {
@@ -1218,6 +1252,8 @@ public final class MetalFxManager {
         frameSynthesisReceipts.discardFrame();
         sourceFrameStamp = null;
         colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         sourceFrameStampInvalidated = false;
         irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();
         pistonExactCandidates.clear();
@@ -2124,6 +2160,7 @@ public final class MetalFxManager {
     }
 
     private void beforeGuiInternal(final GameRenderer renderer) {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.endWorld();
         this.frameUsesUpscaledTarget = false;
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             captureNativeOffReadbackIfRequested(renderer);
@@ -2160,6 +2197,15 @@ public final class MetalFxManager {
         flushEntityMotionReplaysInternal(renderer);
 
         MetalCommandEncoder encoder = device.commandEncoder();
+        this.cutoutReactivePassObserved = cutoutReactiveSource != null
+                && !sourceFrameStampInvalidated
+                && cutoutReactiveSource.hasReceipt(sourceFrameStamp, cutoutReactiveTexture);
+        boolean unsupportedCutout = cutoutReactiveSource != null && !sourceFrameStampInvalidated
+                && cutoutReactiveSource.requiresConservativeFallback(sourceFrameStamp);
+        if (cutoutReactivePassObserved) {
+            frameSynthesisReceipts.observeReactive(FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
+                    (int) Math.min(Integer.MAX_VALUE, cutoutReactiveSource.encodedDrawBatches()));
+        }
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !usesNativeDirectFrameGeneration()
                 && cutoutReactivePipelineAvailable
@@ -2178,14 +2224,21 @@ public final class MetalFxManager {
             if (config.debug && this.cutoutReactivePrepared && !loggedCutoutReactive) {
                 loggedCutoutReactive = true;
                 Metallum.LOGGER.info(
-                        "MetalFX CUTOUT reactive coverage prepared from Sodium terrain MRT: radius={} inputPixels",
+                        "MetalFX CUTOUT reactive coverage prepared from RenderPearl MRT: radius={} inputPixels",
                         radius
                 );
             } else if (this.cutoutReactivePassObserved && !combined) {
-                Metallum.LOGGER.warn(
-                        "MetalFX CUTOUT reactive coverage failed closed; using depth-edge fallback"
-                );
+                unsupportedCutout = true;
+                Metallum.LOGGER.warn("MetalFX CUTOUT mask failed; conservatively reject history for this source");
             }
+        }
+        if (unsupportedCutout && reactiveTexture != null) {
+            // This is an actual pixel operation, not just an eligibility label.
+            // The fused motion kernel preserves this mask for Temporal. Frame
+            // Generation has no reactive input and rejects the source entirely.
+            encoder.clearColorTexture(reactiveTexture, new Vector4f(1f));
+            cutoutReactivePrepared = true;
+            frameSynthesisReceipts.observeReactive(FrameSynthesisContract.ProducerDomain.TRANSPARENCY, 1);
         }
         boolean emitMotionDiagnostics = validationFrame != null && validationFrame.shouldCapture();
         MetalGpuTexture handDepth = null;
@@ -2451,6 +2504,7 @@ public final class MetalFxManager {
     }
 
     private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer, final GpuTexture handDepth) {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.endWorld();
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || !sceneFrame || sceneDepthTexture == null) {
             return;
@@ -4419,6 +4473,8 @@ public final class MetalFxManager {
     private void resetHistoryInternal(final String reason) {
         MetalNativeBridge.metallum_metalfx_invalidate_source();
         colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         if (sourceFrameStamp != null) {
             sourceFrameStampInvalidated = true;
             frameSynthesisReceipts.invalidateForHistoryDiscontinuity();
@@ -4500,6 +4556,8 @@ public final class MetalFxManager {
     }
 
     private void closeAuxiliaryTextures() {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         if (linearSceneInput != null) linearSceneInput.close();
         if (linearSceneOutput != null) linearSceneOutput.close();
         linearSceneInput = null;
@@ -4562,13 +4620,14 @@ public final class MetalFxManager {
         frameSynthesisReceipts.reset();
         sourceFrameStamp = null;
         colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         sourceFrameStampInvalidated = false;
         pistonExactCandidates.clear();
         entityGenerations.clear();
         blockEntityGenerations.clear();
         pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
-        MetalCutoutReactivePipeline.clear();
         closeAuxiliaryTextures();
         if (uiTarget != null) {
             uiTarget.destroyBuffers();

@@ -100,12 +100,14 @@ public abstract class GameRendererMetalFxMixin {
                     cameraState.pos.z
             );
         }
-        return MetalFxManager.prepareSceneProjection(
+        Matrix4f prepared = MetalFxManager.prepareSceneProjection(
                 cameraState,
                 projectionMatrix,
                 state.windowRenderState.width,
                 state.windowRenderState.height
         );
+        MetalFxManager.bindWorldReactiveSource(renderer.mainRenderTarget());
+        return prepared;
     }
 
     @Redirect(

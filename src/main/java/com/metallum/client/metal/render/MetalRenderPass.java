@@ -87,6 +87,17 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private MTLRenderCommandEncoder nativeEncoder;
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
+    @Nullable
+    private MetalFxReactivePass.Pass reactivePass;
+
+    void installReactivePass(@Nullable MetalFxReactivePass.Pass receipt) {
+        if (reactivePass != null) throw new IllegalStateException("Reactive pass already owned");
+        reactivePass = receipt;
+    }
+
+    boolean hasReactivePass() { return reactivePass != null; }
+    void finishReactivePass() { if (reactivePass != null) reactivePass.close(); }
+    private void recordReactiveDraw(long batches) { if (reactivePass != null) reactivePass.didEncode(batches); }
 
     /**
      * Prepares the live terrain encoder for the visibility producer. Kept as a
@@ -177,6 +188,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                             + ", renderPass=" + Arrays.toString(colorAttachmentFormats())
             );
         }
+        if (reactivePass != null) reactivePass.bind(compiled);
         if (this.compiledPipeline != compiled) {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
@@ -197,7 +209,8 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     /** Direct backend entry point retained for Metal-owned Iris passes. */
     public void setPipeline(final @NonNull RenderPipeline pipeline) {
-        setPipeline((BackendRenderPipeline) device.getOrCompilePipeline(pipeline));
+        MetalCompiledRenderPipeline compiled = (MetalCompiledRenderPipeline) device.getOrCompilePipeline(pipeline);
+        setPipeline((BackendRenderPipeline) (reactivePass == null ? compiled : compiled.withCutoutReactiveTarget()));
     }
 
     @Override
@@ -884,6 +897,11 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(vertexOffsets)),
                 drawCount
         );
+        if (reactivePass != null) {
+            long positive = 0;
+            for (int i = 0; i < drawCount; i++) if (indexCounts.get(indexCounts.position() + i) > 0) positive++;
+            recordReactiveDraw(positive);
+        }
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
         }
@@ -935,6 +953,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                     || TerrainSceneSnapshot.GPU_ICB_ENABLED
                     || TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
                 if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
+                    recordReactiveDraw(drawCount);
                     if (contractPassToken >= 0L) {
                         recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
                     }
@@ -973,6 +992,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawCount,
                 VkDrawIndexedIndirectCommand.SIZEOF
         );
+        recordReactiveDraw(drawCount);
     }
 
     @Override
@@ -1031,6 +1051,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             } else {
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
             }
+            recordReactiveDraw(1);
         }
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW, Map.of(
@@ -1063,6 +1084,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             } else {
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
             }
+            recordReactiveDraw(1);
         }
 
         if (contractPassToken >= 0L) {
@@ -1092,6 +1114,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             } else {
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, 1, 0);
             }
+            recordReactiveDraw(1);
         }
 
         if (contractPassToken >= 0L) {
@@ -1120,6 +1143,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
         );
+        recordReactiveDraw(drawCount);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
         }
@@ -1402,6 +1426,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         } else {
             enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(), indexOffsetBytes, instanceCount, baseVertex, baseInstance);
         }
+        recordReactiveDraw(1);
     }
 
     private void bindDrawState(final MTLRenderCommandEncoder enc) {

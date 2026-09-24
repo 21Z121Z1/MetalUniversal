@@ -107,20 +107,27 @@ final class MinecraftMetalFxSourceContractTest {
     }
 
     @Test
-    void unconnectedCutoutMrtCannotBeEnabledByAllocationOrLaunchProperty() {
+    void cutoutMrtDeclarationAndPipelineAreWiredBeforeRenderPearlValidation() {
+        assertFalse(calls(method("com/metallum/mixin/render/FrontendCommandEncoderMetalFxMixin",
+                "metallum$declareCutoutMrt"), "com/metallum/client/metal/render/MetalFxManager",
+                "withCutoutReactiveAttachment").isEmpty());
+        assertFalse(calls(method("com/metallum/mixin/render/FrontendRenderPassBackendAccessMixin",
+                "metallum$matchCutoutMrt"), "com/metallum/client/metal/render/MetalFxReactivePass",
+                "adaptPipeline").isEmpty());
         MethodNode gate = method("com/metallum/client/metal/render/MetalFxManager", "usesCutoutReactiveTerrain");
-        List<Integer> opcodes = new ArrayList<>();
-        for (var instruction : gate.instructions) {
-            if (instruction.getOpcode() >= 0) opcodes.add(instruction.getOpcode());
+        assertFalse(calls(gate, "com/metallum/client/metal/render/MetalFxReactivePass$Source", "acceptsNewPasses").isEmpty());
+        MethodNode receipt = method("com/metallum/client/metal/render/MetalFxReactivePass$Pass", "didEncode");
+        assertTrue(fieldWrites(receipt).contains("encodedDrawBatches"));
+        assertTrue(fieldWrites(receipt).contains("incompleteCoverage"));
+        for (String name : List.of("decorate", "claim", "acceptsNewPasses")) {
+            assertFalse(fieldWrites(method("com/metallum/client/metal/render/MetalFxReactivePass$Source", name))
+                    .contains("encodedDrawBatches"), "only an encoded draw may produce a receipt");
         }
-        assertEquals(List.of(Opcodes.ICONST_0, Opcodes.IRETURN), opcodes,
-                "CUTOUT remains fail-closed until the actual shared pass declares/stores coverage");
         var manager = load("com/metallum/client/metal/render/MetalFxManager");
-        assertTrue(manager.methods.stream().noneMatch(m -> m.name.equals("cutoutReactiveAttachment")),
-                "a texture getter must not manufacture a same-frame producer receipt");
+        assertTrue(manager.methods.stream().noneMatch(m -> m.name.equals("cutoutReactiveAttachment")));
         for (var m : manager.methods) {
             assertFalse(strings(m).contains("metallum.metalfx.cutoutReactiveTerrain"),
-                    "the old flag selected a two-output pipeline in a one-color pass");
+                    "a launch flag must not substitute for the actual pass contract");
         }
     }
 

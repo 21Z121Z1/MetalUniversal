@@ -97,6 +97,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final String fragmentMsl;
     private final String vertexEntryPoint;
     private final String fragmentEntryPoint;
+    @Nullable
+    private final MetalCrossShaderCompiler.CutoutFragment cutoutFragment;
+    @Nullable
+    private MetalCompiledRenderPipeline reactiveVariant;
+    private boolean writesCutoutCoverage;
+    private boolean reactiveTargetVariant;
+    private boolean unsupportedCutoutCoverage;
     /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
     private volatile boolean closed;
 
@@ -112,7 +119,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final String vertexEntryPoint,
             final String fragmentEntryPoint,
             final List<ResourceBinding> resources,
-            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            @Nullable final MetalCrossShaderCompiler.CutoutFragment cutoutFragment
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
@@ -254,6 +262,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         this.fragmentMsl = fragmentMsl;
         this.vertexEntryPoint = vertexEntryPoint;
         this.fragmentEntryPoint = fragmentEntryPoint;
+        this.cutoutFragment = cutoutFragment;
         MemorySegment vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
         MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
@@ -823,11 +832,72 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         return maxVertexBufferBinding + 1;
     }
 
+    /** Same shader, bindings, geometry, depth and scene-color writes, with one auxiliary target. */
+    MetalCompiledRenderPipeline withCutoutReactiveTarget() {
+        synchronized (MetalDevice.COMPILE_CHAIN_LOCK) {
+            if (closed) throw new IllegalStateException("Reactive variant of a retired pipeline");
+            if (reactiveTargetVariant) return this;
+            if (reactiveVariant != null) return reactiveVariant;
+            if (info.getColorTargetStates().size() != 1 || info.getColorTargetStates().getFirst() == null) {
+                throw new IllegalArgumentException("World reactive MRT requires exactly one source color target");
+            }
+            boolean coverage = false;
+            String source = fragmentMsl;
+            if (cutoutFragment != null && cutoutFragment.supported()) {
+                try {
+                    source = cutoutFragment.compileMsl();
+                    coverage = true;
+                } catch (IllegalStateException unsupported) {
+                    // An optional output must not rewrite or disable an otherwise
+                    // valid world shader. Its real draws now require a full reactive
+                    // fallback, and cannot receive an exact coverage receipt.
+                    com.metallum.Metallum.LOGGER.warn(
+                            "CUTOUT coverage lowering unavailable for {}; keeping the original shader",
+                            info.getLocation(), unsupported);
+                }
+            }
+            RenderPipeline variantInfo = new ReactivePipelineInfo(info, coverage);
+            MetalCompiledRenderPipeline variant = new MetalCompiledRenderPipeline(
+                    device, variantInfo, vertexMsl, source, vertexEntryPoint,
+                    MetalCrossShaderCompiler.extractEntryPoint(source,
+                            MetalCrossShaderCompiler.FRAGMENT_ENTRY_PATTERN, fragmentEntryPoint),
+                    resources, genericVertexInputs, null);
+            variant.writesCutoutCoverage = coverage;
+            variant.reactiveTargetVariant = true;
+            variant.unsupportedCutoutCoverage = cutoutFragment != null && !coverage;
+            reactiveVariant = variant;
+            return variant;
+        }
+    }
+
+    boolean writesCutoutCoverage() { return writesCutoutCoverage; }
+    boolean isReactiveTargetVariant() { return reactiveTargetVariant; }
+    boolean unsupportedCutoutCoverage() { return unsupportedCutoutCoverage; }
+
+    List<@Nullable ColorTargetState> colorTargetStates() { return info.getColorTargetStates(); }
+
+    private static final class ReactivePipelineInfo extends RenderPipeline {
+        ReactivePipelineInfo(RenderPipeline source, boolean coverage) {
+            super(source.getLocation(), source.getShaders(), source.getShaderDefines(),
+                    source.getBindGroupLayouts(), new ColorTargetState[]{
+                        source.getColorTargetStates().getFirst(),
+                        new ColorTargetState(Optional.empty(), GpuFormat.R8_UNORM,
+                                coverage ? ColorTargetState.WRITE_RED : 0)
+                    }, source.getDepthStencilState(), source.getPolygonMode(), source.isCull(),
+                    source.getVertexFormatBindings().toArray(VertexFormat[]::new),
+                    source.getPrimitiveTopology(), source.pushConstantSize(), source.getSortKey());
+        }
+    }
+
     @Override
     public void close() {
         synchronized (MetalDevice.COMPILE_CHAIN_LOCK) {
             if (this.closed) return;
             this.closed = true;
+            if (reactiveVariant != null) {
+                reactiveVariant.close();
+                reactiveVariant = null;
+            }
             Set<MemorySegment> uniqueStates = new HashSet<>();
             for (NativePipeline state : this.pipelineStates.values()) uniqueStates.add(state.handle());
             this.pipelineStates.clear();
