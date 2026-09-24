@@ -97,8 +97,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final String fragmentMsl;
     private final String vertexEntryPoint;
     private final String fragmentEntryPoint;
-    @Nullable
-    private final MetalCrossShaderCompiler.CutoutFragment cutoutFragment;
+    private final MetalCrossShaderCompiler.@Nullable CutoutFragment cutoutFragment;
     @Nullable
     private MetalCompiledRenderPipeline reactiveVariant;
     private boolean writesCutoutCoverage;
@@ -120,7 +119,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final String fragmentEntryPoint,
             final List<ResourceBinding> resources,
             final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
-            @Nullable final MetalCrossShaderCompiler.CutoutFragment cutoutFragment
+            final MetalCrossShaderCompiler.@Nullable CutoutFragment cutoutFragment
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));

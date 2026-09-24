@@ -250,8 +250,7 @@ public final class MetalFxManager {
     private boolean transparencyPhase;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
-    @Nullable
-    private MetalFxReactivePass.Source cutoutReactiveSource;
+    private MetalFxReactivePass.@Nullable Source cutoutReactiveSource;
     private boolean cutoutReactivePrepared;
     private boolean motionInputsPrepared;
     private boolean loggedTransparencyTargets;

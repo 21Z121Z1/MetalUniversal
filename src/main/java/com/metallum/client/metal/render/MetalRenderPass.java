@@ -87,10 +87,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private MTLRenderCommandEncoder nativeEncoder;
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
-    @Nullable
-    private MetalFxReactivePass.Pass reactivePass;
+    private MetalFxReactivePass.@Nullable Pass reactivePass;
 
-    void installReactivePass(@Nullable MetalFxReactivePass.Pass receipt) {
+    void installReactivePass(MetalFxReactivePass.@Nullable Pass receipt) {
         if (reactivePass != null) throw new IllegalStateException("Reactive pass already owned");
         reactivePass = receipt;
     }
