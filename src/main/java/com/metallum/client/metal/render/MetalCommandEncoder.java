@@ -1361,6 +1361,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
+    /** The real production transfer path, also exercised by hosted GPU readback tests. */
+    boolean encodeMetalFxColorTransfer(final MetalGpuTexture source,
+                                      final MetalGpuTexture destination, final boolean decode) {
+        flushPendingClear(source);
+        flushPendingClear(destination);
+        submitRenderPass();
+        endEncoder();
+        destination.markContentsDirty();
+        return MetalNativeBridge.metallum_metalfx_color_transfer_encode(
+                commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                source.nativeHandle(), destination.nativeHandle(), decode ? 1 : 2, fence);
+    }
+
     boolean encodeMetalFxV2(
             final MetalGpuTexture color,
             final MetalGpuTexture depth,

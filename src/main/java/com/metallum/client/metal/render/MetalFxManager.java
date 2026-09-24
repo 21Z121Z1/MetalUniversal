@@ -56,15 +56,10 @@ import java.util.UUID;
 /** Owns the per-device MetalFX resources and the frame-level history contract. */
 @Environment(EnvType.CLIENT)
 public final class MetalFxManager {
-    // The reactive CUTOUT shader writes an additional MRT coverage target.
-    // Minecraft 26.3's shared main world pass still exposes only its ordinary
-    // scene-color attachment, so enabling this before the descriptor bridge is
-    // complete would make RenderPearl reject the pipeline at draw time. Keep
-    // the unfinished path explicitly opt-in and preserve the native CUTOUT
-    // render contract by default.
-    private static final boolean CUTOUT_REACTIVE_TERRAIN_OPT_IN =
-            "true".equalsIgnoreCase(System.getProperty(
-                    "metallum.metalfx.cutoutReactiveTerrain", "false"));
+    // Minecraft 26.3 shares a single-color world pass between SOLID and CUTOUT.
+    // No production descriptor supplies the second coverage target. Capability
+    // queries or diagnostic flags cannot turn an allocation into a producer.
+    // Until a real pass owns/stores coverage, preserve Minecraft's own pipeline.
     public static final int USAGE_SHADER_WRITE = 1 << 5;
     private static final double SCENE_CUT_DISTANCE = 32.0;
     private static final float FOV_SCENE_CUT_DEGREES = 5.0F;
@@ -247,6 +242,7 @@ public final class MetalFxManager {
     private long sourceFrameSequence;
     private FrameSynthesisContract.@Nullable FrameStamp sourceFrameStamp;
     private boolean sourceFrameStampInvalidated;
+    private FrameSynthesisContract.@Nullable FrameStamp colorTransferSourceStamp;
     // Sticky for the whole source frame. An Iris generation can be selected and retired between
     // beginFrame and presentation; once any unproven override can have affected color geometry,
     // that source frame must never enter MTLFXFrameInterpolator.
@@ -379,6 +375,10 @@ public final class MetalFxManager {
     @Nullable
     private MetalGpuTexture reactiveTexture;
     @Nullable
+    private MetalGpuTexture linearSceneInput;
+    @Nullable
+    private MetalGpuTexture linearSceneOutput;
+    @Nullable
     private MetalGpuTexture cutoutReactiveTexture;
     @Nullable
     private GpuTextureView cutoutReactiveView;
@@ -429,8 +429,7 @@ public final class MetalFxManager {
                 this.config.mergeDepthDilation ? 1.0F : 0.0F
         );
         this.motionPipelineV2Available = MetalNativeBridge.metallum_metalfx_supports_motion_v2(device.metalDeviceHandle());
-        this.cutoutReactivePipelineAvailable = CUTOUT_REACTIVE_TERRAIN_OPT_IN
-                && MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
+        this.cutoutReactivePipelineAvailable = false;
         this.handOverlayPipelineAvailable =
                 MetalNativeBridge.metallum_metalfx_supports_hand_overlay(device.metalDeviceHandle());
         this.effectiveMode = chooseMode(device, this.config);
@@ -1140,31 +1139,9 @@ public final class MetalFxManager {
     }
 
     public static boolean usesCutoutReactiveTerrain() {
-        MetalFxManager manager = active;
-        return manager != null
-                && manager.effectiveMode == MetalFxConfig.Mode.TEMPORAL
-                && manager.cutoutReactivePipelineAvailable
-                && manager.sceneFrame
-                && manager.motionInputsPrepared
-                && manager.cutoutReactiveView != null
-                && !manager.runtimeDisabled;
-    }
-
-    @Nullable
-    public static GpuTextureView cutoutReactiveAttachment(final int expectedColorWidth, final int expectedColorHeight) {
-        MetalFxManager manager = active;
-        if (!usesCutoutReactiveTerrain() || manager == null) {
-            return null;
-        }
-        GpuTextureView coverage = manager.cutoutReactiveView;
-        if (coverage.getWidth(0) != expectedColorWidth || coverage.getHeight(0) != expectedColorHeight) {
-            // A resize can land between Sodium's color attachment lookup and
-            // this redirect. A one-frame ordinary pass is preferable to
-            // submitting an invalid MRT descriptor and crashing the client.
-            return null;
-        }
-        manager.cutoutReactivePassObserved = true;
-        return coverage;
+        // A two-output shader is illegal in the actual one-color world pass.
+        // Do not offer an override until descriptor-to-consumer receipts exist.
+        return false;
     }
 
     private static MetalFxConfig.Mode chooseMode(final MetalDevice device, final MetalFxConfig config) {
@@ -1240,6 +1217,7 @@ public final class MetalFxManager {
         // transition).
         frameSynthesisReceipts.discardFrame();
         sourceFrameStamp = null;
+        colorTransferSourceStamp = null;
         sourceFrameStampInvalidated = false;
         irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();
         pistonExactCandidates.clear();
@@ -2185,6 +2163,7 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !usesNativeDirectFrameGeneration()
                 && cutoutReactivePipelineAvailable
+                && cutoutReactivePassObserved
                 && cutoutReactiveTexture != null
                 && reactiveTexture != null) {
             int radius = MetalFxMath.cutoutReactiveRadius(config.scale, pixelJitter);
@@ -2273,8 +2252,10 @@ public final class MetalFxManager {
                     && objectValidityTexture != null && handExactValidityTexture != null
                     && disocclusionTexture != null
                     && motionTexture != null && reactiveTexture != null) {
-                encoded = encoder.encodeMetalFxV2(
-                        color,
+                encoded = ensureLinearSceneTextures(color, output)
+                        && encoder.encodeMetalFxColorTransfer(color, linearSceneInput, true)
+                        && encoder.encodeMetalFxV2(
+                        linearSceneInput,
                         depth,
                         handDepth,
                         handExactValidityTexture,
@@ -2285,7 +2266,7 @@ public final class MetalFxManager {
                         disocclusionTexture,
                         motionTexture,
                         reactiveTexture,
-                        output,
+                        linearSceneOutput,
                         currentViewProjection,
                         inverseCurrentViewProjection,
                         previousViewProjection,
@@ -2297,8 +2278,9 @@ public final class MetalFxManager {
                         (config.transparencyReactiveMask && reactiveMaskPrepared)
                                 || cutoutReactivePrepared,
                         emitMotionDiagnostics
-                );
+                ) && encoder.encodeMetalFxColorTransfer(linearSceneOutput, output, false);
                 scalerEncodedThisFrame = encoded;
+                colorTransferSourceStamp = encoded ? sourceFrameStamp : null;
             } else if (effectiveMode == MetalFxConfig.Mode.SPATIAL) {
                 encoded = encoder.encodeMetalFx(
                         effectiveMode,
@@ -4260,6 +4242,36 @@ public final class MetalFxManager {
         }
     }
 
+    private boolean ensureLinearSceneTextures(final MetalGpuTexture source, final MetalGpuTexture output) {
+        if (linearSceneInput != null && linearSceneInput.getWidth(0) == source.getWidth(0)
+                && linearSceneInput.getHeight(0) == source.getHeight(0)
+                && linearSceneOutput != null && linearSceneOutput.getWidth(0) == output.getWidth(0)
+                && linearSceneOutput.getHeight(0) == output.getHeight(0)) return true;
+        int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC | USAGE_SHADER_WRITE;
+        MetalGpuTexture input = null;
+        MetalGpuTexture result = null;
+        try {
+            input = (MetalGpuTexture) device.createTexture(
+                    () -> "MetalFX Linear SDR Input", usage, GpuFormat.RGBA16_FLOAT,
+                    source.getWidth(0), source.getHeight(0), 1, 1);
+            result = (MetalGpuTexture) device.createTexture(
+                    () -> "MetalFX Linear SDR Output", usage, GpuFormat.RGBA16_FLOAT,
+                    output.getWidth(0), output.getHeight(0), 1, 1);
+        } catch (IllegalStateException failure) {
+            if (input != null) input.close();
+            if (result != null) result.close();
+            Metallum.LOGGER.warn("MetalFX linear SDR allocation failed; keeping the real source frame", failure);
+            return false;
+        }
+        // Publish a complete pair. Device retirement keeps the old allocation
+        // alive through outstanding GPU work; a partial allocation is never used.
+        if (linearSceneInput != null) linearSceneInput.close();
+        if (linearSceneOutput != null) linearSceneOutput.close();
+        linearSceneInput = input;
+        linearSceneOutput = result;
+        return true;
+    }
+
     private boolean ensureAuxiliaryTextures() {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || renderWidth <= 0 || renderHeight <= 0
@@ -4405,6 +4417,8 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        MetalNativeBridge.metallum_metalfx_invalidate_source();
+        colorTransferSourceStamp = null;
         if (sourceFrameStamp != null) {
             sourceFrameStampInvalidated = true;
             frameSynthesisReceipts.invalidateForHistoryDiscontinuity();
@@ -4486,6 +4500,10 @@ public final class MetalFxManager {
     }
 
     private void closeAuxiliaryTextures() {
+        if (linearSceneInput != null) linearSceneInput.close();
+        if (linearSceneOutput != null) linearSceneOutput.close();
+        linearSceneInput = null;
+        linearSceneOutput = null;
         if (objectMotionView != null) objectMotionView.close();
         if (objectValidityView != null) objectValidityView.close();
         if (handExactValidityView != null) handExactValidityView.close();
@@ -4521,7 +4539,9 @@ public final class MetalFxManager {
     }
 
     private int countAuxiliaryTextures() {
-        return (motionTexture == null ? 0 : 1)
+        return (linearSceneInput == null ? 0 : 1)
+                + (linearSceneOutput == null ? 0 : 1)
+                + (motionTexture == null ? 0 : 1)
                 + (cameraMotionTexture == null ? 0 : 1)
                 + (objectMotionTexture == null ? 0 : 1)
                 + (objectValidityTexture == null ? 0 : 1)
@@ -4541,6 +4561,7 @@ public final class MetalFxManager {
         motionStateStore.reset();
         frameSynthesisReceipts.reset();
         sourceFrameStamp = null;
+        colorTransferSourceStamp = null;
         sourceFrameStampInvalidated = false;
         pistonExactCandidates.clear();
         entityGenerations.clear();
@@ -4616,10 +4637,11 @@ public final class MetalFxManager {
                     coverage,
                     camera,
                     frameResetForPresent,
-                    FrameGenerationColorContract.currentRenderer(
+                    FrameGenerationColorContract.withSdrTransferReceipt(
                             usesNativeDirectFrameGeneration()
                                     ? FrameGenerationColorContract.SourcePath.NATIVE_DIRECT
-                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT
+                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT,
+                            stamp.equals(colorTransferSourceStamp)
                     ).admissionEvidence(COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION)
             );
         } catch (IllegalArgumentException ignored) {
