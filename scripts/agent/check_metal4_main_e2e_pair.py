@@ -11,7 +11,8 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 UNRECORDED = "unrecorded"
-FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v1"
+FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v2"
+FRAMEBUFFER_GAME_TIME = 6000
 FRAMEBUFFER_WIDTH = 854
 FRAMEBUFFER_HEIGHT = 480
 FRAMEBUFFER_SAMPLE_COUNT = 8
@@ -86,6 +87,12 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
     }
     if world.get("p1GameRules") != expected_rules:
         raise ValueError(f"P1 gamerules differ from the fixed scene contract: {world.get('p1GameRules')!r}")
+    if (
+        world.get("p1FixedGameTime") != FRAMEBUFFER_GAME_TIME
+        or world.get("serverGameTimeAtCapture") != FRAMEBUFFER_GAME_TIME
+        or world.get("clientGameTimeAtCapture") != FRAMEBUFFER_GAME_TIME
+    ):
+        raise ValueError("P1 server/client game time is not pinned to the fixed framebuffer scene value")
 
     waypoints = world.get("waypoints")
     if not isinstance(waypoints, list) or len(waypoints) != 1:
@@ -119,7 +126,14 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
             raise ValueError(f"P1 camera position drifted at frame {frame_id}: {pose!r}")
         if pose["yaw"] != -65.0 or pose["pitch"] != 25.0:
             raise ValueError(f"P1 camera orientation drifted at frame {frame_id}: {pose!r}")
-        normalized_camera_samples.append({"frameId": frame_id, **pose, "mouseGrabbed": False})
+        if sample.get("gameTime") != FRAMEBUFFER_GAME_TIME:
+            raise ValueError(f"P1 game time drifted at frame {frame_id}: {sample!r}")
+        normalized_camera_samples.append({
+            "frameId": frame_id,
+            **pose,
+            "gameTime": FRAMEBUFFER_GAME_TIME,
+            "mouseGrabbed": False,
+        })
 
     scene = {
         "minecraft": runtime.get("minecraft"),
@@ -134,6 +148,9 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         "simulationFrozenDuringFramebufferCapture": world.get("simulationFrozenDuringFramebufferCapture"),
         "serverSimulationFrozenDuringFramebufferCapture": world.get("serverSimulationFrozenDuringFramebufferCapture"),
         "clientSimulationFrozenDuringFramebufferCapture": world.get("clientSimulationFrozenDuringFramebufferCapture"),
+        "p1FixedGameTime": world.get("p1FixedGameTime"),
+        "serverGameTimeAtCapture": world.get("serverGameTimeAtCapture"),
+        "clientGameTimeAtCapture": world.get("clientGameTimeAtCapture"),
         "p1GameRules": world.get("p1GameRules"),
         "waypoints": waypoints,
         "cameraSamples": normalized_camera_samples,
@@ -508,6 +525,14 @@ def self_test() -> None:
         assert code == 3 and result["checks"]["framebuffer_equivalence"] is False, result
         make_framebuffer_fixture(candidate_root)
 
+        runtime_path = candidate_root / "runtime-evidence.json"
+        runtime = load(runtime_path)
+        runtime["world"]["clientGameTimeAtCapture"] = FRAMEBUFFER_GAME_TIME + 1
+        runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+        result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
+        assert code == 2 and "game time is not pinned" in result["reason"], result
+        make_framebuffer_fixture(candidate_root)
+
         wrong = make_evidence("candidate", ("4" * 40, jar, dylib))
         candidate_path.write_text(json.dumps(wrong), encoding="utf-8")
         result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
@@ -547,6 +572,9 @@ def make_framebuffer_fixture(evidence_root: Path) -> None:
             "simulationFrozenDuringFramebufferCapture": True,
             "serverSimulationFrozenDuringFramebufferCapture": True,
             "clientSimulationFrozenDuringFramebufferCapture": True,
+            "p1FixedGameTime": FRAMEBUFFER_GAME_TIME,
+            "serverGameTimeAtCapture": FRAMEBUFFER_GAME_TIME,
+            "clientGameTimeAtCapture": FRAMEBUFFER_GAME_TIME,
             "p1GameRules": {
                 "advance_time": False,
                 "advance_weather": False,
@@ -556,7 +584,8 @@ def make_framebuffer_fixture(evidence_root: Path) -> None:
             "waypoints": [{"frameId": 1, "x": 832, "y": 128, "z": 496, "yaw": -65.0, "pitch": 25.0}],
             "cameraSamples": [
                 {"frameId": frame_id, "x": 832.0, "y": 128.0, "z": 496.0,
-                 "yaw": -65.0, "pitch": 25.0, "mouseGrabbed": False}
+                 "yaw": -65.0, "pitch": 25.0, "gameTime": FRAMEBUFFER_GAME_TIME,
+                 "mouseGrabbed": False}
                 for frame_id in range(1, FRAMEBUFFER_SAMPLE_COUNT + 1)
             ],
         },

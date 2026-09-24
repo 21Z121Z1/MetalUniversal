@@ -11,10 +11,12 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
+import net.minecraft.world.level.storage.ServerLevelData;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -25,6 +27,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.zip.ZipFile;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -39,7 +42,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
-    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v1";
+    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v2";
+    private static final long P1_FRAMEBUFFER_GAME_TIME = 6000L;
     private static final int P1_FRAMEBUFFER_X = 832;
     private static final int P1_FRAMEBUFFER_Y = 128;
     private static final int P1_FRAMEBUFFER_Z = 496;
@@ -226,9 +230,26 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         return false;
                     });
                     require(clientFrozen, "P1 client simulation did not freeze for the stationary framebuffer samples");
+                    long serverGameTime = singleplayer.getServer().computeOnServer(server -> {
+                        var level = server.overworld();
+                        ((ServerLevelData) level.getLevelData()).setGameTime(P1_FRAMEBUFFER_GAME_TIME);
+                        server.getPlayerList().broadcastAll(
+                                new ClientboundSetTimePacket(P1_FRAMEBUFFER_GAME_TIME, Map.of()), level.dimension());
+                        return level.getGameTime();
+                    });
+                    require(serverGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 server game time was not pinned for the stationary framebuffer samples");
+                    context.waitFor(client -> client.level != null
+                            && client.level.getGameTime() == P1_FRAMEBUFFER_GAME_TIME);
+                    long clientGameTime = context.computeOnClient(client -> client.level.getGameTime());
+                    require(clientGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 client did not receive the fixed server game time before framebuffer sampling");
                     worldEvidence.addProperty("simulationFrozenDuringFramebufferCapture", true);
                     worldEvidence.addProperty("serverSimulationFrozenDuringFramebufferCapture", serverFrozen);
                     worldEvidence.addProperty("clientSimulationFrozenDuringFramebufferCapture", clientFrozen);
+                    worldEvidence.addProperty("p1FixedGameTime", P1_FRAMEBUFFER_GAME_TIME);
+                    worldEvidence.addProperty("serverGameTimeAtCapture", serverGameTime);
+                    worldEvidence.addProperty("clientGameTimeAtCapture", clientGameTime);
                     context.waitTicks(20);
                     context.computeOnClient(client -> {
                         client.gui.hud.getChat().clearMessages(false);
@@ -737,6 +758,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             sample.addProperty("z", cameraEntity.getZ());
             sample.addProperty("yaw", cameraEntity.getYRot());
             sample.addProperty("pitch", cameraEntity.getXRot());
+            sample.addProperty("gameTime", client.level.getGameTime());
             sample.addProperty("mouseGrabbed", client.mouseHandler.isMouseGrabbed());
             return sample;
         });
@@ -752,6 +774,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         require(Float.compare(sample.get("yaw").getAsFloat(), P1_FRAMEBUFFER_YAW) == 0
                         && Float.compare(sample.get("pitch").getAsFloat(), P1_FRAMEBUFFER_PITCH) == 0,
                 "P1 camera orientation drifted before frame " + frameId + ": " + sample);
+        require(sample.get("gameTime").getAsLong() == P1_FRAMEBUFFER_GAME_TIME,
+                "P1 game time drifted before frame " + frameId + ": " + sample);
         require(!sample.get("mouseGrabbed").getAsBoolean(),
                 "P1 mouse input remained captured before frame " + frameId + ": " + sample);
     }
