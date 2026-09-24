@@ -124,6 +124,54 @@ private struct MetalFxScalerKey: Hashable {
     let outputWidth: Int
     let outputHeight: Int
 }
+
+/// A scaler configuration is reusable; depth history additionally belongs to
+/// one queue timeline. Retaining the queue in this key prevents address reuse
+/// from aliasing an outstanding history after queue recreation.
+private struct MetalFxDepthHistoryKey: Hashable {
+    let scaler: MetalFxScalerKey
+    let queue: AnyObject
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.scaler == rhs.scaler && lhs.queue === rhs.queue
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(scaler)
+        hasher.combine(ObjectIdentifier(queue))
+    }
+}
+
+private var metalFxSubmissionPublicationKey: UInt8 = 0
+
+private func metalFxSubmissionPublication(_ commandBuffer: MTLCommandBuffer) -> MetalFxSubmissionPublication {
+    if let owner = objc_getAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey)
+            as? MetalFxSubmissionPublication { return owner }
+    let owner = MetalFxSubmissionPublication()
+    objc_setAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey,
+                             owner, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return owner
+}
+
+private func publishMetalFxSubmittedCopies(_ commandBuffer: MTLCommandBuffer) {
+    (objc_getAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey)
+        as? MetalFxSubmissionPublication)?.didSubmit()
+}
+
+private func registerMetalFxDepthPublication(
+    _ owner: MetalFxSubmissionPublication, key: MetalFxDepthHistoryKey,
+    ticket: MetalFxDepthHistoryOwnership<MetalFxDepthHistoryKey>.Ticket
+) {
+    owner.append(publish: {
+        NativeState.metalFxHistoryLock.lock()
+        NativeState.metalFxDepthHistory.publish(key, ticket: ticket)
+        NativeState.metalFxHistoryLock.unlock()
+    }, cancel: {
+        NativeState.metalFxHistoryLock.lock()
+        NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: ticket)
+        NativeState.metalFxHistoryLock.unlock()
+    })
+}
 #endif
 
 private enum NativeState {
@@ -376,9 +424,9 @@ private enum NativeState {
     #endif
     #if os(macOS) && canImport(MetalFX)
     static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
-    static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxPreviousDepthTextures: [MetalFxDepthHistoryKey: MTLTexture] = [:]
     static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
-    static var metalFxDepthHistory = MetalFxDepthHistoryOwnership<MetalFxScalerKey>()
+    static var metalFxDepthHistory = MetalFxDepthHistoryOwnership<MetalFxDepthHistoryKey>()
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -1129,6 +1177,9 @@ private final class Metal4MainCommandBufferLease {
     fileprivate var presentationTelemetryID: UInt64?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
+    #if os(macOS) && canImport(MetalFX)
+    fileprivate let metalFxPublication = MetalFxSubmissionPublication()
+    #endif
 
     init(owner: Metal4MainQueueContext, slotIndex: Int) {
         self.owner = owner
@@ -1261,6 +1312,7 @@ private final class Metal4MainQueueContext {
 
     private let device: MTLDevice
     private let queue: MTL4CommandQueue
+    fileprivate var historyQueueIdentity: AnyObject { queue as AnyObject }
     private let slots: [Slot]
     // The Java renderer bounds submissions to the same three-frame depth, but
     // it cannot wait for the oldest frame until submit(), which happens after
@@ -1450,6 +1502,9 @@ private final class Metal4MainQueueContext {
             queue.waitForDrawable(drawable)
         }
         queue.commit([commandBuffer], options: options)
+        #if os(macOS) && canImport(MetalFX)
+        lease.metalFxPublication.didSubmit()
+        #endif
         for (event, value) in lease.postCommitSignals {
             queue.signalEvent(event, value: value)
         }
@@ -6874,10 +6929,11 @@ private func metal4MetalFxEncodeV2(
         motion: motionTexture,
         reactive: reactiveTexture
     )
+    let historyKey = MetalFxDepthHistoryKey(scaler: key, queue: lease.owner.historyQueueIdentity)
     let previousDepthTexture: MTLTexture
     let previousDepthIsValid: Bool
     NativeState.metalFxHistoryLock.lock()
-    if let cached = NativeState.metalFxPreviousDepthTextures[key],
+    if let cached = NativeState.metalFxPreviousDepthTextures[historyKey],
        cached.width == depthTexture.width, cached.height == depthTexture.height,
        cached.pixelFormat == depthTexture.pixelFormat {
         previousDepthTexture = cached
@@ -6896,18 +6952,18 @@ private func metal4MetalFxEncodeV2(
         }
         created.label = "MetalFX Previous Depth (Metal 4)"
         residencyTrackCreated(created)
-        NativeState.metalFxPreviousDepthTextures[key] = created
-        NativeState.metalFxDepthHistory.invalidate(key)
+        NativeState.metalFxPreviousDepthTextures[historyKey] = created
+        NativeState.metalFxDepthHistory.invalidate(historyKey)
         previousDepthTexture = created
     }
-    let depthSubmission = NativeState.metalFxDepthHistory.begin(key, reset: reset != 0)
+    let depthSubmission = NativeState.metalFxDepthHistory.begin(historyKey, reset: reset != 0)
     previousDepthIsValid = depthSubmission.previousDepthIsValid
     NativeState.metalFxHistoryLock.unlock()
     var historyCopyEncoded = false
     defer {
         if !historyCopyEncoded {
             NativeState.metalFxHistoryLock.lock()
-            NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: depthSubmission.ticket)
+            NativeState.metalFxDepthHistory.invalidate(historyKey, ifOwnedBy: depthSubmission.ticket)
             NativeState.metalFxHistoryLock.unlock()
         }
     }
@@ -7066,7 +7122,7 @@ private func metal4MetalFxEncodeV2(
     scaler.jitterOffsetY = jitterY
     scaler.motionVectorScaleX = Float(inputWidth) * 0.5
     scaler.motionVectorScaleY = Float(inputHeight) * 0.5
-    scaler.reset = reset != 0
+    scaler.reset = depthSubmission.shouldResetHistory
     scaler.isDepthReversed = depthReversed != 0
     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
     scaler.fence = fence
@@ -7105,9 +7161,12 @@ private func metal4MetalFxEncodeV2(
     historyCopy.endEncoding()
     lease.addCompletionHandler { error, _, _ in
         NativeState.metalFxHistoryLock.lock()
-        NativeState.metalFxDepthHistory.complete(key, ticket: depthSubmission.ticket, succeeded: error == nil)
+        NativeState.metalFxDepthHistory.complete(historyKey, ticket: depthSubmission.ticket, succeeded: error == nil)
         NativeState.metalFxHistoryLock.unlock()
     }
+    registerMetalFxDepthPublication(
+        lease.metalFxPublication, key: historyKey, ticket: depthSubmission.ticket
+    )
     historyCopyEncoded = true
     NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
     NativeState.metal4TemporalEncodeCount &+= 1
@@ -7177,10 +7236,11 @@ private func metal3MetalFxEncodeV2(
                 motion: motionTexture,
                 reactive: reactiveTexture
             )
+            let historyKey = MetalFxDepthHistoryKey(scaler: key, queue: commandBuffer.commandQueue as AnyObject)
             let previousDepthTexture: MTLTexture
             let previousDepthIsValid: Bool
             NativeState.metalFxHistoryLock.lock()
-            if let cachedDepth = NativeState.metalFxPreviousDepthTextures[key],
+            if let cachedDepth = NativeState.metalFxPreviousDepthTextures[historyKey],
                cachedDepth.width == depthTexture.width,
                cachedDepth.height == depthTexture.height,
                cachedDepth.pixelFormat == depthTexture.pixelFormat {
@@ -7193,6 +7253,7 @@ private func metal3MetalFxEncodeV2(
                     mipmapped: false
                 )
                 previousDepthDescriptor.storageMode = .private
+                previousDepthDescriptor.hazardTrackingMode = .tracked
                 previousDepthDescriptor.usage = [.shaderRead]
                 guard let createdDepth = device.makeTexture(descriptor: previousDepthDescriptor) else {
                     NativeState.metalFxHistoryLock.unlock()
@@ -7201,18 +7262,18 @@ private func metal3MetalFxEncodeV2(
                 }
                 createdDepth.label = "MetalFX Previous Depth"
                 residencyTrackCreated(createdDepth)
-                NativeState.metalFxPreviousDepthTextures[key] = createdDepth
-                NativeState.metalFxDepthHistory.invalidate(key)
+                NativeState.metalFxPreviousDepthTextures[historyKey] = createdDepth
+                NativeState.metalFxDepthHistory.invalidate(historyKey)
                 previousDepthTexture = createdDepth
             }
-            let depthSubmission = NativeState.metalFxDepthHistory.begin(key, reset: reset != 0)
+            let depthSubmission = NativeState.metalFxDepthHistory.begin(historyKey, reset: reset != 0)
             previousDepthIsValid = depthSubmission.previousDepthIsValid
             NativeState.metalFxHistoryLock.unlock()
             var historyCopyEncoded = false
             defer {
                 if !historyCopyEncoded {
                     NativeState.metalFxHistoryLock.lock()
-                    NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: depthSubmission.ticket)
+                    NativeState.metalFxDepthHistory.invalidate(historyKey, ifOwnedBy: depthSubmission.ticket)
                     NativeState.metalFxHistoryLock.unlock()
                 }
             }
@@ -7432,7 +7493,7 @@ private func metal3MetalFxEncodeV2(
             scaler.jitterOffsetY = jitterY
             scaler.motionVectorScaleX = Float(inputWidth) * 0.5
             scaler.motionVectorScaleY = Float(inputHeight) * 0.5
-            scaler.reset = reset != 0
+            scaler.reset = depthSubmission.shouldResetHistory
             scaler.isDepthReversed = depthReversed != 0
             if #available(macOS 14.4, *) {
                 scaler.reactiveMaskTexture = reactiveTexture
@@ -7463,10 +7524,13 @@ private func metal3MetalFxEncodeV2(
             commandBuffer.addCompletedHandler { completed in
                 NativeState.metalFxHistoryLock.lock()
                 NativeState.metalFxDepthHistory.complete(
-                    key, ticket: depthSubmission.ticket, succeeded: completed.status == .completed
+                    historyKey, ticket: depthSubmission.ticket, succeeded: completed.status == .completed
                 )
                 NativeState.metalFxHistoryLock.unlock()
             }
+            registerMetalFxDepthPublication(
+                metalFxSubmissionPublication(commandBuffer), key: historyKey, ticket: depthSubmission.ticket
+            )
             historyCopyEncoded = true
             NativeState.lastTemporalScalerForInterpolation = scalerObject
             return 1
@@ -9043,6 +9107,9 @@ public func metallum_MTLCommandBuffer_commit(_ pointer: UnsafeMutableRawPointer)
     finishGpuEncoderTimings(commandBuffer)
     residencyFlushBeforeSubmit()
     commandBuffer.commit()
+    #if os(macOS) && canImport(MetalFX)
+    publishMetalFxSubmittedCopies(commandBuffer)
+    #endif
 }
 
 @_cdecl("metallum_create_semaphore")
@@ -9064,6 +9131,9 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ pointer: UnsafeMutableR
     }
     residencyFlushBeforeSubmit()
     commandBuffer.commit()
+    #if os(macOS) && canImport(MetalFX)
+    publishMetalFxSubmittedCopies(commandBuffer)
+    #endif
 }
 
 @_cdecl("metallum_semaphore_wait")

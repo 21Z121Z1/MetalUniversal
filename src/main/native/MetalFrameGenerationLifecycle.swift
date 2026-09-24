@@ -461,12 +461,18 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
     struct Submission {
         let ticket: Ticket
         let previousDepthIsValid: Bool
+        // Reset is a property of actual native ownership, not just the Java
+        // flag: queue changes, failures and cache recreation also reset MetalFX.
+        var shouldResetHistory: Bool { !previousDepthIsValid }
     }
     private struct Entry {
         let epoch: UInt64
         var issued: UInt64 = 0
+        // Publication means a successfully encoded copy has actually been
+        // committed to this history's queue. It is not GPU-completion evidence.
+        var published: UInt64 = 0
         var completed: UInt64 = 0
-        var succeeded = false
+        var poisoned = false
     }
     private var nextEpoch: UInt64 = 0
     private var entries: [Key: Entry] = [:]
@@ -485,8 +491,11 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
             entries[key] = Entry(epoch: nextEpoch)
         }
         var entry = entries[key]!
-        // A completed older copy is not the immediately preceding source.
-        let valid = entry.succeeded && entry.completed == entry.issued
+        // The GPU reads the immediately preceding committed copy, ordered by
+        // tracked hazards (Metal 3) or an explicit queue barrier (Metal 4).
+        // Requiring its CPU completion callback here would starve history when
+        // the CPU consistently submits two or more source frames ahead.
+        let valid = entry.issued > 0 && entry.published == entry.issued && !entry.poisoned
         precondition(entry.issued < UInt64.max, "Depth history submission exhausted")
         entry.issued += 1
         entries[key] = entry
@@ -494,11 +503,24 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
                           previousDepthIsValid: valid)
     }
 
+    /// Called only after committing the command buffer containing this copy.
+    /// Merely allocating or encoding a texture must never initialize history.
+    mutating func publish(_ key: Key, ticket: Ticket) {
+        guard var entry = entries[key], entry.epoch == ticket.epoch,
+              ticket.submission <= entry.issued, ticket.submission > entry.published else { return }
+        entry.published = ticket.submission
+        // Do not clear a GPU failure, including completion racing with commit.
+        entries[key] = entry
+    }
+
     mutating func complete(_ key: Key, ticket: Ticket, succeeded: Bool) {
         guard var entry = entries[key], entry.epoch == ticket.epoch,
-              ticket.submission > entry.completed, ticket.submission == entry.issued else { return }
+              ticket.submission > entry.completed, ticket.submission <= entry.issued else { return }
         entry.completed = ticket.submission
-        entry.succeeded = succeeded
+        entry.poisoned = !succeeded
+        // Completion also proves submission for native clients that commit a
+        // command buffer directly instead of using the production bridge.
+        entry.published = max(entry.published, ticket.submission)
         entries[key] = entry
     }
 
@@ -514,5 +536,34 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
         entries.removeAll()
         activeKey = nil
         // Deliberately retain nextEpoch: outstanding callbacks may still exist.
+    }
+}
+
+/// Owned by the real command buffer / Metal 4 lease, not by a global pointer
+/// registry. Only the real commit path can publish an encoded depth copy.
+/// Releasing an unsubmitted owner cancels its tickets without GPU callbacks.
+/// Encoding and commit run on the command-buffer owner thread; callbacks use
+/// the existing native history lock inside the supplied closures.
+final class MetalFxSubmissionPublication {
+    private var submitted = false
+    private var actions: [(publish: () -> Void, cancel: () -> Void)] = []
+
+    func append(publish: @escaping () -> Void, cancel: @escaping () -> Void) {
+        precondition(!submitted, "Cannot append work to a submitted command buffer")
+        actions.append((publish, cancel))
+    }
+
+    func didSubmit() {
+        guard !submitted else { return }
+        submitted = true
+        let submittedActions = actions
+        actions.removeAll()
+        for action in submittedActions { action.publish() }
+    }
+
+    deinit {
+        if !submitted {
+            for action in actions { action.cancel() }
+        }
     }
 }

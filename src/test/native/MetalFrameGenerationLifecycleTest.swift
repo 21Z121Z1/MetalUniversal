@@ -399,6 +399,99 @@ private func testTemporalDepthRequiresImmediatePredecessor() throws {
                "failed encode cannot be repaired by an older pending callback")
 }
 
+private func testDepthHistoryContinuousInFlightSources() throws {
+    for lag in [1, 2, 3, 8] {
+        var history = MetalFxDepthHistoryOwnership<String>()
+        var tickets: [MetalFxDepthHistoryOwnership<String>.Ticket] = []
+        for source in 0..<128 {
+            let next = history.begin("queue-A/descriptor", reset: false)
+            try expect(next.previousDepthIsValid == (source > 0),
+                       "Committed immediate predecessor must work with \(lag) sources in flight")
+            try expect(next.shouldResetHistory == (source == 0),
+                       "Only the first successful source resets during steady queue submission")
+            tickets.append(next.ticket)
+            let submission = MetalFxSubmissionPublication()
+            submission.append(publish: {
+                history.publish("queue-A/descriptor", ticket: next.ticket)
+            }, cancel: {
+                history.invalidate("queue-A/descriptor", ifOwnedBy: next.ticket)
+            })
+            submission.didSubmit()
+            submission.didSubmit() // Duplicate commit receipt is harmless.
+            if source >= lag {
+                history.complete("queue-A/descriptor", ticket: tickets[source - lag], succeeded: true)
+            }
+        }
+        history.invalidateAll()
+        for ticket in tickets {
+            history.complete("queue-A/descriptor", ticket: ticket, succeeded: true)
+            history.publish("queue-A/descriptor", ticket: ticket)
+        }
+        try expect(history.begin("queue-A/descriptor", reset: false).shouldResetHistory,
+                   "Release invalidates both outstanding completion and publication receipts")
+    }
+}
+
+private func testDepthHistoryCommitOwnership() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let encoded = history.begin(1, reset: false)
+    var publication: MetalFxSubmissionPublication? = MetalFxSubmissionPublication()
+    publication!.append(publish: {
+        history.publish(1, ticket: encoded.ticket)
+    }, cancel: {
+        history.invalidate(1, ifOwnedBy: encoded.ticket)
+    })
+    // No commit: dropping the real command-buffer owner invalidates the epoch.
+    publication = nil
+    history.complete(1, ticket: encoded.ticket, succeeded: true)
+    let replacement = history.begin(1, reset: false)
+    try expect(replacement.shouldResetHistory && replacement.ticket.epoch != encoded.ticket.epoch,
+               "An unsubmitted command buffer cannot initialize or revive history")
+    history.publish(1, ticket: encoded.ticket)
+    let pending = history.begin(1, reset: false)
+    try expect(pending.shouldResetHistory, "Allocation and encoding alone are not publication")
+    history.publish(1, ticket: pending.ticket)
+    let afterCommit = history.begin(1, reset: false)
+    try expect(afterCommit.previousDepthIsValid, "Real commit initializes the immediate predecessor")
+}
+
+private func testDepthHistoryFailureRacingPublication() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let failed = history.begin(1, reset: false)
+    history.complete(1, ticket: failed.ticket, succeeded: false)
+    history.publish(1, ticket: failed.ticket)
+    history.complete(1, ticket: failed.ticket, succeeded: true)
+    let recovery = history.begin(1, reset: false)
+    try expect(recovery.shouldResetHistory, "Late commit and duplicate callback cannot repair failure")
+    history.publish(1, ticket: recovery.ticket)
+    let newer = history.begin(1, reset: false)
+    try expect(newer.shouldResetHistory, "Known failure stays closed until a newer GPU success")
+    history.publish(1, ticket: newer.ticket)
+    // The CPU is ahead: the success is not the latest issued source, but it
+    // proves that the queue recovered. Its immediate successor was committed.
+    history.complete(1, ticket: recovery.ticket, succeeded: true)
+    history.complete(1, ticket: failed.ticket, succeeded: false)
+    try expect(history.begin(1, reset: false).previousDepthIsValid,
+               "Older success can initialize queued history; older failure cannot erase it")
+}
+
+private func testDepthHistoryQueueTransitionAndStalePublication() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let a = history.begin("queue-A", reset: false)
+    history.publish("queue-A", ticket: a.ticket)
+    let b = history.begin("queue-B", reset: false)
+    try expect(b.shouldResetHistory, "Identical descriptors on another queue never share history")
+    history.publish("queue-B", ticket: b.ticket)
+    let recreatedA = history.begin("queue-A", reset: false)
+    history.publish("queue-A", ticket: a.ticket)
+    history.complete("queue-A", ticket: a.ticket, succeeded: true)
+    history.invalidate("queue-A", ifOwnedBy: a.ticket)
+    try expect(recreatedA.shouldResetHistory, "A -> B -> A allocates a fresh temporal epoch")
+    history.publish("queue-A", ticket: recreatedA.ticket)
+    try expect(history.begin("queue-A", reset: false).previousDepthIsValid,
+               "Stale queue receipts cannot erase the recreated epoch's committed predecessor")
+}
+
 private func makeParameters(
     depthWidth: Int = 640, depthHeight: Int = 360,
     colorWidth: Int = 1920, colorHeight: Int = 1080,
@@ -463,6 +556,10 @@ private enum MetalFrameGenerationLifecycleTestMain {
             ("depth history stale callbacks and reset", testDepthHistoryRejectsStaleCompletions),
             ("depth history replacement and pending source", testDepthHistoryReplacementAndPendingSource),
             ("depth history callback permutations", testDepthHistoryCompletionPermutations),
+            ("depth history continuous in-flight sources", testDepthHistoryContinuousInFlightSources),
+            ("depth history real commit ownership", testDepthHistoryCommitOwnership),
+            ("depth history failure racing publication", testDepthHistoryFailureRacingPublication),
+            ("depth history queue transition and stale publication", testDepthHistoryQueueTransitionAndStalePublication),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),
