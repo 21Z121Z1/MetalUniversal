@@ -13,9 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      BASE: a3bf1810e74668cfbe8b3335dee8673fdfe11891
-      PATCH_BLOB: 715e5c423be59828a567d20a22517625f36b7971
-      PATCH_DIGEST: 1aa8957c358ca31805e6fd24587e7dec38c52191b9894978b69e06c3ba60968d
+      BASE: d7a5e4588c22bbfce4cf4d7a34e58e11d7cac132
+      EXPECTED_TREE: e419cb39b06ba54ff5e5f7e65b706292382780ff
+      PATCH_BLOBS: 793d3d97b164c1ce105be09c1028b2f364748a26 f85a8bd635da57f19e496f9dbf5932244e703f1d 29bb0e36221abe6ef97fb4554dd62ba68be91c82
+      PATCH_DIGEST: 096c54ae72721c2a4fb73aabe329803c4f7fc93ab78bf177696f5ae5413cd298
       CANDIDATE: agent/metalfx-data-contracts-20260924
       ASSEMBLY: agent/metalfx-cloud-assembly-20260924
       GH_TOKEN: ${{ github.token }}
@@ -27,27 +28,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          actual=$(git ls-remote origin "refs/heads/$CANDIDATE" | cut -f1)
-          test "$actual" = "$BASE"
-          gh api "repos/$GITHUB_REPOSITORY/git/blobs/$PATCH_BLOB" --jq .content | base64 --decode | gzip --decompress > "$RUNNER_TEMP/reviewed.patch"
+          test "$(git ls-remote origin "refs/heads/$CANDIDATE" | cut -f1)" = "$BASE"
+          : > "$RUNNER_TEMP/reviewed.patch.gz"
+          for blob in $PATCH_BLOBS; do
+            gh api "repos/$GITHUB_REPOSITORY/git/blobs/$blob" --jq .content | base64 --decode >> "$RUNNER_TEMP/reviewed.patch.gz"
+          done
+          gzip --decompress --stdout "$RUNNER_TEMP/reviewed.patch.gz" > "$RUNNER_TEMP/reviewed.patch"
           echo "$PATCH_DIGEST  $RUNNER_TEMP/reviewed.patch" | sha256sum --check
           git switch --detach "$BASE"
           git apply --check --index "$RUNNER_TEMP/reviewed.patch"
           git apply --index "$RUNNER_TEMP/reviewed.patch"
-          python3 - <<'PY'
-          import subprocess
-          expected = {
-            'src/main/native/MetalFrameGenerationLifecycle.swift',
-            'src/main/native/MetallumNative.swift',
-            'src/test/native/MetalFrameGenerationLifecycleTest.swift',
-          }
-          changed = set(subprocess.check_output(['git','diff','--cached','--name-only'], text=True).splitlines())
-          assert changed == expected, changed
-          PY
+          test "$(git write-tree)" = "$EXPECTED_TREE"
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(metalfx): publish queue-owned depth history at real GPU submission' -m 'Separate CPU publication from GPU completion so continuous in-flight sources initialize history. Retain queue identity, invalidate stale epochs and canceled publications, and drive both Metal 3 and Metal 4 scaler reset from the same production state machine. Cover lagged completions, duplicate callbacks, failed publication, unsubmitted command destruction, and queue transitions.'
+          git commit -m 'feat(metalfx): wire source-owned CUTOUT reactive MRT through RenderPearl' -m 'Preserve the original SPIR-V sampling and discard semantics while extending surviving fragment coverage to an R8 attachment. Match frontend pass and pipeline declarations, retain same-source receipts after real draws, and fail closed for unsupported fragment output lowering. Add real hosted raster/depth/coverage readback and negative source-ownership contracts.'
           test "$(git rev-parse HEAD^)" = "$BASE"
           test "$(git ls-remote origin "refs/heads/$CANDIDATE" | cut -f1)" = "$BASE"
           git push origin "HEAD:refs/heads/$ASSEMBLY"
