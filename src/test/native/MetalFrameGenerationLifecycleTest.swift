@@ -309,11 +309,50 @@ private func testPresentedTimeZeroFails() throws {
     try expect(actions.contains(.releaseOwnership), "non-presented real frame releases")
 }
 
+private func testTemporalDepthEpochs() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let first = history.begin("same-format-and-size", reset: false)
+    try expect(!first.previousDepthIsValid, "first frame has no history")
+    let reset = history.begin("same-format-and-size", reset: true)
+    history.complete("same-format-and-size", ticket: first.ticket, succeeded: true)
+    let pending = history.begin("same-format-and-size", reset: false)
+    try expect(!pending.previousDepthIsValid, "late pre-reset success must not resurrect history")
+    history.complete("same-format-and-size", ticket: pending.ticket, succeeded: true)
+    history.complete("same-format-and-size", ticket: reset.ticket, succeeded: false)
+    let next = history.begin("same-format-and-size", reset: false)
+    try expect(next.previousDepthIsValid, "older failure cannot erase newer completed depth")
+    history.invalidateAll()
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    let recreated = history.begin("same-format-and-size", reset: false)
+    try expect(!recreated.previousDepthIsValid, "cache A -> eviction -> A is a new generation")
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    history.invalidate("same-format-and-size", ifOwnedBy: next.ticket)
+    history.complete("same-format-and-size", ticket: recreated.ticket, succeeded: true)
+    try expect(history.begin("same-format-and-size", reset: false).previousDepthIsValid,
+               "old completion and abort cannot mutate a recreated resource")
+}
+
+private func testTemporalDepthRequiresImmediatePredecessor() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let first = history.begin(7, reset: false)
+    history.complete(7, ticket: first.ticket, succeeded: true)
+    let second = history.begin(7, reset: false)
+    try expect(second.previousDepthIsValid, "completed immediately previous source is usable")
+    let third = history.begin(7, reset: false)
+    try expect(!third.previousDepthIsValid, "first's completion does not prove second's depth copy")
+    history.invalidate(7, ifOwnedBy: third.ticket)
+    history.complete(7, ticket: second.ticket, succeeded: true)
+    try expect(!history.begin(7, reset: false).previousDepthIsValid,
+               "failed encode cannot be repaired by an older pending callback")
+}
+
 @main
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
             ("native scaler-link status", assertScalerLinkStatusContract),
+            ("temporal depth reset, eviction and reordered completions", testTemporalDepthEpochs),
+            ("temporal depth immediate predecessor", testTemporalDepthRequiresImmediatePredecessor),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),

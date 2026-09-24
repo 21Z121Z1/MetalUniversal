@@ -5,6 +5,9 @@ import com.metallum.client.metal.render.MetalBackend;
 import com.metallum.client.metal.render.MetalPreviousVertexBridge;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.pipeline.TextureTarget;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
@@ -35,6 +38,18 @@ public abstract class GameRendererMetalFxMixin {
     )
     private MainTarget metallum$createSceneTarget(final int width, final int height) {
         return new MainTarget(MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height));
+    }
+
+    @Redirect(
+            method = "<init>",
+            at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/TextureTarget")
+    )
+    private TextureTarget metallum$createHudDepthTarget(
+            final String label, final int width, final int height,
+            final GpuFormat colorFormat, final GpuFormat depthFormat
+    ) {
+        return new TextureTarget(label, MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height),
+                colorFormat, depthFormat);
     }
 
     @Redirect(
@@ -89,22 +104,17 @@ public abstract class GameRendererMetalFxMixin {
         );
     }
 
-    @Inject(
+    @ModifyArg(
             method = "render3dHud",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
-                    shift = At.Shift.BEFORE
-            )
+                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V"
+            ),
+            index = 0
     )
-    private void metallum$preserveWorldDepthBeforeHand(
-            final net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
-            final net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
-            final net.minecraft.client.renderer.state.OptionsRenderState optionsState,
-            final boolean consistentDepthRequired,
-            final CallbackInfo ci
-    ) {
-        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this);
+    private GpuTexture metallum$preserveWorldDepthBeforeHand(final GpuTexture actualHandDepth) {
+        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, actualHandDepth);
+        return actualHandDepth;
     }
 
     @Inject(

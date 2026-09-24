@@ -386,6 +386,8 @@ public final class MetalFxManager {
     private MetalGpuTexture sceneDepthTexture;
     @Nullable
     private MetalGpuTexture frameDepthTexture;
+    @Nullable
+    private MetalGpuTexture frameHandDepthTexture;
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
 
@@ -570,10 +572,10 @@ public final class MetalFxManager {
      * contains both phases, but the hand projection cannot replace the world
      * depth consumed by Temporal reconstruction.
      */
-    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer) {
+    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer, final GpuTexture handDepth) {
         MetalFxManager manager = active;
         if (manager != null) {
-            manager.preserveWorldDepthBeforeHandInternal(renderer);
+            manager.preserveWorldDepthBeforeHandInternal(renderer, handDepth);
         }
     }
 
@@ -1247,6 +1249,7 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
             this.frameDepthTexture = null;
+            this.frameHandDepthTexture = null;
             this.frameNativeSceneTexture = null;
             this.frameUsesUpscaledTarget = false;
             this.nativeOffFastPathFrames++;
@@ -1269,6 +1272,7 @@ public final class MetalFxManager {
         this.cutoutReactivePrepared = false;
         this.motionInputsPrepared = false;
         this.frameDepthTexture = null;
+        this.frameHandDepthTexture = null;
         this.frameNativeSceneTexture = null;
         this.frameUsesUpscaledTarget = false;
         this.motionStateStore.beginFrame();
@@ -2195,12 +2199,12 @@ public final class MetalFxManager {
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && handExactValidityTexture != null && reactiveTexture != null
-                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture candidateHandDepth
-                && candidateHandDepth.getWidth(0) == renderWidth
-                && candidateHandDepth.getHeight(0) == renderHeight) {
-            handDepth = candidateHandDepth;
-            // Vanilla clears the reversed-Z depth buffer right before the
-            // first-person pass, so at this point it contains only hand,
+                && frameHandDepthTexture != null
+                && frameHandDepthTexture.getWidth(0) == renderWidth
+                && frameHandDepthTexture.getHeight(0) == renderHeight) {
+            handDepth = frameHandDepthTexture;
+            // Use the actual clear target captured at render3dHud, not main
+            // depth (post effects keep a separate HUD depth). It contains hand,
             // held-item, and screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
@@ -2328,6 +2332,7 @@ public final class MetalFxManager {
         }
         boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
+            resetHistoryInternal("MetalFX source encode failed or input contract unavailable");
             this.motionStateStore.discardFrame();
             this.frameSynthesisReceipts.discardFrame();
             if (frameGenerationEnabled) {
@@ -2448,17 +2453,21 @@ public final class MetalFxManager {
         }
     }
 
-    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
+    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer, final GpuTexture handDepth) {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || !sceneFrame || sceneDepthTexture == null) {
             return;
         }
         GpuTexture sourceTexture = renderer.mainRenderTarget().getDepthTexture();
         if (!(sourceTexture instanceof MetalGpuTexture source)
+                || !(handDepth instanceof MetalGpuTexture hand)
+                || hand.getFormat() != sceneDepthTexture.getFormat()
+                || hand.getWidth(0) != renderWidth || hand.getHeight(0) != renderHeight
                 || source.getFormat() != sceneDepthTexture.getFormat()
                 || source.getWidth(0) != renderWidth
                 || source.getHeight(0) != renderHeight) {
             this.frameDepthTexture = null;
+            this.frameHandDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
             return;
         }
@@ -2474,6 +2483,7 @@ public final class MetalFxManager {
                 renderHeight
         );
         this.frameDepthTexture = sceneDepthTexture;
+        this.frameHandDepthTexture = hand;
     }
 
     private void captureValidationFrameIfRequested(
@@ -4491,6 +4501,7 @@ public final class MetalFxManager {
         cutoutReactiveTexture = null;
         sceneDepthTexture = null;
         frameDepthTexture = null;
+        frameHandDepthTexture = null;
         reactiveMaskPrepared = false;
         cutoutReactivePassObserved = false;
         cutoutReactivePrepared = false;

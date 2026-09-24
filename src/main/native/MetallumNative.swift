@@ -377,7 +377,7 @@ private enum NativeState {
     static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
     static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
     static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
-    static var metalFxPreviousDepthValid: Set<MetalFxScalerKey> = []
+    static var metalFxDepthHistory = MetalFxDepthHistoryOwnership<MetalFxScalerKey>()
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -6899,12 +6899,20 @@ private func metal4MetalFxEncodeV2(
         created.label = "MetalFX Previous Depth (Metal 4)"
         residencyTrackCreated(created)
         NativeState.metalFxPreviousDepthTextures[key] = created
-        NativeState.metalFxPreviousDepthValid.remove(key)
+        NativeState.metalFxDepthHistory.invalidate(key)
         previousDepthTexture = created
     }
-    if reset != 0 { NativeState.metalFxPreviousDepthValid.remove(key) }
-    previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+    let depthSubmission = NativeState.metalFxDepthHistory.begin(key, reset: reset != 0)
+    previousDepthIsValid = depthSubmission.previousDepthIsValid
     NativeState.metalFxHistoryLock.unlock()
+    var historyCopyEncoded = false
+    defer {
+        if !historyCopyEncoded {
+            NativeState.metalFxHistoryLock.lock()
+            NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: depthSubmission.ticket)
+            NativeState.metalFxHistoryLock.unlock()
+        }
+    }
 
     let scaler: any MTL4FXTemporalScaler
     if let cached = NativeState.metalFxScalers[key] as? any MTL4FXTemporalScaler {
@@ -6932,7 +6940,6 @@ private func metal4MetalFxEncodeV2(
         scaler = created
         NativeState.metalFxScalers[key] = created as AnyObject
     }
-    NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
 
     let currentMatrix = makeMatrix(currentViewProjection)
     let inverseMatrix = makeMatrix(inverseCurrentViewProjection)
@@ -7100,13 +7107,11 @@ private func metal4MetalFxEncodeV2(
     historyCopy.endEncoding()
     lease.addCompletionHandler { error, _, _ in
         NativeState.metalFxHistoryLock.lock()
-        if error == nil {
-            NativeState.metalFxPreviousDepthValid.insert(key)
-        } else {
-            NativeState.metalFxPreviousDepthValid.remove(key)
-        }
+        NativeState.metalFxDepthHistory.complete(key, ticket: depthSubmission.ticket, succeeded: error == nil)
         NativeState.metalFxHistoryLock.unlock()
     }
+    historyCopyEncoded = true
+    NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
     NativeState.metal4TemporalEncodeCount &+= 1
     return 1
 }
@@ -7198,14 +7203,20 @@ private func metal3MetalFxEncodeV2(
                 }
                 createdDepth.label = "MetalFX Previous Depth"
                 NativeState.metalFxPreviousDepthTextures[key] = createdDepth
-                NativeState.metalFxPreviousDepthValid.remove(key)
+                NativeState.metalFxDepthHistory.invalidate(key)
                 previousDepthTexture = createdDepth
             }
-            if reset != 0 {
-                NativeState.metalFxPreviousDepthValid.remove(key)
-            }
-            previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+            let depthSubmission = NativeState.metalFxDepthHistory.begin(key, reset: reset != 0)
+            previousDepthIsValid = depthSubmission.previousDepthIsValid
             NativeState.metalFxHistoryLock.unlock()
+            var historyCopyEncoded = false
+            defer {
+                if !historyCopyEncoded {
+                    NativeState.metalFxHistoryLock.lock()
+                    NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: depthSubmission.ticket)
+                    NativeState.metalFxHistoryLock.unlock()
+                }
+            }
 
             let scalerObject: AnyObject?
             if let cached = NativeState.metalFxScalers[key] {
@@ -7241,7 +7252,6 @@ private func metal3MetalFxEncodeV2(
                 logMetalFxFailureOnce("temporal-v2-cast", "cached temporal scaler unavailable")
                 return 0
             }
-            NativeState.lastTemporalScalerForInterpolation = scalerObject
             struct MergeUniforms {
                 var viewport: SIMD4<UInt32>
                 var flags: SIMD4<UInt32>
@@ -7453,13 +7463,13 @@ private func metal3MetalFxEncodeV2(
             historyBlit.endEncoding()
             commandBuffer.addCompletedHandler { completed in
                 NativeState.metalFxHistoryLock.lock()
-                if completed.status == .completed {
-                    NativeState.metalFxPreviousDepthValid.insert(key)
-                } else {
-                    NativeState.metalFxPreviousDepthValid.remove(key)
-                }
+                NativeState.metalFxDepthHistory.complete(
+                    key, ticket: depthSubmission.ticket, succeeded: completed.status == .completed
+                )
                 NativeState.metalFxHistoryLock.unlock()
             }
+            historyCopyEncoded = true
+            NativeState.lastTemporalScalerForInterpolation = scalerObject
             return 1
         }
     }
@@ -7505,6 +7515,8 @@ private func metalFxEncodeV2EntryImpl(
     _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
+    // Never offer a scaler from a skipped or failed source encode to FrameGen.
+    NativeState.lastTemporalScalerForInterpolation = nil
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer) {
         return metal4MetalFxEncodeV2(
@@ -7962,7 +7974,7 @@ public func metallum_metalfx_release_scalers() {
     }
     NativeState.metalFxPreviousDepthTextures.removeAll()
     NativeState.metalFxValidationReactiveTextures.removeAll()
-    NativeState.metalFxPreviousDepthValid.removeAll()
+    NativeState.metalFxDepthHistory.invalidateAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
 }
