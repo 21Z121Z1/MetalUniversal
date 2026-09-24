@@ -309,11 +309,257 @@ private func testPresentedTimeZeroFails() throws {
     try expect(actions.contains(.releaseOwnership), "non-presented real frame releases")
 }
 
+private func testDepthHistoryRejectsStaleCompletions() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let first = history.begin(1, reset: false)
+    try expect(!first.previousDepthIsValid, "first source has no previous depth")
+    history.complete(1, ticket: first.ticket, succeeded: true)
+    let second = history.begin(1, reset: false)
+    try expect(second.previousDepthIsValid, "completed immediate predecessor can be read")
+    history.complete(1, ticket: first.ticket, succeeded: false)
+    history.complete(1, ticket: second.ticket, succeeded: true)
+    history.complete(1, ticket: first.ticket, succeeded: false)
+    let reset = history.begin(1, reset: true)
+    try expect(!reset.previousDepthIsValid, "reset never reads pre-reset depth")
+    history.complete(1, ticket: second.ticket, succeeded: true)
+    history.complete(1, ticket: reset.ticket, succeeded: false)
+    history.complete(1, ticket: reset.ticket, succeeded: true)
+    try expect(!history.begin(1, reset: false).previousDepthIsValid,
+               "duplicate callback cannot reverse a failure")
+}
+
+private func testDepthHistoryReplacementAndPendingSource() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let oldA = history.begin("A", reset: false)
+    history.complete("A", ticket: oldA.ticket, succeeded: true)
+    let b = history.begin("B", reset: false)
+    history.complete("B", ticket: b.ticket, succeeded: true)
+    let newA = history.begin("A", reset: false)
+    try expect(!newA.previousDepthIsValid, "A -> B -> A cannot resurrect cached source history")
+    history.complete("A", ticket: oldA.ticket, succeeded: true)
+    history.invalidate("A", ifOwnedBy: oldA.ticket)
+    let pending = history.begin("A", reset: false)
+    try expect(!pending.previousDepthIsValid, "a pending copy is not a completed immediate predecessor")
+    history.complete("A", ticket: newA.ticket, succeeded: true)
+    history.complete("A", ticket: pending.ticket, succeeded: true)
+    try expect(history.begin("A", reset: false).previousDepthIsValid,
+               "latest successful source owns the replacement history")
+}
+
+private func testDepthHistoryCompletionPermutations() throws {
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        for latestSucceeded in [false, true] {
+            var history = MetalFxDepthHistoryOwnership<Int>()
+            let writes = [history.begin(1, reset: false), history.begin(1, reset: true),
+                          history.begin(1, reset: false)]
+            for index in order {
+                history.complete(1, ticket: writes[index].ticket,
+                                 succeeded: index == 2 ? latestSucceeded : !latestSucceeded)
+            }
+            try expect(history.begin(1, reset: false).previousDepthIsValid == latestSucceeded,
+                       "only the latest write may settle history, regardless of callback order")
+        }
+    }
+}
+
+private func testTemporalDepthEpochs() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let first = history.begin("same-format-and-size", reset: false)
+    try expect(!first.previousDepthIsValid, "first frame has no history")
+    let reset = history.begin("same-format-and-size", reset: true)
+    history.complete("same-format-and-size", ticket: first.ticket, succeeded: true)
+    let pending = history.begin("same-format-and-size", reset: false)
+    try expect(!pending.previousDepthIsValid, "late pre-reset success must not resurrect history")
+    history.complete("same-format-and-size", ticket: pending.ticket, succeeded: true)
+    history.complete("same-format-and-size", ticket: reset.ticket, succeeded: false)
+    let next = history.begin("same-format-and-size", reset: false)
+    try expect(next.previousDepthIsValid, "older failure cannot erase newer completed depth")
+    history.invalidateAll()
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    let recreated = history.begin("same-format-and-size", reset: false)
+    try expect(!recreated.previousDepthIsValid, "cache A -> eviction -> A is a new generation")
+    history.complete("same-format-and-size", ticket: next.ticket, succeeded: true)
+    history.invalidate("same-format-and-size", ifOwnedBy: next.ticket)
+    history.complete("same-format-and-size", ticket: recreated.ticket, succeeded: true)
+    try expect(history.begin("same-format-and-size", reset: false).previousDepthIsValid,
+               "old completion and abort cannot mutate a recreated resource")
+}
+
+private func testTemporalDepthRequiresImmediatePredecessor() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let first = history.begin(7, reset: false)
+    history.complete(7, ticket: first.ticket, succeeded: true)
+    let second = history.begin(7, reset: false)
+    try expect(second.previousDepthIsValid, "completed immediately previous source is usable")
+    let third = history.begin(7, reset: false)
+    try expect(!third.previousDepthIsValid, "first's completion does not prove second's depth copy")
+    history.invalidate(7, ifOwnedBy: third.ticket)
+    history.complete(7, ticket: second.ticket, succeeded: true)
+    try expect(!history.begin(7, reset: false).previousDepthIsValid,
+               "failed encode cannot be repaired by an older pending callback")
+}
+
+private func testDepthHistoryContinuousInFlightSources() throws {
+    for lag in [1, 2, 3, 8] {
+        var history = MetalFxDepthHistoryOwnership<String>()
+        var tickets: [MetalFxDepthHistoryOwnership<String>.Ticket] = []
+        for source in 0..<128 {
+            let next = history.begin("queue-A/descriptor", reset: false)
+            try expect(next.previousDepthIsValid == (source > 0),
+                       "Committed immediate predecessor must work with \(lag) sources in flight")
+            try expect(next.shouldResetHistory == (source == 0),
+                       "Only the first successful source resets during steady queue submission")
+            tickets.append(next.ticket)
+            let submission = MetalFxSubmissionPublication()
+            submission.append(publish: {
+                history.publish("queue-A/descriptor", ticket: next.ticket)
+            }, cancel: {
+                history.invalidate("queue-A/descriptor", ifOwnedBy: next.ticket)
+            })
+            submission.didSubmit()
+            submission.didSubmit() // Duplicate commit receipt is harmless.
+            if source >= lag {
+                history.complete("queue-A/descriptor", ticket: tickets[source - lag], succeeded: true)
+            }
+        }
+        history.invalidateAll()
+        for ticket in tickets {
+            history.complete("queue-A/descriptor", ticket: ticket, succeeded: true)
+            history.publish("queue-A/descriptor", ticket: ticket)
+        }
+        try expect(history.begin("queue-A/descriptor", reset: false).shouldResetHistory,
+                   "Release invalidates both outstanding completion and publication receipts")
+    }
+}
+
+private func testDepthHistoryCommitOwnership() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let encoded = history.begin(1, reset: false)
+    var publication: MetalFxSubmissionPublication? = MetalFxSubmissionPublication()
+    publication!.append(publish: {
+        history.publish(1, ticket: encoded.ticket)
+    }, cancel: {
+        history.invalidate(1, ifOwnedBy: encoded.ticket)
+    })
+    // No commit: dropping the real command-buffer owner invalidates the epoch.
+    publication = nil
+    history.complete(1, ticket: encoded.ticket, succeeded: true)
+    let replacement = history.begin(1, reset: false)
+    try expect(replacement.shouldResetHistory && replacement.ticket.epoch != encoded.ticket.epoch,
+               "An unsubmitted command buffer cannot initialize or revive history")
+    history.publish(1, ticket: encoded.ticket)
+    let pending = history.begin(1, reset: false)
+    try expect(pending.shouldResetHistory, "Allocation and encoding alone are not publication")
+    history.publish(1, ticket: pending.ticket)
+    let afterCommit = history.begin(1, reset: false)
+    try expect(afterCommit.previousDepthIsValid, "Real commit initializes the immediate predecessor")
+}
+
+private func testDepthHistoryFailureRacingPublication() throws {
+    var history = MetalFxDepthHistoryOwnership<Int>()
+    let failed = history.begin(1, reset: false)
+    history.complete(1, ticket: failed.ticket, succeeded: false)
+    history.publish(1, ticket: failed.ticket)
+    history.complete(1, ticket: failed.ticket, succeeded: true)
+    let recovery = history.begin(1, reset: false)
+    try expect(recovery.shouldResetHistory, "Late commit and duplicate callback cannot repair failure")
+    history.publish(1, ticket: recovery.ticket)
+    let newer = history.begin(1, reset: false)
+    try expect(newer.shouldResetHistory, "Known failure stays closed until a newer GPU success")
+    history.publish(1, ticket: newer.ticket)
+    // The CPU is ahead: the success is not the latest issued source, but it
+    // proves that the queue recovered. Its immediate successor was committed.
+    history.complete(1, ticket: recovery.ticket, succeeded: true)
+    history.complete(1, ticket: failed.ticket, succeeded: false)
+    try expect(history.begin(1, reset: false).previousDepthIsValid,
+               "Older success can initialize queued history; older failure cannot erase it")
+}
+
+private func testDepthHistoryQueueTransitionAndStalePublication() throws {
+    var history = MetalFxDepthHistoryOwnership<String>()
+    let a = history.begin("queue-A", reset: false)
+    history.publish("queue-A", ticket: a.ticket)
+    let b = history.begin("queue-B", reset: false)
+    try expect(b.shouldResetHistory, "Identical descriptors on another queue never share history")
+    history.publish("queue-B", ticket: b.ticket)
+    let recreatedA = history.begin("queue-A", reset: false)
+    history.publish("queue-A", ticket: a.ticket)
+    history.complete("queue-A", ticket: a.ticket, succeeded: true)
+    history.invalidate("queue-A", ifOwnedBy: a.ticket)
+    try expect(recreatedA.shouldResetHistory, "A -> B -> A allocates a fresh temporal epoch")
+    history.publish("queue-A", ticket: recreatedA.ticket)
+    try expect(history.begin("queue-A", reset: false).previousDepthIsValid,
+               "Stale queue receipts cannot erase the recreated epoch's committed predecessor")
+}
+
+private func makeParameters(
+    depthWidth: Int = 640, depthHeight: Int = 360,
+    colorWidth: Int = 1920, colorHeight: Int = 1080,
+    jitterX: Float = -0.375, jitterY: Float = 0.25,
+    fieldOfView: Float = 67.25, nearPlane: Float = 0.05,
+    farPlane: Float = 1536, aspectRatio: Float = 16.0 / 9.0,
+    deltaTime: Float = 1.0 / 37.0
+) -> MetalFxFrameParameters? {
+    MetalFxFrameParameters(depthWidth: depthWidth, depthHeight: depthHeight,
+        colorWidth: colorWidth, colorHeight: colorHeight,
+        jitterX: jitterX, jitterY: jitterY, fieldOfView: fieldOfView,
+        nearPlane: nearPlane, farPlane: farPlane, aspectRatio: aspectRatio,
+        deltaTime: deltaTime)
+}
+
+private func testInterpolationMotionUsesPreviousColorPixels() throws {
+    for size in [(640, 360, 1920, 1080), (853, 479, 1281, 719), (613, 997, 613, 997)] {
+        let p = makeParameters(depthWidth: size.0, depthHeight: size.1,
+                               colorWidth: size.2, colorHeight: size.3)!
+        // Independent forward screen motion: object moved right/down 10px.
+        let current = SIMD2<Float>(0.15, -0.31)
+        let previous = current - SIMD2<Float>(20.0 / Float(size.2), 20.0 / Float(size.3))
+        let pixels = (previous - current) * SIMD2(p.motionScaleX, p.motionScaleY)
+        try expect(abs(pixels.x + 10) < 0.0001 && abs(pixels.y + 10) < 0.0001,
+                   "NDC motion must address previous COLOR pixels even with lower-resolution depth")
+    }
+}
+
+private func testInterpolationPreservesRealSourceMetadata() throws {
+    for delta: Float in [0.001, 1.0 / 37.0, 0.3, 1.25] {
+        let p = makeParameters(deltaTime: delta)!
+        try expect(p.deltaTime.bitPattern == delta.bitPattern,
+                   "Source time must not be quantized, clamped, or replaced by enqueue spacing")
+        try expect(p.jitterX == -0.375 && p.jitterY == 0.25 && p.fieldOfView == 67.25
+                   && p.nearPlane == 0.05 && p.farPlane == 1536,
+                   "Source jitter/camera metadata must reach the SDK unchanged")
+    }
+    for bad: Float in [0, -1, .nan, .infinity, -.infinity] {
+        try expect(makeParameters(deltaTime: bad) == nil, "Unknown source time must fail closed")
+        try expect(makeParameters(nearPlane: bad) == nil, "Invalid near plane must fail closed")
+        try expect(makeParameters(aspectRatio: bad) == nil, "Invalid aspect must fail closed")
+        try expect(makeParameters(fieldOfView: bad) == nil, "Invalid FOV must fail closed")
+    }
+    try expect(makeParameters(fieldOfView: 180) == nil, "180-degree perspective is invalid")
+    try expect(makeParameters(farPlane: 0.05) == nil, "Far must exceed near")
+    try expect(makeParameters(jitterX: .nan) == nil && makeParameters(jitterY: .infinity) == nil,
+               "Non-finite jitter must fail closed")
+    try expect(makeParameters(depthWidth: 0) == nil && makeParameters(depthHeight: -1) == nil
+               && makeParameters(colorWidth: 0) == nil && makeParameters(colorHeight: -1) == nil
+               && makeParameters(colorWidth: Int.max) == nil, "All extents are checked")
+}
+
 @main
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
             ("native scaler-link status", assertScalerLinkStatusContract),
+            ("temporal depth reset, eviction and reordered completions", testTemporalDepthEpochs),
+            ("temporal depth immediate predecessor", testTemporalDepthRequiresImmediatePredecessor),
+            ("interpolation motion uses previous-color pixels", testInterpolationMotionUsesPreviousColorPixels),
+            ("interpolation preserves source time and camera", testInterpolationPreservesRealSourceMetadata),
+            ("depth history stale callbacks and reset", testDepthHistoryRejectsStaleCompletions),
+            ("depth history replacement and pending source", testDepthHistoryReplacementAndPendingSource),
+            ("depth history callback permutations", testDepthHistoryCompletionPermutations),
+            ("depth history continuous in-flight sources", testDepthHistoryContinuousInFlightSources),
+            ("depth history real commit ownership", testDepthHistoryCommitOwnership),
+            ("depth history failure racing publication", testDepthHistoryFailureRacingPublication),
+            ("depth history queue transition and stale publication", testDepthHistoryQueueTransitionAndStalePublication),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),

@@ -56,15 +56,8 @@ import java.util.UUID;
 /** Owns the per-device MetalFX resources and the frame-level history contract. */
 @Environment(EnvType.CLIENT)
 public final class MetalFxManager {
-    // The reactive CUTOUT shader writes an additional MRT coverage target.
-    // Minecraft 26.3's shared main world pass still exposes only its ordinary
-    // scene-color attachment, so enabling this before the descriptor bridge is
-    // complete would make RenderPearl reject the pipeline at draw time. Keep
-    // the unfinished path explicitly opt-in and preserve the native CUTOUT
-    // render contract by default.
-    private static final boolean CUTOUT_REACTIVE_TERRAIN_OPT_IN =
-            "true".equalsIgnoreCase(System.getProperty(
-                    "metallum.metalfx.cutoutReactiveTerrain", "false"));
+    // The same source owns the RenderPearl attachment, compatible pipeline,
+    // post-discard raster writes and the later Temporal coverage consumer.
     public static final int USAGE_SHADER_WRITE = 1 << 5;
     private static final double SCENE_CUT_DISTANCE = 32.0;
     private static final float FOV_SCENE_CUT_DEGREES = 5.0F;
@@ -247,6 +240,7 @@ public final class MetalFxManager {
     private long sourceFrameSequence;
     private FrameSynthesisContract.@Nullable FrameStamp sourceFrameStamp;
     private boolean sourceFrameStampInvalidated;
+    private FrameSynthesisContract.@Nullable FrameStamp colorTransferSourceStamp;
     // Sticky for the whole source frame. An Iris generation can be selected and retired between
     // beginFrame and presentation; once any unproven override can have affected color geometry,
     // that source frame must never enter MTLFXFrameInterpolator.
@@ -256,6 +250,7 @@ public final class MetalFxManager {
     private boolean transparencyPhase;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
+    private MetalFxReactivePass.@Nullable Source cutoutReactiveSource;
     private boolean cutoutReactivePrepared;
     private boolean motionInputsPrepared;
     private boolean loggedTransparencyTargets;
@@ -379,6 +374,10 @@ public final class MetalFxManager {
     @Nullable
     private MetalGpuTexture reactiveTexture;
     @Nullable
+    private MetalGpuTexture linearSceneInput;
+    @Nullable
+    private MetalGpuTexture linearSceneOutput;
+    @Nullable
     private MetalGpuTexture cutoutReactiveTexture;
     @Nullable
     private GpuTextureView cutoutReactiveView;
@@ -386,6 +385,9 @@ public final class MetalFxManager {
     private MetalGpuTexture sceneDepthTexture;
     @Nullable
     private MetalGpuTexture frameDepthTexture;
+    @Nullable
+    private MetalGpuTexture frameHandDepthTexture;
+    private FrameSynthesisContract.@Nullable Perspective frameCameraPerspective;
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
 
@@ -426,8 +428,8 @@ public final class MetalFxManager {
                 this.config.mergeDepthDilation ? 1.0F : 0.0F
         );
         this.motionPipelineV2Available = MetalNativeBridge.metallum_metalfx_supports_motion_v2(device.metalDeviceHandle());
-        this.cutoutReactivePipelineAvailable = CUTOUT_REACTIVE_TERRAIN_OPT_IN
-                && MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
+        this.cutoutReactivePipelineAvailable =
+                MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
         this.handOverlayPipelineAvailable =
                 MetalNativeBridge.metallum_metalfx_supports_hand_overlay(device.metalDeviceHandle());
         this.effectiveMode = chooseMode(device, this.config);
@@ -570,10 +572,10 @@ public final class MetalFxManager {
      * contains both phases, but the hand projection cannot replace the world
      * depth consumed by Temporal reconstruction.
      */
-    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer) {
+    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer, final GpuTexture handDepth) {
         MetalFxManager manager = active;
         if (manager != null) {
-            manager.preserveWorldDepthBeforeHandInternal(renderer);
+            manager.preserveWorldDepthBeforeHandInternal(renderer, handDepth);
         }
     }
 
@@ -1138,30 +1140,41 @@ public final class MetalFxManager {
 
     public static boolean usesCutoutReactiveTerrain() {
         MetalFxManager manager = active;
-        return manager != null
-                && manager.effectiveMode == MetalFxConfig.Mode.TEMPORAL
-                && manager.cutoutReactivePipelineAvailable
-                && manager.sceneFrame
-                && manager.motionInputsPrepared
-                && manager.cutoutReactiveView != null
-                && !manager.runtimeDisabled;
+        return manager != null && manager.cutoutReactiveSource != null
+                && manager.cutoutReactiveSource.acceptsNewPasses();
     }
 
-    @Nullable
-    public static GpuTextureView cutoutReactiveAttachment(final int expectedColorWidth, final int expectedColorHeight) {
+    /** Called after the complete world projection hook has bound this source's stamp. */
+    public static void bindWorldReactiveSource(final RenderTarget target) {
         MetalFxManager manager = active;
-        if (!usesCutoutReactiveTerrain() || manager == null) {
-            return null;
+        if (manager == null) return;
+        if (manager.cutoutReactiveSource != null) manager.cutoutReactiveSource.invalidate();
+        manager.cutoutReactiveSource = null;
+        if (manager.effectiveMode != MetalFxConfig.Mode.TEMPORAL || manager.runtimeDisabled
+                || !manager.cutoutReactivePipelineAvailable || !manager.motionInputsPrepared
+                || manager.sourceFrameStamp == null || manager.sourceFrameStampInvalidated
+                || manager.cutoutReactiveView == null || target.getColorTexture() == null
+                || target.getDepthTexture() == null || !manager.sourceShaderMotionSemanticsProven()) return;
+        try {
+            manager.cutoutReactiveSource = new MetalFxReactivePass.Source(manager.sourceFrameStamp,
+                    target.getColorTexture(), target.getDepthTexture(), manager.cutoutReactiveView);
+        } catch (IllegalArgumentException incompatible) {
+            manager.resetHistoryInternal("reactive world attachment mismatch");
         }
-        GpuTextureView coverage = manager.cutoutReactiveView;
-        if (coverage.getWidth(0) != expectedColorWidth || coverage.getHeight(0) != expectedColorHeight) {
-            // A resize can land between Sodium's color attachment lookup and
-            // this redirect. A one-frame ordinary pass is preferable to
-            // submitting an invalid MRT descriptor and crashing the client.
-            return null;
-        }
-        manager.cutoutReactivePassObserved = true;
-        return coverage;
+    }
+
+    public static com.mojang.renderpearl.api.commands.RenderPassDescriptor withCutoutReactiveAttachment(
+            final com.mojang.renderpearl.api.commands.RenderPassDescriptor descriptor) {
+        MetalFxManager manager = active;
+        return manager == null || manager.cutoutReactiveSource == null ? descriptor
+                : manager.cutoutReactiveSource.decorate(descriptor);
+    }
+
+    static MetalFxReactivePass.@Nullable Pass cutoutReactivePass(
+            final com.mojang.renderpearl.api.commands.RenderPassDescriptor descriptor) {
+        MetalFxManager manager = active;
+        return manager == null || manager.cutoutReactiveSource == null ? null
+                : manager.cutoutReactiveSource.claim(descriptor);
     }
 
     private static MetalFxConfig.Mode chooseMode(final MetalDevice device, final MetalFxConfig config) {
@@ -1228,6 +1241,8 @@ public final class MetalFxManager {
     }
 
     private void beginFrameInternal() {
+        frameHandDepthTexture = null;
+        frameCameraPerspective = null;
         reloadConfigIfRequested();
         // A receipt transaction belongs to one source frame only.  A frame that
         // never reached a successful temporal submission must not leak its
@@ -1235,6 +1250,9 @@ public final class MetalFxManager {
         // transition).
         frameSynthesisReceipts.discardFrame();
         sourceFrameStamp = null;
+        colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         sourceFrameStampInvalidated = false;
         irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();
         pistonExactCandidates.clear();
@@ -2025,9 +2043,23 @@ public final class MetalFxManager {
         // Frame interpolation needs the camera FOV used to build the base
         // perspective matrix. Screen-effect transforms can legitimately alter
         // m11 and are already represented by the motion reconstruction matrix.
-        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix, 70.0F);
-        this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
-                ? cameraState.depthFar : 1000.0F;
+        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix);
+        this.frameFarPlane = cameraState.depthFar;
+        this.frameCameraPerspective = null;
+        try {
+            // Resolution rounding affects the raster projection aspect, not
+            // the native scene or drawable dimensions supplied to the presenter.
+            Matrix4f baseProjection = new Matrix4f(cameraState.projectionMatrix);
+            MetalFxMath.adjustPerspectiveAspect(baseProjection, displayAspect, renderAspect);
+            this.frameCameraPerspective = FrameSynthesisContract.Perspective.fromProjection(baseProjection);
+            Matrix4f effect = new Matrix4f(cameraState.projectionMatrix).invert().mul(projectionMatrix);
+            if (!MetalFxMath.isRigidViewTransform(effect)) {
+                this.frameCameraPerspective = null;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Temporal still has its complete matrices. Frame Generation cannot
+            // fabricate a scalar frustum for this projection and stays closed.
+        }
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
         MetalFxMath.viewProjection(
                 this.currentCameraRelativeViewProjection,
@@ -2127,6 +2159,7 @@ public final class MetalFxManager {
     }
 
     private void beforeGuiInternal(final GameRenderer renderer) {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.endWorld();
         this.frameUsesUpscaledTarget = false;
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             captureNativeOffReadbackIfRequested(renderer);
@@ -2163,9 +2196,19 @@ public final class MetalFxManager {
         flushEntityMotionReplaysInternal(renderer);
 
         MetalCommandEncoder encoder = device.commandEncoder();
+        this.cutoutReactivePassObserved = cutoutReactiveSource != null
+                && !sourceFrameStampInvalidated
+                && cutoutReactiveSource.hasReceipt(sourceFrameStamp, cutoutReactiveTexture);
+        boolean unsupportedCutout = cutoutReactiveSource != null && !sourceFrameStampInvalidated
+                && cutoutReactiveSource.requiresConservativeFallback(sourceFrameStamp);
+        if (cutoutReactivePassObserved) {
+            frameSynthesisReceipts.observeReactive(FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
+                    (int) Math.min(Integer.MAX_VALUE, cutoutReactiveSource.encodedDrawBatches()));
+        }
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !usesNativeDirectFrameGeneration()
                 && cutoutReactivePipelineAvailable
+                && cutoutReactivePassObserved
                 && cutoutReactiveTexture != null
                 && reactiveTexture != null) {
             int radius = MetalFxMath.cutoutReactiveRadius(config.scale, pixelJitter);
@@ -2180,14 +2223,21 @@ public final class MetalFxManager {
             if (config.debug && this.cutoutReactivePrepared && !loggedCutoutReactive) {
                 loggedCutoutReactive = true;
                 Metallum.LOGGER.info(
-                        "MetalFX CUTOUT reactive coverage prepared from Sodium terrain MRT: radius={} inputPixels",
+                        "MetalFX CUTOUT reactive coverage prepared from RenderPearl MRT: radius={} inputPixels",
                         radius
                 );
             } else if (this.cutoutReactivePassObserved && !combined) {
-                Metallum.LOGGER.warn(
-                        "MetalFX CUTOUT reactive coverage failed closed; using depth-edge fallback"
-                );
+                unsupportedCutout = true;
+                Metallum.LOGGER.warn("MetalFX CUTOUT mask failed; conservatively reject history for this source");
             }
+        }
+        if (unsupportedCutout && reactiveTexture != null) {
+            // This is an actual pixel operation, not just an eligibility label.
+            // The fused motion kernel preserves this mask for Temporal. Frame
+            // Generation has no reactive input and rejects the source entirely.
+            encoder.clearColorTexture(reactiveTexture, new Vector4f(1f));
+            cutoutReactivePrepared = true;
+            frameSynthesisReceipts.observeReactive(FrameSynthesisContract.ProducerDomain.TRANSPARENCY, 1);
         }
         boolean emitMotionDiagnostics = validationFrame != null && validationFrame.shouldCapture();
         MetalGpuTexture handDepth = null;
@@ -2195,13 +2245,13 @@ public final class MetalFxManager {
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && handExactValidityTexture != null && reactiveTexture != null
-                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture candidateHandDepth
-                && candidateHandDepth.getWidth(0) == renderWidth
-                && candidateHandDepth.getHeight(0) == renderHeight) {
-            handDepth = candidateHandDepth;
-            // Vanilla clears the reversed-Z depth buffer right before the
-            // first-person pass, so at this point it contains only hand,
-            // held-item, and screen-effect coverage. Those pixels are
+                && FrameSynthesisContract.sourceDepthMatches(frameHandDepthTexture, renderWidth, renderHeight)) {
+            handDepth = frameHandDepthTexture;
+            // The render3dHud clear hook captures its actual target. With
+            // consistentDepthRequired it is hud3DTarget, NOT the main depth
+            // into which Minecraft subsequently integrates both world and HUD.
+            // This same-frame texture contains only hand, held-item and
+            // screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
             // Production folds this operation into the fused motion kernel.
@@ -2254,8 +2304,10 @@ public final class MetalFxManager {
                     && objectValidityTexture != null && handExactValidityTexture != null
                     && disocclusionTexture != null
                     && motionTexture != null && reactiveTexture != null) {
-                encoded = encoder.encodeMetalFxV2(
-                        color,
+                encoded = ensureLinearSceneTextures(color, output)
+                        && encoder.encodeMetalFxColorTransfer(color, linearSceneInput, true)
+                        && encoder.encodeMetalFxV2(
+                        linearSceneInput,
                         depth,
                         handDepth,
                         handExactValidityTexture,
@@ -2266,7 +2318,7 @@ public final class MetalFxManager {
                         disocclusionTexture,
                         motionTexture,
                         reactiveTexture,
-                        output,
+                        linearSceneOutput,
                         currentViewProjection,
                         inverseCurrentViewProjection,
                         previousViewProjection,
@@ -2278,8 +2330,9 @@ public final class MetalFxManager {
                         (config.transparencyReactiveMask && reactiveMaskPrepared)
                                 || cutoutReactivePrepared,
                         emitMotionDiagnostics
-                );
+                ) && encoder.encodeMetalFxColorTransfer(linearSceneOutput, output, false);
                 scalerEncodedThisFrame = encoded;
+                colorTransferSourceStamp = encoded ? sourceFrameStamp : null;
             } else if (effectiveMode == MetalFxConfig.Mode.SPATIAL) {
                 encoded = encoder.encodeMetalFx(
                         effectiveMode,
@@ -2328,6 +2381,7 @@ public final class MetalFxManager {
         }
         boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
+            resetHistoryInternal("MetalFX source encode failed or input contract unavailable");
             this.motionStateStore.discardFrame();
             this.frameSynthesisReceipts.discardFrame();
             if (frameGenerationEnabled) {
@@ -2448,17 +2502,19 @@ public final class MetalFxManager {
         }
     }
 
-    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
+    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer, final GpuTexture handDepth) {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.endWorld();
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || !sceneFrame || sceneDepthTexture == null) {
             return;
         }
         GpuTexture sourceTexture = renderer.mainRenderTarget().getDepthTexture();
         if (!(sourceTexture instanceof MetalGpuTexture source)
-                || source.getFormat() != sceneDepthTexture.getFormat()
-                || source.getWidth(0) != renderWidth
-                || source.getHeight(0) != renderHeight) {
+                || !FrameSynthesisContract.sourceDepthMatches(source, renderWidth, renderHeight)
+                || !(handDepth instanceof MetalGpuTexture hand)
+                || !FrameSynthesisContract.sourceDepthMatches(hand, renderWidth, renderHeight)) {
             this.frameDepthTexture = null;
+            this.frameHandDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
             return;
         }
@@ -2474,6 +2530,7 @@ public final class MetalFxManager {
                 renderHeight
         );
         this.frameDepthTexture = sceneDepthTexture;
+        this.frameHandDepthTexture = hand;
     }
 
     private void captureValidationFrameIfRequested(
@@ -4238,6 +4295,36 @@ public final class MetalFxManager {
         }
     }
 
+    private boolean ensureLinearSceneTextures(final MetalGpuTexture source, final MetalGpuTexture output) {
+        if (linearSceneInput != null && linearSceneInput.getWidth(0) == source.getWidth(0)
+                && linearSceneInput.getHeight(0) == source.getHeight(0)
+                && linearSceneOutput != null && linearSceneOutput.getWidth(0) == output.getWidth(0)
+                && linearSceneOutput.getHeight(0) == output.getHeight(0)) return true;
+        int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC | USAGE_SHADER_WRITE;
+        MetalGpuTexture input = null;
+        MetalGpuTexture result = null;
+        try {
+            input = (MetalGpuTexture) device.createTexture(
+                    () -> "MetalFX Linear SDR Input", usage, GpuFormat.RGBA16_FLOAT,
+                    source.getWidth(0), source.getHeight(0), 1, 1);
+            result = (MetalGpuTexture) device.createTexture(
+                    () -> "MetalFX Linear SDR Output", usage, GpuFormat.RGBA16_FLOAT,
+                    output.getWidth(0), output.getHeight(0), 1, 1);
+        } catch (IllegalStateException failure) {
+            if (input != null) input.close();
+            if (result != null) result.close();
+            Metallum.LOGGER.warn("MetalFX linear SDR allocation failed; keeping the real source frame", failure);
+            return false;
+        }
+        // Publish a complete pair. Device retirement keeps the old allocation
+        // alive through outstanding GPU work; a partial allocation is never used.
+        if (linearSceneInput != null) linearSceneInput.close();
+        if (linearSceneOutput != null) linearSceneOutput.close();
+        linearSceneInput = input;
+        linearSceneOutput = result;
+        return true;
+    }
+
     private boolean ensureAuxiliaryTextures() {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || renderWidth <= 0 || renderHeight <= 0
@@ -4383,6 +4470,10 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        MetalNativeBridge.metallum_metalfx_invalidate_source();
+        colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         if (sourceFrameStamp != null) {
             sourceFrameStampInvalidated = true;
             frameSynthesisReceipts.invalidateForHistoryDiscontinuity();
@@ -4464,6 +4555,12 @@ public final class MetalFxManager {
     }
 
     private void closeAuxiliaryTextures() {
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
+        if (linearSceneInput != null) linearSceneInput.close();
+        if (linearSceneOutput != null) linearSceneOutput.close();
+        linearSceneInput = null;
+        linearSceneOutput = null;
         if (objectMotionView != null) objectMotionView.close();
         if (objectValidityView != null) objectValidityView.close();
         if (handExactValidityView != null) handExactValidityView.close();
@@ -4491,6 +4588,7 @@ public final class MetalFxManager {
         cutoutReactiveTexture = null;
         sceneDepthTexture = null;
         frameDepthTexture = null;
+        frameHandDepthTexture = null;
         reactiveMaskPrepared = false;
         cutoutReactivePassObserved = false;
         cutoutReactivePrepared = false;
@@ -4498,7 +4596,9 @@ public final class MetalFxManager {
     }
 
     private int countAuxiliaryTextures() {
-        return (motionTexture == null ? 0 : 1)
+        return (linearSceneInput == null ? 0 : 1)
+                + (linearSceneOutput == null ? 0 : 1)
+                + (motionTexture == null ? 0 : 1)
                 + (cameraMotionTexture == null ? 0 : 1)
                 + (objectMotionTexture == null ? 0 : 1)
                 + (objectValidityTexture == null ? 0 : 1)
@@ -4518,13 +4618,15 @@ public final class MetalFxManager {
         motionStateStore.reset();
         frameSynthesisReceipts.reset();
         sourceFrameStamp = null;
+        colorTransferSourceStamp = null;
+        if (cutoutReactiveSource != null) cutoutReactiveSource.invalidate();
+        cutoutReactiveSource = null;
         sourceFrameStampInvalidated = false;
         pistonExactCandidates.clear();
         entityGenerations.clear();
         blockEntityGenerations.clear();
         pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
-        MetalCutoutReactivePipeline.clear();
         closeAuxiliaryTextures();
         if (uiTarget != null) {
             uiTarget.destroyBuffers();
@@ -4583,24 +4685,21 @@ public final class MetalFxManager {
         FrameSynthesisContract.ProducerCoverageSet coverage =
                 new FrameSynthesisContract.ProducerCoverageSet(receipts);
         try {
+            if (frameCameraPerspective == null) {
+                return null;
+            }
             FrameSynthesisContract.CameraFrameInput camera =
-                    new FrameSynthesisContract.CameraFrameInput(
-                            frameFieldOfView,
-                            0.05F,
-                            frameFarPlane,
-                            displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                            sceneFrameDeltaSeconds > 0.0F && Float.isFinite(sceneFrameDeltaSeconds)
-                                    ? sceneFrameDeltaSeconds : 1.0F / 60.0F
-                    );
+                    frameCameraPerspective.atSourceInterval(sceneFrameDeltaSeconds);
             return new FrameSynthesisContract.FrameGenerationAdmission(
                     stamp,
                     coverage,
                     camera,
                     frameResetForPresent,
-                    FrameGenerationColorContract.currentRenderer(
+                    FrameGenerationColorContract.withSdrTransferReceipt(
                             usesNativeDirectFrameGeneration()
                                     ? FrameGenerationColorContract.SourcePath.NATIVE_DIRECT
-                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT
+                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT,
+                            stamp.equals(colorTransferSourceStamp)
                     ).admissionEvidence(COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION)
             );
         } catch (IllegalArgumentException ignored) {
@@ -4769,11 +4868,11 @@ public final class MetalFxManager {
                 frameGenerationInputHeight,
                 pixelJitter.x,
                 pixelJitter.y,
-                frameFieldOfView,
-                0.05F,
-                frameFarPlane,
-                displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                sceneFrameDeltaSeconds,
+                admission.camera().fieldOfViewDegrees(),
+                admission.camera().nearPlane(),
+                admission.camera().farPlane(),
+                admission.camera().aspectRatio(),
+                admission.camera().deltaSeconds(),
                 frameResetForPresent,
                 frameId,
                 admission

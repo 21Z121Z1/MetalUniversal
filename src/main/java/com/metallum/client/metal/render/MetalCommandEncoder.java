@@ -1053,6 +1053,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         : 0.0,
                 beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, hasColorClear, depthClear.isPresent())
         );
+        renderPass.installReactivePass(MetalFxManager.cutoutReactivePass(descriptor));
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
         return renderPass;
@@ -1064,6 +1065,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             currentRenderPass.materializePendingClear();
             currentRenderPass.finishTiming();
             currentRenderPass.finishContractPass();
+            currentRenderPass.finishReactivePass();
             currentRenderPass.popDebugGroup();
             currentRenderPass = null;
         }
@@ -1359,6 +1361,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 preserveReactiveMask,
                 fence
         );
+    }
+
+    /** The real production transfer path, also exercised by hosted GPU readback tests. */
+    boolean encodeMetalFxColorTransfer(final MetalGpuTexture source,
+                                      final MetalGpuTexture destination, final boolean decode) {
+        flushPendingClear(source);
+        flushPendingClear(destination);
+        submitRenderPass();
+        endEncoder();
+        destination.markContentsDirty();
+        return MetalNativeBridge.metallum_metalfx_color_transfer_encode(
+                commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                source.nativeHandle(), destination.nativeHandle(), decode ? 1 : 2, fence);
     }
 
     boolean encodeMetalFxV2(
