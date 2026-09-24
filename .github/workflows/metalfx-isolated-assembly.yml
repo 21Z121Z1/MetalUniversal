@@ -1,0 +1,58 @@
+name: MetalFX isolated tree assembly
+on:
+  push:
+    branches: [agent/metalfx-assembly-20260924-01]
+permissions:
+  contents: write
+jobs:
+  assemble:
+    if: github.repository == '21Z121Z1/MetalUniversal' && github.ref == 'refs/heads/agent/metalfx-assembly-20260924-01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Verify reviewed patch and publish source objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          gh api repos/21Z121Z1/MetalUniversal/git/blobs/8a65865e9d64b6a02936bf52849162361b68109c > "$RUNNER_TEMP/reviewed-blob.json"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import base64, gzip, hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          blob = json.loads((root / 'reviewed-blob.json').read_text())
+          assert blob['encoding'] == 'base64'
+          patch = gzip.decompress(base64.b64decode(blob['content']))
+          assert len(patch) == 32928
+          assert hashlib.sha256(patch).hexdigest() == '3388fab74e19d6d46fb4e29acf8303b450e16fe2df33110a0fdc6009e72520b5'
+          (root / 'reviewed.patch').write_bytes(patch)
+          PY
+          git checkout --detach 29d192520e23e450faad7dfecb7ccc85e7a8de57
+          git apply --check --index "$RUNNER_TEMP/reviewed.patch"
+          git apply --index "$RUNNER_TEMP/reviewed.patch"
+          git diff --cached --check
+          tree=$(git write-tree)
+          test "$tree" = cae998b8d4017cd22d346becb4a9a6b97b3839b2
+          test ! -e .github/workflows/metalfx-isolated-assembly.yml
+          test ! -e .github/workflows/metalfx-candidate-apply.yml
+          test ! -e .github/ci/metalfx-reviewed.patch.b64
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          commit=$(printf '%s\n' 'fix(metalfx): assemble converged source and history contracts' | git commit-tree "$tree" -p "$GITHUB_SHA")
+          git checkout --detach "$commit"
+          git push origin "$commit:refs/heads/agent/metalfx-assembly-20260924-01"
+          mkdir -p build/agent-evidence
+          printf '{"tree_sha":"%s","assembly_commit_sha":"%s","base_sha":"29d192520e23e450faad7dfecb7ccc85e7a8de57"}\n' "$tree" "$commit" > build/agent-evidence/assembly.json
+          cat build/agent-evidence/assembly.json
+          git bundle create build/agent-evidence/source.bundle HEAD
+          git bundle verify build/agent-evidence/source.bundle
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: metalfx-converged-source-tree
+          path: build/agent-evidence/
+          if-no-files-found: error
+          retention-days: 7
