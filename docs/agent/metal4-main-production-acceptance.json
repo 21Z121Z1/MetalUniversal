@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
@@ -181,10 +181,19 @@
     "world_scenario_id": "metal-validation-fixed-camera-v1",
     "camera_policy": "world-player pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees and pitch 0, then held fixed by MetalValidationClient",
     "camera_driver_must_be_content_addressed": true,
-    "framebuffer": [
-      1708,
-      960
-    ],
+    "display_mode": {
+      "window_mode": "fullscreen",
+      "drawable_resolution_source": "native-fullscreen-baseline.json from the first baseline trial of each profile",
+      "drawable_resolution_must_remain_identical_within_profile": true,
+      "drawable_resolution_must_match_across_profiles": true,
+      "target_fps": 120,
+      "target_refresh_hz": 120,
+      "vsync_enabled": true,
+      "window_focused": true,
+      "window_iconified": false,
+      "inactivity_fps_limit": "minimized",
+      "framerate_throttle_reason": "NONE"
+    },
     "ui_scale_default": 3,
     "render_distance_default": 16,
     "mutable_options_iris_config_and_staged_shader_inputs_are_restored_or_removed": true,
@@ -199,6 +208,14 @@
       "render_distance",
       "camera_pose",
       "camera_script_sha256",
+      "window_mode",
+      "target_fps",
+      "target_refresh_hz",
+      "vsync_enabled",
+      "window_focused",
+      "window_iconified",
+      "inactivity_fps_limit",
+      "expected_framerate_throttle_reason",
       "minecraft_version",
       "sodium_version",
       "macos_version",
@@ -212,7 +229,10 @@
       "iris_version"
     ],
     "trial_guardrails": [
-      "drawable resolution equals 1708x960",
+      "Minecraft is fullscreen, focused and not iconified",
+      "first baseline fullscreen drawable is captured and all later trials match it",
+      "active display refresh is 120 Hz",
+      "VSync and 120 FPS cap are enabled without an inactivity/gameplay throttle",
       "native main readback completed and passed",
       "explicit residency remains active",
       "main renderer engagement matches the lane",

@@ -13,8 +13,10 @@ CORRECTNESS_GATE="${P1_CORRECTNESS_GATE:-}"
 UI_SCALE="${UI_SCALE:-3}"
 RENDER_DISTANCE="${RENDER_DISTANCE:-16}"
 WORLD_SCENARIO_ID="metal-validation-fixed-camera-v1"
-EXPECTED_FRAMEBUFFER_WIDTH=1708
-EXPECTED_FRAMEBUFFER_HEIGHT=960
+TARGET_FPS="${METALLUM_EVAL_TARGET_FPS:-120}"
+TARGET_REFRESH_HZ="${METALLUM_EVAL_REFRESH_HZ:-120}"
+EXPECTED_FRAMEBUFFER_WIDTH="${METALLUM_EVAL_FRAMEBUFFER_WIDTH:-}"
+EXPECTED_FRAMEBUFFER_HEIGHT="${METALLUM_EVAL_FRAMEBUFFER_HEIGHT:-}"
 CAMERA_POLICY="world-player-pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees, pitch 0; held fixed by MetalValidationClient"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -102,6 +104,21 @@ fi
 if ! [[ "$RENDER_DISTANCE" =~ ^[0-9]+$ ]] || (( RENDER_DISTANCE < 2 )); then
   echo "RENDER_DISTANCE must be an integer >= 2" >&2
   exit 2
+fi
+if ! [[ "$TARGET_FPS" =~ ^[0-9]+$ ]] || (( TARGET_FPS < 1 )); then
+  echo "METALLUM_EVAL_TARGET_FPS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$TARGET_REFRESH_HZ" =~ ^[0-9]+$ ]] || (( TARGET_REFRESH_HZ < 1 )); then
+  echo "METALLUM_EVAL_REFRESH_HZ must be a positive integer" >&2
+  exit 2
+fi
+if [[ -n "$EXPECTED_FRAMEBUFFER_WIDTH" || -n "$EXPECTED_FRAMEBUFFER_HEIGHT" ]]; then
+  if ! [[ "$EXPECTED_FRAMEBUFFER_WIDTH" =~ ^[0-9]+$ ]] || (( EXPECTED_FRAMEBUFFER_WIDTH < 1 )) \
+      || ! [[ "$EXPECTED_FRAMEBUFFER_HEIGHT" =~ ^[0-9]+$ ]] || (( EXPECTED_FRAMEBUFFER_HEIGHT < 1 )); then
+    echo "METALLUM_EVAL_FRAMEBUFFER_WIDTH and HEIGHT must be set together as positive integers" >&2
+    exit 2
+  fi
 fi
 if [[ -n "$(git status --porcelain=v1)" ]]; then
   echo "P1 physical performance requires a clean worktree" >&2
@@ -248,6 +265,13 @@ PY
 # only accept caller-supplied files and record their exact hashes.
 pin_colon_option "$OPTIONS_FILE" "guiScale" "$UI_SCALE"
 pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"
+pin_colon_option "$OPTIONS_FILE" "maxFps" "$TARGET_FPS"
+pin_colon_option "$OPTIONS_FILE" "enableVsync" "true"
+pin_colon_option "$OPTIONS_FILE" "fullscreen" "true"
+# 26.3's AFK limiter cuts a stationary foreground game to 30 FPS after 60s.
+# `minimized` preserves ordinary idle behavior while leaving visible fullscreen
+# trials uncapped by the inactivity limiter.
+pin_colon_option "$OPTIONS_FILE" "inactivityFpsLimit" "minimized"
 if [[ "$PROFILE_ID" == "V1" ]]; then
   pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"
   pin_equals_property "$IRIS_CONFIG" "shaderPack" ""
@@ -338,15 +362,54 @@ lane_args() {
 
 validate_trial_identity() {
   local report="$1" lane="$2" log="$3"
-  python3 - "$report" "$lane" "$HEAD_SHA" "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" <<'PY'
-import json, pathlib, sys
+  python3 - "$report" "$lane" "$HEAD_SHA" "$OUT/environment.json" "$TARGET_FPS" "$TARGET_REFRESH_HZ" <<'PY'
+import json, math, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 lane, head = sys.argv[2], sys.argv[3]
-width, height = int(sys.argv[4]), int(sys.argv[5])
+environment_path = pathlib.Path(sys.argv[4])
+target_fps, target_refresh_hz = int(sys.argv[5]), int(sys.argv[6])
 data = json.loads(path.read_text(encoding="utf-8"))
+environment = json.loads(environment_path.read_text(encoding="utf-8"))
+identity = environment.get("identity")
+if not isinstance(identity, dict):
+    raise SystemExit("P1 environment evidence has no identity object")
+expected_resolution = identity.get("resolution")
+if (isinstance(expected_resolution, list) and len(expected_resolution) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in expected_resolution)):
+    width, height = expected_resolution
+else:
+    width = height = None
+actual_width, actual_height = data.get("drawableWidth"), data.get("drawableHeight")
 problems = []
-if data.get("drawableWidth") != width or data.get("drawableHeight") != height:
-    problems.append(f"drawable {data.get('drawableWidth')}x{data.get('drawableHeight')} != {width}x{height}")
+if not isinstance(actual_width, int) or actual_width <= 0 or not isinstance(actual_height, int) or actual_height <= 0:
+    problems.append(f"fullscreen drawable is invalid: {actual_width}x{actual_height}")
+elif width is not None and height is not None and (actual_width, actual_height) != (width, height):
+    problems.append(f"drawable {actual_width}x{actual_height} != captured fullscreen baseline {width}x{height}")
+elif width is None or height is None:
+    if lane != "baseline":
+        problems.append("first fullscreen drawable must be captured from the baseline lane")
+    else:
+        identity["resolution"] = [actual_width, actual_height]
+        identity["resolution_source"] = "first accepted fullscreen baseline native-fullscreen-baseline.json"
+        pinned = environment.setdefault("pinned_runtime_config", {})
+        pinned["expected_framebuffer"] = [actual_width, actual_height]
+        environment_path.write_text(json.dumps(environment, indent=2) + "\n", encoding="utf-8")
+if data.get("windowFullscreen") is not True:
+    problems.append("Minecraft did not report fullscreen mode")
+if data.get("windowFocused") is not True or data.get("windowIconified") is not False:
+    problems.append("fullscreen trial is not focused and visible")
+if data.get("vsyncEnabled") is not True:
+    problems.append("VSync is not enabled")
+if data.get("configuredFpsLimit") != target_fps or data.get("effectiveFpsLimit") != target_fps:
+    problems.append(f"FPS limit configured/effective={data.get('configuredFpsLimit')}/{data.get('effectiveFpsLimit')} != {target_fps}")
+if data.get("framerateThrottleReason") != "NONE":
+    problems.append(f"gameplay frame limiter is active: {data.get('framerateThrottleReason')}")
+if data.get("inactivityFpsLimit") != "minimized":
+    problems.append(f"inactivity FPS policy is not minimized-only: {data.get('inactivityFpsLimit')}")
+refresh_hz = data.get("activeDisplayRefreshHz")
+if not isinstance(refresh_hz, (int, float)) or isinstance(refresh_hz, bool) or not math.isfinite(refresh_hz) \
+        or abs(refresh_hz - target_refresh_hz) > 0.5:
+    problems.append(f"active display refresh {refresh_hz} Hz != target {target_refresh_hz} Hz")
 if not isinstance(data.get("measuredFrameIntervals"), int) or data.get("measuredFrameIntervals") <= 0:
     problems.append("no measured frame intervals")
 readback = data.get("nativeMainReadback")
@@ -422,7 +485,8 @@ python3 - "$OUT/environment.json" "$HEAD_SHA" "$CORRECTNESS_JAR_SHA" "$CORRECTNE
   "$WORLD" "$WORLD_SHA" "$PROFILE_ID" "$WORLD_SCENARIO_ID" "$UI_SCALE" "$RENDER_DISTANCE" \
   "$CAMERA_POLICY" "$CAMERA_SCRIPT_SHA" "$OPTIONS_SHA" "$IRIS_CONFIG_SHA" \
   "$SHADER_PACK_LABEL" "$SHADER_PACK_VERSION" "$SHADER_PACK_SHA" "$SHADER_OPTIONS_SHA" \
-  "$BLOCKS" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" <<'PY'
+  "$BLOCKS" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" "$TARGET_FPS" "$TARGET_REFRESH_HZ" \
+  "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" <<'PY'
 import json, os, pathlib, platform, subprocess, sys
 path = pathlib.Path(sys.argv[1])
 def cmd(*args):
@@ -448,7 +512,18 @@ identity = {
     "native_dylib_sha256": sys.argv[4],
     "world_sha256": sys.argv[6],
     "world_scenario_id": sys.argv[8],
-    "resolution": [1708, 960],
+    "resolution": ([int(sys.argv[24]), int(sys.argv[25])]
+                    if sys.argv[24] and sys.argv[25] else "pending-first-fullscreen-baseline"),
+    "resolution_source": ("explicit METALLUM_EVAL_FRAMEBUFFER_WIDTH/HEIGHT"
+                          if sys.argv[24] and sys.argv[25] else "captured from first fullscreen baseline trial"),
+    "window_mode": "fullscreen",
+    "target_fps": int(sys.argv[22]),
+    "target_refresh_hz": int(sys.argv[23]),
+    "vsync_enabled": True,
+    "window_focused": True,
+    "window_iconified": False,
+    "inactivity_fps_limit": "minimized",
+    "expected_framerate_throttle_reason": "NONE",
     "ui_scale": int(sys.argv[9]),
     "render_distance": int(sys.argv[10]),
     "camera_pose": sys.argv[11],
@@ -470,28 +545,32 @@ required_by_profile = {
     "V1": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
-        "camera_script_sha256", "minecraft_version", "sodium_version", "macos_version", "java_version"
+        "camera_script_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
+        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "minecraft_version", "sodium_version", "macos_version", "java_version"
     },
     "I0": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
         "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
-        "shader_options_sha256", "minecraft_version", "sodium_version", "iris_version",
-        "macos_version", "java_version"
+        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
+        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "minecraft_version", "sodium_version", "iris_version", "macos_version", "java_version"
     },
     "I1": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
         "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
-        "shader_options_sha256", "minecraft_version", "sodium_version", "iris_version",
-        "macos_version", "java_version"
+        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
+        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "minecraft_version", "sodium_version", "iris_version", "macos_version", "java_version"
     },
 }
 missing = sorted(key for key in required_by_profile[profile] if identity.get(key) in (None, "", "unknown"))
 if missing:
     raise SystemExit(f"{profile} benchmark identity is incomplete: {missing}")
 path.write_text(json.dumps({
-    "schema_version": 3,
+    "schema_version": 4,
     "stage": "P1-metal4-main-production",
     "kind": "physical-performance-abba",
     "benchmark_contract": "docs/agent/benchmark-profiles.json",
@@ -504,7 +583,13 @@ path.write_text(json.dumps({
         "shader_pack": None if profile == "V1" else sys.argv[15],
         "metalfx_mode": "OFF",
         "frame_generation": False,
-        "expected_framebuffer": [1708, 960],
+        "expected_framebuffer": ([int(sys.argv[24]), int(sys.argv[25])]
+                                  if sys.argv[24] and sys.argv[25] else "captured-from-first-fullscreen-baseline"),
+        "window_mode": "fullscreen",
+        "target_fps": int(sys.argv[22]),
+        "target_refresh_hz": int(sys.argv[23]),
+        "vsync_enabled": True,
+        "inactivity_fps_limit": "minimized",
     },
     "pairedBlocks": int(sys.argv[19]),
     "warmupSeconds": int(sys.argv[20]),

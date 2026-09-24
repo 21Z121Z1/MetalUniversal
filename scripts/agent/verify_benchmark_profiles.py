@@ -68,6 +68,20 @@ def main() -> None:
         missing = common_identity - identity
         if missing:
             fail(f"{profile_id} is missing identity fields {sorted(missing)}")
+        if profile_id in {"V1", "I0", "I1"}:
+            fullscreen_identity = {
+                "window_mode",
+                "target_fps",
+                "target_refresh_hz",
+                "vsync_enabled",
+                "window_focused",
+                "window_iconified",
+                "inactivity_fps_limit",
+                "expected_framerate_throttle_reason",
+            }
+            missing_fullscreen = fullscreen_identity - identity
+            if missing_fullscreen:
+                fail(f"{profile_id} is missing fullscreen pacing identity fields {sorted(missing_fullscreen)}")
         # Mutable file paths are not identity. Every external binary/script input
         # in a benchmark contract must have a content hash field.
         for field in identity:
@@ -106,6 +120,12 @@ def main() -> None:
         fail("T1 must expose time_to_first_visible_ms")
 
     measurement = data.get("measurement", {})
+    if measurement.get("display_mode") != "fullscreen at a fixed active-refresh and FPS target; runtime drawable is captured from the first baseline trial and held constant":
+        fail("performance profiles must use fullscreen with a captured, fixed drawable")
+    if measurement.get("default_target_fps") != 120 or measurement.get("default_target_refresh_hz") != 120:
+        fail("default fullscreen performance target must be 120 FPS at 120 Hz")
+    if measurement.get("vsync_required") is not True or measurement.get("inactivity_fps_limit") != "minimized":
+        fail("fullscreen performance requires VSync and minimized-only inactivity limiting")
     if measurement.get("warmup_seconds_min", 0) < 30:
         fail("warmup must be at least 30 seconds")
     if measurement.get("sample_seconds_min", 0) < 120:

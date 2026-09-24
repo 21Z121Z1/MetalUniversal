@@ -8,6 +8,7 @@ BUILD = (ROOT / "build.gradle").read_text(encoding="utf-8")
 RUNNER = (ROOT / "scripts/agent/run_metal4_main_p1_physical_performance.sh").read_text(encoding="utf-8")
 MATRIX = (ROOT / "scripts/agent/run_metal4_main_p1_physical_matrix.sh").read_text(encoding="utf-8")
 IRIS_COMPAT = (ROOT / "src/main/java/com/metallum/client/metal/render/MetalIrisCompat.java").read_text(encoding="utf-8")
+VALIDATION_CLIENT = (ROOT / "src/main/java/com/metallum/client/validation/MetalValidationClient.java").read_text(encoding="utf-8")
 
 
 def require(condition: bool, message: str) -> None:
@@ -93,6 +94,11 @@ require('grep -F "Iris-on-Metal semantic layer active:"' in MATRIX,
         "I0/I1 matrix does not prove semantic-layer activation in every trial")
 require('grep -F "Using shaderpack: $STAGED_PACK_NAME"' in RUNNER,
         "I0/I1 profile runner does not prove the exact staged shader pack")
+for field in ("windowFullscreen", "windowFocused", "windowIconified", "vsyncEnabled",
+              "configuredFpsLimit", "effectiveFpsLimit", "framerateThrottleReason",
+              "inactivityFpsLimit", "activeDisplayRefreshHz"):
+    require(f'"{field}"' in VALIDATION_CLIENT,
+            f"native fullscreen performance telemetry does not record {field}")
 
 # Performance evidence must use the same product binaries that passed the
 # paired physical correctness run.
