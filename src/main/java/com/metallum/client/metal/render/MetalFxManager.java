@@ -388,6 +388,7 @@ public final class MetalFxManager {
     private MetalGpuTexture frameDepthTexture;
     @Nullable
     private MetalGpuTexture frameHandDepthTexture;
+    private FrameSynthesisContract.@Nullable Perspective frameCameraPerspective;
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
 
@@ -1230,6 +1231,8 @@ public final class MetalFxManager {
     }
 
     private void beginFrameInternal() {
+        frameHandDepthTexture = null;
+        frameCameraPerspective = null;
         reloadConfigIfRequested();
         // A receipt transaction belongs to one source frame only.  A frame that
         // never reached a successful temporal submission must not leak its
@@ -1249,7 +1252,6 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
             this.frameDepthTexture = null;
-            this.frameHandDepthTexture = null;
             this.frameNativeSceneTexture = null;
             this.frameUsesUpscaledTarget = false;
             this.nativeOffFastPathFrames++;
@@ -1272,7 +1274,6 @@ public final class MetalFxManager {
         this.cutoutReactivePrepared = false;
         this.motionInputsPrepared = false;
         this.frameDepthTexture = null;
-        this.frameHandDepthTexture = null;
         this.frameNativeSceneTexture = null;
         this.frameUsesUpscaledTarget = false;
         this.motionStateStore.beginFrame();
@@ -2029,9 +2030,23 @@ public final class MetalFxManager {
         // Frame interpolation needs the camera FOV used to build the base
         // perspective matrix. Screen-effect transforms can legitimately alter
         // m11 and are already represented by the motion reconstruction matrix.
-        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix, 70.0F);
-        this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
-                ? cameraState.depthFar : 1000.0F;
+        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix);
+        this.frameFarPlane = cameraState.depthFar;
+        this.frameCameraPerspective = null;
+        try {
+            // Resolution rounding affects the raster projection aspect, not
+            // the native scene or drawable dimensions supplied to the presenter.
+            Matrix4f baseProjection = new Matrix4f(cameraState.projectionMatrix);
+            MetalFxMath.adjustPerspectiveAspect(baseProjection, displayAspect, renderAspect);
+            this.frameCameraPerspective = FrameSynthesisContract.Perspective.fromProjection(baseProjection);
+            Matrix4f effect = new Matrix4f(cameraState.projectionMatrix).invert().mul(projectionMatrix);
+            if (!MetalFxMath.isRigidViewTransform(effect)) {
+                this.frameCameraPerspective = null;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Temporal still has its complete matrices. Frame Generation cannot
+            // fabricate a scalar frustum for this projection and stays closed.
+        }
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
         MetalFxMath.viewProjection(
                 this.currentCameraRelativeViewProjection,
@@ -2199,13 +2214,13 @@ public final class MetalFxManager {
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && handExactValidityTexture != null && reactiveTexture != null
-                && frameHandDepthTexture != null
-                && frameHandDepthTexture.getWidth(0) == renderWidth
-                && frameHandDepthTexture.getHeight(0) == renderHeight) {
+                && FrameSynthesisContract.sourceDepthMatches(frameHandDepthTexture, renderWidth, renderHeight)) {
             handDepth = frameHandDepthTexture;
-            // Use the actual clear target captured at render3dHud, not main
-            // depth (post effects keep a separate HUD depth). It contains hand,
-            // held-item, and screen-effect coverage. Those pixels are
+            // The render3dHud clear hook captures its actual target. With
+            // consistentDepthRequired it is hud3DTarget, NOT the main depth
+            // into which Minecraft subsequently integrates both world and HUD.
+            // This same-frame texture contains only hand, held-item and
+            // screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
             // Production folds this operation into the fused motion kernel.
@@ -2460,12 +2475,9 @@ public final class MetalFxManager {
         }
         GpuTexture sourceTexture = renderer.mainRenderTarget().getDepthTexture();
         if (!(sourceTexture instanceof MetalGpuTexture source)
+                || !FrameSynthesisContract.sourceDepthMatches(source, renderWidth, renderHeight)
                 || !(handDepth instanceof MetalGpuTexture hand)
-                || hand.getFormat() != sceneDepthTexture.getFormat()
-                || hand.getWidth(0) != renderWidth || hand.getHeight(0) != renderHeight
-                || source.getFormat() != sceneDepthTexture.getFormat()
-                || source.getWidth(0) != renderWidth
-                || source.getHeight(0) != renderHeight) {
+                || !FrameSynthesisContract.sourceDepthMatches(hand, renderWidth, renderHeight)) {
             this.frameDepthTexture = null;
             this.frameHandDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
@@ -4594,15 +4606,11 @@ public final class MetalFxManager {
         FrameSynthesisContract.ProducerCoverageSet coverage =
                 new FrameSynthesisContract.ProducerCoverageSet(receipts);
         try {
+            if (frameCameraPerspective == null) {
+                return null;
+            }
             FrameSynthesisContract.CameraFrameInput camera =
-                    new FrameSynthesisContract.CameraFrameInput(
-                            frameFieldOfView,
-                            0.05F,
-                            frameFarPlane,
-                            displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                            sceneFrameDeltaSeconds > 0.0F && Float.isFinite(sceneFrameDeltaSeconds)
-                                    ? sceneFrameDeltaSeconds : 1.0F / 60.0F
-                    );
+                    frameCameraPerspective.atSourceInterval(sceneFrameDeltaSeconds);
             return new FrameSynthesisContract.FrameGenerationAdmission(
                     stamp,
                     coverage,
@@ -4780,11 +4788,11 @@ public final class MetalFxManager {
                 frameGenerationInputHeight,
                 pixelJitter.x,
                 pixelJitter.y,
-                frameFieldOfView,
-                0.05F,
-                frameFarPlane,
-                displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                sceneFrameDeltaSeconds,
+                admission.camera().fieldOfViewDegrees(),
+                admission.camera().nearPlane(),
+                admission.camera().farPlane(),
+                admission.camera().aspectRatio(),
+                admission.camera().deltaSeconds(),
                 frameResetForPresent,
                 frameId,
                 admission

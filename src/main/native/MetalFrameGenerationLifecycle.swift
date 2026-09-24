@@ -1,4 +1,51 @@
 import Foundation
+import CoreFoundation
+
+/// Immutable source values consumed by both Metal 3 and Metal 4 interpolation.
+/// Motion is stored as a top-left oriented NDC displacement (previous-current).
+/// The SDK scales it into PREVIOUS COLOR pixels, not depth/motion texel units.
+/// Input allocation dimensions must therefore never determine these scales.
+struct MetalFxFrameParameters: Equatable {
+    let depthWidth: Int
+    let depthHeight: Int
+    let colorWidth: Int
+    let colorHeight: Int
+    let jitterX: Float
+    let jitterY: Float
+    let fieldOfView: Float
+    let nearPlane: Float
+    let farPlane: Float
+    let aspectRatio: Float
+    let deltaTime: Float
+
+    var motionScaleX: Float { Float(colorWidth) * 0.5 }
+    var motionScaleY: Float { Float(colorHeight) * 0.5 }
+
+    init?(depthWidth: Int, depthHeight: Int, colorWidth: Int, colorHeight: Int,
+          jitterX: Float, jitterY: Float, fieldOfView: Float, nearPlane: Float,
+          farPlane: Float, aspectRatio: Float, deltaTime: Float) {
+        guard depthWidth > 0, depthHeight > 0, colorWidth > 0, colorHeight > 0,
+              depthWidth <= Int(Int32.max), depthHeight <= Int(Int32.max),
+              colorWidth <= Int(Int32.max), colorHeight <= Int(Int32.max),
+              jitterX.isFinite, jitterY.isFinite,
+              fieldOfView.isFinite, fieldOfView > 0, fieldOfView < 180,
+              nearPlane.isFinite, nearPlane > 0,
+              farPlane.isFinite, farPlane > nearPlane,
+              aspectRatio.isFinite, aspectRatio > 0,
+              deltaTime.isFinite, deltaTime > 0 else { return nil }
+        self.depthWidth = depthWidth
+        self.depthHeight = depthHeight
+        self.colorWidth = colorWidth
+        self.colorHeight = colorHeight
+        self.jitterX = jitterX
+        self.jitterY = jitterY
+        self.fieldOfView = fieldOfView
+        self.nearPlane = nearPlane
+        self.farPlane = farPlane
+        self.aspectRatio = aspectRatio
+        self.deltaTime = deltaTime
+    }
+}
 
 /// CPU reference for bounded Frame Generation input resampling.
 ///
@@ -423,15 +470,24 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
     }
     private var nextEpoch: UInt64 = 0
     private var entries: [Key: Entry] = [:]
+    private var activeKey: Key?
 
     mutating func begin(_ key: Key, reset: Bool) -> Submission {
+        // Returning to a cached format/extent is NOT a continuation of its old
+        // source stream. Invalidate even when an upstream reset flag was lost.
+        if activeKey != key {
+            invalidateAll()
+            activeKey = key
+        }
         if reset || entries[key] == nil {
+            precondition(nextEpoch < UInt64.max, "Depth history epoch exhausted")
             nextEpoch += 1
             entries[key] = Entry(epoch: nextEpoch)
         }
         var entry = entries[key]!
         // A completed older copy is not the immediately preceding source.
         let valid = entry.succeeded && entry.completed == entry.issued
+        precondition(entry.issued < UInt64.max, "Depth history submission exhausted")
         entry.issued += 1
         entries[key] = entry
         return Submission(ticket: Ticket(epoch: entry.epoch, submission: entry.issued),
@@ -440,7 +496,7 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
 
     mutating func complete(_ key: Key, ticket: Ticket, succeeded: Bool) {
         guard var entry = entries[key], entry.epoch == ticket.epoch,
-              ticket.submission > entry.completed, ticket.submission <= entry.issued else { return }
+              ticket.submission > entry.completed, ticket.submission == entry.issued else { return }
         entry.completed = ticket.submission
         entry.succeeded = succeeded
         entries[key] = entry
@@ -456,6 +512,7 @@ struct MetalFxDepthHistoryOwnership<Key: Hashable> {
 
     mutating func invalidateAll() {
         entries.removeAll()
+        activeKey = nil
         // Deliberately retain nextEpoch: outstanding callbacks may still exist.
     }
 }

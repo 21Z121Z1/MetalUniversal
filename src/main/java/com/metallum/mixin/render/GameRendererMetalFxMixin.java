@@ -7,7 +7,9 @@ import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import org.jspecify.annotations.Nullable;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
@@ -46,10 +48,12 @@ public abstract class GameRendererMetalFxMixin {
     )
     private TextureTarget metallum$createHudDepthTarget(
             final String label, final int width, final int height,
-            final GpuFormat colorFormat, final GpuFormat depthFormat
+            final @Nullable GpuFormat colorFormat, final @Nullable GpuFormat depthFormat
     ) {
-        return new TextureTarget(label, MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height),
-                colorFormat, depthFormat);
+        // GameRenderer's sole TextureTarget is hud_3d_depth. Match main scene
+        // dimensions at construction, not only after the first window resize.
+        return new TextureTarget(label, MetalFxManager.sceneWidth(width),
+                MetalFxManager.sceneHeight(height), colorFormat, depthFormat);
     }
 
     @Redirect(
@@ -104,17 +108,18 @@ public abstract class GameRendererMetalFxMixin {
         );
     }
 
-    @ModifyArg(
+    @Redirect(
             method = "render3dHud",
             at = @At(
                     value = "INVOKE",
                     target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V"
-            ),
-            index = 0
+            )
     )
-    private GpuTexture metallum$preserveWorldDepthBeforeHand(final GpuTexture actualHandDepth) {
-        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, actualHandDepth);
-        return actualHandDepth;
+    private void metallum$preserveWorldDepthBeforeHand(
+            final CommandEncoder encoder, final GpuTexture depthTexture, final double clearValue
+    ) {
+        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, depthTexture);
+        encoder.clearDepthTexture(depthTexture, clearValue);
     }
 
     @Inject(

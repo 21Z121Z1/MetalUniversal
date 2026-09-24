@@ -64,19 +64,24 @@ final class MetalFxMath {
     }
 
     /**
-     * Applies clip.xy += jitter * clip.w after the complete world projection.
-     * Minecraft 26.3 has already multiplied bob, hurt and portal transforms at
-     * this hook. Editing only m20/m21 assumes an untransformed perspective and
-     * is not equivalent. JOML names entries column first, row second.
+     * Applies a clip-space translation after the complete world projection:
+     * {@code clip.xy += clipJitter * clip.w}. Minecraft 26.3 folds bob/hurt
+     * transforms and portal/nausea distortion into that projection. Its W row
+     * is therefore not necessarily {@code (0, 0, -1, 0)}. Updating only m20/m21
+     * gives a position-dependent raster offset for those ordinary world frames.
+     *
+     * <p>All four columns participate. Z and W remain unchanged, so the jitter
+     * cannot change depth, clipping or the homogeneous divide. The unjittered
+     * projection remains the motion-vector reference.
      */
     static void applyProjectionJitter(final Matrix4f projection, final Vector2f clipJitter) {
         projection.m00(projection.m00() + clipJitter.x * projection.m03());
-        projection.m10(projection.m10() + clipJitter.x * projection.m13());
-        projection.m20(projection.m20() + clipJitter.x * projection.m23());
-        projection.m30(projection.m30() + clipJitter.x * projection.m33());
         projection.m01(projection.m01() + clipJitter.y * projection.m03());
+        projection.m10(projection.m10() + clipJitter.x * projection.m13());
         projection.m11(projection.m11() + clipJitter.y * projection.m13());
+        projection.m20(projection.m20() + clipJitter.x * projection.m23());
         projection.m21(projection.m21() + clipJitter.y * projection.m23());
+        projection.m30(projection.m30() + clipJitter.x * projection.m33());
         projection.m31(projection.m31() + clipJitter.y * projection.m33());
     }
 
@@ -101,25 +106,45 @@ final class MetalFxMath {
             return;
         }
         float ratio = displayAspect / renderAspect;
+        // Resolution rounding changes the aspect of the completed projection,
+        // not just the original perspective's focal-length coefficient.
         projection.m00(projection.m00() * ratio);
         projection.m10(projection.m10() * ratio);
         projection.m20(projection.m20() * ratio);
         projection.m30(projection.m30() * ratio);
     }
 
-    static float verticalFieldOfViewDegrees(final Matrix4fc projection, final float fallback) {
+    static float verticalFieldOfViewDegrees(final Matrix4fc projection) {
         float focalLength = projection.m11();
-        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)) {
-            return fallback;
+        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)
+                || projection.m23() != -1.0F || projection.m33() != 0.0F) {
+            return Float.NaN;
         }
         float fieldOfView = (float) Math.toDegrees(2.0D * Math.atan(1.0D / focalLength));
-        // Minecraft's perspective FOV slider and its camera effects stay well
-        // above 15 degrees. During world initialization the camera state can
-        // briefly expose a valid but stale projection (for example ~8
-        // degrees); passing that to frame interpolation produces an invalid
-        // camera model for the first queued frame.
-        return fieldOfView >= 15.0F && fieldOfView < 170.0F && Float.isFinite(fieldOfView)
-                ? fieldOfView : fallback;
+        // A narrow perspective may be a real zoom. Never replace it with a
+        // guessed normal FOV; invalid initialization is represented by NaN.
+        return fieldOfView > 0.0F && fieldOfView < 180.0F && Float.isFinite(fieldOfView)
+                ? fieldOfView : Float.NaN;
+    }
+
+    static boolean isRigidViewTransform(final Matrix4fc matrix) {
+        if (!isFinite(matrix) || Math.abs(matrix.m03()) > 1.0E-5F
+                || Math.abs(matrix.m13()) > 1.0E-5F || Math.abs(matrix.m23()) > 1.0E-5F
+                || Math.abs(matrix.m33() - 1.0F) > 1.0E-5F) {
+            return false;
+        }
+        for (int first = 0; first < 3; first++) {
+            for (int second = first; second < 3; second++) {
+                float dot = 0;
+                for (int row = 0; row < 3; row++) {
+                    dot += matrix.get(first, row) * matrix.get(second, row);
+                }
+                if (Math.abs(dot - (first == second ? 1.0F : 0.0F)) > 1.0E-4F) {
+                    return false;
+                }
+            }
+        }
+        return Math.abs(matrix.determinant3x3() - 1.0F) <= 1.0E-4F;
     }
 
     static Matrix4f viewMatrix(final Matrix4fc viewRotation, final double cameraX, final double cameraY, final double cameraZ) {
