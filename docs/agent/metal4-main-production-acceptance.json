@@ -197,7 +197,7 @@
       "inactivity_fps_limit": "minimized"
     },
     "ui_scale_default": 3,
-    "render_distance_default": 16,
+    "render_distance_default": 32,
     "mutable_options_iris_config_and_staged_shader_inputs_are_restored_or_removed": true,
     "common_identity_fields_must_match_across_profiles": [
       "candidate_sha",

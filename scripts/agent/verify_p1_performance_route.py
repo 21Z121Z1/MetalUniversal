@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify that P1 benchmark properties reach the Minecraft client JVM."""
 from pathlib import Path
+import json
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -9,6 +10,8 @@ RUNNER = (ROOT / "scripts/agent/run_metal4_main_p1_physical_performance.sh").rea
 MATRIX = (ROOT / "scripts/agent/run_metal4_main_p1_physical_matrix.sh").read_text(encoding="utf-8")
 IRIS_COMPAT = (ROOT / "src/main/java/com/metallum/client/metal/render/MetalIrisCompat.java").read_text(encoding="utf-8")
 VALIDATION_CLIENT = (ROOT / "src/main/java/com/metallum/client/validation/MetalValidationClient.java").read_text(encoding="utf-8")
+P1_CONTRACT = json.loads((ROOT / "docs/agent/metal4-main-production-acceptance.json").read_text(encoding="utf-8"))
+BENCHMARK_CONTRACT = json.loads((ROOT / "docs/agent/benchmark-profiles.json").read_text(encoding="utf-8"))
 
 
 def require(condition: bool, message: str) -> None:
@@ -99,6 +102,12 @@ require('report.addProperty("drawableWidth"' in VALIDATION_CLIENT
         "native fullscreen report no longer records the runtime drawable size")
 require('system_profiler SPDisplaysDataType -json' in RUNNER,
         "physical performance runner does not read the active macOS display mode")
+require('RENDER_DISTANCE="${RENDER_DISTANCE:-32}"' in RUNNER,
+        "P1 physical performance runner default is not the requested 32 chunks")
+require(P1_CONTRACT.get("performance_policy", {}).get("render_distance_default") == 32,
+        "P1 acceptance contract does not pin its default render distance to 32 chunks")
+require(BENCHMARK_CONTRACT.get("measurement", {}).get("default_render_distance") == 32,
+        "benchmark profile contract does not pin its default render distance to 32 chunks")
 
 # Performance evidence must use the same product binaries that passed the
 # paired physical correctness run.

@@ -43,7 +43,7 @@
     },
     {
       "id": "V1",
-      "purpose": "Deterministic Sodium/Iris-loaded fixed-world/fixed-camera no-shader performance profile",
+      "purpose": "Deterministic Sodium/Iris-loaded fixed-world/fixed-camera no-shader 32-chunk performance profile",
       "stack": {
         "minecraft": "26.3",
         "sodium": true,
@@ -208,6 +208,7 @@
     "display_mode": "fullscreen at a fixed active-refresh and FPS target; runtime drawable is captured from the first baseline trial and held constant",
     "default_target_fps": 120,
     "default_target_refresh_hz": 120,
+    "default_render_distance": 32,
     "vsync_required": true,
     "inactivity_fps_limit": "minimized",
     "warmup_seconds_min": 30,
