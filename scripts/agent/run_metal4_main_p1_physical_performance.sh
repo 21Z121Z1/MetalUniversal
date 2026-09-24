@@ -113,6 +113,36 @@ if ! [[ "$TARGET_REFRESH_HZ" =~ ^[0-9]+$ ]] || (( TARGET_REFRESH_HZ < 1 )); then
   echo "METALLUM_EVAL_REFRESH_HZ must be a positive integer" >&2
   exit 2
 fi
+DISPLAY_PROFILE_JSON="$(system_profiler SPDisplaysDataType -json)"
+read -r HOST_DISPLAY_WIDTH HOST_DISPLAY_HEIGHT HOST_DISPLAY_REFRESH_HZ < <(
+  python3 - "$DISPLAY_PROFILE_JSON" <<'PY'
+import json, sys
+root = json.loads(sys.argv[1])
+displays = [display for gpu in root.get("SPDisplaysDataType", [])
+            for display in gpu.get("spdisplays_ndrvs", [])]
+main = next((display for display in displays
+             if display.get("spdisplays_main") == "spdisplays_yes"
+             and display.get("spdisplays_online") == "spdisplays_yes"), None)
+if main is None:
+    raise SystemExit("system_profiler found no online main display")
+pixels = main.get("_spdisplays_pixels", "").split(" x ")
+resolution = main.get("_spdisplays_resolution", "")
+if len(pixels) != 2 or "@" not in resolution or not resolution.rstrip().endswith("Hz"):
+    raise SystemExit(f"system_profiler main display lacks native pixels or active refresh: {main}")
+try:
+    width, height = (int(value.strip()) for value in pixels)
+    refresh = float(resolution.split("@", 1)[1].strip()[:-2].strip())
+except ValueError as exc:
+    raise SystemExit(f"could not parse system_profiler main display mode: {main}") from exc
+print(width, height, refresh)
+PY
+)
+python3 - "$HOST_DISPLAY_REFRESH_HZ" "$TARGET_REFRESH_HZ" <<'PY'
+import math, sys
+actual, expected = float(sys.argv[1]), float(sys.argv[2])
+if not math.isfinite(actual) or abs(actual - expected) > 0.5:
+    raise SystemExit(f"active main display is {actual:g} Hz; benchmark target is {expected} Hz")
+PY
 if [[ -n "$EXPECTED_FRAMEBUFFER_WIDTH" || -n "$EXPECTED_FRAMEBUFFER_HEIGHT" ]]; then
   if ! [[ "$EXPECTED_FRAMEBUFFER_WIDTH" =~ ^[0-9]+$ ]] || (( EXPECTED_FRAMEBUFFER_WIDTH < 1 )) \
       || ! [[ "$EXPECTED_FRAMEBUFFER_HEIGHT" =~ ^[0-9]+$ ]] || (( EXPECTED_FRAMEBUFFER_HEIGHT < 1 )); then
@@ -128,6 +158,16 @@ fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
 mkdir -p "$OUT/correctness" "$OUT/trials"
+
+assert_console_unlocked() {
+  local lock_state
+  lock_state="$(ioreg -n Root -d1 | awk -F'= ' '/IOConsoleLocked/ { gsub(/"/, "", $2); print $2; exit }')"
+  if [[ "$lock_state" != "No" ]]; then
+    echo "physical fullscreen P1 trial requires an unlocked WindowServer console (IOConsoleLocked=$lock_state)" >&2
+    return 2
+  fi
+}
+assert_console_unlocked
 
 read -r CORRECTNESS_JAR_SHA CORRECTNESS_DYLIB_SHA < <(
   python3 - "$CORRECTNESS_GATE" "$HEAD_SHA" <<'PY'
@@ -297,6 +337,30 @@ else
   pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
 fi
 
+assert_pinned_render_options() {
+  python3 - "$OPTIONS_FILE" "$UI_SCALE" "$RENDER_DISTANCE" "$TARGET_FPS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+expected = {
+    "guiScale": sys.argv[2],
+    "renderDistance": sys.argv[3],
+    "maxFps": sys.argv[4],
+    "enableVsync": "true",
+    "fullscreen": "true",
+    "inactivityFpsLimit": "minimized",
+}
+actual = {}
+for raw in path.read_text(encoding="utf-8").splitlines():
+    if ":" in raw:
+        key, value = raw.split(":", 1)
+        actual[key] = value
+bad = {key: (actual.get(key), value) for key, value in expected.items() if actual.get(key) != value}
+if bad:
+    raise SystemExit(f"fullscreen render options drifted from the P1 contract: {bad}")
+PY
+}
+assert_pinned_render_options
+
 cp -a "run/saves/$WORLD" "$SNAPSHOT"
 
 world_sha256() {
@@ -362,12 +426,13 @@ lane_args() {
 
 validate_trial_identity() {
   local report="$1" lane="$2" log="$3"
-  python3 - "$report" "$lane" "$HEAD_SHA" "$OUT/environment.json" "$TARGET_FPS" "$TARGET_REFRESH_HZ" <<'PY'
+  python3 - "$report" "$lane" "$HEAD_SHA" "$OUT/environment.json" \
+    "$HOST_DISPLAY_WIDTH" "$HOST_DISPLAY_HEIGHT" <<'PY'
 import json, math, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 lane, head = sys.argv[2], sys.argv[3]
 environment_path = pathlib.Path(sys.argv[4])
-target_fps, target_refresh_hz = int(sys.argv[5]), int(sys.argv[6])
+display_width, display_height = int(sys.argv[5]), int(sys.argv[6])
 data = json.loads(path.read_text(encoding="utf-8"))
 environment = json.loads(environment_path.read_text(encoding="utf-8"))
 identity = environment.get("identity")
@@ -381,8 +446,14 @@ else:
     width = height = None
 actual_width, actual_height = data.get("drawableWidth"), data.get("drawableHeight")
 problems = []
-if not isinstance(actual_width, int) or actual_width <= 0 or not isinstance(actual_height, int) or actual_height <= 0:
+if (not isinstance(actual_width, int) or isinstance(actual_width, bool) or actual_width <= 0
+        or not isinstance(actual_height, int) or isinstance(actual_height, bool) or actual_height <= 0):
     problems.append(f"fullscreen drawable is invalid: {actual_width}x{actual_height}")
+elif actual_width < math.ceil(display_width * 0.95) or actual_height < math.ceil(display_height * 0.90):
+    problems.append(
+        f"drawable {actual_width}x{actual_height} does not fill main display "
+        f"{display_width}x{display_height} within fullscreen bounds"
+    )
 elif width is not None and height is not None and (actual_width, actual_height) != (width, height):
     problems.append(f"drawable {actual_width}x{actual_height} != captured fullscreen baseline {width}x{height}")
 elif width is None or height is None:
@@ -394,22 +465,6 @@ elif width is None or height is None:
         pinned = environment.setdefault("pinned_runtime_config", {})
         pinned["expected_framebuffer"] = [actual_width, actual_height]
         environment_path.write_text(json.dumps(environment, indent=2) + "\n", encoding="utf-8")
-if data.get("windowFullscreen") is not True:
-    problems.append("Minecraft did not report fullscreen mode")
-if data.get("windowFocused") is not True or data.get("windowIconified") is not False:
-    problems.append("fullscreen trial is not focused and visible")
-if data.get("vsyncEnabled") is not True:
-    problems.append("VSync is not enabled")
-if data.get("configuredFpsLimit") != target_fps or data.get("effectiveFpsLimit") != target_fps:
-    problems.append(f"FPS limit configured/effective={data.get('configuredFpsLimit')}/{data.get('effectiveFpsLimit')} != {target_fps}")
-if data.get("framerateThrottleReason") != "NONE":
-    problems.append(f"gameplay frame limiter is active: {data.get('framerateThrottleReason')}")
-if data.get("inactivityFpsLimit") != "minimized":
-    problems.append(f"inactivity FPS policy is not minimized-only: {data.get('inactivityFpsLimit')}")
-refresh_hz = data.get("activeDisplayRefreshHz")
-if not isinstance(refresh_hz, (int, float)) or isinstance(refresh_hz, bool) or not math.isfinite(refresh_hz) \
-        or abs(refresh_hz - target_refresh_hz) > 0.5:
-    problems.append(f"active display refresh {refresh_hz} Hz != target {target_refresh_hz} Hz")
 if not isinstance(data.get("measuredFrameIntervals"), int) or data.get("measuredFrameIntervals") <= 0:
     problems.append("no measured frame intervals")
 readback = data.get("nativeMainReadback")
@@ -437,6 +492,8 @@ PY
 run_trial() {
   local lane="$1" trial_dir="$2"
   local args=() arg status report
+  assert_console_unlocked
+  assert_pinned_render_options
   reset_eval_world
   mkdir -p "$trial_dir/artifacts/validation"
   while IFS= read -r arg; do args+=("$arg"); done < <(lane_args "$lane")
@@ -463,6 +520,8 @@ run_trial() {
   if (( status != 0 )); then
     return "$status"
   fi
+  assert_console_unlocked
+  assert_pinned_render_options
 
   report="$(find "$trial_dir" -type f -name native-fullscreen-baseline.json -print | head -n 1)"
   if [[ -z "$report" ]]; then
@@ -486,7 +545,8 @@ python3 - "$OUT/environment.json" "$HEAD_SHA" "$CORRECTNESS_JAR_SHA" "$CORRECTNE
   "$CAMERA_POLICY" "$CAMERA_SCRIPT_SHA" "$OPTIONS_SHA" "$IRIS_CONFIG_SHA" \
   "$SHADER_PACK_LABEL" "$SHADER_PACK_VERSION" "$SHADER_PACK_SHA" "$SHADER_OPTIONS_SHA" \
   "$BLOCKS" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" "$TARGET_FPS" "$TARGET_REFRESH_HZ" \
-  "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" <<'PY'
+  "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" \
+  "$HOST_DISPLAY_WIDTH" "$HOST_DISPLAY_HEIGHT" "$HOST_DISPLAY_REFRESH_HZ" <<'PY'
 import json, os, pathlib, platform, subprocess, sys
 path = pathlib.Path(sys.argv[1])
 def cmd(*args):
@@ -519,11 +579,10 @@ identity = {
     "window_mode": "fullscreen",
     "target_fps": int(sys.argv[22]),
     "target_refresh_hz": int(sys.argv[23]),
+    "display_pixel_mode": [int(sys.argv[26]), int(sys.argv[27])],
+    "display_refresh_hz": float(sys.argv[28]),
     "vsync_enabled": True,
-    "window_focused": True,
-    "window_iconified": False,
     "inactivity_fps_limit": "minimized",
-    "expected_framerate_throttle_reason": "NONE",
     "ui_scale": int(sys.argv[9]),
     "render_distance": int(sys.argv[10]),
     "camera_pose": sys.argv[11],
@@ -545,24 +604,24 @@ required_by_profile = {
     "V1": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
-        "camera_script_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
-        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "camera_script_sha256", "window_mode", "target_fps", "target_refresh_hz", "display_pixel_mode",
+        "display_refresh_hz", "vsync_enabled", "inactivity_fps_limit",
         "minecraft_version", "sodium_version", "macos_version", "java_version"
     },
     "I0": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
         "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
-        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
-        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "display_pixel_mode",
+        "display_refresh_hz", "vsync_enabled", "inactivity_fps_limit",
         "minecraft_version", "sodium_version", "iris_version", "macos_version", "java_version"
     },
     "I1": {
         "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
         "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
         "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
-        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "vsync_enabled",
-        "window_focused", "window_iconified", "inactivity_fps_limit", "expected_framerate_throttle_reason",
+        "shader_options_sha256", "window_mode", "target_fps", "target_refresh_hz", "display_pixel_mode",
+        "display_refresh_hz", "vsync_enabled", "inactivity_fps_limit",
         "minecraft_version", "sodium_version", "iris_version", "macos_version", "java_version"
     },
 }
@@ -585,6 +644,9 @@ path.write_text(json.dumps({
         "frame_generation": False,
         "expected_framebuffer": ([int(sys.argv[24]), int(sys.argv[25])]
                                   if sys.argv[24] and sys.argv[25] else "captured-from-first-fullscreen-baseline"),
+        "display_pixel_mode": [int(sys.argv[26]), int(sys.argv[27])],
+        "display_refresh_hz": float(sys.argv[28]),
+        "minimum_fullscreen_drawable_fraction": {"width": 0.95, "height": 0.90},
         "window_mode": "fullscreen",
         "target_fps": int(sys.argv[22]),
         "target_refresh_hz": int(sys.argv[23]),
@@ -597,7 +659,12 @@ path.write_text(json.dumps({
     "pairing": "ABBA-equivalent alternating order",
     "machine": platform.machine(),
     "xcode": cmd("xcodebuild", "-version"),
-    "display": os.environ.get("METALLUM_EVAL_DISPLAY", "unrecorded"),
+    "display": {
+        "label": os.environ.get("METALLUM_EVAL_DISPLAY", "unrecorded"),
+        "native_pixel_mode": [int(sys.argv[26]), int(sys.argv[27])],
+        "active_refresh_hz": float(sys.argv[28]),
+        "source": "system_profiler SPDisplaysDataType active online main display",
+    },
     "powerState": os.environ.get("METALLUM_EVAL_POWER_STATE", "unrecorded"),
     "laneContract": {
         "common": f"{profile} benchmark stack + Metal4 compiler/present + explicit residency; MetalFX/FG and unrelated experimental lanes off",

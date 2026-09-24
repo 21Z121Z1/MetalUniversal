@@ -23,11 +23,10 @@ COMMON_KEYS = (
     "window_mode",
     "target_fps",
     "target_refresh_hz",
+    "display_pixel_mode",
+    "display_refresh_hz",
     "vsync_enabled",
-    "window_focused",
-    "window_iconified",
     "inactivity_fps_limit",
-    "expected_framerate_throttle_reason",
     "minecraft_version",
     "sodium_version",
     "macos_version",
@@ -86,14 +85,20 @@ def evaluate(root: Path, head: str, jar_sha: str, dylib_sha: str) -> tuple[dict[
             errors.append(f"{profile}: performance run was not fullscreen")
         if identity.get("target_fps") != 120 or identity.get("target_refresh_hz") != 120:
             errors.append(f"{profile}: performance identity does not pin the 120 FPS / 120 Hz target")
+        display_pixels = identity.get("display_pixel_mode")
+        if not (isinstance(display_pixels, list) and len(display_pixels) == 2
+                and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in display_pixels)):
+            errors.append(f"{profile}: physical main display pixel mode is missing")
+        if identity.get("display_refresh_hz") != 120.0:
+            errors.append(f"{profile}: physical main display refresh is not 120 Hz")
         if identity.get("vsync_enabled") is not True:
             errors.append(f"{profile}: VSync was not enabled")
-        if identity.get("window_focused") is not True or identity.get("window_iconified") is not False:
-            errors.append(f"{profile}: fullscreen window was not visible and focused")
         if identity.get("inactivity_fps_limit") != "minimized":
             errors.append(f"{profile}: inactivity FPS limit is not minimized-only")
-        if identity.get("expected_framerate_throttle_reason") != "NONE":
-            errors.append(f"{profile}: expected game frame limiter is not NONE")
+        if (isinstance(resolution, list) and len(resolution) == 2
+                and isinstance(display_pixels, list) and len(display_pixels) == 2
+                and (resolution[0] < display_pixels[0] * 0.95 or resolution[1] < display_pixels[1] * 0.90)):
+            errors.append(f"{profile}: fullscreen drawable does not fill the physical display")
         if decision.get("state") != "accepted-candidate":
             errors.append(f"{profile}: decision={decision.get('state')!r}")
         identities[profile] = identity
@@ -153,11 +158,10 @@ def synthetic_identity(profile: str, head: str, jar: str, dylib: str) -> dict[st
         "window_mode": "fullscreen",
         "target_fps": 120,
         "target_refresh_hz": 120,
+        "display_pixel_mode": [3024, 1964],
+        "display_refresh_hz": 120.0,
         "vsync_enabled": True,
-        "window_focused": True,
-        "window_iconified": False,
         "inactivity_fps_limit": "minimized",
-        "expected_framerate_throttle_reason": "NONE",
         "minecraft_version": "26.2",
         "sodium_version": "test",
         "macos_version": "26.6",

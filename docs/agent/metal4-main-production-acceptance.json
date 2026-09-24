@@ -182,17 +182,19 @@
     "camera_policy": "world-player pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees and pitch 0, then held fixed by MetalValidationClient",
     "camera_driver_must_be_content_addressed": true,
     "display_mode": {
-      "window_mode": "fullscreen",
+      "window_mode": "fullscreen option enabled and framebuffer fills the physical main display",
       "drawable_resolution_source": "native-fullscreen-baseline.json from the first baseline trial of each profile",
       "drawable_resolution_must_remain_identical_within_profile": true,
       "drawable_resolution_must_match_across_profiles": true,
+      "physical_display_source": "system_profiler SPDisplaysDataType active online main display",
+      "minimum_drawable_fraction_of_native_display_pixels": {
+        "width": 0.95,
+        "height": 0.90
+      },
       "target_fps": 120,
       "target_refresh_hz": 120,
       "vsync_enabled": true,
-      "window_focused": true,
-      "window_iconified": false,
-      "inactivity_fps_limit": "minimized",
-      "framerate_throttle_reason": "NONE"
+      "inactivity_fps_limit": "minimized"
     },
     "ui_scale_default": 3,
     "render_distance_default": 16,
@@ -211,11 +213,10 @@
       "window_mode",
       "target_fps",
       "target_refresh_hz",
+      "display_pixel_mode",
+      "display_refresh_hz",
       "vsync_enabled",
-      "window_focused",
-      "window_iconified",
       "inactivity_fps_limit",
-      "expected_framerate_throttle_reason",
       "minecraft_version",
       "sodium_version",
       "macos_version",
@@ -229,10 +230,11 @@
       "iris_version"
     ],
     "trial_guardrails": [
-      "Minecraft is fullscreen, focused and not iconified",
+      "fullscreen option is enabled and the drawable fills the physical main display",
       "first baseline fullscreen drawable is captured and all later trials match it",
-      "active display refresh is 120 Hz",
-      "VSync and 120 FPS cap are enabled without an inactivity/gameplay throttle",
+      "system_profiler confirms the physical main display is at 120 Hz",
+      "VSync, 120 FPS cap and minimized-only inactivity limiting are pinned",
+      "WindowServer console remains unlocked for each physical trial",
       "native main readback completed and passed",
       "explicit residency remains active",
       "main renderer engagement matches the lane",

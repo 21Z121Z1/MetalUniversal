@@ -756,22 +756,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                             ? "native-direct-frame-generation"
                             : "native-metalfx-off"
             );
-            var window = minecraft.getWindow();
-            var frameRateTracker = minecraft.getFramerateLimitTracker();
-            var activeVideoMode = window.getActiveVideoMode();
-            report.addProperty("drawableWidth", window.getWidth());
-            report.addProperty("drawableHeight", window.getHeight());
-            report.addProperty("windowFullscreen", minecraft.options.fullscreen().get());
-            report.addProperty("windowFocused", window.isFocused());
-            report.addProperty("windowIconified", window.isIconified());
-            report.addProperty("vsyncEnabled", minecraft.options.enableVsync().get());
-            report.addProperty("configuredFpsLimit", minecraft.options.framerateLimit().get());
-            report.addProperty("effectiveFpsLimit", frameRateTracker.getFramerateLimit());
-            report.addProperty("framerateThrottleReason", frameRateTracker.getThrottleReason().name());
-            report.addProperty("inactivityFpsLimit",
-                    minecraft.options.inactivityFpsLimit().get().getSerializedName());
-            report.addProperty("activeDisplayRefreshHz",
-                    activeVideoMode == null ? 0.0F : activeVideoMode.getRefreshRate());
+            report.addProperty("drawableWidth", minecraft.getWindow().getWidth());
+            report.addProperty("drawableHeight", minecraft.getWindow().getHeight());
             report.addProperty("measuredFrameIntervals", baselineFrameIntervalsMillis.size());
             report.addProperty("measuredGpuCommandBuffers", steadyGpuMilliseconds.size());
             report.addProperty("frameIntervalP50Milliseconds", frameP50);

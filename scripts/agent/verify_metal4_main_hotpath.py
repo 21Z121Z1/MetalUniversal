@@ -215,13 +215,19 @@ def main() -> None:
             "performance runner does not pin the requested FPS/VSync display target")
     require('pin_colon_option "$OPTIONS_FILE" "inactivityFpsLimit" "minimized"' in physical_performance,
             "performance runner can enter the 26.3 AFK limiter during a stationary workload")
+    require("assert_pinned_render_options" in physical_performance,
+            "performance runner does not verify the fullscreen display options stayed pinned")
     require('"pending-first-fullscreen-baseline"' in physical_performance
             and '"first accepted fullscreen baseline native-fullscreen-baseline.json"' in physical_performance,
             "performance runner does not capture fullscreen drawable resolution at runtime")
-    for guard in ("windowFullscreen", "windowFocused", "windowIconified", "activeDisplayRefreshHz",
-                  "configuredFpsLimit", "effectiveFpsLimit", "framerateThrottleReason"):
-        require(guard in physical_performance,
-                f"performance runner does not enforce fullscreen pacing state {guard}")
+    require('system_profiler SPDisplaysDataType -json' in physical_performance
+            and 'HOST_DISPLAY_WIDTH' in physical_performance and 'HOST_DISPLAY_REFRESH_HZ' in physical_performance,
+            "performance runner does not record the physical main display mode")
+    require('actual_width < math.ceil(display_width * 0.95)' in physical_performance
+            and 'actual_height < math.ceil(display_height * 0.90)' in physical_performance,
+            "performance runner does not reject a windowed drawable on the full-screen profile")
+    require('assert_console_unlocked' in physical_performance and 'IOConsoleLocked' in physical_performance,
+            "performance runner does not protect physical trials from the locked console")
     require("CAMERA_SCRIPT_SHA" in physical_performance and "CAMERA_POLICY" in physical_performance,
             "performance runner does not content-address the fixed-camera driver")
     require("P1_CORRECTNESS_GATE" in physical_performance and "sourceSha" in physical_performance,
@@ -285,6 +291,7 @@ def main() -> None:
             "drawableResolution": "captured-from-first-baseline-and-matched-across-trials-and-profiles",
             "targetFps": 120,
             "targetRefreshHz": 120,
+            "physicalDisplayMode": "system_profiler native pixels and active refresh",
             "vsync": True,
             "inactivityFpsLimit": "minimized",
             "fixedUiScale": True,

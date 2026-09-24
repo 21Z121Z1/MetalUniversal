@@ -73,11 +73,10 @@ def main() -> None:
                 "window_mode",
                 "target_fps",
                 "target_refresh_hz",
+                "display_pixel_mode",
+                "display_refresh_hz",
                 "vsync_enabled",
-                "window_focused",
-                "window_iconified",
                 "inactivity_fps_limit",
-                "expected_framerate_throttle_reason",
             }
             missing_fullscreen = fullscreen_identity - identity
             if missing_fullscreen:

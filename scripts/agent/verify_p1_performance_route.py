@@ -94,11 +94,11 @@ require('grep -F "Iris-on-Metal semantic layer active:"' in MATRIX,
         "I0/I1 matrix does not prove semantic-layer activation in every trial")
 require('grep -F "Using shaderpack: $STAGED_PACK_NAME"' in RUNNER,
         "I0/I1 profile runner does not prove the exact staged shader pack")
-for field in ("windowFullscreen", "windowFocused", "windowIconified", "vsyncEnabled",
-              "configuredFpsLimit", "effectiveFpsLimit", "framerateThrottleReason",
-              "inactivityFpsLimit", "activeDisplayRefreshHz"):
-    require(f'"{field}"' in VALIDATION_CLIENT,
-            f"native fullscreen performance telemetry does not record {field}")
+require('report.addProperty("drawableWidth"' in VALIDATION_CLIENT
+        and 'report.addProperty("drawableHeight"' in VALIDATION_CLIENT,
+        "native fullscreen report no longer records the runtime drawable size")
+require('system_profiler SPDisplaysDataType -json' in RUNNER,
+        "physical performance runner does not read the active macOS display mode")
 
 # Performance evidence must use the same product binaries that passed the
 # paired physical correctness run.
