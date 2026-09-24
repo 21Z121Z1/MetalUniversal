@@ -1,0 +1,35 @@
+name: MetalFX isolated cloud workbench
+on:
+  push:
+    branches: [agent/metalfx-cloud-workbench-20260924]
+    paths: [.github/workflows/metalfx-cloud-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact subjects without credentials or worktree state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e 53153cdee8b878496c7af18b74b323d1d6d83e2a^{commit}
+          git cat-file -e 29d192520e23e450faad7dfecb7ccc85e7a8de57^{commit}
+          git cat-file -e b0c6dcf349de072bd8b099e25085864a519a7a9f^{commit}
+          git branch export-candidate 53153cdee8b878496c7af18b74b323d1d6d83e2a
+          git branch export-85 29d192520e23e450faad7dfecb7ccc85e7a8de57
+          git branch export-main b0c6dcf349de072bd8b099e25085864a519a7a9f
+          git bundle create "$RUNNER_TEMP/metalfx-subjects.bundle" export-candidate export-85 export-main
+          git bundle verify "$RUNNER_TEMP/metalfx-subjects.bundle"
+          sha256sum "$RUNNER_TEMP/metalfx-subjects.bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metalfx-exact-subjects
+          path: ${{ runner.temp }}/metalfx-subjects.bundle
+          retention-days: 1
+          if-no-files-found: error
