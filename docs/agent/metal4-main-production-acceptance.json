@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
@@ -43,9 +43,16 @@
       "sample_count": 8,
       "camera_pose_and_world_identity_must_match": true,
       "actual_camera_pose_and_ungrabbed_mouse_must_be_recorded_per_sample": true,
-      "samples_must_be_byte_identical_within_each_lane": true,
-      "baseline_candidate_comparison": "byte-identical RGBA payload for every matching frameId",
-      "first_pixel_divergence_is_rejected": true
+      "visible_rgb_samples_must_be_byte_identical_within_each_lane": true,
+      "baseline_candidate_comparison": "byte-identical RGB channels for every matching frameId after opaque-surface projection",
+      "opaque_surface_projection": {
+        "surface": "CAMetalLayer",
+        "native_configuration": "layer.isOpaque=true",
+        "compared_channels": ["r", "g", "b"],
+        "alpha_channel": "recorded for diagnostics; excluded from visible-output equivalence"
+      },
+      "raw_alpha_deltas_are_recorded": true,
+      "first_visible_rgb_divergence_is_rejected": true
     },
     "resource_reload_recovery_required": true
   },

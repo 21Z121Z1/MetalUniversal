@@ -229,6 +229,15 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     worldEvidence.addProperty("simulationFrozenDuringFramebufferCapture", true);
                     worldEvidence.addProperty("serverSimulationFrozenDuringFramebufferCapture", serverFrozen);
                     worldEvidence.addProperty("clientSimulationFrozenDuringFramebufferCapture", clientFrozen);
+                    context.waitTicks(20);
+                    context.computeOnClient(client -> {
+                        client.gui.hud.getChat().clearMessages(false);
+                        client.gui.hud.clearTitles();
+                        client.gui.hud.resetTitleTimes();
+                        return null;
+                    });
+                    worldEvidence.addProperty("clientPresentationWarmupTicks", 20);
+                    worldEvidence.addProperty("transientHudMessagesCleared", true);
                     worldEvidence.add("cameraSamples", cameraSamples);
                     JsonObject waypoint = new JsonObject();
                     waypoint.addProperty("frameId", 1);
@@ -718,7 +727,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(cameraEntity != null, "P1 framebuffer capture has no camera entity");
             cameraEntity.setYRot(P1_FRAMEBUFFER_YAW);
             cameraEntity.setXRot(P1_FRAMEBUFFER_PITCH);
-            cameraEntity.setOldRot();
+            cameraEntity.setOldPosAndRot();
             pinVignette(cameraEntity);
 
             JsonObject sample = new JsonObject();

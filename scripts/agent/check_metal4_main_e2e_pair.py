@@ -203,24 +203,46 @@ def compare_framebuffers(baseline_root: Path, candidate_root: Path) -> dict[str,
             "frames": [],
         }
 
-    baseline_stable = len(set(baseline.values())) == 1
-    candidate_stable = len(set(candidate.values())) == 1
+    def visible_rgb(payload: bytes) -> bytes:
+        rgb = bytearray(len(payload) // 4 * 3)
+        rgb[0::3] = payload[0::4]
+        rgb[1::3] = payload[1::4]
+        rgb[2::3] = payload[2::4]
+        return bytes(rgb)
+
+    baseline_rgb = {frame_id: visible_rgb(payload) for frame_id, payload in baseline.items()}
+    candidate_rgb = {frame_id: visible_rgb(payload) for frame_id, payload in candidate.items()}
+    baseline_stable = len(set(baseline_rgb.values())) == 1
+    candidate_stable = len(set(candidate_rgb.values())) == 1
     frames = []
     for frame_id in range(1, FRAMEBUFFER_SAMPLE_COUNT + 1):
         before = baseline[frame_id]
         after = candidate[frame_id]
         differing_bytes = 0
+        differing_rgb_bytes = 0
+        differing_alpha_bytes = 0
         changed_pixels = 0
         changed_rgb_pixels = 0
         changed_alpha_pixels = 0
         first_byte = None
+        first_rgb_byte = None
         maximum_delta = 0
+        maximum_rgb_delta = 0
+        maximum_alpha_delta = 0
         for index, (left, right) in enumerate(zip(before, after)):
             if left != right:
                 differing_bytes += 1
                 if first_byte is None:
                     first_byte = index
                 maximum_delta = max(maximum_delta, abs(left - right))
+                if index % 4 == 3:
+                    differing_alpha_bytes += 1
+                    maximum_alpha_delta = max(maximum_alpha_delta, abs(left - right))
+                else:
+                    differing_rgb_bytes += 1
+                    maximum_rgb_delta = max(maximum_rgb_delta, abs(left - right))
+                    if first_rgb_byte is None:
+                        first_rgb_byte = index
         for index in range(0, len(before), 4):
             rgb_changed = before[index:index + 3] != after[index:index + 3]
             alpha_changed = before[index + 3] != after[index + 3]
@@ -240,17 +262,32 @@ def compare_framebuffers(baseline_root: Path, candidate_root: Path) -> dict[str,
                 "baseline": before[first_byte],
                 "candidate": after[first_byte],
             }
+        first_rgb_difference = None
+        if first_rgb_byte is not None:
+            pixel = first_rgb_byte // 4
+            first_rgb_difference = {
+                "x": pixel % FRAMEBUFFER_WIDTH,
+                "y": pixel // FRAMEBUFFER_WIDTH,
+                "channel": ("r", "g", "b")[first_rgb_byte % 4],
+                "baseline": before[first_rgb_byte],
+                "candidate": after[first_rgb_byte],
+            }
         frames.append({
             "frameId": frame_id,
-            "status": "exact-equivalent" if differing_bytes == 0 else "pixel-mismatch",
+            "status": "visible-rgb-equivalent" if differing_rgb_bytes == 0 else "pixel-mismatch",
             "differingBytes": differing_bytes,
+            "differingRgbBytes": differing_rgb_bytes,
+            "differingAlphaBytes": differing_alpha_bytes,
             "changedPixels": changed_pixels,
             "changedRgbPixels": changed_rgb_pixels,
             "changedAlphaPixels": changed_alpha_pixels,
             "maximumChannelDelta": maximum_delta,
+            "maximumRgbChannelDelta": maximum_rgb_delta,
+            "maximumAlphaChannelDelta": maximum_alpha_delta,
             "firstDifference": first_difference,
+            "firstRgbDifference": first_rgb_difference,
         })
-    exact = all(frame["status"] == "exact-equivalent" for frame in frames)
+    exact = all(frame["status"] == "visible-rgb-equivalent" for frame in frames)
     stable = baseline_stable and candidate_stable
     state = "pass" if exact and stable else (
         "rejected-pixel-difference" if not exact else "rejected-nonstationary-framebuffer"
@@ -261,13 +298,16 @@ def compare_framebuffers(baseline_root: Path, candidate_root: Path) -> dict[str,
         "extent": [FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT],
         "format": "RGBA8_UNORM",
         "sampleCount": FRAMEBUFFER_SAMPLE_COUNT,
-        "comparison": "byte-identical raw FINAL_DRAWABLE RGBA payloads matched by frame id",
+        "comparison": "byte-identical FINAL_DRAWABLE RGB channels after opaque-surface projection; raw alpha deltas are diagnostic",
+        "opaqueSurfaceProjection": "discard alpha and compare every RGB byte exactly; CAMetalLayer is configured isOpaque=true",
         "baselineStableAcrossSamples": baseline_stable,
         "candidateStableAcrossSamples": candidate_stable,
+        "baselineAlphaStableAcrossSamples": len(set(payload[3::4] for payload in baseline.values())) == 1,
+        "candidateAlphaStableAcrossSamples": len(set(payload[3::4] for payload in candidate.values())) == 1,
         "baselineScene": baseline_scene,
         "candidateScene": candidate_scene,
         "frames": frames,
-        "firstDivergentFrame": next((frame["frameId"] for frame in frames if frame["status"] != "exact-equivalent"), None),
+        "firstDivergentFrame": next((frame["frameId"] for frame in frames if frame["status"] != "visible-rgb-equivalent"), None),
     }
 
 
@@ -449,6 +489,16 @@ def self_test() -> None:
         candidate_path.write_text(json.dumps(make_evidence("candidate", ids)), encoding="utf-8")
         result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
         assert code == 0 and result["state"] == "pass", result
+
+        changed_alpha = candidate_root / "metal-framebuffer/render-contract/frames/frame-000001/actual.bin"
+        payload = bytearray(changed_alpha.read_bytes())
+        payload[3] ^= 0x7F
+        changed_alpha.write_bytes(payload)
+        result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
+        assert code == 0 and result["state"] == "pass", result
+        assert result["framebufferEquivalence"]["frames"][0]["changedRgbPixels"] == 0, result
+        assert result["framebufferEquivalence"]["frames"][0]["changedAlphaPixels"] == 1, result
+        make_framebuffer_fixture(candidate_root)
 
         changed_payload = candidate_root / "metal-framebuffer/render-contract/frames/frame-000001/actual.bin"
         payload = bytearray(changed_payload.read_bytes())
