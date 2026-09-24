@@ -120,6 +120,11 @@ head = sys.argv[2]
 data = json.loads(path.read_text(encoding="utf-8"))
 if data.get("state") != "pass":
     raise SystemExit(f"P1 physical correctness gate is not passing: {data.get('state')}")
+framebuffer = data.get("framebufferEquivalence")
+checks = data.get("checks")
+if not isinstance(framebuffer, dict) or framebuffer.get("state") != "pass" or not isinstance(checks, dict) \
+        or checks.get("framebuffer_equivalence") is not True:
+    raise SystemExit("P1 physical correctness gate has no passing exact framebuffer-equivalence evidence")
 identity = data.get("identity")
 if not isinstance(identity, dict) or identity.get("sourceSha") != head:
     raise SystemExit(f"P1 correctness gate does not belong to current HEAD {head}: {identity}")
