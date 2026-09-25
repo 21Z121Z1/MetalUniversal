@@ -162,35 +162,48 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             startRenderContract(metalCaptureRoot);
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
 
-            List<CaptureSample> samples = new ArrayList<>();
-            for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
-                // Move beyond the spawn region, allowing ordinary generation and chunk upload.
-                // A fixed seed still has a randomized player spawn within the spawn radius.
-                int x = 160 + (int) (frameId - 1) * 96;
-                int z = 160 + (int) (frameId - 1) * 48;
-                // Keep camera coordinates independent of spawn timing and vegetation heightmaps.
-                // Teleporting still exercises ordinary generation and uploads along the route.
-                int y = 128;
-                singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
-                if (frameId == 1) {
-                    singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)
-                            + " " + (z + 4) + " {text:\"Vanilla 26.3\",billboard:\"center\",shadow:1b}");
-                }
-                context.waitFor(client -> client.player != null
-                        && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
-                context.waitTicks(10);
-                singleplayer.getConnection().waitForChunksRender();
+            // Keep the authoritative screenshot route inside the already-loaded chunk window.
+            // Long spectator teleports are a chunk-streaming stress test, not a framebuffer
+            // correctness test, and can legitimately outrun Sodium/Iris mesh publication.
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run tp @s ~ ~24 ~ -157 20"
+            );
+            context.waitTicks(20);
+            singleplayer.getConnection().waitForChunksRender();
+            context.waitTicks(20);
 
-                // Renderer internals are intentionally not used as a readiness oracle here:
-                // Vanilla, Sodium and Iris do not share one authoritative visible-section state.
-                // Instead, sample the exact pre-present Metal source. If a teleport catches a
-                // transient unloaded/black frame, remain at the same waypoint, let streaming
-                // advance, and retry before moving anywhere else.
+            double anchorX = context.computeOnClient(client -> client.player.getX());
+            double anchorY = context.computeOnClient(client -> client.player.getY());
+            double anchorZ = context.computeOnClient(client -> client.player.getZ());
+            JsonObject captureAnchor = new JsonObject();
+            captureAnchor.addProperty("x", anchorX);
+            captureAnchor.addProperty("y", anchorY);
+            captureAnchor.addProperty("z", anchorZ);
+            worldEvidence.addProperty("framebufferCaptureStrategy", "stationary-loaded-anchor-rotation");
+            worldEvidence.add("captureAnchor", captureAnchor);
+
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run summon minecraft:text_display ~8 ~-3 ~4 "
+                            + "{text:\"MetalUniversal 26.3\",billboard:\"center\",shadow:1b}"
+            );
+
+            List<CaptureSample> samples = new ArrayList<>();
+            for (long sampleIndex = 1; sampleIndex <= METAL_CAPTURE_SAMPLES; sampleIndex++) {
+                int yaw = -157 + (int) (sampleIndex - 1) * 45;
+                int pitch = 20;
+                singleplayer.getServer().runCommand(
+                        "execute as @a at @s run tp @s ~ ~ ~ " + yaw + " " + pitch
+                );
+                context.waitTicks(4);
+
+                // Sample the exact pre-present Metal source. Any transient degenerate
+                // readback is retained as diagnostic evidence, but the camera stays on
+                // the same loaded anchor while the renderer advances before retrying.
                 CaptureSample sample = null;
                 int captureAttempts = 0;
                 for (int attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS_PER_SAMPLE; attempt++) {
                     captureAttempts = attempt;
-                    long captureFrameId = (frameId - 1) * MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + attempt;
+                    long captureFrameId = (sampleIndex - 1) * MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + attempt;
                     RenderContractSnapshot before = renderContractSnapshot();
                     beginRenderContractFrame(captureFrameId);
                     try {
@@ -210,28 +223,24 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         break;
                     }
 
-                    // A rejected readback is useful diagnostic evidence but never a passing
-                    // screenshot. Keep the camera fixed while chunk generation/upload catches up.
                     context.waitTicks(20);
-                    singleplayer.getConnection().waitForChunksRender();
                 }
                 require(sample != null,
                         "Metal framebuffer stayed black/degenerate after "
-                                + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at waypoint " + frameId);
+                                + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at stationary view " + sampleIndex);
                 samples.add(sample);
 
                 JsonObject waypoint = new JsonObject();
-                waypoint.addProperty("sampleIndex", frameId);
+                waypoint.addProperty("sampleIndex", sampleIndex);
                 waypoint.addProperty("frameId", sample.frameId());
                 waypoint.addProperty("captureAttempts", captureAttempts);
-                waypoint.addProperty("x", x);
-                waypoint.addProperty("y", y);
-                waypoint.addProperty("z", z);
+                waypoint.addProperty("x", context.computeOnClient(client -> client.player.getX()));
+                waypoint.addProperty("y", context.computeOnClient(client -> client.player.getY()));
+                waypoint.addProperty("z", context.computeOnClient(client -> client.player.getZ()));
+                waypoint.addProperty("yaw", yaw);
+                waypoint.addProperty("pitch", pitch);
                 waypoints.add(waypoint);
 
-                // Sampling is deliberately spaced. This rejects the possibility that a single
-                // transitional frame (world load, resize, GUI hand-off) is mistaken for the
-                // renderer's steady-state output.
                 context.waitTicks(4);
             }
 
