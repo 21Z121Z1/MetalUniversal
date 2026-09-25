@@ -451,10 +451,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
     private static void writeCaptureSamples(Path path, List<CaptureSample> samples, long selectedFrameId) {
         StringBuilder json = new StringBuilder();
-        json.append("{\n  \"schema\": 2,\n")
+        json.append("{\n  \"schema\": 3,\n")
                 .append("  \"sourceReadbackOrientation\": \"renderpearl-present-source\",\n")
                 .append("  \"diagnosticPngOrientation\": \"top-left\",\n")
                 .append("  \"diagnosticPngTransform\": \"flip-y\",\n")
+                .append("  \"diagnosticPngAlpha\": \"opaque-final-drawable\",\n")
                 .append("  \"minDistinctRgb\": ").append(MIN_CAPTURE_DISTINCT_RGB).append(",\n")
                 .append("  \"minLumaStddev\": ").append(String.format(java.util.Locale.ROOT, "%.1f", MIN_CAPTURE_LUMA_STDDEV)).append(",\n")
                 .append("  \"selectedFrameId\": ").append(selectedFrameId)
