@@ -487,6 +487,7 @@ public final class FileValidationCaptureService implements ValidationCaptureServ
                     blue = bytes[offset + 2] & 0xff;
                     if (bytesPerTexel == 4) alpha = bytes[offset + 3] & 0xff;
                 }
+                alpha = diagnosticPngAlpha(resource.semanticName(), alpha);
                 image.setRGB(x, y, alpha << 24 | red << 16 | green << 8 | blue);
                 offset += bytesPerTexel;
             }
@@ -508,6 +509,19 @@ public final class FileValidationCaptureService implements ValidationCaptureServ
             throw new IllegalArgumentException("Invalid diagnostic PNG row " + outputY + " for height " + height);
         }
         return "final-drawable".equals(semanticName) ? height - 1 - outputY : outputY;
+    }
+
+    /**
+     * The production presentation target is opaque. RenderPearl does not use the
+     * final drawable's alpha channel as visible coverage, so preserving transient
+     * zero alpha in a diagnostic PNG makes valid RGB look black in normal viewers.
+     * Keep actual.bin byte-exact and normalize only the human-facing PNG.
+     */
+    static int diagnosticPngAlpha(final String semanticName, final int sourceAlpha) {
+        if (sourceAlpha < 0 || sourceAlpha > 0xff) {
+            throw new IllegalArgumentException("Invalid diagnostic PNG alpha " + sourceAlpha);
+        }
+        return "final-drawable".equals(semanticName) ? 0xff : sourceAlpha;
     }
 
     private JsonObject baseCaptureJson(final CapturePoint point) {
