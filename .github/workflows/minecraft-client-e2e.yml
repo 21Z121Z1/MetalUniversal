@@ -191,7 +191,7 @@ jobs:
               if any(abs(float(waypoint.get(axis, 0.0)) - float(anchor.get(axis, 0.0))) > 0.25
                      for axis in ('x', 'y', 'z')):
                   raise SystemExit(f'framebuffer capture left the loaded anchor: anchor={anchor} waypoint={waypoint}')
-              if int(waypoint.get('pitch', -999)) != 20:
+              if int(waypoint.get('pitch', -999)) != 45:
                   raise SystemExit(f'unexpected framebuffer capture pitch: {waypoint}')
               yaws.add(int(waypoint.get('yaw', -999)))
           if len(yaws) != len(waypoints):
