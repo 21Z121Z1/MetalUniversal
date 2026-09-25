@@ -1,11 +1,11 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.blaze3d.systems.CommandEncoderBackend;
-import com.mojang.blaze3d.systems.GpuSurface;
-import com.mojang.blaze3d.systems.GpuSurfaceBackend;
-import com.mojang.blaze3d.systems.SurfaceException;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.device.GpuSurface;
+import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
+import com.mojang.renderpearl.api.device.SurfaceException;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
@@ -20,12 +20,15 @@ final class MetalSurface implements GpuSurfaceBackend {
     private static final Set<GpuSurface.PresentMode> SUPPORTED_PRESENT_MODES = EnumSet.of(GpuSurface.PresentMode.FIFO, GpuSurface.PresentMode.MAILBOX);
     private final MetalDevice device;
     private final MemorySegment metalLayer;
+    private final long sdlMetalView;
+    private boolean closed;
     private GpuSurface.Configuration configuration;
     private MetalCommandEncoder pendingPresentEncoder;
 
-    MetalSurface(final MetalDevice device, final MemorySegment metalLayer) {
+    MetalSurface(final MetalDevice device, final MemorySegment metalLayer, final long sdlMetalView) {
         this.device = device;
         this.metalLayer = metalLayer;
+        this.sdlMetalView = sdlMetalView;
     }
 
     @Override
@@ -34,11 +37,16 @@ final class MetalSurface implements GpuSurfaceBackend {
             throw new SurfaceException("Metal surface configuration must be positive, got " + config.width() + "x" + config.height());
         }
 
+        boolean immediate = config.presentMode() == GpuSurface.PresentMode.MAILBOX;
+        // Frame generation presents from CAMetalDisplayLink and is only valid
+        // with vsync on. Publish the mode before the layer is reconfigured so
+        // the presenter is already gated off when displaySyncEnabled drops.
+        MetalFxManager.observePresentMode(immediate);
         MetalNativeBridge.metallum_configure_layer(
                 this.metalLayer,
                 config.width(),
                 config.height(),
-                config.presentMode() == GpuSurface.PresentMode.MAILBOX ? 1 : 0
+                immediate ? 1 : 0
         );
 
         this.configuration = config;
@@ -70,6 +78,11 @@ final class MetalSurface implements GpuSurfaceBackend {
 
     @Override
     public void close() {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+        this.device.presentationSurfaceClosed(this.sdlMetalView);
     }
 
     @Override

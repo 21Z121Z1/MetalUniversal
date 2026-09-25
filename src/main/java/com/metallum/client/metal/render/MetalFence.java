@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.buffers.GpuFence;
+import com.mojang.renderpearl.api.commands.GpuFence;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 
@@ -8,7 +8,7 @@ import net.fabricmc.api.Environment;
 final class MetalFence implements GpuFence {
     private final MetalCommandEncoder encoder;
     private final long submitIndex;
-    private boolean closed;
+    private boolean closedOrCompleted;
 
     MetalFence(final MetalCommandEncoder encoder, final long submitIndex) {
         this.encoder = encoder;
@@ -17,11 +17,18 @@ final class MetalFence implements GpuFence {
 
     @Override
     public void close() {
-        this.closed = true;
+        this.closedOrCompleted = true;
     }
 
     @Override
     public boolean awaitCompletion(final long timeoutNS) {
-        return this.closed || this.encoder.awaitSubmitCompletion(this.submitIndex, timeoutNS / 1_000_000);
+        if (!this.closedOrCompleted) {
+            // RenderPearl uses -1 for an unbounded wait (not a zero-time poll).
+            // Round positive sub-millisecond waits up without overflowing.
+            long timeoutMs = timeoutNS < 0L ? Long.MAX_VALUE
+                    : timeoutNS / 1_000_000L + (timeoutNS % 1_000_000L == 0L ? 0L : 1L);
+            this.closedOrCompleted = this.encoder.awaitSubmitCompletion(this.submitIndex, timeoutMs);
+        }
+        return this.closedOrCompleted;
     }
 }

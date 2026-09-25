@@ -1,5 +1,12 @@
 accessWidener v1 official
 
-accessible class com/mojang/blaze3d/vulkan/glsl/SpvUniformBuffer
-accessible class com/mojang/blaze3d/vulkan/glsl/SpvSampler
-accessible class com/mojang/blaze3d/vulkan/glsl/SpvVariable
+# 26.3 把 GPU 抽象从 com.mojang.blaze3d.* 迁到了 com.mojang.renderpearl.*。
+# 原先需要放宽访问权限的三个 SPIR-V 辅助类：
+#
+#   com/mojang/blaze3d/vulkan/glsl/SpvUniformBuffer
+#   com/mojang/blaze3d/vulkan/glsl/SpvSampler
+#   com/mojang/blaze3d/vulkan/glsl/SpvVariable
+#
+# 已随 26.3 的旧 Vulkan 图形栈一并移除。取而代之的
+# com.mojang.renderpearl.backend.api.SpvModule 及其 Reflection 嵌套类型
+# 本身就是公开 API，无需额外放宽。此处保留空表，便于后续需要时直接追加。

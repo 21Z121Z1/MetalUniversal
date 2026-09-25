@@ -1,9 +1,9 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalBackend;
-import com.mojang.blaze3d.opengl.GlBackend;
-import com.mojang.blaze3d.systems.GpuBackend;
-import com.mojang.blaze3d.vulkan.VulkanBackend;
+import com.mojang.renderpearl.backend.opengl.GlBackend;
+import com.mojang.renderpearl.api.device.GpuBackend;
+import com.mojang.renderpearl.backend.vulkan.VulkanBackend;
 import net.minecraft.client.PreferredGraphicsApi;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,7 +16,8 @@ abstract class PreferredGraphicsApiMixin {
     @Inject(method = "getBackendsToTry", at = @At("HEAD"), cancellable = true)
     private void metallum$injectMetalBackend(final CallbackInfoReturnable<GpuBackend[]> cir) {
         PreferredGraphicsApi self = (PreferredGraphicsApi) (Object) this;
-        if (self != PreferredGraphicsApi.DEFAULT) {
+        if (self != PreferredGraphicsApi.DEFAULT
+                && !Boolean.getBoolean("metallum.validation.forceMetal")) {
             return;
         }
 

@@ -1,0 +1,198 @@
+name: Minecraft 26.3 production client E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 26.3-fabric-dev
+      - agent/upstream-26.3-renderpearl
+  pull_request:
+    branches:
+      - 26.3-fabric-dev
+      - agent/upstream-26.3-renderpearl
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'scripts/agent/**'
+      - 'validation/**'
+      - '.github/ci/minecraft-e2e/**'
+      - '.github/workflows/minecraft-client-e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-client-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  minecraft-client-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [vanilla, sodium, iris]
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      METALLUM_RENDERER_MODE: ${{ matrix.renderer }}
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Record exact-head environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          test "$(uname -m)" = arm64
+          mkdir -p build/agent-evidence
+          python3 scripts/agent/record_ci_subject.py \
+            --proof-subject candidate-head \
+            --output build/agent-evidence/ci-subject-minecraft-e2e.json
+          uname -a
+          sw_vers
+          xcodebuild -version
+      - name: Build the Minecraft 26.3 production artifact
+        id: metallum
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace \
+            -x buildIOSNative -x buildIOSSpvc \
+            jar verifyIsolatedClientProfiles
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+      - name: Configure the physical production task without launching a client
+        run: |
+          ./gradlew --no-daemon --stacktrace -p .github/ci/minecraft-e2e \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            -Pmetallum.renderer="${{ matrix.renderer }}" \
+            help --task runProductionClientValidation
+      - name: Run the isolated Minecraft 26.3 production client GameTest
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -p .github/ci/minecraft-e2e \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            -Pmetallum.renderer="${{ matrix.renderer }}" \
+            test runProductionClientGameTest
+      - name: Verify framebuffer, presentation, and reload evidence
+        run: |
+          set -euo pipefail
+          root='.github/ci/minecraft-e2e/build/evidence'
+          log='.github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log'
+          python3 - "$root" "${{ steps.metallum.outputs.jar }}" <<'PY'
+          import json
+          import pathlib
+          import struct
+          import sys
+          import os
+          import hashlib
+
+          root = pathlib.Path(sys.argv[1])
+          required = [
+              root / 'readback-control' / 'suite.json',
+              root / 'metal-framebuffer.png',
+              root / 'metal-framebuffer-samples.json',
+              root / 'runtime-evidence.json',
+              root / 'presentation-evidence.json',
+              root / 'reload-evidence.json',
+              root / 'artifact-identity.json',
+          ]
+          for path in required:
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'missing E2E evidence: {path}')
+
+          suite = json.loads(required[0].read_text(encoding='utf-8'))
+          if suite.get('allExact') is not True:
+              raise SystemExit(f'readback controls failed: {suite}')
+
+          identity = json.loads(required[6].read_text(encoding='utf-8'))
+          mode = os.environ['METALLUM_RENDERER_MODE']
+          if identity.get('rendererMode') != mode or (('sodium' in identity.get('mods', {})) != (mode != 'vanilla')) or (('iris' in identity.get('mods', {})) != (mode == 'iris')):
+              raise SystemExit('production test has the wrong optional renderer stack')
+          if identity.get('build', {}).get('sourceSha') != os.environ['METALLUM_SOURCE_SHA'] or identity['build'].get('dirty') is not False:
+              raise SystemExit('loaded artifact does not prove the clean candidate HEAD')
+          loaded = pathlib.Path(identity['loadedJavaArtifact'])
+          expected_jar_hash = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
+          if hashlib.sha256(loaded.read_bytes()).hexdigest() != expected_jar_hash or identity.get('javaArtifactSha256') != expected_jar_hash:
+              raise SystemExit('loaded production JAR hash does not match the evidence')
+
+          raw = required[1].read_bytes()
+          if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
+              raise SystemExit('invalid framebuffer PNG')
+          width, height = struct.unpack('>II', raw[16:24])
+          if width <= 1 or height <= 1:
+              raise SystemExit(f'invalid framebuffer dimensions: {width}x{height}')
+
+          samples = json.loads(required[2].read_text(encoding='utf-8'))
+          selected_id = samples.get('selectedFrameId')
+          selected = next((x for x in samples.get('samples', []) if x.get('frameId') == selected_id), None)
+          if not selected:
+              raise SystemExit(f'selected frame is absent: {selected_id}')
+          if selected.get('byteCount') != width * height * 4:
+              raise SystemExit(f'framebuffer byte count mismatch: {selected}')
+          if selected.get('nonBlackPixels', 0) <= 0 or selected.get('distinctRgb', 0) <= 1:
+              raise SystemExit(f'framebuffer has no useful content: {selected}')
+
+          presentation = json.loads(required[4].read_text(encoding='utf-8'))
+          if presentation.get('completeAndSuccessful') is not True:
+              raise SystemExit(f'presentation lifecycle failed: {presentation}')
+
+          reload = json.loads(required[5].read_text(encoding='utf-8'))
+          if reload.get('reloadCompleted') is not True:
+              raise SystemExit(f'resource reload did not complete: {reload}')
+          if str(reload.get('backendAfterReload', '')).lower() != 'metal':
+              raise SystemExit(f'backend was not Metal after reload: {reload}')
+          if reload.get('worldLoadedAfterReload') is not True:
+              raise SystemExit(f'world was lost after reload: {reload}')
+          if reload.get('postReloadPresentationHealthy') is not True:
+              raise SystemExit(f'presentation did not recover after reload: {reload}')
+
+          print(f'verified Minecraft Metal framebuffer: {width}x{height}, frame={selected_id}')
+          PY
+          python3 scripts/agent/verify_loaded_artifact.py \
+            --identity "$root/artifact-identity.json" --mode "$METALLUM_RENDERER_MODE" \
+            --source "$METALLUM_SOURCE_SHA" --jar "${{ steps.metallum.outputs.jar }}"
+          test -s "$log"
+          ! grep -Fq 'nextDrawable() returned nil' "$log"
+      - name: State evidence boundary
+        run: |
+          cat <<'BOUNDARY' > build/agent-evidence/minecraft-e2e-boundary.txt
+          This hosted offscreen job proves the exact candidate JAR can run its isolated Minecraft 26.3 client GameTest
+          on the hosted Apple Silicon environment and emit valid Metal readback evidence.
+          It does not prove attended visual parity, stable performance, thermals, or release readiness.
+          BOUNDARY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: minecraft-26.3-e2e-${{ matrix.renderer }}-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/libs/
+            build/agent-evidence/
+            .github/ci/minecraft-e2e/build/evidence/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
+            .github/ci/minecraft-e2e/build/reports/
+          if-no-files-found: warn
+          retention-days: 14

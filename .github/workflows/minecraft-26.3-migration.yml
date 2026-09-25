@@ -1,0 +1,89 @@
+name: Minecraft 26.3 migration
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 26.3-fabric-dev
+      - agent/upstream-26.3-renderpearl
+  pull_request:
+    branches:
+      - 26.3-fabric-dev
+      - agent/upstream-26.3-renderpearl
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'scripts/agent/**'
+      - 'validation/**'
+      - '.github/workflows/minecraft-26.3-migration.yml'
+
+permissions:
+  contents: read
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: minecraft-26.3-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  java-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Verify executable migration and evidence contracts
+        run: bash scripts/agent/verify_unified_eval.sh
+      - name: Verify resolved optional runtime profiles
+        run: |
+          set -euo pipefail
+          for renderer in vanilla sodium iris; do
+            ./gradlew --no-daemon --stacktrace -Pmetallum.renderer="$renderer" verifyRuntimeRendererProfile
+          done
+      - name: Verify active version identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          test "$(sed -n 's/^minecraft_version=//p' gradle.properties | head -n1)" = '26.3'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('src/main/resources/fabric.mod.json').read_text(encoding='utf-8'))
+          supported = str(data.get('depends', {}).get('minecraft', ''))
+          if '1.26.3' not in supported and '26.3' not in supported:
+              raise SystemExit(f'fabric.mod.json does not target Minecraft 26.3: {supported!r}')
+          PY
+      - name: Verify Vanilla RenderPearl without optional render mods
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -Pmetallum.noOptionalMods=true vanillaRenderPearlBoundaryTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+      - name: Compile and run Java contracts
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            compileJava test verifyProductionJarIsolation \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+      - name: Preserve test reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: minecraft-26.3-contracts-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/reports/tests/
+            build/test-results/
+            build/reports/problems/
+          if-no-files-found: warn
+          retention-days: 7
