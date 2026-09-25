@@ -157,8 +157,10 @@ jobs:
               )
 
           samples = json.loads(required[2].read_text(encoding='utf-8'))
-          if samples.get('diagnosticPngOrientation') != 'top-left' or samples.get('diagnosticPngTransform') != 'flip-y':
-              raise SystemExit(f'framebuffer diagnostic orientation contract missing: {samples}')
+          if (samples.get('diagnosticPngOrientation') != 'top-left'
+                  or samples.get('diagnosticPngTransform') != 'flip-y'
+                  or samples.get('diagnosticPngAlpha') != 'opaque-final-drawable'):
+              raise SystemExit(f'framebuffer diagnostic PNG contract missing: {samples}')
           selected_id = samples.get('selectedFrameId')
           selected = next((x for x in samples.get('samples', []) if x.get('frameId') == selected_id), None)
           if not selected:
@@ -174,13 +176,26 @@ jobs:
                   raise SystemExit(f'render-ready framebuffer is black/degenerate: {sample}')
 
           runtime = json.loads(required[3].read_text(encoding='utf-8'))
-          waypoints = runtime.get('world', {}).get('waypoints', [])
+          world = runtime.get('world', {})
+          if world.get('framebufferCaptureStrategy') != 'stationary-loaded-anchor-rotation':
+              raise SystemExit(f'framebuffer capture did not use the stable loaded anchor: {world}')
+          anchor = world.get('captureAnchor', {})
+          waypoints = world.get('waypoints', [])
           if len(waypoints) != len(samples.get('samples', [])):
-              raise SystemExit(f'terrain readiness evidence count mismatch: {len(waypoints)}')
+              raise SystemExit(f'framebuffer waypoint evidence count mismatch: {len(waypoints)}')
+          yaws = set()
           for waypoint in waypoints:
               attempts = int(waypoint.get('captureAttempts', 0))
               if attempts < 1 or attempts > 3:
                   raise SystemExit(f'invalid bounded framebuffer retry evidence: {waypoint}')
+              if any(abs(float(waypoint.get(axis, 0.0)) - float(anchor.get(axis, 0.0))) > 0.25
+                     for axis in ('x', 'y', 'z')):
+                  raise SystemExit(f'framebuffer capture left the loaded anchor: anchor={anchor} waypoint={waypoint}')
+              if int(waypoint.get('pitch', -999)) != 20:
+                  raise SystemExit(f'unexpected framebuffer capture pitch: {waypoint}')
+              yaws.add(int(waypoint.get('yaw', -999)))
+          if len(yaws) != len(waypoints):
+              raise SystemExit(f'framebuffer capture did not sample unique view directions: {waypoints}')
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
           if presentation.get('completeAndSuccessful') is not True:
