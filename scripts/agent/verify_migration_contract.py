@@ -31,6 +31,6 @@ assert 'FrameWorkloads.validateProducer(mode, sodium, iris)' in readback
 assert 'metallum.ci.noOptionalMods' not in readback
 for name in ('minecraft-client-e2e.yml','minecraft-26.3-migration.yml','metal-capabilities.yml'):
     workflow = (ROOT / '.github/workflows' / name).read_text()
-    assert '26.3-fabric-dev' in workflow and 'pull_request_target' not in workflow
+    assert '26.3-Fabric' in workflow and 'pull_request_target' not in workflow
     assert 'self-hosted' not in workflow
 print('upstream pins / RenderPearl / optional adapters / workflow isolation: PASS')
