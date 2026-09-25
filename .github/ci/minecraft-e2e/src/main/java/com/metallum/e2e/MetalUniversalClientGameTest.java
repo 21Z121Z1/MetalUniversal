@@ -182,15 +182,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
                 // waitForChunksRender() proves the connection-side chunk window completed, but
                 // after a long spectator teleport it can still precede the client renderer's
-                // occlusion rebuild, mesh upload, and visible-section stabilization. Capturing
-                // in that interval produced misleading sky/black transitional evidence.
-                StationaryTerrain terrainReadiness = new StationaryTerrain();
-                context.waitFor(client -> terrainReadiness.ready(client));
-                JsonObject terrainEvidence = terrainReadiness.evidence();
-                require(terrainEvidence.get("visibleSections").getAsInt() > 0,
-                        "No visible terrain sections after render-readiness gate for frame " + frameId);
-                require(terrainEvidence.get("layerIndexCount").getAsLong() > 0L,
-                        "Visible terrain contains no admitted draw indices for frame " + frameId);
+                // occlusion rebuild and mesh publication. Use only public 26.3 renderer state
+                // here: this correctness lane intentionally does not depend on profiling mixins.
+                context.waitFor(client -> renderReadiness(client).get("ready").getAsBoolean());
+                context.waitTicks(4);
+                context.waitFor(client -> renderReadiness(client).get("ready").getAsBoolean());
+                JsonObject terrainEvidence = context.computeOnClient(MetalUniversalClientGameTest::renderReadiness);
+                require(terrainEvidence.get("ready").getAsBoolean(),
+                        "Terrain renderer regressed before framebuffer capture for frame " + frameId + ": " + terrainEvidence);
 
                 JsonObject waypoint = new JsonObject();
                 waypoint.addProperty("frameId", frameId);
@@ -276,6 +275,48 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             closeRenderContractQuietly();
         }
+    }
+
+    private static JsonObject renderReadiness(net.minecraft.client.Minecraft client) {
+        JsonObject evidence = new JsonObject();
+        if (client.level == null || client.levelRenderer == null) {
+            evidence.addProperty("ready", false);
+            evidence.addProperty("worldLoaded", false);
+            return evidence;
+        }
+
+        var renderer = client.levelRenderer;
+        var dispatcher = renderer.sectionRenderDispatcher();
+        boolean hasRenderedAllSections = renderer.hasRenderedAllSections();
+        int expectedChunks = renderer.sectionOcclusionGraph().expectedChunks().size();
+        int visibleSections = renderer.visibleSections().size();
+        int compileQueueSize = dispatcher == null ? -1 : dispatcher.getCompileQueueSize();
+        boolean allVisibleSectionsCompiled = visibleSections > 0;
+        if (allVisibleSectionsCompiled) {
+            for (var section : renderer.visibleSections()) {
+                if (section.getSectionMesh() == net.minecraft.client.renderer.chunk.CompiledSectionMesh.UNCOMPILED) {
+                    allVisibleSectionsCompiled = false;
+                    break;
+                }
+            }
+        }
+
+        boolean ready = dispatcher != null
+                && hasRenderedAllSections
+                && expectedChunks == 0
+                && compileQueueSize == 0
+                && visibleSections > 0
+                && allVisibleSectionsCompiled;
+        evidence.addProperty("ready", ready);
+        evidence.addProperty("worldLoaded", true);
+        evidence.addProperty("hasRenderedAllSections", hasRenderedAllSections);
+        evidence.addProperty("expectedChunks", expectedChunks);
+        evidence.addProperty("compileQueueSize", compileQueueSize);
+        evidence.addProperty("visibleSections", visibleSections);
+        evidence.addProperty("allVisibleSectionsCompiled", allVisibleSectionsCompiled);
+        evidence.addProperty("authority",
+                "public LevelRenderer/SectionRenderDispatcher state after teleport; no profiling mixins");
+        return evidence;
     }
 
     private static void startRenderContract(Path output) {

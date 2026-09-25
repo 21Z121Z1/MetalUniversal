@@ -179,10 +179,12 @@ jobs:
               raise SystemExit(f'terrain readiness evidence count mismatch: {len(waypoints)}')
           for waypoint in waypoints:
               terrain = waypoint.get('terrainReadiness', {})
-              scheduled = terrain.get('scheduledSectionWork', {})
-              if (terrain.get('visibleSections', 0) <= 0
-                      or terrain.get('layerIndexCount', 0) <= 0
-                      or scheduled.get('scheduledSectionWorkComplete') is not True):
+              if (terrain.get('ready') is not True
+                      or terrain.get('hasRenderedAllSections') is not True
+                      or terrain.get('expectedChunks') != 0
+                      or terrain.get('compileQueueSize') != 0
+                      or terrain.get('visibleSections', 0) <= 0
+                      or terrain.get('allVisibleSectionsCompiled') is not True):
                   raise SystemExit(f'capture occurred before visible terrain was render-ready: {waypoint}')
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
