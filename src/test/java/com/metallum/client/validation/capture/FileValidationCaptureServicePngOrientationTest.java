@@ -19,6 +19,29 @@ final class FileValidationCaptureServicePngOrientationTest {
         assertEquals(2, FileValidationCaptureService.diagnosticPngSourceRow("scene-color", 3, 2));
     }
 
+
+    @Test
+    void finalDrawableDiagnosticPngForcesOpaqueAlpha() {
+        assertEquals(255, FileValidationCaptureService.diagnosticPngAlpha("final-drawable", 0));
+        assertEquals(255, FileValidationCaptureService.diagnosticPngAlpha("final-drawable", 127));
+        assertEquals(255, FileValidationCaptureService.diagnosticPngAlpha("final-drawable", 255));
+    }
+
+    @Test
+    void nonPresentationCapturesPreserveSourceAlpha() {
+        assertEquals(0, FileValidationCaptureService.diagnosticPngAlpha("scene-color", 0));
+        assertEquals(127, FileValidationCaptureService.diagnosticPngAlpha("scene-color", 127));
+        assertEquals(255, FileValidationCaptureService.diagnosticPngAlpha("scene-color", 255));
+    }
+
+    @Test
+    void invalidAlphaFailsClosed() {
+        assertThrows(IllegalArgumentException.class,
+                () -> FileValidationCaptureService.diagnosticPngAlpha("final-drawable", -1));
+        assertThrows(IllegalArgumentException.class,
+                () -> FileValidationCaptureService.diagnosticPngAlpha("final-drawable", 256));
+    }
+
     @Test
     void invalidRowsFailClosed() {
         assertThrows(IllegalArgumentException.class,
