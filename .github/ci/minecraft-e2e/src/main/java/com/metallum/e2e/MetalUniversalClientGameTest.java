@@ -166,7 +166,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             // Long spectator teleports are a chunk-streaming stress test, not a framebuffer
             // correctness test, and can legitimately outrun Sodium/Iris mesh publication.
             singleplayer.getServer().runCommand(
-                    "execute as @a at @s run tp @s ~ ~24 ~ -157 20"
+                    "execute as @a at @s run tp @s ~ ~4 ~ -157 45"
             );
             context.waitTicks(20);
             singleplayer.getConnection().waitForChunksRender();
@@ -190,7 +190,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             List<CaptureSample> samples = new ArrayList<>();
             for (long sampleIndex = 1; sampleIndex <= METAL_CAPTURE_SAMPLES; sampleIndex++) {
                 int yaw = -157 + (int) (sampleIndex - 1) * 45;
-                int pitch = 20;
+                int pitch = 45;
                 singleplayer.getServer().runCommand(
                         "execute as @a at @s run tp @s ~ ~ ~ " + yaw + " " + pitch
                 );
