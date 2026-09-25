@@ -1511,7 +1511,11 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                         device, compiledPipeline, binding.name(), samplers);
             }
             if (textureBinding == null) {
-                throw new IllegalStateException("Missing sampler " + binding.name());
+                throw new IllegalStateException(
+                        "Missing sampler " + binding.name() + " (slot " + binding.bindingIndex() + ")"
+                                + "; bound samplers=" + samplers.keySet()
+                                + ", bound uniforms=" + uniforms.keySet()
+                );
             }
 
             validateTextureBinding(device, textureBinding.view(), textureBinding.sampler(), binding.name());
@@ -1567,7 +1571,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                     "Missing "
                             + (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER
                             ? "storage buffer " : "uniform ")
-                            + binding.name()
+                            + binding.name() + " (slot " + binding.bindingIndex() + ")"
+                            + "; bound uniforms=" + uniforms.keySet()
+                            + ", bound samplers=" + samplers.keySet()
+                            + ", bound storage buffers=" + storageBuffers.keySet()
             );
         }
         if (VALIDATION && uniformSlice.buffer().isClosed()) {
