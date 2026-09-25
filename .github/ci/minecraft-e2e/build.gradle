@@ -16,6 +16,21 @@ if (!(rendererMode in ["vanilla", "sodium", "iris"]) || (legacyVanilla && render
     throw new GradleException("metallum.renderer must be vanilla, sodium, or iris; noOptionalMods requires vanilla")
 }
 def noOptionalRenderMods = rendererMode == "vanilla"
+def parseE2eDimension = { String propertyName, int fallback ->
+    def raw = providers.gradleProperty(propertyName).orElse(Integer.toString(fallback)).get().trim()
+    int value
+    try {
+        value = Integer.parseInt(raw)
+    } catch (NumberFormatException failure) {
+        throw new GradleException("${propertyName} must be an integer", failure)
+    }
+    if (value < 64 || value > 8192) {
+        throw new GradleException("${propertyName} must be between 64 and 8192")
+    }
+    value
+}
+def e2eWidth = parseE2eDimension('e2eWidth', 854)
+def e2eHeight = parseE2eDimension('e2eHeight', 480)
 
 def expectedSourceSha = providers.gradleProperty("metallumSourceSha")
         .orElse(providers.gradleProperty("p1SourceSha"))
@@ -211,6 +226,10 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     mods.from(tasks.named("jar"))
     mods.from(metallumJarProvider)
     mods.from(configurations.productionRuntimeMods)
+
+    // Keep local/default behavior modest, while hosted CI can request a larger
+    // authoritative Metal source texture without depending on scan-out size.
+    programArgs.addAll('--width', Integer.toString(e2eWidth), '--height', Integer.toString(e2eHeight))
 
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")

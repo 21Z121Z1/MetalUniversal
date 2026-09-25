@@ -471,8 +471,9 @@ public final class FileValidationCaptureService implements ValidationCaptureServ
         if (bytesPerTexel != 1 && bytesPerTexel != 3 && bytesPerTexel != 4) return;
         byte[] bytes = resource.bytes();
         BufferedImage image = new BufferedImage(resource.width(), resource.height(), BufferedImage.TYPE_INT_ARGB);
-        int offset = 0;
         for (int y = 0; y < resource.height(); y++) {
+            int sourceY = diagnosticPngSourceRow(resource.semanticName(), resource.height(), y);
+            int offset = sourceY * resource.width() * bytesPerTexel;
             for (int x = 0; x < resource.width(); x++) {
                 int red;
                 int green;
@@ -494,6 +495,19 @@ public final class FileValidationCaptureService implements ValidationCaptureServ
         if (ImageIO.write(image, "png", encoded)) {
             storageBudget.writeBytes(path, encoded.toByteArray());
         }
+    }
+
+    /**
+     * RenderPearl's presentation source is vertically inverted relative to the
+     * top-left row convention used by PNG viewers. Preserve actual.bin exactly
+     * as copied from the GPU and normalize only the diagnostic final-drawable
+     * PNG. Other attachment captures retain their existing byte-to-row mapping.
+     */
+    static int diagnosticPngSourceRow(final String semanticName, final int height, final int outputY) {
+        if (height <= 0 || outputY < 0 || outputY >= height) {
+            throw new IllegalArgumentException("Invalid diagnostic PNG row " + outputY + " for height " + height);
+        }
+        return "final-drawable".equals(semanticName) ? height - 1 - outputY : outputY;
     }
 
     private JsonObject baseCaptureJson(final CapturePoint point) {

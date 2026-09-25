@@ -44,6 +44,8 @@ jobs:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      METALLUM_E2E_WIDTH: '3840'
+      METALLUM_E2E_HEIGHT: '2160'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -95,6 +97,8 @@ jobs:
             -p .github/ci/minecraft-e2e \
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             -Pmetallum.renderer="${{ matrix.renderer }}" \
+            -Pe2eWidth="$METALLUM_E2E_WIDTH" \
+            -Pe2eHeight="$METALLUM_E2E_HEIGHT" \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -144,16 +148,42 @@ jobs:
           width, height = struct.unpack('>II', raw[16:24])
           if width <= 1 or height <= 1:
               raise SystemExit(f'invalid framebuffer dimensions: {width}x{height}')
+          expected_width = int(os.environ['METALLUM_E2E_WIDTH'])
+          expected_height = int(os.environ['METALLUM_E2E_HEIGHT'])
+          if (width, height) != (expected_width, expected_height):
+              raise SystemExit(
+                  f'framebuffer resolution was clamped or misconfigured: '
+                  f'expected={expected_width}x{expected_height} actual={width}x{height}'
+              )
 
           samples = json.loads(required[2].read_text(encoding='utf-8'))
+          if samples.get('diagnosticPngOrientation') != 'top-left' or samples.get('diagnosticPngTransform') != 'flip-y':
+              raise SystemExit(f'framebuffer diagnostic orientation contract missing: {samples}')
           selected_id = samples.get('selectedFrameId')
           selected = next((x for x in samples.get('samples', []) if x.get('frameId') == selected_id), None)
           if not selected:
               raise SystemExit(f'selected frame is absent: {selected_id}')
           if selected.get('byteCount') != width * height * 4:
               raise SystemExit(f'framebuffer byte count mismatch: {selected}')
-          if selected.get('nonBlackPixels', 0) <= 0 or selected.get('distinctRgb', 0) <= 1:
-              raise SystemExit(f'framebuffer has no useful content: {selected}')
+          min_distinct = int(samples.get('minDistinctRgb', 256))
+          min_stddev = float(samples.get('minLumaStddev', 5.0))
+          for sample in samples.get('samples', []):
+              if (sample.get('nonBlackPixels', 0) <= 0
+                      or sample.get('distinctRgb', 0) < min_distinct
+                      or float(sample.get('lumaStddev', 0.0)) < min_stddev):
+                  raise SystemExit(f'render-ready framebuffer is black/degenerate: {sample}')
+
+          runtime = json.loads(required[3].read_text(encoding='utf-8'))
+          waypoints = runtime.get('world', {}).get('waypoints', [])
+          if len(waypoints) != len(samples.get('samples', [])):
+              raise SystemExit(f'terrain readiness evidence count mismatch: {len(waypoints)}')
+          for waypoint in waypoints:
+              terrain = waypoint.get('terrainReadiness', {})
+              scheduled = terrain.get('scheduledSectionWork', {})
+              if (terrain.get('visibleSections', 0) <= 0
+                      or terrain.get('layerIndexCount', 0) <= 0
+                      or scheduled.get('scheduledSectionWorkComplete') is not True):
+                  raise SystemExit(f'capture occurred before visible terrain was render-ready: {waypoint}')
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
           if presentation.get('completeAndSuccessful') is not True:

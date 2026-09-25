@@ -37,6 +37,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
+    private static final int MIN_CAPTURE_DISTINCT_RGB = 256;
+    private static final double MIN_CAPTURE_LUMA_STDDEV = 5.0;
 
     private static void requestStationaryServerHalt(TestSingleplayerContext singleplayer) {
         // Fabric's TestSingleplayerContext.close() disconnects the client and then
@@ -177,11 +179,25 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
                 context.waitTicks(10);
                 singleplayer.getConnection().waitForChunksRender();
+
+                // waitForChunksRender() proves the connection-side chunk window completed, but
+                // after a long spectator teleport it can still precede the client renderer's
+                // occlusion rebuild, mesh upload, and visible-section stabilization. Capturing
+                // in that interval produced misleading sky/black transitional evidence.
+                StationaryTerrain terrainReadiness = new StationaryTerrain();
+                context.waitFor(client -> terrainReadiness.ready(client));
+                JsonObject terrainEvidence = terrainReadiness.evidence();
+                require(terrainEvidence.get("visibleSections").getAsInt() > 0,
+                        "No visible terrain sections after render-readiness gate for frame " + frameId);
+                require(terrainEvidence.get("layerIndexCount").getAsLong() > 0L,
+                        "Visible terrain contains no admitted draw indices for frame " + frameId);
+
                 JsonObject waypoint = new JsonObject();
                 waypoint.addProperty("frameId", frameId);
                 waypoint.addProperty("x", x);
                 waypoint.addProperty("y", y);
                 waypoint.addProperty("z", z);
+                waypoint.add("terrainReadiness", terrainEvidence);
                 waypoints.add(waypoint);
                 RenderContractSnapshot before = renderContractSnapshot();
                 beginRenderContractFrame(frameId);
@@ -197,6 +213,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
                 require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
                 CaptureSample sample = inspectCapture(frameId, png, raw);
+                require(sample.nonBlackPixels() > 0
+                                && sample.distinctRgb() >= MIN_CAPTURE_DISTINCT_RGB
+                                && sample.lumaStddev() >= MIN_CAPTURE_LUMA_STDDEV,
+                        "Render-ready Metal framebuffer is black/degenerate at frame " + frameId + ": " + sample);
                 samples.add(sample);
 
                 // Sampling is deliberately spaced. This rejects the possibility that a single
@@ -248,8 +268,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Metal render-contract still has pending captures: " + contractSnapshot);
             require(contractSnapshot.droppedCaptures() == 0,
                     "Metal render-contract dropped framebuffer captures: " + contractSnapshot);
-            require(selected.nonBlackPixels() > 0 && selected.distinctRgb() > 1,
-                    "All sampled Metal framebuffers were black/constant; best sample=" + selected);
+            require(selected.nonBlackPixels() > 0
+                            && selected.distinctRgb() >= MIN_CAPTURE_DISTINCT_RGB
+                            && selected.lumaStddev() >= MIN_CAPTURE_LUMA_STDDEV,
+                    "All sampled Metal framebuffers failed the content-quality gate; best sample=" + selected);
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             closeRenderContractQuietly();
@@ -403,7 +425,13 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
     private static void writeCaptureSamples(Path path, List<CaptureSample> samples, long selectedFrameId) {
         StringBuilder json = new StringBuilder();
-        json.append("{\n  \"schema\": 1,\n  \"selectedFrameId\": ").append(selectedFrameId)
+        json.append("{\n  \"schema\": 2,\n")
+                .append("  \"sourceReadbackOrientation\": \"renderpearl-present-source\",\n")
+                .append("  \"diagnosticPngOrientation\": \"top-left\",\n")
+                .append("  \"diagnosticPngTransform\": \"flip-y\",\n")
+                .append("  \"minDistinctRgb\": ").append(MIN_CAPTURE_DISTINCT_RGB).append(",\n")
+                .append("  \"minLumaStddev\": ").append(String.format(java.util.Locale.ROOT, "%.1f", MIN_CAPTURE_LUMA_STDDEV)).append(",\n")
+                .append("  \"selectedFrameId\": ").append(selectedFrameId)
                 .append(",\n  \"samples\": [\n");
         for (int i = 0; i < samples.size(); i++) {
             CaptureSample sample = samples.get(i);
