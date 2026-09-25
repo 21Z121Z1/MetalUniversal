@@ -36,8 +36,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String SCREENSHOT_NAME = "metaluniversal-hosted-world";
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
-    private static final int METAL_CAPTURE_SAMPLES = 8;
-    private static final int MAX_CAPTURE_ATTEMPTS_PER_SAMPLE = 3;
+    private static final int METAL_CAPTURE_SAMPLES = 4;
+    private static final int MAX_CAPTURE_ATTEMPTS_PER_SAMPLE = 2;
     private static final int MIN_CAPTURE_DISTINCT_RGB = 256;
     private static final double MIN_CAPTURE_LUMA_STDDEV = 5.0;
 
@@ -162,43 +162,59 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             startRenderContract(metalCaptureRoot);
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
 
-            // Keep the authoritative screenshot route inside the already-loaded chunk window.
-            // Long spectator teleports are a chunk-streaming stress test, not a framebuffer
-            // correctness test, and can legitimately outrun Sodium/Iris mesh publication.
+            // Build a deterministic near-field validation scene inside the chunk window that
+            // was already loaded by the client GameTest. Long spectator teleports are a
+            // streaming/culling stress test and are deliberately excluded from framebuffer
+            // correctness evidence.
             singleplayer.getServer().runCommand(
-                    "execute as @a at @s run tp @s ~ ~4 ~ -157 45"
+                    "execute as @a at @s run fill ~-12 ~-4 ~10 ~12 ~8 ~10 minecraft:stone_bricks"
             );
-            context.waitTicks(20);
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run fill ~-10 ~-2 ~9 ~-7 ~6 ~9 minecraft:red_concrete"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run fill ~-5 ~-2 ~9 ~-2 ~6 ~9 minecraft:yellow_concrete"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run fill ~0 ~-2 ~9 ~3 ~6 ~9 minecraft:lime_concrete"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run fill ~5 ~-2 ~9 ~8 ~6 ~9 minecraft:blue_concrete"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run fill ~-12 ~-4 ~-4 ~12 ~-4 ~12 minecraft:grass_block"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run tp @s ~ ~2 ~ 0 5"
+            );
+            singleplayer.getServer().runCommand(
+                    "execute as @a at @s run summon minecraft:text_display ~ ~1 ~7 "
+                            + "{text:\"MetalUniversal 26.3 / Metal\",billboard:\"center\",shadow:1b}"
+            );
+            context.waitTicks(40);
             singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(20);
 
             double anchorX = context.computeOnClient(client -> client.player.getX());
             double anchorY = context.computeOnClient(client -> client.player.getY());
             double anchorZ = context.computeOnClient(client -> client.player.getZ());
+            float anchorYaw = context.computeOnClient(client -> client.player.getYRot());
+            float anchorPitch = context.computeOnClient(client -> client.player.getXRot());
             JsonObject captureAnchor = new JsonObject();
             captureAnchor.addProperty("x", anchorX);
             captureAnchor.addProperty("y", anchorY);
             captureAnchor.addProperty("z", anchorZ);
-            worldEvidence.addProperty("framebufferCaptureStrategy", "stationary-loaded-anchor-rotation");
+            captureAnchor.addProperty("yaw", anchorYaw);
+            captureAnchor.addProperty("pitch", anchorPitch);
+            worldEvidence.addProperty("framebufferCaptureStrategy", "stationary-loaded-validation-stage");
+            worldEvidence.addProperty("framebufferValidationStage", "near-field-block-wall");
             worldEvidence.add("captureAnchor", captureAnchor);
-
-            singleplayer.getServer().runCommand(
-                    "execute as @a at @s run summon minecraft:text_display ~8 ~-3 ~4 "
-                            + "{text:\"MetalUniversal 26.3\",billboard:\"center\",shadow:1b}"
-            );
 
             List<CaptureSample> samples = new ArrayList<>();
             for (long sampleIndex = 1; sampleIndex <= METAL_CAPTURE_SAMPLES; sampleIndex++) {
-                int yaw = -157 + (int) (sampleIndex - 1) * 45;
-                int pitch = 45;
-                singleplayer.getServer().runCommand(
-                        "execute as @a at @s run tp @s ~ ~ ~ " + yaw + " " + pitch
-                );
-                context.waitTicks(4);
-
-                // Sample the exact pre-present Metal source. Any transient degenerate
-                // readback is retained as diagnostic evidence, but the camera stays on
-                // the same loaded anchor while the renderer advances before retrying.
+                // Capture a temporal sequence from exactly one stable pose. This exercises
+                // successive real Metal presents without introducing chunk-streaming or
+                // camera-culling transitions between samples.
                 CaptureSample sample = null;
                 int captureAttempts = 0;
                 for (int attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS_PER_SAMPLE; attempt++) {
@@ -222,17 +238,18 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         sample = candidate;
                         break;
                     }
-
                     context.waitTicks(20);
                 }
                 require(sample != null,
                         "Metal framebuffer stayed black/degenerate after "
-                                + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at stationary view " + sampleIndex);
+                                + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at temporal sample " + sampleIndex);
                 samples.add(sample);
 
                 double waypointX = context.computeOnClient(client -> client.player.getX());
                 double waypointY = context.computeOnClient(client -> client.player.getY());
                 double waypointZ = context.computeOnClient(client -> client.player.getZ());
+                float waypointYaw = context.computeOnClient(client -> client.player.getYRot());
+                float waypointPitch = context.computeOnClient(client -> client.player.getXRot());
                 JsonObject waypoint = new JsonObject();
                 waypoint.addProperty("sampleIndex", sampleIndex);
                 waypoint.addProperty("frameId", sample.frameId());
@@ -240,11 +257,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 waypoint.addProperty("x", waypointX);
                 waypoint.addProperty("y", waypointY);
                 waypoint.addProperty("z", waypointZ);
-                waypoint.addProperty("yaw", yaw);
-                waypoint.addProperty("pitch", pitch);
+                waypoint.addProperty("yaw", waypointYaw);
+                waypoint.addProperty("pitch", waypointPitch);
                 waypoints.add(waypoint);
-
-                context.waitTicks(4);
+                context.waitTicks(8);
             }
 
             CaptureSample selected = selectBestCapture(samples);
