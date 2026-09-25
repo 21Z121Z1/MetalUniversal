@@ -37,6 +37,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
+    private static final int MAX_CAPTURE_ATTEMPTS_PER_SAMPLE = 3;
     private static final int MIN_CAPTURE_DISTINCT_RGB = 256;
     private static final double MIN_CAPTURE_LUMA_STDDEV = 5.0;
 
@@ -180,43 +181,53 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 context.waitTicks(10);
                 singleplayer.getConnection().waitForChunksRender();
 
-                // waitForChunksRender() proves the connection-side chunk window completed, but
-                // after a long spectator teleport it can still precede the client renderer's
-                // occlusion rebuild and mesh publication. Use only public 26.3 renderer state
-                // here: this correctness lane intentionally does not depend on profiling mixins.
-                context.waitFor(client -> renderReadiness(client).get("ready").getAsBoolean());
-                context.waitTicks(4);
-                context.waitFor(client -> renderReadiness(client).get("ready").getAsBoolean());
-                JsonObject terrainEvidence = context.computeOnClient(MetalUniversalClientGameTest::renderReadiness);
-                require(terrainEvidence.get("ready").getAsBoolean(),
-                        "Terrain renderer regressed before framebuffer capture for frame " + frameId + ": " + terrainEvidence);
+                // Renderer internals are intentionally not used as a readiness oracle here:
+                // Vanilla, Sodium and Iris do not share one authoritative visible-section state.
+                // Instead, sample the exact pre-present Metal source. If a teleport catches a
+                // transient unloaded/black frame, remain at the same waypoint, let streaming
+                // advance, and retry before moving anywhere else.
+                CaptureSample sample = null;
+                int captureAttempts = 0;
+                for (int attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS_PER_SAMPLE; attempt++) {
+                    captureAttempts = attempt;
+                    long captureFrameId = (frameId - 1) * MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + attempt;
+                    RenderContractSnapshot before = renderContractSnapshot();
+                    beginRenderContractFrame(captureFrameId);
+                    try {
+                        requestFinalDrawableCapture(captureFrameId);
+                        waitForCaptureCompletion(context, before.completedCaptures() + 1, captureFrameId, 100);
+                    } finally {
+                        endRenderContractFrame(captureFrameId);
+                    }
+
+                    Path png = findFrameArtifact(metalCaptureRoot, captureFrameId, "actual.png");
+                    Path raw = findFrameArtifact(metalCaptureRoot, captureFrameId, "actual.bin");
+                    require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for capture " + captureFrameId);
+                    require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for capture " + captureFrameId);
+                    CaptureSample candidate = inspectCapture(captureFrameId, png, raw);
+                    if (isUsefulCapture(candidate)) {
+                        sample = candidate;
+                        break;
+                    }
+
+                    // A rejected readback is useful diagnostic evidence but never a passing
+                    // screenshot. Keep the camera fixed while chunk generation/upload catches up.
+                    context.waitTicks(20);
+                    singleplayer.getConnection().waitForChunksRender();
+                }
+                require(sample != null,
+                        "Metal framebuffer stayed black/degenerate after "
+                                + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at waypoint " + frameId);
+                samples.add(sample);
 
                 JsonObject waypoint = new JsonObject();
-                waypoint.addProperty("frameId", frameId);
+                waypoint.addProperty("sampleIndex", frameId);
+                waypoint.addProperty("frameId", sample.frameId());
+                waypoint.addProperty("captureAttempts", captureAttempts);
                 waypoint.addProperty("x", x);
                 waypoint.addProperty("y", y);
                 waypoint.addProperty("z", z);
-                waypoint.add("terrainReadiness", terrainEvidence);
                 waypoints.add(waypoint);
-                RenderContractSnapshot before = renderContractSnapshot();
-                beginRenderContractFrame(frameId);
-                try {
-                    requestFinalDrawableCapture(frameId);
-                    waitForCaptureCompletion(context, before.completedCaptures() + 1, frameId, 100);
-                } finally {
-                    endRenderContractFrame(frameId);
-                }
-
-                Path png = findFrameArtifact(metalCaptureRoot, frameId, "actual.png");
-                Path raw = findFrameArtifact(metalCaptureRoot, frameId, "actual.bin");
-                require(Files.isRegularFile(png), "Missing Metal framebuffer PNG for frame " + frameId);
-                require(Files.isRegularFile(raw), "Missing Metal framebuffer raw readback for frame " + frameId);
-                CaptureSample sample = inspectCapture(frameId, png, raw);
-                require(sample.nonBlackPixels() > 0
-                                && sample.distinctRgb() >= MIN_CAPTURE_DISTINCT_RGB
-                                && sample.lumaStddev() >= MIN_CAPTURE_LUMA_STDDEV,
-                        "Render-ready Metal framebuffer is black/degenerate at frame " + frameId + ": " + sample);
-                samples.add(sample);
 
                 // Sampling is deliberately spaced. This rejects the possibility that a single
                 // transitional frame (world load, resize, GUI hand-off) is mistaken for the
@@ -259,72 +270,36 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     worldEvidence
             );
 
-            require(contractSnapshot.completedCaptures() == METAL_CAPTURE_SAMPLES,
-                    "Expected " + METAL_CAPTURE_SAMPLES + " completed Metal framebuffer captures: " + contractSnapshot);
+            require(contractSnapshot.completedCaptures() >= METAL_CAPTURE_SAMPLES
+                            && contractSnapshot.completedCaptures() <= METAL_CAPTURE_SAMPLES * MAX_CAPTURE_ATTEMPTS_PER_SAMPLE,
+                    "Unexpected Metal framebuffer capture count after bounded retries: " + contractSnapshot);
             require(contractSnapshot.failedCaptures() == 0,
                     "Metal render-contract reported failed captures: " + contractSnapshot);
             require(contractSnapshot.pendingCaptures() == 0,
                     "Metal render-contract still has pending captures: " + contractSnapshot);
             require(contractSnapshot.droppedCaptures() == 0,
                     "Metal render-contract dropped framebuffer captures: " + contractSnapshot);
-            require(selected.nonBlackPixels() > 0
-                            && selected.distinctRgb() >= MIN_CAPTURE_DISTINCT_RGB
-                            && selected.lumaStddev() >= MIN_CAPTURE_LUMA_STDDEV,
-                    "All sampled Metal framebuffers failed the content-quality gate; best sample=" + selected);
+            require(isUsefulCapture(selected),
+                    "All accepted Metal framebuffers failed the content-quality gate; best sample=" + selected);
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             closeRenderContractQuietly();
         }
     }
 
-    private static JsonObject renderReadiness(net.minecraft.client.Minecraft client) {
-        JsonObject evidence = new JsonObject();
-        if (client.level == null || client.levelRenderer == null) {
-            evidence.addProperty("ready", false);
-            evidence.addProperty("worldLoaded", false);
-            return evidence;
-        }
-
-        var renderer = client.levelRenderer;
-        var dispatcher = renderer.sectionRenderDispatcher();
-        boolean hasRenderedAllSections = renderer.hasRenderedAllSections();
-        int expectedChunks = renderer.sectionOcclusionGraph().expectedChunks().size();
-        int visibleSections = renderer.visibleSections().size();
-        int compileQueueSize = dispatcher == null ? -1 : dispatcher.getCompileQueueSize();
-        int compiledVisibleSections = 0;
-        for (var section : renderer.visibleSections()) {
-            if (section.getSectionMesh() != net.minecraft.client.renderer.chunk.CompiledSectionMesh.UNCOMPILED) {
-                compiledVisibleSections++;
-            }
-        }
-        int requiredCompiledSections = Math.min(8, visibleSections);
-
-        // A streaming renderer can legitimately keep global occlusion/chunk queues
-        // non-empty indefinitely, especially with Sodium/Iris. The screenshot gate
-        // only needs a locally drawable viewport; the per-frame pixel contract below
-        // independently rejects black or degenerate output.
-        boolean ready = dispatcher != null
-                && visibleSections > 0
-                && requiredCompiledSections > 0
-                && compiledVisibleSections >= requiredCompiledSections;
-        evidence.addProperty("ready", ready);
-        evidence.addProperty("worldLoaded", true);
-        evidence.addProperty("hasRenderedAllSections", hasRenderedAllSections);
-        evidence.addProperty("expectedChunks", expectedChunks);
-        evidence.addProperty("compileQueueSize", compileQueueSize);
-        evidence.addProperty("visibleSections", visibleSections);
-        evidence.addProperty("compiledVisibleSections", compiledVisibleSections);
-        evidence.addProperty("requiredCompiledSections", requiredCompiledSections);
-        evidence.addProperty("authority",
-                "local visible-section mesh readiness after teleport; global streaming queues are diagnostic only");
-        return evidence;
+    private static boolean isUsefulCapture(CaptureSample sample) {
+        return sample != null
+                && sample.nonBlackPixels() > 0
+                && sample.distinctRgb() >= MIN_CAPTURE_DISTINCT_RGB
+                && sample.lumaStddev() >= MIN_CAPTURE_LUMA_STDDEV;
     }
 
     private static void startRenderContract(Path output) {
         try {
             Files.createDirectories(output);
             System.setProperty("metallum.renderContract.enabled", "true");
-            System.setProperty("metallum.renderContract.maxCaptures", Integer.toString(METAL_CAPTURE_SAMPLES + 4));
+            System.setProperty("metallum.renderContract.maxCaptures",
+                    Integer.toString(METAL_CAPTURE_SAMPLES * MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + 4));
             Class<?> runtime = Class.forName(RENDER_CONTRACT_RUNTIME);
             Method start = runtime.getMethod("start", Path.class, String.class);
             start.invoke(null, output, "minecraft-client-gametest");

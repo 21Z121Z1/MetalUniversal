@@ -178,14 +178,9 @@ jobs:
           if len(waypoints) != len(samples.get('samples', [])):
               raise SystemExit(f'terrain readiness evidence count mismatch: {len(waypoints)}')
           for waypoint in waypoints:
-              terrain = waypoint.get('terrainReadiness', {})
-              required = int(terrain.get('requiredCompiledSections', 0))
-              compiled = int(terrain.get('compiledVisibleSections', 0))
-              if (terrain.get('ready') is not True
-                      or terrain.get('visibleSections', 0) <= 0
-                      or required <= 0
-                      or compiled < required):
-                  raise SystemExit(f'capture occurred before local visible terrain was render-ready: {waypoint}')
+              attempts = int(waypoint.get('captureAttempts', 0))
+              if attempts < 1 or attempts > 3:
+                  raise SystemExit(f'invalid bounded framebuffer retry evidence: {waypoint}')
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
           if presentation.get('completeAndSuccessful') is not True:
