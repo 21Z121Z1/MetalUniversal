@@ -120,7 +120,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         commandBuffer = null;
         currentSubmitIndex++;
 
-        if (!awaitSubmitCompletion(currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT, 5000L)) {
+        if (!awaitSubmitCompletion(currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT, 5_000_000_000L)) {
             throw new IllegalStateException("5s timeout reached when waiting for Metal submit completion");
         }
 
@@ -570,16 +570,55 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         destroyQueue.add(destroyAction);
     }
 
-    boolean awaitSubmitCompletion(final long submitIndex, final long timeoutMs) {
+    /**
+     * 等待指定提交完成，语义与引擎参考后端 {@code GlCommandEncoder#awaitSubmit} 对齐。
+     *
+     * <p>这条路径的关键调用方是 {@code StagedVertexBuffer$GpuBufferPool}：它每帧用
+     * {@code createFence()} 取一个时间点，下一帧用 {@code awaitCompletion(0)} 做
+     * <b>非阻塞轮询</b>决定能否回收顶点缓冲。因此这里必须满足：
+     * <ul>
+     *   <li>索引已滚出环形缓冲 → 必然完成，直接返回 true；</li>
+     *   <li>索引等于当前提交号且超时为 0 → 轮询语义，返回 false（<b>不能抛异常</b>）；</li>
+     *   <li>索引等于当前提交号且超时非 0 → 才是真正的用法错误，抛异常。</li>
+     * </ul>
+     *
+     * <p>早期实现把第 2 种情况也当异常抛出，导致每帧回收轮询都会崩在
+     * {@code Cannot wait on a fence for the current submit}。
+     *
+     * @param timeoutNs 超时纳秒数；0 表示仅轮询不等待
+     * @return 该提交是否已完成
+     */
+    boolean awaitSubmitCompletion(final long submitIndex, final long timeoutNs) {
+        // 已滚出环形缓冲：对应槽位早被后续提交复用并回收过，必然已完成。
+        if (currentSubmitIndex > submitIndex + MAX_SUBMITS_IN_FLIGHT) {
+            return true;
+        }
         if (submitIndex == currentSubmitIndex) {
+            // 当前提交尚未发生（或正在进行），非阻塞轮询时按「未完成」返回。
+            if (timeoutNs == 0L) {
+                return false;
+            }
             throw new IllegalStateException("Cannot wait on a fence for the current submit");
         }
         for (InFlight f : inFlight) {
             if (f != null && f.index == submitIndex) {
-                return MetalNativeBridge.metallum_semaphore_wait(f.completedSemaphore, Math.max(timeoutMs, 0L)) == 0;
+                if (timeoutNs == 0L) {
+                    // 轮询：直接问命令缓冲的状态，不阻塞渲染线程。
+                    return f.buffer != null && f.buffer.isCompleted();
+                }
+                return MetalNativeBridge.metallum_semaphore_wait(f.completedSemaphore, millisFromNanos(timeoutNs)) == 0;
             }
         }
+        // 该索引的 in-flight 记录已被回收（或从未提交过）：视作已完成。
         return true;
+    }
+
+    /** 纳秒转毫秒，向上取整，确保不会被截断成 0 而把「等待」降级成「轮询」。 */
+    private static long millisFromNanos(final long timeoutNs) {
+        if (timeoutNs == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        return Math.max(1L, (timeoutNs + 999_999L) / 1_000_000L);
     }
 
     void close() {
