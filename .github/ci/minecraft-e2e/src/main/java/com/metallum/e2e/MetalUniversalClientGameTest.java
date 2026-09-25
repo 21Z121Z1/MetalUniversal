@@ -230,13 +230,16 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 + MAX_CAPTURE_ATTEMPTS_PER_SAMPLE + " attempts at stationary view " + sampleIndex);
                 samples.add(sample);
 
+                double waypointX = context.computeOnClient(client -> client.player.getX());
+                double waypointY = context.computeOnClient(client -> client.player.getY());
+                double waypointZ = context.computeOnClient(client -> client.player.getZ());
                 JsonObject waypoint = new JsonObject();
                 waypoint.addProperty("sampleIndex", sampleIndex);
                 waypoint.addProperty("frameId", sample.frameId());
                 waypoint.addProperty("captureAttempts", captureAttempts);
-                waypoint.addProperty("x", context.computeOnClient(client -> client.player.getX()));
-                waypoint.addProperty("y", context.computeOnClient(client -> client.player.getY()));
-                waypoint.addProperty("z", context.computeOnClient(client -> client.player.getZ()));
+                waypoint.addProperty("x", waypointX);
+                waypoint.addProperty("y", waypointY);
+                waypoint.addProperty("z", waypointZ);
                 waypoint.addProperty("yaw", yaw);
                 waypoint.addProperty("pitch", pitch);
                 waypoints.add(waypoint);
