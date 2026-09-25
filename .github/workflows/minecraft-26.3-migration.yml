@@ -4,12 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 26.3-fabric-dev
-      - agent/upstream-26.3-renderpearl
+      - 26.3-Fabric
+      - upstream/26.3-fabric-pr
   pull_request:
     branches:
-      - 26.3-fabric-dev
-      - agent/upstream-26.3-renderpearl
+      - 26.3-Fabric
     paths:
       - 'src/**'
       - 'build.gradle'
