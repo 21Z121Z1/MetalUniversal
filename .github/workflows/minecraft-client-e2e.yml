@@ -44,8 +44,8 @@ jobs:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
-      METALLUM_E2E_WIDTH: '3840'
-      METALLUM_E2E_HEIGHT: '2160'
+      METALLUM_E2E_WIDTH: '5120'
+      METALLUM_E2E_HEIGHT: '2880'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -177,25 +177,24 @@ jobs:
 
           runtime = json.loads(required[3].read_text(encoding='utf-8'))
           world = runtime.get('world', {})
-          if world.get('framebufferCaptureStrategy') != 'stationary-loaded-anchor-rotation':
-              raise SystemExit(f'framebuffer capture did not use the stable loaded anchor: {world}')
+          if world.get('framebufferCaptureStrategy') != 'stationary-loaded-validation-stage':
+              raise SystemExit(f'framebuffer capture did not use the deterministic loaded stage: {world}')
+          if world.get('framebufferValidationStage') != 'near-field-block-wall':
+              raise SystemExit(f'framebuffer validation stage identity missing: {world}')
           anchor = world.get('captureAnchor', {})
           waypoints = world.get('waypoints', [])
-          if len(waypoints) != len(samples.get('samples', [])):
-              raise SystemExit(f'framebuffer waypoint evidence count mismatch: {len(waypoints)}')
-          yaws = set()
+          if len(waypoints) != len(samples.get('samples', [])) or len(waypoints) != 4:
+              raise SystemExit(f'framebuffer temporal evidence count mismatch: {len(waypoints)}')
           for waypoint in waypoints:
               attempts = int(waypoint.get('captureAttempts', 0))
-              if attempts < 1 or attempts > 3:
+              if attempts < 1 or attempts > 2:
                   raise SystemExit(f'invalid bounded framebuffer retry evidence: {waypoint}')
-              if any(abs(float(waypoint.get(axis, 0.0)) - float(anchor.get(axis, 0.0))) > 0.25
-                     for axis in ('x', 'y', 'z')):
-                  raise SystemExit(f'framebuffer capture left the loaded anchor: anchor={anchor} waypoint={waypoint}')
-              if int(waypoint.get('pitch', -999)) != 45:
-                  raise SystemExit(f'unexpected framebuffer capture pitch: {waypoint}')
-              yaws.add(int(waypoint.get('yaw', -999)))
-          if len(yaws) != len(waypoints):
-              raise SystemExit(f'framebuffer capture did not sample unique view directions: {waypoints}')
+              for axis in ('x', 'y', 'z', 'yaw', 'pitch'):
+                  if abs(float(waypoint.get(axis, 0.0)) - float(anchor.get(axis, 0.0))) > 0.25:
+                      raise SystemExit(
+                          f'framebuffer temporal sample changed camera pose: '
+                          f'axis={axis} anchor={anchor} waypoint={waypoint}'
+                      )
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
           if presentation.get('completeAndSuccessful') is not True:
