@@ -388,7 +388,9 @@ run_trial() {
   set +e
   MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 \
     ./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation \
-      "-Pworld=$EVAL_WORLD" "${args[@]}" 2>&1 | tee "$trial_dir/client.log"
+      "-Pworld=$EVAL_WORLD" "${args[@]}" \
+      -x buildIOSNative -x buildIOSSpvc \
+      2>&1 | tee "$trial_dir/client.log"
   status=${PIPESTATUS[0]}
   set -e
   printf '%d\n' "$status" > "$trial_dir/exit-status.txt"

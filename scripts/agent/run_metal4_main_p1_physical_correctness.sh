@@ -109,6 +109,8 @@ run_lane candidate
 python3 scripts/agent/check_metal4_main_e2e_pair.py \
   "$OUT/baseline/evidence/metal4-main-renderer-evidence.json" \
   "$OUT/candidate/evidence/metal4-main-renderer-evidence.json" \
+  --baseline-evidence-root "$OUT/baseline/evidence" \
+  --candidate-evidence-root "$OUT/candidate/evidence" \
   --output "$OUT/pair-decision.json"
 
 python3 - "$OUT" <<'PY'
