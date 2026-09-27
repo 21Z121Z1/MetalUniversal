@@ -184,7 +184,7 @@ final class FrameSynthesisContractTest {
                         ),
                         new FrameSynthesisContract.ProducerReceipt(
                                 FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
-                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                FrameSynthesisContract.ProducerCoverage.NOT_PRESENT,
                                 0
                         ),
                         new FrameSynthesisContract.ProducerReceipt(

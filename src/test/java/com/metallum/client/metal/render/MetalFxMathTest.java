@@ -95,19 +95,19 @@ final class MetalFxMathTest {
         Matrix4f projection = new Matrix4f().perspective(
                 (float) Math.toRadians(70.0D), 16.0F / 9.0F, 0.05F, 1000.0F
         );
-        assertEquals(70.0F, MetalFxMath.verticalFieldOfViewDegrees(projection, 55.0F), 1.0E-4F);
+        assertEquals(70.0F, MetalFxMath.verticalFieldOfViewDegrees(projection), 1.0E-4F);
     }
 
     @Test
-    void invalidProjectionUsesTheFieldOfViewFallback() {
-        Matrix4f invalid = new Matrix4f().m11(Float.NaN);
-        assertEquals(55.0F, MetalFxMath.verticalFieldOfViewDegrees(invalid, 55.0F), 1.0E-6F);
+    void invalidProjectionDoesNotInventCameraMetadata() {
+        assertTrue(Float.isNaN(MetalFxMath.verticalFieldOfViewDegrees(new Matrix4f().m11(Float.NaN))));
+        assertTrue(Float.isNaN(MetalFxMath.verticalFieldOfViewDegrees(new Matrix4f())));
     }
 
     @Test
-    void staleNarrowProjectionUsesTheFieldOfViewFallback() {
-        Matrix4f stale = new Matrix4f().m11(13.5F);
-        assertEquals(55.0F, MetalFxMath.verticalFieldOfViewDegrees(stale, 55.0F), 1.0E-6F);
+    void aRealNarrowZoomRetainsItsActualFieldOfView() {
+        Matrix4f zoom = new Matrix4f().setPerspective((float) Math.toRadians(8), 1.7F, 0.05F, 1000);
+        assertEquals(8.0F, MetalFxMath.verticalFieldOfViewDegrees(zoom), 1.0E-5F);
     }
 
     @Test
