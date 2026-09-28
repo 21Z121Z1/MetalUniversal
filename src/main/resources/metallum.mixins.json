@@ -6,6 +6,7 @@
   "mixins": [],
   "client": [
     "render.FrontendRenderPassBackendAccessMixin",
+    "render.FrontendCommandEncoderMetalFxMixin",
     "render.PreferredGraphicsApiMixin",
     "render.BackendFrameComparisonMixin",
     "render.BackendFrameComparisonGameRendererMixin",

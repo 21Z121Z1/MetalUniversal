@@ -124,6 +124,54 @@ private struct MetalFxScalerKey: Hashable {
     let outputWidth: Int
     let outputHeight: Int
 }
+
+/// A scaler configuration is reusable; depth history additionally belongs to
+/// one queue timeline. Retaining the queue in this key prevents address reuse
+/// from aliasing an outstanding history after queue recreation.
+private struct MetalFxDepthHistoryKey: Hashable {
+    let scaler: MetalFxScalerKey
+    let queue: AnyObject
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.scaler == rhs.scaler && lhs.queue === rhs.queue
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(scaler)
+        hasher.combine(ObjectIdentifier(queue))
+    }
+}
+
+private var metalFxSubmissionPublicationKey: UInt8 = 0
+
+private func metalFxSubmissionPublication(_ commandBuffer: MTLCommandBuffer) -> MetalFxSubmissionPublication {
+    if let owner = objc_getAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey)
+            as? MetalFxSubmissionPublication { return owner }
+    let owner = MetalFxSubmissionPublication()
+    objc_setAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey,
+                             owner, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return owner
+}
+
+private func publishMetalFxSubmittedCopies(_ commandBuffer: MTLCommandBuffer) {
+    (objc_getAssociatedObject(commandBuffer, &metalFxSubmissionPublicationKey)
+        as? MetalFxSubmissionPublication)?.didSubmit()
+}
+
+private func registerMetalFxDepthPublication(
+    _ owner: MetalFxSubmissionPublication, key: MetalFxDepthHistoryKey,
+    ticket: MetalFxDepthHistoryOwnership<MetalFxDepthHistoryKey>.Ticket
+) {
+    owner.append(publish: {
+        NativeState.metalFxHistoryLock.lock()
+        NativeState.metalFxDepthHistory.publish(key, ticket: ticket)
+        NativeState.metalFxHistoryLock.unlock()
+    }, cancel: {
+        NativeState.metalFxHistoryLock.lock()
+        NativeState.metalFxDepthHistory.invalidate(key, ifOwnedBy: ticket)
+        NativeState.metalFxHistoryLock.unlock()
+    })
+}
 #endif
 
 private enum NativeState {
@@ -367,6 +415,7 @@ private enum NativeState {
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
     static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
+    static var metalFxColorTransferPipelines: [ObjectIdentifier: MTLComputePipelineState] = [:]
     #if os(macOS)
     // Present mode the game last asked for, so stopping the frame-generation
     // presenter can hand the layer back in the state Minecraft expects instead
@@ -375,9 +424,9 @@ private enum NativeState {
     #endif
     #if os(macOS) && canImport(MetalFX)
     static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
-    static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxPreviousDepthTextures: [MetalFxDepthHistoryKey: MTLTexture] = [:]
     static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
-    static var metalFxPreviousDepthValid: Set<MetalFxScalerKey> = []
+    static var metalFxDepthHistory = MetalFxDepthHistoryOwnership<MetalFxDepthHistoryKey>()
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -1128,6 +1177,9 @@ private final class Metal4MainCommandBufferLease {
     fileprivate var presentationTelemetryID: UInt64?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
+    #if os(macOS) && canImport(MetalFX)
+    fileprivate let metalFxPublication = MetalFxSubmissionPublication()
+    #endif
 
     init(owner: Metal4MainQueueContext, slotIndex: Int) {
         self.owner = owner
@@ -1260,6 +1312,7 @@ private final class Metal4MainQueueContext {
 
     private let device: MTLDevice
     private let queue: MTL4CommandQueue
+    fileprivate var historyQueueIdentity: AnyObject { queue as AnyObject }
     private let slots: [Slot]
     // The Java renderer bounds submissions to the same three-frame depth, but
     // it cannot wait for the oldest frame until submit(), which happens after
@@ -1449,6 +1502,9 @@ private final class Metal4MainQueueContext {
             queue.waitForDrawable(drawable)
         }
         queue.commit([commandBuffer], options: options)
+        #if os(macOS) && canImport(MetalFX)
+        lease.metalFxPublication.didSubmit()
+        #endif
         for (event, value) in lease.postCommitSignals {
             queue.signalEvent(event, value: value)
         }
@@ -2088,16 +2144,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let frameGenerationHeight: Int
         let nativeWidth: Int
         let nativeHeight: Int
-        let jitterX: Float
-        let jitterY: Float
-        let fieldOfView: Float
-        let nearPlane: Float
-        let farPlane: Float
-        let aspectRatio: Float
-        // Render-timeline interval between this source frame and the previous
-        // one, measured by the game at scene-frame start. 0 or non-finite
-        // means "unknown"; the presenter then falls back to enqueue spacing.
-        let sourceDelta: Float
+        let parameters: MetalFxFrameParameters
         let reset: Bool
     }
 
@@ -2245,7 +2292,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var queuedLifecycle: MetalFrameGenerationLifecycle?
     private var activePreviousIndex: Int?
     private var activeShouldResetHistory = true
-    private var activeDeltaTime: Float = 1.0 / 60.0
+    private var activeDeltaTime: Float = 0.0
     private var historyOwnership = MetalFrameGenerationHistoryOwnership()
     private var realPresentationTimeoutAt: CFTimeInterval?
     private var displayUpdateStarvationTimeoutAt: CFTimeInterval?
@@ -2941,11 +2988,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         nearPlane: Float,
         farPlane: Float,
         aspectRatio: Float,
-        sourceDeltaSeconds: Float = 0.0,
+        sourceDeltaSeconds: Float,
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
-        guard sceneColor.width > 0, sceneColor.height > 0,
+        guard let parameters = MetalFxFrameParameters(
+                  depthWidth: inputWidth, depthHeight: inputHeight,
+                  colorWidth: sceneColor.width, colorHeight: sceneColor.height,
+                  jitterX: jitterX, jitterY: jitterY, fieldOfView: fieldOfView,
+                  nearPlane: nearPlane, farPlane: farPlane, aspectRatio: aspectRatio,
+                  deltaTime: sourceDeltaSeconds),
               nativeSceneColor.width > 0, nativeSceneColor.height > 0,
               uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
@@ -3194,13 +3246,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameGenerationHeight: sceneColor.height,
             nativeWidth: nativeSceneColor.width,
             nativeHeight: nativeSceneColor.height,
-            jitterX: jitterX,
-            jitterY: jitterY,
-            fieldOfView: fieldOfView,
-            nearPlane: nearPlane,
-            farPlane: farPlane,
-            aspectRatio: aspectRatio,
-            sourceDelta: sourceDeltaSeconds,
+            parameters: parameters,
             reset: reset
         )
 
@@ -3453,25 +3499,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             activeShouldResetHistory = frame.reset
                     || !historyOwnership.interpolatorValid
                     || !historyOwnership.displayValid
-            activeDeltaTime = {
-                guard !activeShouldResetHistory else {
-                    return 1.0 / 60.0
-                }
-                // Prefer the game-provided render-timeline interval; the
-                // enqueue spacing below is only a proxy that inherits CPU
-                // scheduling jitter from the encode path.
-                if frame.sourceDelta.isFinite && frame.sourceDelta > 0.0 {
-                    return min(max(frame.sourceDelta, 1.0 / 240.0), 0.25)
-                }
-                guard let previousTimestamp = lastPresentedTimestamp else {
-                    return 1.0 / 60.0
-                }
-                let delta = frame.timestamp - previousTimestamp
-                guard delta.isFinite, delta > 0.0 else {
-                    return 1.0 / 60.0
-                }
-                return Float(min(max(delta, 1.0 / 240.0), 0.25))
-            }()
+            // The render-timeline interval is immutable source metadata.
+            // Resetting history changes history ownership, not elapsed time.
+            activeDeltaTime = frame.parameters.deltaTime
             currentLifecycle = lifecycle
         }
 
@@ -3554,24 +3584,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         commandBuffer.encodeWaitForEvent(readyEvent, value: frame.eventValue)
 
         if work.step == .generated {
-            frameInterpolator.colorTexture = sceneBuffers[frame.index]
-            frameInterpolator.prevColorTexture = sceneBuffers[work.previousIndex]
-            frameInterpolator.depthTexture = depthBuffers[frame.index]
-            frameInterpolator.motionTexture = motionBuffers[frame.index]
-            frameInterpolator.uiTexture = nil
-            frameInterpolator.outputTexture = interpolationOutputs[frame.index]
-            frameInterpolator.isUITextureComposited = false
-            frameInterpolator.jitterOffsetX = frame.jitterX
-            frameInterpolator.jitterOffsetY = frame.jitterY
-            frameInterpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            frameInterpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
-            frameInterpolator.fieldOfView = frame.fieldOfView
-            frameInterpolator.nearPlane = frame.nearPlane
-            frameInterpolator.farPlane = frame.farPlane
-            frameInterpolator.aspectRatio = frame.aspectRatio
-            frameInterpolator.deltaTime = work.deltaTime
-            frameInterpolator.isDepthReversed = true
-            frameInterpolator.shouldResetHistory = work.shouldResetHistory
+            guard configureInterpolator(frameInterpolator, for: work) else {
+                failPresentationBeforeSubmission(work, reason: "interpolator source contract mismatch")
+                return
+            }
             frameInterpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -3675,6 +3691,56 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ///   - the selected Metal 4 slot must be closed on every path out of here,
     ///     which is what abandonFrame() is for. All early returns after beginFrame
     ///     call it, and it is idempotent. Slot exhaustion returns before encoding.
+    /// The same immutable source contract reaches both SDK backends. Validate
+    /// actual ring resources again after queueing/resize, before SDK encoding.
+    private func configureInterpolator(
+        _ interpolator: any MTLFXFrameInterpolatorBase,
+        for work: PresentationWork
+    ) -> Bool {
+        let frame = work.frame
+        let p = frame.parameters
+        let color = sceneBuffers[frame.index]
+        let previous = sceneBuffers[work.previousIndex]
+        let depth = depthBuffers[frame.index]
+        let motion = motionBuffers[frame.index]
+        let output = interpolationOutputs[frame.index]
+        guard color.width == p.colorWidth, color.height == p.colorHeight,
+              previous.width == p.colorWidth, previous.height == p.colorHeight,
+              output.width == p.colorWidth, output.height == p.colorHeight,
+              depth.width == p.depthWidth, depth.height == p.depthHeight,
+              motion.width == p.depthWidth, motion.height == p.depthHeight,
+              color.pixelFormat == interpolator.colorTextureFormat,
+              previous.pixelFormat == interpolator.colorTextureFormat,
+              depth.pixelFormat == interpolator.depthTextureFormat,
+              motion.pixelFormat == interpolator.motionTextureFormat,
+              output.pixelFormat == interpolator.outputTextureFormat,
+              output.storageMode == .private,
+              color.usage.isSuperset(of: interpolator.colorTextureUsage),
+              previous.usage.isSuperset(of: interpolator.colorTextureUsage),
+              depth.usage.isSuperset(of: interpolator.depthTextureUsage),
+              motion.usage.isSuperset(of: interpolator.motionTextureUsage),
+              output.usage.isSuperset(of: interpolator.outputTextureUsage) else { return false }
+        interpolator.colorTexture = color
+        interpolator.prevColorTexture = previous
+        interpolator.depthTexture = depth
+        interpolator.motionTexture = motion
+        interpolator.uiTexture = nil
+        interpolator.outputTexture = output
+        interpolator.isUITextureComposited = false
+        interpolator.jitterOffsetX = p.jitterX
+        interpolator.jitterOffsetY = p.jitterY
+        interpolator.motionVectorScaleX = p.motionScaleX
+        interpolator.motionVectorScaleY = p.motionScaleY
+        interpolator.fieldOfView = p.fieldOfView
+        interpolator.nearPlane = p.nearPlane
+        interpolator.farPlane = p.farPlane
+        interpolator.aspectRatio = p.aspectRatio
+        interpolator.deltaTime = p.deltaTime
+        interpolator.isDepthReversed = true
+        interpolator.shouldResetHistory = work.shouldResetHistory
+        return true
+    }
+
     @available(macOS 26.0, *)
     private func presentMetal4(
         _ work: PresentationWork,
@@ -3696,24 +3762,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
 
         if work.step == .generated {
-            interpolator.colorTexture = sceneBuffers[frame.index]
-            interpolator.prevColorTexture = sceneBuffers[work.previousIndex]
-            interpolator.depthTexture = depthBuffers[frame.index]
-            interpolator.motionTexture = motionBuffers[frame.index]
-            interpolator.uiTexture = nil
-            interpolator.outputTexture = interpolationOutputs[frame.index]
-            interpolator.isUITextureComposited = false
-            interpolator.jitterOffsetX = frame.jitterX
-            interpolator.jitterOffsetY = frame.jitterY
-            interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            interpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
-            interpolator.fieldOfView = frame.fieldOfView
-            interpolator.nearPlane = frame.nearPlane
-            interpolator.farPlane = frame.farPlane
-            interpolator.aspectRatio = frame.aspectRatio
-            interpolator.deltaTime = work.deltaTime
-            interpolator.isDepthReversed = true
-            interpolator.shouldResetHistory = work.shouldResetHistory
+            guard configureInterpolator(interpolator, for: work) else {
+                path.abandonFrame()
+                failPresentationBeforeSubmission(work, reason: "interpolator source contract mismatch")
+                return
+            }
             interpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
         }
@@ -3970,7 +4023,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         currentLifecycle = nil
         activePreviousIndex = nil
         activeShouldResetHistory = true
-        activeDeltaTime = 1.0 / 60.0
+        activeDeltaTime = 0.0
         realPresentationTimeoutAt = nil
         displayUpdateStarvationTimeoutAt = nil
         completeFrameLocked()
@@ -4007,7 +4060,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         queuedLifecycle = nil
         activePreviousIndex = nil
         activeShouldResetHistory = true
-        activeDeltaTime = 1.0 / 60.0
+        activeDeltaTime = 0.0
         displayUpdateStarvationTimeoutAt = CACurrentMediaTime()
                 + Self.displayUpdateStarvationTimeout
         condition.broadcast()
@@ -4116,8 +4169,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameGenerationHeight: sourceFrame?.frameGenerationHeight ?? 0,
             nativeWidth: sourceFrame?.nativeWidth ?? 0,
             nativeHeight: sourceFrame?.nativeHeight ?? 0,
-            jitterX: sourceFrame?.jitterX ?? 0.0,
-            jitterY: sourceFrame?.jitterY ?? 0.0,
+            jitterX: sourceFrame?.parameters.jitterX ?? 0.0,
+            jitterY: sourceFrame?.parameters.jitterY ?? 0.0,
             sourceGpuStartTime: sourceTiming?.start ?? 0.0,
             sourceGpuEndTime: sourceTiming?.end ?? 0.0,
             gpuStartTime: 0.0,
@@ -6876,10 +6929,11 @@ private func metal4MetalFxEncodeV2(
         motion: motionTexture,
         reactive: reactiveTexture
     )
+    let historyKey = MetalFxDepthHistoryKey(scaler: key, queue: lease.owner.historyQueueIdentity)
     let previousDepthTexture: MTLTexture
     let previousDepthIsValid: Bool
     NativeState.metalFxHistoryLock.lock()
-    if let cached = NativeState.metalFxPreviousDepthTextures[key],
+    if let cached = NativeState.metalFxPreviousDepthTextures[historyKey],
        cached.width == depthTexture.width, cached.height == depthTexture.height,
        cached.pixelFormat == depthTexture.pixelFormat {
         previousDepthTexture = cached
@@ -6898,13 +6952,21 @@ private func metal4MetalFxEncodeV2(
         }
         created.label = "MetalFX Previous Depth (Metal 4)"
         residencyTrackCreated(created)
-        NativeState.metalFxPreviousDepthTextures[key] = created
-        NativeState.metalFxPreviousDepthValid.remove(key)
+        NativeState.metalFxPreviousDepthTextures[historyKey] = created
+        NativeState.metalFxDepthHistory.invalidate(historyKey)
         previousDepthTexture = created
     }
-    if reset != 0 { NativeState.metalFxPreviousDepthValid.remove(key) }
-    previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+    let depthSubmission = NativeState.metalFxDepthHistory.begin(historyKey, reset: reset != 0)
+    previousDepthIsValid = depthSubmission.previousDepthIsValid
     NativeState.metalFxHistoryLock.unlock()
+    var historyCopyEncoded = false
+    defer {
+        if !historyCopyEncoded {
+            NativeState.metalFxHistoryLock.lock()
+            NativeState.metalFxDepthHistory.invalidate(historyKey, ifOwnedBy: depthSubmission.ticket)
+            NativeState.metalFxHistoryLock.unlock()
+        }
+    }
 
     let scaler: any MTL4FXTemporalScaler
     if let cached = NativeState.metalFxScalers[key] as? any MTL4FXTemporalScaler {
@@ -6932,7 +6994,6 @@ private func metal4MetalFxEncodeV2(
         scaler = created
         NativeState.metalFxScalers[key] = created as AnyObject
     }
-    NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
 
     let currentMatrix = makeMatrix(currentViewProjection)
     let inverseMatrix = makeMatrix(inverseCurrentViewProjection)
@@ -7061,7 +7122,7 @@ private func metal4MetalFxEncodeV2(
     scaler.jitterOffsetY = jitterY
     scaler.motionVectorScaleX = Float(inputWidth) * 0.5
     scaler.motionVectorScaleY = Float(inputHeight) * 0.5
-    scaler.reset = reset != 0
+    scaler.reset = depthSubmission.shouldResetHistory
     scaler.isDepthReversed = depthReversed != 0
     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
     scaler.fence = fence
@@ -7100,13 +7161,14 @@ private func metal4MetalFxEncodeV2(
     historyCopy.endEncoding()
     lease.addCompletionHandler { error, _, _ in
         NativeState.metalFxHistoryLock.lock()
-        if error == nil {
-            NativeState.metalFxPreviousDepthValid.insert(key)
-        } else {
-            NativeState.metalFxPreviousDepthValid.remove(key)
-        }
+        NativeState.metalFxDepthHistory.complete(historyKey, ticket: depthSubmission.ticket, succeeded: error == nil)
         NativeState.metalFxHistoryLock.unlock()
     }
+    registerMetalFxDepthPublication(
+        lease.metalFxPublication, key: historyKey, ticket: depthSubmission.ticket
+    )
+    historyCopyEncoded = true
+    NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
     NativeState.metal4TemporalEncodeCount &+= 1
     return 1
 }
@@ -7174,10 +7236,11 @@ private func metal3MetalFxEncodeV2(
                 motion: motionTexture,
                 reactive: reactiveTexture
             )
+            let historyKey = MetalFxDepthHistoryKey(scaler: key, queue: commandBuffer.commandQueue as AnyObject)
             let previousDepthTexture: MTLTexture
             let previousDepthIsValid: Bool
             NativeState.metalFxHistoryLock.lock()
-            if let cachedDepth = NativeState.metalFxPreviousDepthTextures[key],
+            if let cachedDepth = NativeState.metalFxPreviousDepthTextures[historyKey],
                cachedDepth.width == depthTexture.width,
                cachedDepth.height == depthTexture.height,
                cachedDepth.pixelFormat == depthTexture.pixelFormat {
@@ -7190,6 +7253,7 @@ private func metal3MetalFxEncodeV2(
                     mipmapped: false
                 )
                 previousDepthDescriptor.storageMode = .private
+                previousDepthDescriptor.hazardTrackingMode = .tracked
                 previousDepthDescriptor.usage = [.shaderRead]
                 guard let createdDepth = device.makeTexture(descriptor: previousDepthDescriptor) else {
                     NativeState.metalFxHistoryLock.unlock()
@@ -7197,15 +7261,22 @@ private func metal3MetalFxEncodeV2(
                     return 0
                 }
                 createdDepth.label = "MetalFX Previous Depth"
-                NativeState.metalFxPreviousDepthTextures[key] = createdDepth
-                NativeState.metalFxPreviousDepthValid.remove(key)
+                residencyTrackCreated(createdDepth)
+                NativeState.metalFxPreviousDepthTextures[historyKey] = createdDepth
+                NativeState.metalFxDepthHistory.invalidate(historyKey)
                 previousDepthTexture = createdDepth
             }
-            if reset != 0 {
-                NativeState.metalFxPreviousDepthValid.remove(key)
-            }
-            previousDepthIsValid = NativeState.metalFxPreviousDepthValid.contains(key)
+            let depthSubmission = NativeState.metalFxDepthHistory.begin(historyKey, reset: reset != 0)
+            previousDepthIsValid = depthSubmission.previousDepthIsValid
             NativeState.metalFxHistoryLock.unlock()
+            var historyCopyEncoded = false
+            defer {
+                if !historyCopyEncoded {
+                    NativeState.metalFxHistoryLock.lock()
+                    NativeState.metalFxDepthHistory.invalidate(historyKey, ifOwnedBy: depthSubmission.ticket)
+                    NativeState.metalFxHistoryLock.unlock()
+                }
+            }
 
             let scalerObject: AnyObject?
             if let cached = NativeState.metalFxScalers[key] {
@@ -7241,7 +7312,6 @@ private func metal3MetalFxEncodeV2(
                 logMetalFxFailureOnce("temporal-v2-cast", "cached temporal scaler unavailable")
                 return 0
             }
-            NativeState.lastTemporalScalerForInterpolation = scalerObject
             struct MergeUniforms {
                 var viewport: SIMD4<UInt32>
                 var flags: SIMD4<UInt32>
@@ -7423,7 +7493,7 @@ private func metal3MetalFxEncodeV2(
             scaler.jitterOffsetY = jitterY
             scaler.motionVectorScaleX = Float(inputWidth) * 0.5
             scaler.motionVectorScaleY = Float(inputHeight) * 0.5
-            scaler.reset = reset != 0
+            scaler.reset = depthSubmission.shouldResetHistory
             scaler.isDepthReversed = depthReversed != 0
             if #available(macOS 14.4, *) {
                 scaler.reactiveMaskTexture = reactiveTexture
@@ -7453,13 +7523,16 @@ private func metal3MetalFxEncodeV2(
             historyBlit.endEncoding()
             commandBuffer.addCompletedHandler { completed in
                 NativeState.metalFxHistoryLock.lock()
-                if completed.status == .completed {
-                    NativeState.metalFxPreviousDepthValid.insert(key)
-                } else {
-                    NativeState.metalFxPreviousDepthValid.remove(key)
-                }
+                NativeState.metalFxDepthHistory.complete(
+                    historyKey, ticket: depthSubmission.ticket, succeeded: completed.status == .completed
+                )
                 NativeState.metalFxHistoryLock.unlock()
             }
+            registerMetalFxDepthPublication(
+                metalFxSubmissionPublication(commandBuffer), key: historyKey, ticket: depthSubmission.ticket
+            )
+            historyCopyEncoded = true
+            NativeState.lastTemporalScalerForInterpolation = scalerObject
             return 1
         }
     }
@@ -7490,6 +7563,103 @@ public func metallum_metalfx_encode_v2(
     )
 }
 
+// SDR display values are not scene-linear radiance. This transfer pair only
+// linearizes the authored sRGB display signal for Temporal, then restores that
+// signal before FrameInterpolator/UI/presentation. It does not recover HDR or
+// invert Minecraft's artistic lightmap/brightness operations.
+private let metalFxColorTransferSource = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void metallum_metalfx_color_transfer(
+    texture2d<float, access::read> source [[texture(0)]],
+    texture2d<float, access::write> destination [[texture(1)]],
+    constant uint4 &parameters [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= parameters.x || p.y >= parameters.y) return;
+    float4 pixel = source.read(p);
+    float3 c = max(pixel.rgb, float3(0.0f));
+    float3 transformed;
+    if (parameters.z == 1u) {
+        transformed = select(pow((c + 0.055f) / 1.055f, float3(2.4f)),
+                             c / 12.92f, c <= 0.04045f);
+    } else {
+        transformed = select(1.055f * pow(c, float3(1.0f / 2.4f)) - 0.055f,
+                             c * 12.92f, c <= 0.0031308f);
+    }
+    // Alpha is coverage, never a transfer-encoded color channel. These are
+    // scene textures; no premultiply/unpremultiply is performed here.
+    destination.write(float4(transformed, pixel.a), p);
+}
+"""
+
+private func metalFxColorTransferPipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    let key = ObjectIdentifier(device as AnyObject)
+    if let cached = NativeState.metalFxColorTransferPipelines[key] { return cached }
+    do {
+        let library = try device.makeLibrary(source: metalFxColorTransferSource, options: nil)
+        guard let function = library.makeFunction(name: "metallum_metalfx_color_transfer") else { return nil }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        NativeState.metalFxColorTransferPipelines[key] = pipeline
+        return pipeline
+    } catch {
+        NSLog("[Metallum] MetalFX SDR transfer pipeline creation failed: %@", String(describing: error))
+        return nil
+    }
+}
+
+@_cdecl("metallum_metalfx_color_transfer_encode")
+public func metallumMetalFxColorTransferEncodeEntry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ source: MTLTexture,
+    _ destination: MTLTexture,
+    _ direction: Int32,
+    _ fence: MTLFence?
+) -> Int32 {
+    guard source.width == destination.width, source.height == destination.height,
+          source.textureType == .type2D, destination.textureType == .type2D,
+          source.sampleCount == 1, destination.sampleCount == 1,
+          source.usage.contains(.shaderRead), destination.usage.contains(.shaderWrite),
+          destination.storageMode == .private,
+          (direction == 1 && source.pixelFormat == .rgba8Unorm && destination.pixelFormat == .rgba16Float)
+            || (direction == 2 && source.pixelFormat == .rgba16Float && destination.pixelFormat == .rgba8Unorm),
+          let pipeline = metalFxColorTransferPipeline(device) else { return 0 }
+    let parameters = SIMD4<UInt32>(UInt32(source.width), UInt32(source.height), UInt32(direction), 0)
+    let label = direction == 1 ? "MetalFX sRGB Decode" : "MetalFX SDR Output Transfer"
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+        return encodeMetal4Compute(
+            lease: lease, label: label, pipeline: pipeline, uniforms: parameters,
+            textures: [(0, source), (1, destination)], width: source.width, height: source.height,
+            producerBarrierBeforeStages: [.vertex, .fragment, .dispatch, .blit]
+        ) ? 1 : 0
+    }
+    let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return 0 }
+    encoder.label = label
+    if let fence { encoder.waitForFence(fence) }
+    var mutableParameters = parameters
+    encoder.setComputePipelineState(pipeline)
+    encoder.setBytes(&mutableParameters, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
+    encoder.setTexture(source, index: 0)
+    encoder.setTexture(destination, index: 1)
+    let width = max(1, min(pipeline.threadExecutionWidth, 64))
+    let height = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / width))
+    encoder.dispatchThreads(MTLSize(width: source.width, height: source.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
+    if let fence { encoder.updateFence(fence) }
+    encoder.endEncoding()
+    return 1
+}
+
+@_cdecl("metallum_metalfx_invalidate_source")
+public func metallumMetalFxInvalidateSource() {
+    #if os(macOS) && canImport(MetalFX)
+    NativeState.lastTemporalScalerForInterpolation = nil
+    NativeState.metalFxHistoryLock.lock()
+    NativeState.metalFxDepthHistory.invalidateAll()
+    NativeState.metalFxHistoryLock.unlock()
+    #endif
+}
+
 private func metalFxEncodeV2EntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
     _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
@@ -7505,6 +7675,8 @@ private func metalFxEncodeV2EntryImpl(
     _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
+    // Never offer a scaler from a skipped or failed source encode to FrameGen.
+    NativeState.lastTemporalScalerForInterpolation = nil
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer) {
         return metal4MetalFxEncodeV2(
@@ -7962,7 +8134,7 @@ public func metallum_metalfx_release_scalers() {
     }
     NativeState.metalFxPreviousDepthTextures.removeAll()
     NativeState.metalFxValidationReactiveTextures.removeAll()
-    NativeState.metalFxPreviousDepthValid.removeAll()
+    NativeState.metalFxDepthHistory.invalidateAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
 }
@@ -7979,6 +8151,7 @@ public func metallumMetalFxFrameGenerationScalerLinkStatus() -> Int32 {
 
 @_cdecl("metallum_metalfx_shutdown")
 public func metallum_metalfx_shutdown() {
+    NativeState.metalFxColorTransferPipelines.removeAll()
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 26.0, *) {
         NativeState.frameGenerationPresenter?.shutdown()
@@ -8934,6 +9107,9 @@ public func metallum_MTLCommandBuffer_commit(_ pointer: UnsafeMutableRawPointer)
     finishGpuEncoderTimings(commandBuffer)
     residencyFlushBeforeSubmit()
     commandBuffer.commit()
+    #if os(macOS) && canImport(MetalFX)
+    publishMetalFxSubmittedCopies(commandBuffer)
+    #endif
 }
 
 @_cdecl("metallum_create_semaphore")
@@ -8955,6 +9131,9 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ pointer: UnsafeMutableR
     }
     residencyFlushBeforeSubmit()
     commandBuffer.commit()
+    #if os(macOS) && canImport(MetalFX)
+    publishMetalFxSubmittedCopies(commandBuffer)
+    #endif
 }
 
 @_cdecl("metallum_semaphore_wait")

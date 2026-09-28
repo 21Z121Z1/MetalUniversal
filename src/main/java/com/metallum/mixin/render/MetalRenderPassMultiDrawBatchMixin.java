@@ -88,6 +88,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             final int drawCount,
             final CallbackInfo ci
     ) {
+        if (com.metallum.client.metal.render.MetalFxReactivePass.needsDrawReceipt(this)) return;
         final boolean noTrace = NO_TRACE_FAST_PATH && this.contractPassToken < 0L;
         if (drawCount < 0
                 || drawCount > Integer.MAX_VALUE / 3

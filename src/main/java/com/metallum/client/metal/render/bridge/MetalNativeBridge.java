@@ -175,6 +175,11 @@ public final class MetalNativeBridge {
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     FLOAT, FLOAT, FLOAT, INT, INT, INT, INT, INT, INT
             ));
+            metalfxColorTransfer = optionalDowncall(lookup, "metallum_metalfx_color_transfer_encode",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS));
+            metalfxInvalidateSource = optionalDowncall(lookup, "metallum_metalfx_invalidate_source",
+                    FunctionDescriptor.ofVoid());
             metalfxEncodeV3 = optionalDowncall(lookup, "metallum_metalfx_encode_v3", FunctionDescriptor.of(
                     INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -1219,6 +1224,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxEncodeV2;
     @Nullable
     private static final MethodHandle metalfxEncodeV3;
+    private static final MethodHandle metalfxColorTransfer;
+    private static final MethodHandle metalfxInvalidateSource;
     private static final MethodHandle metalfxEncode;
     private static final MethodHandle metalfxTransparencyMask;
     private static final MethodHandle metalfxCopy;
@@ -1712,6 +1719,29 @@ public final class MetalNativeBridge {
      * when its validity attachment is non-zero. The old symbol above remains
      * available for older dylibs and for the spatial/camera fallback path.
      */
+    /** Explicit SDR transfer; 1 decodes sRGB, 2 encodes linear display values. */
+    public static boolean metallum_metalfx_color_transfer_encode(
+            final MemorySegment commandBuffer, final MemorySegment device,
+            final MemorySegment source, final MemorySegment destination,
+            final int direction, final MemorySegment fence) {
+        if (metalfxColorTransfer == null) return false;
+        try {
+            return (int) metalfxColorTransfer.invokeExact(segment(commandBuffer), segment(device),
+                    segment(source), segment(destination), direction, segment(fence)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_color_transfer_encode", throwable);
+        }
+    }
+
+    public static void metallum_metalfx_invalidate_source() {
+        if (metalfxInvalidateSource == null) return;
+        try {
+            metalfxInvalidateSource.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_invalidate_source", throwable);
+        }
+    }
+
     public static boolean metallum_metalfx_encode_v3_available() {
         return metalfxEncodeV3 != null;
     }

@@ -360,6 +360,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
     }
 
     private boolean metallum$useFastPath() {
-        return ENABLED && this.contractPassToken < 0L;
+        return ENABLED && this.contractPassToken < 0L
+                && !com.metallum.client.metal.render.MetalFxReactivePass.needsDrawReceipt(this);
     }
 }

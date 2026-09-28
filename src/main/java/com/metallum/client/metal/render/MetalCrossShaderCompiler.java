@@ -89,6 +89,19 @@ final class MetalCrossShaderCompiler {
             int pushConstantBinding = firstStorageBinding + storageResources.size();
             float sampleLodBias = MetalFxManager.shaderSampleLodBias();
             RenderPipeline syntheticPipeline = syntheticPipeline(info);
+            CutoutFragment cutoutFragment = null;
+            if (info.colorTargetStates().size() == 1 && info.colorTargetStates().getFirst() != null) {
+                try {
+                    var coverage = MetalFxCutoutSpirv.addCoverage(fragmentSpirv);
+                    if (coverage.isPresent()) cutoutFragment = new CutoutFragment(
+                            coverage.get(), pushConstantBinding, sampleLodBias);
+                } catch (IllegalArgumentException unsupported) {
+                    // The optional MRT must never reject an otherwise legal source
+                    // shader. Preserve it unchanged and make its actual draws use
+                    // a conservative reactive fallback instead of claiming coverage.
+                    cutoutFragment = new CutoutFragment(null, pushConstantBinding, sampleLodBias);
+                }
+            }
 
             MetalMslDiskCache diskCache = MetalMslDiskCache.instance();
             String cacheKey = diskCache == null ? null : renderPearlCacheKey(
@@ -106,7 +119,8 @@ final class MetalCrossShaderCompiler {
                             cached.vertexEntryPoint(),
                             cached.fragmentEntryPoint(),
                             cached.resources(),
-                            cached.genericVertexInputs()
+                            cached.genericVertexInputs(),
+                            cutoutFragment
                     );
                 }
             }
@@ -149,7 +163,8 @@ final class MetalCrossShaderCompiler {
                     vertexEntryPoint,
                     fragmentEntryPoint,
                     resources,
-                    genericInputs
+                    genericInputs,
+                    cutoutFragment
             );
         } catch (ShaderCompileException exception) {
             throw new IllegalStateException("Failed to translate RenderPearl pipeline " + info.name(), exception);
@@ -241,6 +256,38 @@ final class MetalCrossShaderCompiler {
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 unavailable", exception);
+        }
+    }
+
+    /** Immutable, owned SPIR-V copy; its resources are exactly those of the source pipeline. */
+    static final class CutoutFragment {
+        private final byte @Nullable [] spirv;
+        private final int pushConstantBinding;
+        private final float sampleLodBias;
+
+        CutoutFragment(byte @Nullable [] spirv, int pushConstantBinding, float sampleLodBias) {
+            this.spirv = spirv == null ? null : spirv.clone();
+            this.pushConstantBinding = pushConstantBinding;
+            this.sampleLodBias = sampleLodBias;
+        }
+
+        boolean supported() { return spirv != null; }
+
+        String compileMsl() {
+            if (spirv == null) throw new IllegalStateException("Unsupported CUTOUT fragment interface");
+            ByteBuffer nativeModule = MemoryUtil.memAlloc(spirv.length).order(ByteOrder.LITTLE_ENDIAN);
+            try {
+                nativeModule.put(spirv).flip();
+                MslShader shader = spirvToMsl(nativeModule, pushConstantBinding, Map.of(), Map.of());
+                if (!new HashSet<>(shader.stageOutputLocations()).equals(Set.of(0, 1))) {
+                    throw new IllegalStateException("CUTOUT coverage must expose scene=0 and R8=1");
+                }
+                return applySampleLodBias(shader.source(), sampleLodBias);
+            } catch (ShaderCompileException failure) {
+                throw new IllegalStateException("Cannot lower the optional CUTOUT coverage output", failure);
+            } finally {
+                MemoryUtil.memFree(nativeModule);
+            }
         }
     }
 
@@ -538,7 +585,7 @@ final class MetalCrossShaderCompiler {
         return patched.toString();
     }
 
-    private static String extractEntryPoint(final String source, final Pattern pattern, final String fallback) {
+    static String extractEntryPoint(final String source, final Pattern pattern, final String fallback) {
         Matcher matcher = pattern.matcher(source);
         return matcher.find() ? matcher.group(1) : fallback;
     }

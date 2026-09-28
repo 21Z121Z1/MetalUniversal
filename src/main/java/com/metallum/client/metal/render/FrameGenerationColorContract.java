@@ -40,6 +40,8 @@ final class FrameGenerationColorContract {
 
     enum ToneMapPlacement {
         AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION,
+        /** Already tone-mapped SDR: identity range mapping plus explicit sRGB encoding. */
+        LINEARIZED_SDR_AFTER_TEMPORAL,
         BEFORE_NATIVE_DIRECT_FRAME_INTERPOLATION,
         UNPROVEN
     }
@@ -90,8 +92,8 @@ final class FrameGenerationColorContract {
             boolean temporalStageProven = switch (sourcePath) {
                 case TEMPORAL_OUTPUT -> sceneEncoding == SceneEncoding.LINEAR
                         && temporalEncoding == TemporalEncoding.LINEAR
-                        && toneMapPlacement
-                        == ToneMapPlacement.AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION;
+                        && (toneMapPlacement == ToneMapPlacement.AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION
+                        || toneMapPlacement == ToneMapPlacement.LINEARIZED_SDR_AFTER_TEMPORAL);
                 case NATIVE_DIRECT -> sceneEncoding == SceneEncoding.DISPLAY_REFERRED_SRGB
                         && temporalEncoding == TemporalEncoding.NOT_APPLICABLE
                         && toneMapPlacement
@@ -133,8 +135,8 @@ final class FrameGenerationColorContract {
                 if (temporalEncoding != TemporalEncoding.LINEAR) {
                     missing.add("temporal-linear");
                 }
-                if (toneMapPlacement
-                        != ToneMapPlacement.AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION) {
+                if (toneMapPlacement != ToneMapPlacement.AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION
+                        && toneMapPlacement != ToneMapPlacement.LINEARIZED_SDR_AFTER_TEMPORAL) {
                     missing.add("post-temporal-tone-map");
                 }
             } else {
@@ -166,20 +168,7 @@ final class FrameGenerationColorContract {
     private FrameGenerationColorContract() {
     }
 
-    /**
-     * Evidence for the renderer as it exists today.
-     *
-     * <p>The Temporal API has a documented linear semantic, but the current Minecraft scene
-     * target is a plain non-sRGB UNORM texture carrying already tone-mapped/display-referred
-     * values. There is no explicit display-referred -> linear conversion before Temporal, nor an
-     * explicit post-Temporal tone-map/transfer pass before {@code sceneOutputTarget} is copied into
-     * the Frame Interpolator ring. The native-direct path likewise has no machine-verifiable
-     * transfer attestation. The UI target is RGBA8_UNORM, but the complete set of GUI/overlay blend modes
-     * has not yet been proven to preserve a premultiplied-alpha invariant. The CAMetalLayer
-     * keeps BGRA8Unorm storage but explicitly tags its display-referred contents as sRGB, avoiding
-     * an _srgb render-target conversion while giving Core Animation a concrete display color space.
-     * The remaining unknowns are deliberately represented rather than inferred from storage formats.</p>
-     */
+    /** Without a successful same-frame transfer receipt, no color stage is inferred. */
     static Evidence currentRenderer(final SourcePath sourcePath) {
         return new Evidence(
                 sourcePath,
@@ -195,4 +184,13 @@ final class FrameGenerationColorContract {
                 DrawableEncoding.EXPLICIT_SRGB
         );
     }
+    /** A receipt is issued only after decode, Temporal and encode all accepted this source. */
+    static Evidence withSdrTransferReceipt(final SourcePath sourcePath, final boolean sameSourceReceipt) {
+        if (sourcePath != SourcePath.TEMPORAL_OUTPUT || !sameSourceReceipt) return currentRenderer(sourcePath);
+        return new Evidence(sourcePath, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM,
+                SceneEncoding.LINEAR, TemporalEncoding.LINEAR, ToneMapPlacement.LINEARIZED_SDR_AFTER_TEMPORAL,
+                FrameInterpolationEncoding.DISPLAY_REFERRED_SRGB, UiAlphaEncoding.UNPROVEN,
+                DrawableEncoding.EXPLICIT_SRGB);
+    }
+
 }
