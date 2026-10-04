@@ -11,8 +11,13 @@ def noOptionalRenderMods = providers.gradleProperty("metallum.noOptionalMods")
         .map { it.toBoolean() }.orElse(false).get()
 def sodiumOnly = providers.gradleProperty("metallum.sodiumOnly")
         .map { it.toBoolean() }.orElse(false).get()
+def sodiumSemanticP0 = providers.gradleProperty("metallum.sodiumSemanticP0")
+        .map { it.toBoolean() }.orElse(false).get()
 if (noOptionalRenderMods && sodiumOnly) {
     throw new GradleException('metallum.noOptionalMods and metallum.sodiumOnly cannot both be true')
+}
+if (sodiumSemanticP0 && !sodiumOnly) {
+    throw new GradleException('metallum.sodiumSemanticP0 requires metallum.sodiumOnly=true')
 }
 def expectedSourceSha = providers.gradleProperty("metallumSourceSha")
         .orElse(providers.gradleProperty("p1SourceSha"))
@@ -220,6 +225,13 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.waitForProfiler=${waitForProfiler}")
     jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.ci.sodiumOnly=${sodiumOnly}")
+    if (sodiumSemanticP0) {
+        jvmArgs.add("-Dmetallum.opt.sodiumCullRecovery=true")
+        jvmArgs.add("-Dmetallum.opt.sodiumRegionLookupCache=true")
+        jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheCleanup=true")
+        jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheEntries=4096")
+        jvmArgs.add("-Dmetallum.opt.lazyNarrator=true")
+    }
     jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.validation.sourceCommit=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
