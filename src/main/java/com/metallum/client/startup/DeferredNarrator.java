@@ -35,7 +35,6 @@ public final class DeferredNarrator implements Narrator {
     public synchronized void destroy() {
         if (this.delegate != null) {
             this.delegate.destroy();
-            this.delegate = null;
         }
     }
 }
