@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.client.sodium.SodiumPerformanceOptions;
 import com.metallum.client.metal.render.bridge.NativePlatform;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
@@ -44,6 +45,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.terrain.UberGpuBufferSliceInvalidationMixin"
     );
     private static final String VANILLA_TERRAIN_GENERATION_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
+    private static final String SODIUM_CULL_RECOVERY_MIXIN =
+            "com.metallum.mixin.sodium.SodiumCullRecoveryMixin";
+    private static final String SODIUM_REGION_LOOKUP_CACHE_MIXIN =
+            "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
+    private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
+            "com.metallum.mixin.sodium.ClonedChunkSectionCacheOptimizationMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -111,6 +118,21 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents") || frameEvidenceDrawHook)
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
+        }
+        if (SODIUM_CULL_RECOVERY_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi
+                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && SodiumPerformanceOptions.cullRecoveryEnabled();
+        }
+        if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi
+                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && SodiumPerformanceOptions.regionLookupCacheEnabled();
+        }
+        if (SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi
+                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && SodiumPerformanceOptions.cloneCacheTuningEnabled();
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
