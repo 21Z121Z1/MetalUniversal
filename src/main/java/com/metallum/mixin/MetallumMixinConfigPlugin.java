@@ -51,6 +51,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
             "com.metallum.mixin.sodium.ClonedChunkSectionCacheOptimizationMixin";
+    private static final String STARTUP_LAZY_NARRATOR_MIXIN =
+            "com.metallum.mixin.startup.GameNarratorDeferredMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -118,6 +120,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents") || frameEvidenceDrawHook)
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
+        }
+        if (STARTUP_LAZY_NARRATOR_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
         }
         if (SODIUM_CULL_RECOVERY_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi
