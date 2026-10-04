@@ -32,6 +32,16 @@ class SodiumPerformanceOptionsTest {
     }
 
     @Test
+    void explicitCloneCapacityEnablesOnlyCloneCacheTuning() {
+        System.setProperty(SodiumPerformanceOptions.CLONE_CACHE_ENTRIES_PROPERTY, "4096");
+
+        assertTrue(SodiumPerformanceOptions.cloneCacheTuningEnabled());
+        assertFalse(SodiumPerformanceOptions.cloneCacheCleanupEnabled());
+        assertFalse(SodiumPerformanceOptions.cullRecoveryEnabled());
+        assertFalse(SodiumPerformanceOptions.regionLookupCacheEnabled());
+    }
+
+    @Test
     void cloneCacheCapacityOnlyExpandsWithinBound() {
         assertEquals(512, SodiumPerformanceOptions.cloneCacheEntries());
 
