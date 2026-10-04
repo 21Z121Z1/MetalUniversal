@@ -35,9 +35,11 @@ jobs:
           - renderer: vanilla
             no_optional_mods: 'true'
             sodium_only: 'false'
+            sodium_semantic_p0: 'false'
           - renderer: sodium
             no_optional_mods: 'false'
             sodium_only: 'true'
+            sodium_semantic_p0: 'true'
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -92,6 +94,7 @@ jobs:
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
+            -Pmetallum.sodiumSemanticP0=${{ matrix.sodium_semantic_p0 }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
