@@ -242,9 +242,13 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         if (sodiumCullReuseMode == "verify") {
             jvmArgs.add("-Dmetallum.opt.sodiumCullReuseVerify=true")
             jvmArgs.add("-Dmetallum.opt.sodiumVisibilitySweep=verify")
+            jvmArgs.add("-Dmetallum.opt.chunkPaletteParse=verify")
+            jvmArgs.add("-Dmetallum.opt.chunkPaletteSerialize=verify")
         } else if (sodiumCullReuseMode == "skip") {
             jvmArgs.add("-Dmetallum.opt.sodiumCullReuse=true")
             jvmArgs.add("-Dmetallum.opt.sodiumVisibilitySweep=true")
+            jvmArgs.add("-Dmetallum.opt.chunkPaletteParse=true")
+            jvmArgs.add("-Dmetallum.opt.chunkPaletteSerialize=true")
             jvmArgs.add("-Dmetallum.opt.qos.render=interactive")
             jvmArgs.add("-Dmetallum.opt.qos.server=initiated")
             jvmArgs.add("-Dmetallum.opt.qos.mesh=utility")
