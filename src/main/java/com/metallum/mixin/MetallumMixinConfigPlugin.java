@@ -56,6 +56,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.LevelSliceBoundsFastPathMixin";
     private static final String SODIUM_BIOME_UNIFORM_MIXIN =
             "com.metallum.mixin.sodium.LevelBiomeUniformFastPathMixin";
+    private static final String SODIUM_SHARED_AIR_MIXIN =
+            "com.metallum.mixin.sodium.LevelSliceSharedAirMixin";
     private static final String STARTUP_LAZY_NARRATOR_MIXIN =
             "com.metallum.mixin.startup.GameNarratorDeferredMixin";
     private static final String CHUNK_SAVE_SKIP_MIXIN =
@@ -166,6 +168,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             return this.shouldApplySodiumSemanticMixin(
                     "biomeUniform",
                     SodiumPerformanceOptions.biomeUniformEnabled()
+            );
+        }
+        if (SODIUM_SHARED_AIR_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "sharedAir",
+                    SodiumPerformanceOptions.sharedAirSliceEnabled()
             );
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
