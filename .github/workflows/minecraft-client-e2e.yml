@@ -65,6 +65,10 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
           test "$(uname -m)" = arm64
+          root_sodium="$(sed -n 's/^sodium_version=//p' gradle.properties)"
+          e2e_sodium="$(sed -n 's/^sodium_version=//p' .github/ci/minecraft-e2e/gradle.properties)"
+          test -n "$root_sodium"
+          test "$root_sodium" = "$e2e_sodium"
           mkdir -p build/agent-evidence
           python3 scripts/agent/record_ci_subject.py \
             --proof-subject candidate-head \
