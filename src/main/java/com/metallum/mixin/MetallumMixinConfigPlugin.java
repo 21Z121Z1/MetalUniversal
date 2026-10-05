@@ -48,6 +48,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String VANILLA_TERRAIN_GENERATION_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
     private static final String SODIUM_CULL_RECOVERY_MIXIN =
             "com.metallum.mixin.sodium.SodiumCullRecoveryMixin";
+    private static final String SODIUM_CULL_REUSE_VERIFY_MIXIN =
+            "com.metallum.mixin.sodium.SodiumCullReuseVerifierMixin";
     private static final String SODIUM_REGION_LOOKUP_CACHE_MIXIN =
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
@@ -144,6 +146,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             return this.shouldApplySodiumSemanticMixin(
                     "cullRecovery",
                     SodiumPerformanceOptions.cullRecoveryEnabled()
+            );
+        }
+        if (SODIUM_CULL_REUSE_VERIFY_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "cullReuseVerify",
+                    SodiumPerformanceOptions.cullReuseVerifyEnabled()
             );
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
