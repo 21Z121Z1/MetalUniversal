@@ -125,19 +125,22 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
         }
         if (SODIUM_CULL_RECOVERY_MIXIN.equals(mixinClassName)) {
-            return this.isDefaultGraphicsApi
-                    && hasSupportedSodiumSemanticTarget()
-                    && SodiumPerformanceOptions.cullRecoveryEnabled();
+            return this.shouldApplySodiumSemanticMixin(
+                    "cullRecovery",
+                    SodiumPerformanceOptions.cullRecoveryEnabled()
+            );
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
-            return this.isDefaultGraphicsApi
-                    && hasSupportedSodiumSemanticTarget()
-                    && SodiumPerformanceOptions.regionLookupCacheEnabled();
+            return this.shouldApplySodiumSemanticMixin(
+                    "regionLookupCache",
+                    SodiumPerformanceOptions.regionLookupCacheEnabled()
+            );
         }
         if (SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN.equals(mixinClassName)) {
-            return this.isDefaultGraphicsApi
-                    && hasSupportedSodiumSemanticTarget()
-                    && SodiumPerformanceOptions.cloneCacheTuningEnabled();
+            return this.shouldApplySodiumSemanticMixin(
+                    "cloneCache",
+                    SodiumPerformanceOptions.cloneCacheTuningEnabled()
+            );
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
@@ -175,6 +178,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+    }
+
+    private boolean shouldApplySodiumSemanticMixin(String evidenceKey, boolean enabled) {
+        if (!this.isDefaultGraphicsApi || !enabled || !hasSupportedSodiumSemanticTarget()) {
+            return false;
+        }
+        if (Boolean.getBoolean("metallum.ci.e2e")) {
+            System.setProperty("metallum.ci.sodiumSemantic." + evidenceKey + ".selected", "true");
+        }
+        return true;
     }
 
     private static boolean hasSupportedSodiumSemanticTarget() {
