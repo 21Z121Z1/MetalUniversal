@@ -152,6 +152,12 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Sodium shared-AIR LevelSlice mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.semantic.chunkSaveSkip.selected"),
                     "Chunk save-skip mixin was not selected in the semantic P0 runtime");
+            if ("skip".equals(sodiumCullReuseMode)) {
+                for (String role : new String[]{"render", "server", "mesh", "cull", "worker"}) {
+                    require(Boolean.getBoolean("metallum.ci.qos." + role + ".selected"),
+                            "QoS mixin was not selected for role " + role);
+                }
+            }
         }
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly, sodiumOnly);
 
@@ -405,6 +411,22 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 } else {
                     require(visibilityAccelerated > 0,
                             "Visibility fast lane did not accelerate any section graphs");
+
+                    JsonObject qosEvidence = new JsonObject();
+                    for (String role : new String[]{"render", "server", "mesh", "cull", "worker"}) {
+                        long attempts = qosCounter("attempts", role);
+                        long successes = qosCounter("successes", role);
+                        long failures = qosCounter("failures", role);
+                        JsonObject roleEvidence = new JsonObject();
+                        roleEvidence.addProperty("attempts", attempts);
+                        roleEvidence.addProperty("successes", successes);
+                        roleEvidence.addProperty("failures", failures);
+                        qosEvidence.add(role, roleEvidence);
+                        require(attempts > 0 && successes > 0 && failures == 0,
+                                "QoS role did not apply successfully: " + role + " "
+                                        + roleEvidence);
+                    }
+                    worldEvidence.add("macThreadQos", qosEvidence);
                 }
             }
 
@@ -631,6 +653,17 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         // oracle pass time to publish before telemetry is sampled.
         singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
         context.waitTicks(24);
+    }
+
+    private static long qosCounter(String methodName, String role) {
+        try {
+            Class<?> qos = Class.forName("com.metallum.client.metal.MacThreadQos");
+            return ((Number) qos.getMethod(methodName, String.class).invoke(null, role)).longValue();
+        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+                 | InvocationTargetException exception) {
+            throw new IllegalStateException("Could not inspect MacThreadQos." + methodName
+                    + " for " + role, exception);
+        }
     }
 
     private static long semanticCounter(String className, String methodName) {
