@@ -38,7 +38,7 @@ public final class AppleThreadQos {
     }
 
     static int level(String role) {
-        String value = System.getProperty("metallum.qos." + role, "").trim().toLowerCase(Locale.ROOT);
+        String value = System.getProperty("metallum.opt.qos." + role, "").trim().toLowerCase(Locale.ROOT);
         return switch (value) {
             case "background" -> BACKGROUND;
             case "utility" -> UTILITY;
