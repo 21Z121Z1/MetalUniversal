@@ -1,6 +1,7 @@
 package com.metallum.mixin;
 
 import com.metallum.client.sodium.SodiumPerformanceOptions;
+import com.metallum.client.ClientPerformanceOptions;
 import com.metallum.client.storage.ChunkStorageOptions;
 import com.metallum.client.metal.render.bridge.NativePlatform;
 import net.fabricmc.loader.api.FabricLoader;
@@ -54,6 +55,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.DirectionalVisGraphSweepMixin";
     private static final String SODIUM_BLOCK_RENDERER_REFS_MIXIN =
             "com.metallum.mixin.sodium.BlockRendererCachedReferencesMixin";
+    private static final String SODIUM_ENTITY_BOX_MIXIN =
+            "com.metallum.mixin.sodium.SodiumEntityCullingBoxMixin";
+    private static final String ENTITY_BOX_CONSUMER_MIXIN =
+            "com.metallum.mixin.render.EntityRendererCullingBoxReuseMixin";
+    private static final String MODEL_PART_INDEXED_MIXIN =
+            "com.metallum.mixin.render.ModelPartIndexedCompileMixin";
     private static final String SODIUM_REGION_LOOKUP_CACHE_MIXIN =
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
@@ -169,6 +176,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     "blockRendererRefs",
                     SodiumPerformanceOptions.blockRendererRefsEnabled()
             );
+        }
+        if (SODIUM_ENTITY_BOX_MIXIN.equals(mixinClassName)
+                || ENTITY_BOX_CONSUMER_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "entityBoxReuse",
+                    SodiumPerformanceOptions.entityBoxReuseEnabled()
+            );
+        }
+        if (MODEL_PART_INDEXED_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi && ClientPerformanceOptions.modelPartIndexedLoopEnabled();
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
             return this.shouldApplySodiumSemanticMixin(
