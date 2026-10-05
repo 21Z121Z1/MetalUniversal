@@ -1,5 +1,6 @@
 package com.metallum.mixin.sodium;
 
+import com.metallum.client.sodium.SodiumCullRecoveryPolicy;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.async.CullTask;
 import org.spongepowered.asm.mixin.Mixin;
@@ -38,7 +39,10 @@ public abstract class SodiumCullRecoveryMixin {
             )
     )
     private void metallum$restoreCancelledInvalidation(CallbackInfo ci) {
-        if (this.metallum$pendingAtPrepareStart != null && this.pendingTask == null) {
+        if (SodiumCullRecoveryPolicy.shouldRestoreInvalidation(
+                this.metallum$pendingAtPrepareStart != null,
+                this.pendingTask != null
+        )) {
             this.needsGraphUpdate = true;
         }
         this.metallum$pendingAtPrepareStart = null;
