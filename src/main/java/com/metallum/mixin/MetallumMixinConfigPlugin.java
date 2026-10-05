@@ -52,6 +52,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
             "com.metallum.mixin.sodium.ClonedChunkSectionCacheOptimizationMixin";
+    private static final String SODIUM_SLICE_BOUNDS_MIXIN =
+            "com.metallum.mixin.sodium.LevelSliceBoundsFastPathMixin";
+    private static final String SODIUM_BIOME_UNIFORM_MIXIN =
+            "com.metallum.mixin.sodium.LevelBiomeUniformFastPathMixin";
     private static final String STARTUP_LAZY_NARRATOR_MIXIN =
             "com.metallum.mixin.startup.GameNarratorDeferredMixin";
     private static final String CHUNK_SAVE_SKIP_MIXIN =
@@ -150,6 +154,18 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             return this.shouldApplySodiumSemanticMixin(
                     "cloneCache",
                     SodiumPerformanceOptions.cloneCacheTuningEnabled()
+            );
+        }
+        if (SODIUM_SLICE_BOUNDS_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "sliceBounds",
+                    SodiumPerformanceOptions.sliceBoundsEnabled()
+            );
+        }
+        if (SODIUM_BIOME_UNIFORM_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "biomeUniform",
+                    SodiumPerformanceOptions.biomeUniformEnabled()
             );
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
