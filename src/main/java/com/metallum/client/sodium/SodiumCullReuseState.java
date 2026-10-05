@@ -8,20 +8,14 @@ import net.caffeinemc.mods.sodium.client.render.viewport.Viewport;
 
 import java.util.Map;
 
-/**
- * Per-RenderSectionManager state for the verify-only cull-reuse experiment.
- *
- * <p>Ordinary Sodium culling always runs. An eligible old REGULAR/WIDE pair is
- * retained only long enough to compare it with the newly produced oracle pair.
- */
+/** Per-manager state for conservative Sodium REGULAR/WIDE tree reuse. */
 public final class SodiumCullReuseState {
     private record ReferencePass(
             SodiumCullReusePolicy.Inputs inputs,
             SectionTree regular,
             SectionTree wide,
             boolean taskListEmpty
-    ) {
-    }
+    ) {}
 
     private long graphGeneration;
     private ReferencePass reference;
@@ -32,7 +26,7 @@ public final class SodiumCullReuseState {
         this.graphGeneration++;
     }
 
-    public void beforeSchedule(
+    public boolean beforeSchedule(
             Viewport viewport,
             float regularDistance,
             float localDistance,
@@ -42,14 +36,12 @@ public final class SodiumCullReuseState {
             Map<CullType, SectionTree> currentTrees,
             SectionStorage sections,
             int minSectionY,
-            int maxSectionY
+            int maxSectionY,
+            boolean allowSkip,
+            boolean verify
     ) {
         SodiumCullReusePolicy.Inputs current = new SodiumCullReusePolicy.Inputs(
-                viewport,
-                regularDistance,
-                localDistance,
-                occlusion,
-                this.graphGeneration
+                viewport, regularDistance, localDistance, occlusion, this.graphGeneration
         );
 
         boolean referenceTreesStillCurrent = this.reference != null
@@ -69,10 +61,17 @@ public final class SodiumCullReuseState {
         );
         SodiumCullReuseTelemetry.recordAdmission(reason);
 
+        if (reason == SodiumCullReusePolicy.AdmissionReason.ELIGIBLE && allowSkip && !verify) {
+            this.pendingInput = null;
+            this.pendingCandidate = null;
+            SodiumCullReuseTelemetry.recordSkip();
+            return true;
+        }
+
         this.pendingInput = current;
-        this.pendingCandidate = reason == SodiumCullReusePolicy.AdmissionReason.ELIGIBLE
-                ? this.reference
-                : null;
+        this.pendingCandidate = verify && reason == SodiumCullReusePolicy.AdmissionReason.ELIGIBLE
+                ? this.reference : null;
+        return false;
     }
 
     public void afterConsume(
