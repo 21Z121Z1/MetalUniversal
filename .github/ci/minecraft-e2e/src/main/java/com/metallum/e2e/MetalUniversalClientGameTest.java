@@ -127,6 +127,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Sodium semantic P0 requires 0.9.3-alpha.1, observed " + sodiumVersion);
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullRecovery.selected"),
                     "Sodium cull-recovery mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullReuseVerify.selected"),
+                    "Sodium cull-reuse verifier mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.regionLookupCache.selected"),
                     "Sodium region-lookup cache mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cloneCache.selected"),
