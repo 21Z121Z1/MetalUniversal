@@ -9147,7 +9147,7 @@ public func metallum_MTLBlitCommandEncoder_fillBuffer(
         return
     }
     let blit = metal3BlitEncoder(pointer)
-    blit.fill(buffer: buffer, range: NSRange(location: Int(offset), length: Int(length)), value: value)
+    blit.__fill(buffer, range: NSRange(location: Int(offset), length: Int(length)), value: value)
 }
 
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToTexture")
