@@ -36,10 +36,17 @@ jobs:
             no_optional_mods: 'true'
             sodium_only: 'false'
             sodium_semantic_p0: 'false'
-          - renderer: sodium
+            sodium_cull_reuse_mode: 'off'
+          - renderer: sodium-verify
             no_optional_mods: 'false'
             sodium_only: 'true'
             sodium_semantic_p0: 'true'
+            sodium_cull_reuse_mode: 'verify'
+          - renderer: sodium-fast
+            no_optional_mods: 'false'
+            sodium_only: 'true'
+            sodium_semantic_p0: 'true'
+            sodium_cull_reuse_mode: 'skip'
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -99,6 +106,7 @@ jobs:
             -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
             -Pmetallum.sodiumSemanticP0=${{ matrix.sodium_semantic_p0 }} \
+            -Pmetallum.sodiumCullReuseMode=${{ matrix.sodium_cull_reuse_mode }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -132,10 +140,11 @@ jobs:
               raise SystemExit(f'readback controls failed: {suite}')
 
           renderer = os.environ['METALLUM_E2E_RENDERER']
-          expected_sodium = renderer == 'sodium'
+          expected_sodium = renderer.startswith('sodium')
+          expected_identity_renderer = 'sodium' if expected_sodium else 'vanilla'
           identity = json.loads(required[6].read_text(encoding='utf-8'))
           mods = identity.get('mods', {})
-          if identity.get('rendererMode') != renderer or not isinstance(mods, dict) or (
+          if identity.get('rendererMode') != expected_identity_renderer or not isinstance(mods, dict) or (
                   ('sodium' in mods) != expected_sodium or 'iris' in mods):
               raise SystemExit(f'production test used the wrong renderer mods: {identity}')
           if identity.get('build', {}).get('sourceSha') != os.environ['METALLUM_SOURCE_SHA'] or identity['build'].get('dirty') is not False:
