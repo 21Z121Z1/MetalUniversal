@@ -2,6 +2,7 @@ package com.metallum.mixin;
 
 import com.metallum.client.sodium.SodiumPerformanceOptions;
 import com.metallum.client.ClientPerformanceOptions;
+import com.metallum.client.chunk.ChunkPipelineOptions;
 import com.metallum.client.storage.ChunkStorageOptions;
 import com.metallum.client.metal.render.bridge.NativePlatform;
 import com.metallum.client.metal.MacThreadQos;
@@ -88,6 +89,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.startup.GameNarratorDeferredMixin";
     private static final String CHUNK_SAVE_SKIP_MIXIN =
             "com.metallum.mixin.storage.RegionFileStorageSaveSkipMixin";
+
+    private static final String CHUNK_SECTION_INDEX_MIXIN =
+            "com.metallum.mixin.chunk.ChunkSectionIndexCacheMixin";
+    private static final String CHUNK_PALETTE_CODEC_MIXIN =
+            "com.metallum.mixin.chunk.PalettedContainerFactoryFastCodecMixin";
+    private static final Set<String> CHUNK_POI_MIXINS = Set.of(
+            "com.metallum.mixin.chunk.PoiSectionFastPathAccessor",
+            "com.metallum.mixin.chunk.SectionStorageFastPathAccessor",
+            "com.metallum.mixin.chunk.AcquirePoiFastPathMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -162,6 +173,15 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 System.setProperty("metallum.ci.semantic.chunkSaveSkip.selected", "true");
             }
             return selected;
+        }
+        if (CHUNK_SECTION_INDEX_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi && ChunkPipelineOptions.sectionIndexCacheEnabled();
+        }
+        if (CHUNK_PALETTE_CODEC_MIXIN.equals(mixinClassName)) {
+            return this.isDefaultGraphicsApi && ChunkPipelineOptions.paletteCodecEnabled();
+        }
+        if (CHUNK_POI_MIXINS.contains(mixinClassName)) {
+            return this.isDefaultGraphicsApi && ChunkPipelineOptions.poiSearchMode() != ChunkPipelineOptions.Mode.OFF;
         }
         if (STARTUP_LAZY_NARRATOR_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
