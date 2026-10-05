@@ -13,6 +13,7 @@ public final class SodiumPerformanceOptions {
     public static final String VISIBILITY_SWEEP_PROPERTY = "metallum.opt.sodiumVisibilitySweep";
     public static final String BLOCK_RENDERER_REFS_PROPERTY = "metallum.opt.sodiumBlockRendererRefs";
     public static final String ENTITY_BOX_REUSE_PROPERTY = "metallum.opt.sodiumEntityBoxReuse";
+    public static final String DRAW_MERGE_PROPERTY = "metallum.opt.sodiumDrawMerge";
     public static final String REGION_LOOKUP_CACHE_PROPERTY = "metallum.opt.sodiumRegionLookupCache";
     public static final String CLONE_CACHE_CLEANUP_PROPERTY = "metallum.opt.sodiumCloneCacheCleanup";
     public static final String CLONE_CACHE_ENTRIES_PROPERTY = "metallum.opt.sodiumCloneCacheEntries";
@@ -80,6 +81,10 @@ public final class SodiumPerformanceOptions {
 
     public static boolean entityBoxReuseEnabled() {
         return Boolean.getBoolean(ENTITY_BOX_REUSE_PROPERTY);
+    }
+
+    public static boolean drawMergeEnabled() {
+        return Boolean.getBoolean(DRAW_MERGE_PROPERTY);
     }
 
     public static boolean regionLookupCacheEnabled() {
