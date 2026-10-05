@@ -193,7 +193,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             );
         }
         if (MODEL_PART_INDEXED_MIXIN.equals(mixinClassName)) {
-            return this.isDefaultGraphicsApi && ClientPerformanceOptions.modelPartIndexedLoopEnabled();
+            boolean selected = this.isDefaultGraphicsApi && ClientPerformanceOptions.modelPartIndexedLoopEnabled();
+            if (selected && Boolean.getBoolean("metallum.ci.e2e")) {
+                System.setProperty("metallum.ci.semantic.modelPartIndexed.selected", "true");
+            }
+            return selected;
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
             return this.shouldApplySodiumSemanticMixin(
