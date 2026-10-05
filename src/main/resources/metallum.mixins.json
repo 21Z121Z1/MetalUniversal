@@ -104,6 +104,7 @@
     "sodium.SodiumWorldRendererTerrainSchedulingMixin",
     "sodium.SodiumWorldRendererTerrainCandidateMixin",
     "sodium.DrawBackendMixin",
+    "sodium.VKMultiDrawBatchMergeMixin",
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererMetalFxMixin",
