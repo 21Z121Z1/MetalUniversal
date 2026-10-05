@@ -10,6 +10,8 @@ class ChunkPipelineOptionsTest {
     @AfterEach
     void clear() {
         System.clearProperty(ChunkPipelineOptions.SECTION_INDEX_CACHE);
+        System.clearProperty(ChunkPipelineOptions.PALETTE_PARSE);
+        System.clearProperty(ChunkPipelineOptions.PALETTE_SERIALIZE);
     }
 
     @Test
@@ -17,5 +19,23 @@ class ChunkPipelineOptionsTest {
         assertFalse(ChunkPipelineOptions.sectionIndexCacheEnabled());
         System.setProperty(ChunkPipelineOptions.SECTION_INDEX_CACHE, "true");
         assertTrue(ChunkPipelineOptions.sectionIndexCacheEnabled());
+    }
+
+    @Test
+    void paletteModesFailClosedAndParseExplicitValues() {
+        assertFalse(ChunkPipelineOptions.paletteCodecEnabled());
+
+        System.setProperty(ChunkPipelineOptions.PALETTE_PARSE, "verify");
+        assertTrue(ChunkPipelineOptions.paletteCodecEnabled());
+        org.junit.jupiter.api.Assertions.assertEquals(
+                ChunkPipelineOptions.Mode.VERIFY,
+                ChunkPipelineOptions.paletteParseMode()
+        );
+
+        System.setProperty(ChunkPipelineOptions.PALETTE_SERIALIZE, "true");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                ChunkPipelineOptions.Mode.FAST,
+                ChunkPipelineOptions.paletteSerializeMode()
+        );
     }
 }
