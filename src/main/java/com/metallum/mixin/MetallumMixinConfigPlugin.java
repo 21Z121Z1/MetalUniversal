@@ -126,17 +126,17 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (SODIUM_CULL_RECOVERY_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi
-                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && hasSupportedSodiumSemanticTarget()
                     && SodiumPerformanceOptions.cullRecoveryEnabled();
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi
-                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && hasSupportedSodiumSemanticTarget()
                     && SodiumPerformanceOptions.regionLookupCacheEnabled();
         }
         if (SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi
-                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && hasSupportedSodiumSemanticTarget()
                     && SodiumPerformanceOptions.cloneCacheTuningEnabled();
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
@@ -175,6 +175,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+    }
+
+    private static boolean hasSupportedSodiumSemanticTarget() {
+        return FabricLoader.getInstance()
+                .getModContainer("sodium")
+                .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                .map(SodiumPerformanceOptions::supportsSemanticMixins)
+                .orElse(false);
     }
 
     private static boolean isDefaultGraphicsApiSelected() {
