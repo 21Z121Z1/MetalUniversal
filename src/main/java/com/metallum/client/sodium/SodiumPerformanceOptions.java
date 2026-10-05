@@ -9,6 +9,9 @@ package com.metallum.client.sodium;
 public final class SodiumPerformanceOptions {
     public static final String CULL_RECOVERY_PROPERTY = "metallum.opt.sodiumCullRecovery";
     public static final String CULL_REUSE_VERIFY_PROPERTY = "metallum.opt.sodiumCullReuseVerify";
+    public static final String CULL_REUSE_PROPERTY = "metallum.opt.sodiumCullReuse";
+    public static final String VISIBILITY_SWEEP_PROPERTY = "metallum.opt.sodiumVisibilitySweep";
+    public static final String BLOCK_RENDERER_REFS_PROPERTY = "metallum.opt.sodiumBlockRendererRefs";
     public static final String REGION_LOOKUP_CACHE_PROPERTY = "metallum.opt.sodiumRegionLookupCache";
     public static final String CLONE_CACHE_CLEANUP_PROPERTY = "metallum.opt.sodiumCloneCacheCleanup";
     public static final String CLONE_CACHE_ENTRIES_PROPERTY = "metallum.opt.sodiumCloneCacheEntries";
@@ -44,6 +47,34 @@ public final class SodiumPerformanceOptions {
 
     public static boolean cullReuseVerifyEnabled() {
         return Boolean.getBoolean(CULL_REUSE_VERIFY_PROPERTY);
+    }
+
+    public static boolean cullReuseEnabled() {
+        return Boolean.getBoolean(CULL_REUSE_PROPERTY);
+    }
+
+    public static boolean cullReuseAnyModeEnabled() {
+        return cullReuseEnabled() || cullReuseVerifyEnabled();
+    }
+
+    public static String visibilitySweepMode() {
+        return System.getProperty(VISIBILITY_SWEEP_PROPERTY, "").trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    public static boolean visibilitySweepVerifyEnabled() {
+        return "verify".equals(visibilitySweepMode());
+    }
+
+    public static boolean visibilitySweepFastEnabled() {
+        return "true".equals(visibilitySweepMode());
+    }
+
+    public static boolean visibilitySweepAnyModeEnabled() {
+        return visibilitySweepVerifyEnabled() || visibilitySweepFastEnabled();
+    }
+
+    public static boolean blockRendererRefsEnabled() {
+        return Boolean.getBoolean(BLOCK_RENDERER_REFS_PROPERTY);
     }
 
     public static boolean regionLookupCacheEnabled() {
