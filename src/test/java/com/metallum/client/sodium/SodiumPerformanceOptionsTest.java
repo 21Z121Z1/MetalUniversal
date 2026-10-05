@@ -11,6 +11,7 @@ class SodiumPerformanceOptionsTest {
     @AfterEach
     void clearProperties() {
         System.clearProperty(SodiumPerformanceOptions.CULL_RECOVERY_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.CULL_REUSE_VERIFY_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.REGION_LOOKUP_CACHE_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.CLONE_CACHE_CLEANUP_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.CLONE_CACHE_ENTRIES_PROPERTY);
@@ -36,6 +37,7 @@ class SodiumPerformanceOptionsTest {
     @Test
     void featuresAreOptIn() {
         assertFalse(SodiumPerformanceOptions.cullRecoveryEnabled());
+        assertFalse(SodiumPerformanceOptions.cullReuseVerifyEnabled());
         assertFalse(SodiumPerformanceOptions.regionLookupCacheEnabled());
         assertFalse(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertFalse(SodiumPerformanceOptions.sliceBoundsEnabled());
@@ -43,6 +45,7 @@ class SodiumPerformanceOptionsTest {
         assertFalse(SodiumPerformanceOptions.sharedAirSliceEnabled());
 
         System.setProperty(SodiumPerformanceOptions.CULL_RECOVERY_PROPERTY, "true");
+        System.setProperty(SodiumPerformanceOptions.CULL_REUSE_VERIFY_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.REGION_LOOKUP_CACHE_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.CLONE_CACHE_CLEANUP_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.SLICE_BOUNDS_PROPERTY, "true");
@@ -50,6 +53,7 @@ class SodiumPerformanceOptionsTest {
         System.setProperty(SodiumPerformanceOptions.SHARED_AIR_PROPERTY, "true");
 
         assertTrue(SodiumPerformanceOptions.cullRecoveryEnabled());
+        assertTrue(SodiumPerformanceOptions.cullReuseVerifyEnabled());
         assertTrue(SodiumPerformanceOptions.regionLookupCacheEnabled());
         assertTrue(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertTrue(SodiumPerformanceOptions.sliceBoundsEnabled());
@@ -64,6 +68,7 @@ class SodiumPerformanceOptionsTest {
         assertTrue(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertFalse(SodiumPerformanceOptions.cloneCacheCleanupEnabled());
         assertFalse(SodiumPerformanceOptions.cullRecoveryEnabled());
+        assertFalse(SodiumPerformanceOptions.cullReuseVerifyEnabled());
         assertFalse(SodiumPerformanceOptions.regionLookupCacheEnabled());
     }
 
