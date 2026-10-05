@@ -20,8 +20,8 @@ public final class SodiumPerformanceOptions {
 
     /**
      * The semantic P0 mixins touch Sodium implementation details which are
-     * verified against the 0.9.3 line. Keep them fail-closed on any other
-     * Sodium version so an otherwise compatible adapter cannot accidentally
+     * verified against Sodium 0.9.3-alpha.1 for Minecraft 26.3. Keep them
+     * fail-closed on any other Sodium build so an otherwise compatible adapter cannot accidentally
      * apply stale private-field/method assumptions.
      */
     public static boolean supportsSemanticMixins(String version) {
@@ -30,9 +30,8 @@ public final class SodiumPerformanceOptions {
         }
 
         String normalized = version.trim();
-        return normalized.equals("0.9.3")
-                || normalized.startsWith("0.9.3-")
-                || normalized.startsWith("0.9.3+");
+        return normalized.equals("0.9.3-alpha.1")
+                || normalized.startsWith("0.9.3-alpha.1+");
     }
 
     public static boolean cullRecoveryEnabled() {
