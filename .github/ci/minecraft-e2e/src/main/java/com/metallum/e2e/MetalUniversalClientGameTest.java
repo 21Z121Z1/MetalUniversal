@@ -110,6 +110,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
         boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
         boolean sodiumSemanticP0 = Boolean.getBoolean("metallum.ci.sodiumSemanticP0");
+        String sodiumCullReuseMode = System.getProperty("metallum.ci.sodiumCullReuseMode", "off");
         String sodiumVersion = FabricLoader.getInstance().getModContainer("sodium")
                 .map(container -> container.getMetadata().getVersion().getFriendlyString())
                 .orElse("");
@@ -127,8 +128,18 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Sodium semantic P0 requires 0.9.3-alpha.1, observed " + sodiumVersion);
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullRecovery.selected"),
                     "Sodium cull-recovery mixin was not selected on the 0.9.3 runtime");
-            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullReuseVerify.selected"),
-                    "Sodium cull-reuse verifier mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullReuse.selected"),
+                    "Sodium cull-reuse mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.visibilitySweep.selected"),
+                    "Sodium directional visibility sweep mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.blockRendererRefs.selected"),
+                    "Sodium BlockRenderer callback-cache mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.entityBoxReuse.selected"),
+                    "Sodium entity culling-box reuse mixins were not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.drawMerge.selected"),
+                    "Sodium fallback draw-merge mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.semantic.modelPartIndexed.selected"),
+                    "ModelPart indexed-loop mixin was not selected in the semantic runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.regionLookupCache.selected"),
                     "Sodium region-lookup cache mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cloneCache.selected"),
@@ -339,23 +350,62 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             }
 
             if (sodiumSemanticP0) {
-                long cullReuseCandidates = sodiumCullReuseCounter("candidateCount");
-                long cullReuseMatches = sodiumCullReuseCounter("matchCount");
-                long cullReuseMismatches = sodiumCullReuseCounter("mismatchCount");
-                long cullReuseRacy = sodiumCullReuseCounter("racyCompletionCount");
+                long cullReuseCandidates = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "candidateCount");
+                long cullReuseMatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "matchCount");
+                long cullReuseSkips = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "skipCount");
+                long cullReuseMismatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "mismatchCount");
+                long cullReuseRacy = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "racyCompletionCount");
                 JsonObject cullReuseEvidence = new JsonObject();
+                cullReuseEvidence.addProperty("mode", sodiumCullReuseMode);
                 cullReuseEvidence.addProperty("candidates", cullReuseCandidates);
                 cullReuseEvidence.addProperty("matches", cullReuseMatches);
+                cullReuseEvidence.addProperty("skips", cullReuseSkips);
                 cullReuseEvidence.addProperty("mismatches", cullReuseMismatches);
                 cullReuseEvidence.addProperty("racyCompletions", cullReuseRacy);
-                worldEvidence.add("sodiumCullReuseVerify", cullReuseEvidence);
+                worldEvidence.add("sodiumCullReuse", cullReuseEvidence);
 
                 require(cullReuseCandidates > 0,
-                        "CullReuse verify lane produced no eligible same-section admissions");
-                require(cullReuseMatches > 0,
-                        "CullReuse verify lane produced no oracle-confirmed reusable cull");
+                        "CullReuse lane produced no eligible same-section admissions");
                 require(cullReuseMismatches == 0,
-                        "CullReuse verify lane observed " + cullReuseMismatches + " oracle mismatches");
+                        "CullReuse lane observed " + cullReuseMismatches + " oracle mismatches");
+                if ("verify".equals(sodiumCullReuseMode)) {
+                    require(cullReuseMatches > 0,
+                            "CullReuse verify lane produced no oracle-confirmed reusable cull");
+                    require(cullReuseSkips == 0,
+                            "CullReuse verify lane unexpectedly skipped Sodium culls");
+                } else if ("skip".equals(sodiumCullReuseMode)) {
+                    require(cullReuseSkips > 0,
+                            "CullReuse fast lane did not execute any proven reuse skips");
+                } else {
+                    throw new IllegalStateException("Semantic Sodium lane has invalid CullReuse mode "
+                            + sodiumCullReuseMode);
+                }
+
+                long visibilityVerified = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "verifiedCount");
+                long visibilityMismatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "mismatchCount");
+                long visibilityAccelerated = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "acceleratedCount");
+                JsonObject visibilityEvidence = new JsonObject();
+                visibilityEvidence.addProperty("verified", visibilityVerified);
+                visibilityEvidence.addProperty("mismatches", visibilityMismatches);
+                visibilityEvidence.addProperty("accelerated", visibilityAccelerated);
+                worldEvidence.add("sodiumVisibilitySweep", visibilityEvidence);
+                require(visibilityMismatches == 0,
+                        "Directional visibility sweep diverged from Sodium");
+                if ("verify".equals(sodiumCullReuseMode)) {
+                    require(visibilityVerified > 0,
+                            "Visibility verify lane did not compare any section graphs");
+                } else {
+                    require(visibilityAccelerated > 0,
+                            "Visibility fast lane did not accelerate any section graphs");
+                }
             }
 
             CaptureSample selected = selectBestCapture(samples);
@@ -583,14 +633,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         context.waitTicks(24);
     }
 
-    private static long sodiumCullReuseCounter(String methodName) {
+    private static long semanticCounter(String className, String methodName) {
         try {
-            Class<?> telemetry = Class.forName("com.metallum.client.sodium.SodiumCullReuseTelemetry");
+            Class<?> telemetry = Class.forName(className);
             return ((Number) telemetry.getMethod(methodName).invoke(null)).longValue();
         } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
                  | InvocationTargetException exception) {
             throw new IllegalStateException(
-                    "Could not inspect Sodium CullReuse verifier telemetry via " + methodName,
+                    "Could not inspect semantic telemetry " + className + "." + methodName,
                     exception
             );
         }
