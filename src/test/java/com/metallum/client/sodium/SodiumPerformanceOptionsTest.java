@@ -17,6 +17,19 @@ class SodiumPerformanceOptionsTest {
     }
 
     @Test
+    void semanticMixinsArePinnedToSodium093() {
+        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3"));
+        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3-alpha.1+mc26.3"));
+        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins(" 0.9.3+mc26.3 "));
+
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins(null));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins(""));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.2+mc26.3"));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.30"));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.4-alpha.1+mc26.3"));
+    }
+
+    @Test
     void featuresAreOptIn() {
         assertFalse(SodiumPerformanceOptions.cullRecoveryEnabled());
         assertFalse(SodiumPerformanceOptions.regionLookupCacheEnabled());
