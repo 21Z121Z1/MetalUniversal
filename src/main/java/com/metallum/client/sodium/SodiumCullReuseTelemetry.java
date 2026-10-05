@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class SodiumCullReuseTelemetry {
     private static final AtomicLong candidates = new AtomicLong();
     private static final AtomicLong matches = new AtomicLong();
+    private static final AtomicLong skips = new AtomicLong();
     private static final AtomicLong mismatches = new AtomicLong();
     private static final AtomicLong racyCompletions = new AtomicLong();
     private static final Map<SodiumCullReusePolicy.AdmissionReason, AtomicLong> reasons =
@@ -33,6 +34,10 @@ public final class SodiumCullReuseTelemetry {
         matches.incrementAndGet();
     }
 
+    public static void recordSkip() {
+        skips.incrementAndGet();
+    }
+
     public static void recordMismatch() {
         mismatches.incrementAndGet();
     }
@@ -47,6 +52,10 @@ public final class SodiumCullReuseTelemetry {
 
     public static long matchCount() {
         return matches.get();
+    }
+
+    public static long skipCount() {
+        return skips.get();
     }
 
     public static long mismatchCount() {
