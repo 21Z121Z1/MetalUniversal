@@ -12,6 +12,11 @@ class SodiumPerformanceOptionsTest {
     void clearProperties() {
         System.clearProperty(SodiumPerformanceOptions.CULL_RECOVERY_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.CULL_REUSE_VERIFY_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.DRAW_MERGE_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.ENTITY_BOX_REUSE_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.BLOCK_RENDERER_REFS_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.VISIBILITY_SWEEP_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.CULL_REUSE_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.REGION_LOOKUP_CACHE_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.CLONE_CACHE_CLEANUP_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.CLONE_CACHE_ENTRIES_PROPERTY);
@@ -38,6 +43,11 @@ class SodiumPerformanceOptionsTest {
     void featuresAreOptIn() {
         assertFalse(SodiumPerformanceOptions.cullRecoveryEnabled());
         assertFalse(SodiumPerformanceOptions.cullReuseVerifyEnabled());
+        assertFalse(SodiumPerformanceOptions.cullReuseEnabled());
+        assertFalse(SodiumPerformanceOptions.visibilitySweepAnyModeEnabled());
+        assertFalse(SodiumPerformanceOptions.blockRendererRefsEnabled());
+        assertFalse(SodiumPerformanceOptions.entityBoxReuseEnabled());
+        assertFalse(SodiumPerformanceOptions.drawMergeEnabled());
         assertFalse(SodiumPerformanceOptions.regionLookupCacheEnabled());
         assertFalse(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertFalse(SodiumPerformanceOptions.sliceBoundsEnabled());
@@ -46,6 +56,10 @@ class SodiumPerformanceOptionsTest {
 
         System.setProperty(SodiumPerformanceOptions.CULL_RECOVERY_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.CULL_REUSE_VERIFY_PROPERTY, "true");
+        System.setProperty(SodiumPerformanceOptions.VISIBILITY_SWEEP_PROPERTY, "verify");
+        System.setProperty(SodiumPerformanceOptions.BLOCK_RENDERER_REFS_PROPERTY, "true");
+        System.setProperty(SodiumPerformanceOptions.ENTITY_BOX_REUSE_PROPERTY, "true");
+        System.setProperty(SodiumPerformanceOptions.DRAW_MERGE_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.REGION_LOOKUP_CACHE_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.CLONE_CACHE_CLEANUP_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.SLICE_BOUNDS_PROPERTY, "true");
@@ -54,6 +68,11 @@ class SodiumPerformanceOptionsTest {
 
         assertTrue(SodiumPerformanceOptions.cullRecoveryEnabled());
         assertTrue(SodiumPerformanceOptions.cullReuseVerifyEnabled());
+        assertTrue(SodiumPerformanceOptions.cullReuseAnyModeEnabled());
+        assertTrue(SodiumPerformanceOptions.visibilitySweepVerifyEnabled());
+        assertTrue(SodiumPerformanceOptions.blockRendererRefsEnabled());
+        assertTrue(SodiumPerformanceOptions.entityBoxReuseEnabled());
+        assertTrue(SodiumPerformanceOptions.drawMergeEnabled());
         assertTrue(SodiumPerformanceOptions.regionLookupCacheEnabled());
         assertTrue(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertTrue(SodiumPerformanceOptions.sliceBoundsEnabled());
