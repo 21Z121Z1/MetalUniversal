@@ -5,6 +5,7 @@ public final class ChunkPipelineOptions {
     public static final String SECTION_INDEX_CACHE = "metallum.opt.chunkSectionIndexCache";
     public static final String PALETTE_PARSE = "metallum.opt.chunkPaletteParse";
     public static final String PALETTE_SERIALIZE = "metallum.opt.chunkPaletteSerialize";
+    public static final String POI_SEARCH = "metallum.opt.chunkPoiSearch";
 
     private ChunkPipelineOptions() {}
 
@@ -22,6 +23,10 @@ public final class ChunkPipelineOptions {
 
     public static boolean paletteCodecEnabled() {
         return paletteParseMode() != Mode.OFF || paletteSerializeMode() != Mode.OFF;
+    }
+
+    public static Mode poiSearchMode() {
+        return mode(POI_SEARCH);
     }
 
     private static Mode mode(String property) {
