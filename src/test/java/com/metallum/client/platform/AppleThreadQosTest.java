@@ -9,20 +9,20 @@ class AppleThreadQosTest {
     @AfterEach
     void clear() {
         for (String role : new String[]{"render","server","mesh","cull","worker"}) {
-            System.clearProperty("metallum.qos." + role);
+            System.clearProperty("metallum.opt.qos." + role);
         }
     }
 
     @Test
     void parsesOnlyKnownQosClasses() {
         assertEquals(0, AppleThreadQos.level("render"));
-        System.setProperty("metallum.qos.render", "interactive");
+        System.setProperty("metallum.opt.qos.render", "interactive");
         assertEquals(0x21, AppleThreadQos.level("render"));
-        System.setProperty("metallum.qos.render", "initiated");
+        System.setProperty("metallum.opt.qos.render", "initiated");
         assertEquals(0x19, AppleThreadQos.level("render"));
-        System.setProperty("metallum.qos.render", "utility");
+        System.setProperty("metallum.opt.qos.render", "utility");
         assertEquals(0x11, AppleThreadQos.level("render"));
-        System.setProperty("metallum.qos.render", "unknown");
+        System.setProperty("metallum.opt.qos.render", "unknown");
         assertEquals(0, AppleThreadQos.level("render"));
     }
 }
