@@ -99,6 +99,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.chunk.SectionStorageFastPathAccessor",
             "com.metallum.mixin.chunk.AcquirePoiFastPathMixin"
     );
+    private static final Set<String> CHUNK_LIGHT_SNAPSHOT_MIXINS = Set.of(
+            "com.metallum.mixin.chunk.DataLayerStorageSnapshotMixin",
+            "com.metallum.mixin.chunk.BlockLightSnapshotMixin",
+            "com.metallum.mixin.chunk.SkyLightSnapshotMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -182,6 +187,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (CHUNK_POI_MIXINS.contains(mixinClassName)) {
             return this.isDefaultGraphicsApi && ChunkPipelineOptions.poiSearchMode() != ChunkPipelineOptions.Mode.OFF;
+        }
+        if (CHUNK_LIGHT_SNAPSHOT_MIXINS.contains(mixinClassName)) {
+            return this.isDefaultGraphicsApi
+                    && ChunkPipelineOptions.lightSnapshotMode() != ChunkPipelineOptions.Mode.OFF;
         }
         if (STARTUP_LAZY_NARRATOR_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
