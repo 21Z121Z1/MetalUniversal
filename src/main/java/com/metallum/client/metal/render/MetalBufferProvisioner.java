@@ -114,6 +114,22 @@ final class MetalBufferProvisioner implements AutoCloseable {
         );
     }
 
+    public static long scheduledCount() {
+        return scheduled.get();
+    }
+
+    public static long completedCount() {
+        return completed.get();
+    }
+
+    public static long failureCount() {
+        return failures.get();
+    }
+
+    public static long foregroundWaitCount() {
+        return foregroundWaits.get();
+    }
+
     @Override
     public void close() {
         this.executor.shutdown();
