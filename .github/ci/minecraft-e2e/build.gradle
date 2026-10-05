@@ -228,6 +228,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.sodiumSemanticP0=${sodiumSemanticP0}")
     if (sodiumSemanticP0) {
         jvmArgs.add("-Dmetallum.opt.sodiumCullRecovery=true")
+        jvmArgs.add("-Dmetallum.opt.sodiumCullReuseVerify=true")
         jvmArgs.add("-Dmetallum.opt.sodiumRegionLookupCache=true")
         jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheCleanup=true")
         jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheEntries=4096")
