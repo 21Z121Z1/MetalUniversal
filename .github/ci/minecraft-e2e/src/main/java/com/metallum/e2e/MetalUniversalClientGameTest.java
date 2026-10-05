@@ -562,25 +562,25 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             int z
     ) {
         // Let the long-distance teleport's graph/build work settle before probing
-        // camera-only reuse. All probe points stay inside the same section.
-        context.waitTicks(20);
-        double[] offsets = {0.25, 0.50, 0.75, 0.50, 0.25};
-        for (double offset : offsets) {
-            double targetX = x + offset;
+        // camera-only reuse. Keep position fixed and vary only yaw: Sodium treats
+        // angle changes as camera changes, while REGULAR/WIDE distance classes
+        // remain exactly unchanged at a fixed CameraTransform.
+        context.waitTicks(40);
+        double[] yaws = {-65.125, -65.250, -65.375, -65.250, -65.125, -65.500, -65.0};
+        for (double yaw : yaws) {
             singleplayer.getServer().runCommand(
-                    "tp @a " + targetX + " " + y + " " + z + " -65 25"
+                    "tp @a " + x + " " + y + " " + z + " " + yaw + " 25"
             );
-            context.waitFor(client -> client.player != null
-                    && Math.abs(client.player.getX() - targetX) < 0.05
-                    && Math.abs(client.player.getZ() - z) < 0.05);
-            context.waitTicks(8);
+            // Do not assert packet-level rotation state here. Waiting several
+            // client ticks is sufficient for SodiumWorldRenderer to observe the
+            // camera matrix/yaw transition and consume the resulting async cull.
+            context.waitTicks(12);
         }
 
+        // Leave the camera at the canonical framebuffer pose and give the final
+        // oracle pass time to publish before telemetry is sampled.
         singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
-        context.waitFor(client -> client.player != null
-                && Math.abs(client.player.getX() - x) < 0.05
-                && Math.abs(client.player.getZ() - z) < 0.05);
-        context.waitTicks(10);
+        context.waitTicks(24);
     }
 
     private static long sodiumCullReuseCounter(String methodName) {
