@@ -8,6 +8,7 @@ package com.metallum.client.sodium;
  */
 public final class SodiumPerformanceOptions {
     public static final String CULL_RECOVERY_PROPERTY = "metallum.opt.sodiumCullRecovery";
+    public static final String CULL_REUSE_VERIFY_PROPERTY = "metallum.opt.sodiumCullReuseVerify";
     public static final String REGION_LOOKUP_CACHE_PROPERTY = "metallum.opt.sodiumRegionLookupCache";
     public static final String CLONE_CACHE_CLEANUP_PROPERTY = "metallum.opt.sodiumCloneCacheCleanup";
     public static final String CLONE_CACHE_ENTRIES_PROPERTY = "metallum.opt.sodiumCloneCacheEntries";
@@ -39,6 +40,10 @@ public final class SodiumPerformanceOptions {
 
     public static boolean cullRecoveryEnabled() {
         return Boolean.getBoolean(CULL_RECOVERY_PROPERTY);
+    }
+
+    public static boolean cullReuseVerifyEnabled() {
+        return Boolean.getBoolean(CULL_REUSE_VERIFY_PROPERTY);
     }
 
     public static boolean regionLookupCacheEnabled() {
