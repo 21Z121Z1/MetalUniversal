@@ -233,6 +233,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheEntries=4096")
         jvmArgs.add("-Dmetallum.opt.sodiumSliceBounds=true")
         jvmArgs.add("-Dmetallum.opt.sodiumBiomeUniform=true")
+        jvmArgs.add("-Dmetallum.opt.sodiumSharedAirSlice=true")
         jvmArgs.add("-Dmetallum.opt.lazyNarrator=true")
         jvmArgs.add("-Dmetallum.opt.chunkSaveSkip=true")
     }
