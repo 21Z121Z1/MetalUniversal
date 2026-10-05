@@ -17,15 +17,16 @@ class SodiumPerformanceOptionsTest {
     }
 
     @Test
-    void semanticMixinsArePinnedToSodium093() {
-        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3"));
+    void semanticMixinsArePinnedToVerifiedSodium093Alpha1() {
+        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3-alpha.1"));
         assertTrue(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3-alpha.1+mc26.3"));
-        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins(" 0.9.3+mc26.3 "));
+        assertTrue(SodiumPerformanceOptions.supportsSemanticMixins(" 0.9.3-alpha.1+mc26.3 "));
 
         assertFalse(SodiumPerformanceOptions.supportsSemanticMixins(null));
         assertFalse(SodiumPerformanceOptions.supportsSemanticMixins(""));
         assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.2+mc26.3"));
-        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.30"));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3"));
+        assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.3-alpha.2+mc26.3"));
         assertFalse(SodiumPerformanceOptions.supportsSemanticMixins("0.9.4-alpha.1+mc26.3"));
     }
 
