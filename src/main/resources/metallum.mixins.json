@@ -12,6 +12,7 @@
     "startup.BlockStateCacheDeferMixin",
     "startup.CrashReportPreloadMixin",
     "storage.RegionFileStorageSaveSkipMixin",
+    "chunk.ChunkSectionIndexCacheMixin",
     "render.BackendFrameComparisonMixin",
     "render.BackendFrameComparisonGameRendererMixin",
     "render.BackendFrameComparisonServerMixin",
