@@ -16,6 +16,7 @@ class SodiumPerformanceOptionsTest {
         System.clearProperty(SodiumPerformanceOptions.CLONE_CACHE_ENTRIES_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.SLICE_BOUNDS_PROPERTY);
         System.clearProperty(SodiumPerformanceOptions.BIOME_UNIFORM_PROPERTY);
+        System.clearProperty(SodiumPerformanceOptions.SHARED_AIR_PROPERTY);
     }
 
     @Test
@@ -39,18 +40,21 @@ class SodiumPerformanceOptionsTest {
         assertFalse(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertFalse(SodiumPerformanceOptions.sliceBoundsEnabled());
         assertFalse(SodiumPerformanceOptions.biomeUniformEnabled());
+        assertFalse(SodiumPerformanceOptions.sharedAirSliceEnabled());
 
         System.setProperty(SodiumPerformanceOptions.CULL_RECOVERY_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.REGION_LOOKUP_CACHE_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.CLONE_CACHE_CLEANUP_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.SLICE_BOUNDS_PROPERTY, "true");
         System.setProperty(SodiumPerformanceOptions.BIOME_UNIFORM_PROPERTY, "true");
+        System.setProperty(SodiumPerformanceOptions.SHARED_AIR_PROPERTY, "true");
 
         assertTrue(SodiumPerformanceOptions.cullRecoveryEnabled());
         assertTrue(SodiumPerformanceOptions.regionLookupCacheEnabled());
         assertTrue(SodiumPerformanceOptions.cloneCacheTuningEnabled());
         assertTrue(SodiumPerformanceOptions.sliceBoundsEnabled());
         assertTrue(SodiumPerformanceOptions.biomeUniformEnabled());
+        assertTrue(SodiumPerformanceOptions.sharedAirSliceEnabled());
     }
 
     @Test
