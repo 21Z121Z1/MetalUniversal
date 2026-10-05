@@ -13,6 +13,7 @@ public final class SodiumPerformanceOptions {
     public static final String CLONE_CACHE_ENTRIES_PROPERTY = "metallum.opt.sodiumCloneCacheEntries";
     public static final String SLICE_BOUNDS_PROPERTY = "metallum.opt.sodiumSliceBounds";
     public static final String BIOME_UNIFORM_PROPERTY = "metallum.opt.sodiumBiomeUniform";
+    public static final String SHARED_AIR_PROPERTY = "metallum.opt.sodiumSharedAirSlice";
 
     public static final int SODIUM_DEFAULT_CLONE_CACHE_ENTRIES = 512;
     public static final int MAX_CLONE_CACHE_ENTRIES = 16_384;
@@ -54,6 +55,10 @@ public final class SodiumPerformanceOptions {
 
     public static boolean biomeUniformEnabled() {
         return Boolean.getBoolean(BIOME_UNIFORM_PROPERTY);
+    }
+
+    public static boolean sharedAirSliceEnabled() {
+        return Boolean.getBoolean(SHARED_AIR_PROPERTY);
     }
 
     public static boolean cloneCacheTuningEnabled() {
