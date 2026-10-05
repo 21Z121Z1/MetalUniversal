@@ -1,6 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.sodium.SodiumCullReuseState;
+import com.metallum.client.sodium.SodiumPerformanceOptions;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.async.CullTask;
 import net.caffeinemc.mods.sodium.client.render.chunk.lists.DeferredTaskList;
@@ -22,8 +23,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.util.Map;
 
 /**
- * Verifies conservative REGULAR/WIDE cull reuse admissions while leaving
- * Sodium's scheduling and culling behavior untouched.
+ * Verifies or applies conservative Sodium REGULAR/WIDE cull reuse.
+ *
+ * <p>Verify mode always runs Sodium and compares the reference with the new
+ * result. Fast mode cancels scheduleAsyncWork only after the same admission
+ * policy proves that the existing REGULAR/WIDE trees remain authoritative.
  */
 @Mixin(value = RenderSectionManager.class, remap = false)
 public abstract class SodiumCullReuseVerifierMixin {
@@ -35,11 +39,8 @@ public abstract class SodiumCullReuseVerifierMixin {
     @Shadow @Final private SectionStorage renderSections;
     @Shadow @Final private Map<CullType, SectionTree> cullResults;
 
-    @Unique
-    private SodiumCullReuseState metallum$cullReuseState;
-
-    @Unique
-    private CullTask metallum$consumeTaskAtHead;
+    @Unique private SodiumCullReuseState metallum$cullReuseState;
+    @Unique private CullTask metallum$consumeTaskAtHead;
 
     @Invoker("getSearchDistanceForCullType")
     protected abstract float metallum$invokeSearchDistance(CullType type, FogParameters fogParameters);
@@ -57,7 +58,7 @@ public abstract class SodiumCullReuseVerifierMixin {
         this.metallum$cullReuseState().graphDirty();
     }
 
-    @Inject(method = "scheduleAsyncWork", at = @At("HEAD"))
+    @Inject(method = "scheduleAsyncWork", at = @At("HEAD"), cancellable = true)
     private void metallum$evaluateCullReuseCandidate(
             Viewport viewport,
             FogParameters fogParameters,
@@ -68,7 +69,7 @@ public abstract class SodiumCullReuseVerifierMixin {
             return;
         }
 
-        this.metallum$cullReuseState().beforeSchedule(
+        boolean skip = this.metallum$cullReuseState().beforeSchedule(
                 viewport,
                 this.metallum$invokeSearchDistance(CullType.REGULAR, fogParameters),
                 this.metallum$invokeSearchDistance(CullType.LOCAL, fogParameters),
@@ -78,8 +79,13 @@ public abstract class SodiumCullReuseVerifierMixin {
                 this.cullResults,
                 this.renderSections,
                 this.level.getMinSectionY(),
-                this.level.getMaxSectionY()
+                this.level.getMaxSectionY(),
+                SodiumPerformanceOptions.cullReuseEnabled(),
+                SodiumPerformanceOptions.cullReuseVerifyEnabled()
         );
+        if (skip) {
+            ci.cancel();
+        }
     }
 
     @Inject(method = "consumeCullTaskResults", at = @At("HEAD"))
