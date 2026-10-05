@@ -8,7 +8,7 @@ import net.minecraft.world.level.chunk.DataLayer;
  * immutable cumulative delta. Updating maps never use this type.
  */
 public final class LayeredLightSnapshotMap extends Long2ObjectOpenHashMap<DataLayer> {
-    static final DataLayer REMOVED = new DataLayer();
+    public static final DataLayer REMOVED = new DataLayer();
 
     private final Long2ObjectOpenHashMap<DataLayer> base;
     private final Long2ObjectOpenHashMap<DataLayer> delta;
