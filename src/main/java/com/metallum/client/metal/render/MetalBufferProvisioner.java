@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * first render submission. Work is serialized on a daemon thread but encoded
  * on the device's existing command queue, preserving queue ordering.
  */
-final class MetalBufferProvisioner implements AutoCloseable {
+public final class MetalBufferProvisioner implements AutoCloseable {
     static final String ENABLE_PROPERTY = "metallum.opt.largeBufferProvision";
     static final String THRESHOLD_PROPERTY = "metallum.opt.largeBufferProvisionBytes";
     static final long DEFAULT_THRESHOLD = 32L * 1024L * 1024L;
