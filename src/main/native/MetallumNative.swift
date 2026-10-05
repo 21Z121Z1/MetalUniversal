@@ -9132,6 +9132,24 @@ public func metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(
     blit.copy(from: sourceBuffer, sourceOffset: Int(sourceOffset), to: destinationBuffer, destinationOffset: Int(destinationOffset), size: Int(length))
 }
 
+@_cdecl("metallum_MTLBlitCommandEncoder_fillBuffer")
+public func metallum_MTLBlitCommandEncoder_fillBuffer(
+    _ pointer: UnsafeMutableRawPointer,
+    _ buffer: MTLBuffer,
+    _ offset: UInt64,
+    _ length: UInt64,
+    _ value: UInt8
+) {
+    guard length > 0 else { return }
+    let range = Int(offset)..<Int(offset + length)
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
+        bridge.encoder.fill(buffer: buffer, range: range, value: value)
+        return
+    }
+    let blit = metal3BlitEncoder(pointer)
+    blit.__fill(buffer, range: NSRange(location: Int(offset), length: Int(length)), value: value)
+}
+
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToTexture")
 public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture(
     _ pointer: UnsafeMutableRawPointer,

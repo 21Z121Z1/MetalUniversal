@@ -243,6 +243,11 @@ public final class MetalNativeBridge {
                     "metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG, LONG)
             );
+            MTLBlitCommandEncoderFillBuffer = downcall(
+                    lookup,
+                    "metallum_MTLBlitCommandEncoder_fillBuffer",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, ValueLayout.JAVA_BYTE)
+            );
             MTLBlitCommandEncoderCopyFromBufferToTexture = downcall(
                     lookup,
                     "metallum_MTLBlitCommandEncoder_copyFromBufferToTexture",
@@ -1031,6 +1036,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferMakeBlitCommandEncoder;
     private static final MethodHandle MTLCommandEncoderEndEncoding;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToBuffer;
+    private static final MethodHandle MTLBlitCommandEncoderFillBuffer;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToTexture;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToTextureV2;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromTextureToTexture;
@@ -2081,6 +2087,26 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer", throwable);
+        }
+    }
+
+    public static void MTLBlitCommandEncoder_fillBuffer(
+            final MemorySegment blitEncoder,
+            final MemorySegment buffer,
+            final long offset,
+            final long length,
+            final byte value
+    ) {
+        try {
+            MTLBlitCommandEncoderFillBuffer.invokeExact(
+                    segment(blitEncoder),
+                    segment(buffer),
+                    offset,
+                    length,
+                    value
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLBlitCommandEncoder_fillBuffer", throwable);
         }
     }
 

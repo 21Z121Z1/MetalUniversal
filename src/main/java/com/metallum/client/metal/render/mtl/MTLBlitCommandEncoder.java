@@ -25,6 +25,17 @@ public final class MTLBlitCommandEncoder extends MTLCommandEncoder {
         );
     }
 
+    public void fillBuffer(
+            final MemorySegment buffer,
+            final long offset,
+            final long length,
+            final byte value
+    ) {
+        MetalNativeBridge.MTLBlitCommandEncoder_fillBuffer(
+                handle(), buffer, offset, length, value
+        );
+    }
+
     public void copyFromBufferToTexture(
             final MemorySegment sourceBuffer,
             final long sourceOffset,
