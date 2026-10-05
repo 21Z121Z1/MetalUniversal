@@ -6,6 +6,7 @@ public final class ChunkPipelineOptions {
     public static final String PALETTE_PARSE = "metallum.opt.chunkPaletteParse";
     public static final String PALETTE_SERIALIZE = "metallum.opt.chunkPaletteSerialize";
     public static final String POI_SEARCH = "metallum.opt.chunkPoiSearch";
+    public static final String LIGHT_SNAPSHOT = "metallum.opt.chunkLightSnapshot";
 
     private ChunkPipelineOptions() {}
 
@@ -27,6 +28,10 @@ public final class ChunkPipelineOptions {
 
     public static Mode poiSearchMode() {
         return mode(POI_SEARCH);
+    }
+
+    public static Mode lightSnapshotMode() {
+        return mode(LIGHT_SNAPSHOT);
     }
 
     private static Mode mode(String property) {
