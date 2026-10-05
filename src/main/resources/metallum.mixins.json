@@ -94,6 +94,7 @@
     "sodium.ClonedChunkSectionCacheOptimizationMixin",
     "sodium.LevelBiomeUniformFastPathMixin",
     "sodium.LevelSliceBoundsFastPathMixin",
+    "sodium.LevelSliceSharedAirMixin",
     "sodium.SodiumWorldRendererTerrainSchedulingMixin",
     "sodium.SodiumWorldRendererTerrainCandidateMixin",
     "sodium.DrawBackendMixin",
