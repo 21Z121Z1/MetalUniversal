@@ -4,6 +4,7 @@ import com.metallum.client.sodium.SodiumPerformanceOptions;
 import com.metallum.client.ClientPerformanceOptions;
 import com.metallum.client.storage.ChunkStorageOptions;
 import com.metallum.client.metal.render.bridge.NativePlatform;
+import com.metallum.client.metal.MacThreadQos;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -63,6 +64,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.EntityRendererCullingBoxReuseMixin";
     private static final String MODEL_PART_INDEXED_MIXIN =
             "com.metallum.mixin.render.ModelPartIndexedCompileMixin";
+    private static final String QOS_RENDER_MIXIN =
+            "com.metallum.mixin.qos.RenderThreadQosMixin";
+    private static final String QOS_SERVER_MIXIN =
+            "com.metallum.mixin.qos.ServerThreadQosMixin";
+    private static final String QOS_WORKER_MIXIN =
+            "com.metallum.mixin.qos.MinecraftWorkerQosMixin";
+    private static final String QOS_MESH_MIXIN =
+            "com.metallum.mixin.sodium.SodiumMeshQosMixin";
+    private static final String QOS_CULL_MIXIN =
+            "com.metallum.mixin.sodium.SodiumCullQosMixin";
     private static final String SODIUM_REGION_LOOKUP_CACHE_MIXIN =
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
@@ -154,6 +165,21 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (STARTUP_LAZY_NARRATOR_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
+        }
+        if (QOS_RENDER_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplyQosMixin("render");
+        }
+        if (QOS_SERVER_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplyQosMixin("server");
+        }
+        if (QOS_WORKER_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplyQosMixin("worker");
+        }
+        if (QOS_MESH_MIXIN.equals(mixinClassName)) {
+            return FabricLoader.getInstance().isModLoaded("sodium") && this.shouldApplyQosMixin("mesh");
+        }
+        if (QOS_CULL_MIXIN.equals(mixinClassName)) {
+            return FabricLoader.getInstance().isModLoaded("sodium") && this.shouldApplyQosMixin("cull");
         }
         if (SODIUM_CULL_RECOVERY_MIXIN.equals(mixinClassName)) {
             return this.shouldApplySodiumSemanticMixin(
@@ -265,6 +291,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+    }
+
+    private boolean shouldApplyQosMixin(String role) {
+        boolean selected = this.isDefaultGraphicsApi && MacThreadQos.configured(role);
+        if (selected && Boolean.getBoolean("metallum.ci.e2e")) {
+            System.setProperty("metallum.ci.qos." + role + ".selected", "true");
+        }
+        return selected;
     }
 
     private boolean shouldApplySodiumSemanticMixin(String evidenceKey, boolean enabled) {
