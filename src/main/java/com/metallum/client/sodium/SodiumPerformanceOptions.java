@@ -18,6 +18,23 @@ public final class SodiumPerformanceOptions {
     private SodiumPerformanceOptions() {
     }
 
+    /**
+     * The semantic P0 mixins touch Sodium implementation details which are
+     * verified against the 0.9.3 line. Keep them fail-closed on any other
+     * Sodium version so an otherwise compatible adapter cannot accidentally
+     * apply stale private-field/method assumptions.
+     */
+    public static boolean supportsSemanticMixins(String version) {
+        if (version == null) {
+            return false;
+        }
+
+        String normalized = version.trim();
+        return normalized.equals("0.9.3")
+                || normalized.startsWith("0.9.3-")
+                || normalized.startsWith("0.9.3+");
+    }
+
     public static boolean cullRecoveryEnabled() {
         return Boolean.getBoolean(CULL_RECOVERY_PROPERTY);
     }
@@ -37,6 +54,10 @@ public final class SodiumPerformanceOptions {
     /**
      * MetalUniversal only expands Sodium's cache here. A smaller cache would be
      * a memory policy change and belongs in a separately validated profile.
+     *
+     * <p>The production profile does not currently choose a capacity from
+     * physical RAM automatically. Explicit capacities exist for controlled
+     * A/B trials until device-tier measurements justify a default policy.
      */
     public static int cloneCacheEntries() {
         String raw = System.getProperty(CLONE_CACHE_ENTRIES_PROPERTY);
