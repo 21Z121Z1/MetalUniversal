@@ -13,6 +13,7 @@
     "startup.CrashReportPreloadMixin",
     "storage.RegionFileStorageSaveSkipMixin",
     "chunk.ChunkSectionIndexCacheMixin",
+    "chunk.PalettedContainerFactoryFastCodecMixin",
     "render.BackendFrameComparisonMixin",
     "render.BackendFrameComparisonGameRendererMixin",
     "render.BackendFrameComparisonServerMixin",
