@@ -245,6 +245,11 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         } else if (sodiumCullReuseMode == "skip") {
             jvmArgs.add("-Dmetallum.opt.sodiumCullReuse=true")
             jvmArgs.add("-Dmetallum.opt.sodiumVisibilitySweep=true")
+            jvmArgs.add("-Dmetallum.opt.qos.render=interactive")
+            jvmArgs.add("-Dmetallum.opt.qos.server=initiated")
+            jvmArgs.add("-Dmetallum.opt.qos.mesh=utility")
+            jvmArgs.add("-Dmetallum.opt.qos.cull=utility")
+            jvmArgs.add("-Dmetallum.opt.qos.worker=utility")
         }
         jvmArgs.add("-Dmetallum.opt.sodiumRegionLookupCache=true")
         jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheCleanup=true")
