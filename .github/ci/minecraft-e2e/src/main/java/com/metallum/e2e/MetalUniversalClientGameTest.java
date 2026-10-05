@@ -109,12 +109,23 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         require(metallumLoaded, "MetalUniversal mod was not loaded in the production client");
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
         boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
+        boolean sodiumSemanticP0 = Boolean.getBoolean("metallum.ci.sodiumSemanticP0");
         require(!(vanillaOnly && sodiumOnly), "Vanilla and Sodium-only lanes cannot both be selected");
+        require(!sodiumSemanticP0 || sodiumOnly,
+                "Sodium semantic P0 evidence requires the Sodium-only lane");
         if (FrameWorkloads.ENABLED) FrameWorkloads.validateProducer(FrameWorkloads.PRODUCER, sodiumLoaded, irisLoaded);
         else {
             require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
             require(irisLoaded == (!vanillaOnly && !sodiumOnly),
                     "Iris runtime presence disagrees with the requested lane");
+        }
+        if (sodiumSemanticP0) {
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullRecovery.selected"),
+                    "Sodium cull-recovery mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.regionLookupCache.selected"),
+                    "Sodium region-lookup cache mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cloneCache.selected"),
+                    "Sodium clone-cache optimization mixin was not selected on the 0.9.3 runtime");
         }
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly, sodiumOnly);
 
