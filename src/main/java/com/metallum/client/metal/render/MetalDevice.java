@@ -58,6 +58,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final DeviceInfo deviceInfo;
     private final boolean terrainIcbEnabled;
     public final MTLCommandQueue commandQueue;
+    private final MetalBufferProvisioner bufferProvisioner;
     // ConcurrentHashMap gives identity semantics here only because
     // RenderPipeline never overrides equals/hashCode; RENDER_PIPELINE_IDENTITY_EQUALS
     // verifies that at class load and disables async precompile otherwise.
@@ -220,6 +221,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
+        this.bufferProvisioner = new MetalBufferProvisioner(this.commandQueue);
         this.metal4Available = METAL4_REQUESTED
                 && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
         boolean metal4MainRendererRequested = this.metal4Available && METAL4_MAIN_RENDERER;
@@ -805,6 +807,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.pipelineBuilder.close();
         if (this.rasterStorageCompiler != null) this.rasterStorageCompiler.close();
         this.drainBufferPool();
+        this.bufferProvisioner.close();
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }
@@ -888,6 +891,14 @@ final class MetalDevice implements GpuDeviceBackend {
 
     void queueResourceRelease(final MemorySegment handle) {
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
+    }
+
+    java.util.concurrent.CompletableFuture<Void> provisionBuffer(
+            final MemorySegment handle,
+            final long size,
+            final long resourceOptions
+    ) {
+        return this.bufferProvisioner.schedule(handle, size, resourceOptions);
     }
 
     MemorySegment tryAcquirePooledBuffer(final long size, final long resourceOptions) {
