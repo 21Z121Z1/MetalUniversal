@@ -11,11 +11,11 @@ public final class LightSnapshotTelemetry {
 
     private LightSnapshotTelemetry() {}
 
-    static void fastSnapshot() { fastSnapshots.incrementAndGet(); }
-    static void verifiedSnapshot() { verifiedSnapshots.incrementAndGet(); }
-    static void rebase() { rebases.incrementAndGet(); }
-    static void delta() { deltas.incrementAndGet(); }
-    static void mismatch() { mismatches.incrementAndGet(); }
+    public static void fastSnapshot() { fastSnapshots.incrementAndGet(); }
+    public static void verifiedSnapshot() { verifiedSnapshots.incrementAndGet(); }
+    public static void rebase() { rebases.incrementAndGet(); }
+    public static void delta() { deltas.incrementAndGet(); }
+    public static void mismatch() { mismatches.incrementAndGet(); }
 
     public static long fastSnapshotCount() { return fastSnapshots.get(); }
     public static long verifiedSnapshotCount() { return verifiedSnapshots.get(); }
