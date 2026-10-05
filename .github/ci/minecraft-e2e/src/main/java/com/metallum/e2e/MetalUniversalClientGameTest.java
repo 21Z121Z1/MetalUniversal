@@ -131,6 +131,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Sodium region-lookup cache mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cloneCache.selected"),
                     "Sodium clone-cache optimization mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.sliceBounds.selected"),
+                    "Sodium LevelSlice bounds fast-path mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.biomeUniform.selected"),
+                    "Sodium biome-uniform fast-path mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.semantic.chunkSaveSkip.selected"),
                     "Chunk save-skip mixin was not selected in the semantic P0 runtime");
         }
