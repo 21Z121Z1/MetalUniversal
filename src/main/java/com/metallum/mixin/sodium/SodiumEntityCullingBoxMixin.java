@@ -4,7 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.sodium.SodiumEntityCullingBoxCache;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
-import net.caffeinemc.mods.sodium.mixin.features.render.entity.culling.EntityRendererAccessor;
+import net.caffeinemc.mods.sodium.mixin.core.render.world.EntityRendererAccessor;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.world.entity.Entity;
@@ -30,7 +30,7 @@ public abstract class SodiumEntityCullingBoxMixin {
             method = "isEntityVisible",
             at = @At(
                     value = "INVOKE",
-                    target = "Lnet/caffeinemc/mods/sodium/mixin/features/render/entity/culling/EntityRendererAccessor;"
+                    target = "Lnet/caffeinemc/mods/sodium/mixin/core/render/world/EntityRendererAccessor;"
                             + "sodium$getBoundingBoxForCulling(Lnet/minecraft/world/entity/Entity;F)"
                             + "Lnet/minecraft/world/phys/AABB;"
             ),
