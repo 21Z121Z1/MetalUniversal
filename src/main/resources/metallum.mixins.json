@@ -91,6 +91,8 @@
     "sodium.RenderSectionManagerTerrainSchedulingMixin",
     "sodium.SodiumCullRecoveryMixin",
     "sodium.SodiumCullReuseVerifierMixin",
+    "sodium.BlockRendererCachedReferencesMixin",
+    "sodium.DirectionalVisGraphSweepMixin",
     "sodium.VisibleChunkCollectorRegionCacheMixin",
     "sodium.ClonedChunkSectionCacheOptimizationMixin",
     "sodium.LevelBiomeUniformFastPathMixin",
