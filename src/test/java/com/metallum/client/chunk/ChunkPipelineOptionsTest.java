@@ -12,6 +12,7 @@ class ChunkPipelineOptionsTest {
         System.clearProperty(ChunkPipelineOptions.SECTION_INDEX_CACHE);
         System.clearProperty(ChunkPipelineOptions.PALETTE_PARSE);
         System.clearProperty(ChunkPipelineOptions.PALETTE_SERIALIZE);
+        System.clearProperty(ChunkPipelineOptions.POI_SEARCH);
     }
 
     @Test
@@ -24,6 +25,7 @@ class ChunkPipelineOptionsTest {
     @Test
     void paletteModesFailClosedAndParseExplicitValues() {
         assertFalse(ChunkPipelineOptions.paletteCodecEnabled());
+        org.junit.jupiter.api.Assertions.assertEquals(ChunkPipelineOptions.Mode.OFF, ChunkPipelineOptions.poiSearchMode());
 
         System.setProperty(ChunkPipelineOptions.PALETTE_PARSE, "verify");
         assertTrue(ChunkPipelineOptions.paletteCodecEnabled());
@@ -36,6 +38,12 @@ class ChunkPipelineOptionsTest {
         org.junit.jupiter.api.Assertions.assertEquals(
                 ChunkPipelineOptions.Mode.FAST,
                 ChunkPipelineOptions.paletteSerializeMode()
+        );
+
+        System.setProperty(ChunkPipelineOptions.POI_SEARCH, "verify");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                ChunkPipelineOptions.Mode.VERIFY,
+                ChunkPipelineOptions.poiSearchMode()
         );
     }
 }
