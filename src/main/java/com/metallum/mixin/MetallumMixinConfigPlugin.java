@@ -50,6 +50,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.SodiumCullRecoveryMixin";
     private static final String SODIUM_CULL_REUSE_VERIFY_MIXIN =
             "com.metallum.mixin.sodium.SodiumCullReuseVerifierMixin";
+    private static final String SODIUM_VISIBILITY_SWEEP_MIXIN =
+            "com.metallum.mixin.sodium.DirectionalVisGraphSweepMixin";
+    private static final String SODIUM_BLOCK_RENDERER_REFS_MIXIN =
+            "com.metallum.mixin.sodium.BlockRendererCachedReferencesMixin";
     private static final String SODIUM_REGION_LOOKUP_CACHE_MIXIN =
             "com.metallum.mixin.sodium.VisibleChunkCollectorRegionCacheMixin";
     private static final String SODIUM_CLONE_CACHE_OPTIMIZATION_MIXIN =
@@ -150,8 +154,20 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (SODIUM_CULL_REUSE_VERIFY_MIXIN.equals(mixinClassName)) {
             return this.shouldApplySodiumSemanticMixin(
-                    "cullReuseVerify",
-                    SodiumPerformanceOptions.cullReuseVerifyEnabled()
+                    "cullReuse",
+                    SodiumPerformanceOptions.cullReuseAnyModeEnabled()
+            );
+        }
+        if (SODIUM_VISIBILITY_SWEEP_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "visibilitySweep",
+                    SodiumPerformanceOptions.visibilitySweepAnyModeEnabled()
+            );
+        }
+        if (SODIUM_BLOCK_RENDERER_REFS_MIXIN.equals(mixinClassName)) {
+            return this.shouldApplySodiumSemanticMixin(
+                    "blockRendererRefs",
+                    SodiumPerformanceOptions.blockRendererRefsEnabled()
             );
         }
         if (SODIUM_REGION_LOOKUP_CACHE_MIXIN.equals(mixinClassName)) {
