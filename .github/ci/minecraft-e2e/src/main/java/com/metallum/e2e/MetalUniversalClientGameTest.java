@@ -427,6 +427,25 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                         + roleEvidence);
                     }
                     worldEvidence.add("macThreadQos", qosEvidence);
+
+                    long provisionScheduled = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "scheduledCount");
+                    long provisionCompleted = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "completedCount");
+                    long provisionFailures = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "failureCount");
+                    long provisionForegroundWaits = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "foregroundWaitCount");
+                    JsonObject provisionEvidence = new JsonObject();
+                    provisionEvidence.addProperty("scheduled", provisionScheduled);
+                    provisionEvidence.addProperty("completed", provisionCompleted);
+                    provisionEvidence.addProperty("failures", provisionFailures);
+                    provisionEvidence.addProperty("foregroundWaits", provisionForegroundWaits);
+                    worldEvidence.add("largeBufferProvision", provisionEvidence);
+                    require(provisionScheduled > 0,
+                            "Large-buffer provisioning fast lane never scheduled a private buffer");
+                    require(provisionCompleted > 0 && provisionFailures == 0,
+                            "Large-buffer provisioning did not complete cleanly: " + provisionEvidence);
                 }
             }
 
