@@ -252,6 +252,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
             jvmArgs.add("-Dmetallum.opt.qos.worker=utility")
             jvmArgs.add("-Dmetallum.opt.parallelBlockStateCache=true")
             jvmArgs.add("-Dmetallum.opt.asyncCrashReportPreload=true")
+            jvmArgs.add("-Dmetallum.opt.chunkSectionIndexCache=true")
         }
         jvmArgs.add("-Dmetallum.opt.sodiumRegionLookupCache=true")
         jvmArgs.add("-Dmetallum.opt.sodiumCloneCacheCleanup=true")
