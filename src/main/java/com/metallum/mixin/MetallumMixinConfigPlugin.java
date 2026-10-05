@@ -1,6 +1,7 @@
 package com.metallum.mixin;
 
 import com.metallum.client.sodium.SodiumPerformanceOptions;
+import com.metallum.client.storage.ChunkStorageOptions;
 import com.metallum.client.metal.render.bridge.NativePlatform;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
@@ -53,6 +54,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.ClonedChunkSectionCacheOptimizationMixin";
     private static final String STARTUP_LAZY_NARRATOR_MIXIN =
             "com.metallum.mixin.startup.GameNarratorDeferredMixin";
+    private static final String CHUNK_SAVE_SKIP_MIXIN =
+            "com.metallum.mixin.storage.RegionFileStorageSaveSkipMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -120,6 +123,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents") || frameEvidenceDrawHook)
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
+        }
+        if (CHUNK_SAVE_SKIP_MIXIN.equals(mixinClassName)) {
+            boolean selected = this.isDefaultGraphicsApi && ChunkStorageOptions.chunkSaveSkipEnabled();
+            if (selected && Boolean.getBoolean("metallum.ci.e2e")) {
+                System.setProperty("metallum.ci.semantic.chunkSaveSkip.selected", "true");
+            }
+            return selected;
         }
         if (STARTUP_LAZY_NARRATOR_MIXIN.equals(mixinClassName)) {
             return this.isDefaultGraphicsApi && Boolean.getBoolean("metallum.opt.lazyNarrator");
