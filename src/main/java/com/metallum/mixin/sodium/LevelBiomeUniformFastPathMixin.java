@@ -10,8 +10,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.util.Arrays;
-
 /**
  * Short-circuits LevelBiomeSlice uniform-neighbour calculation when the entire
  * captured 12x12x12 biome slice already resolves to one canonical Biome.
@@ -36,7 +34,19 @@ public abstract class LevelBiomeUniformFastPathMixin {
             }
         }
 
-        Arrays.fill(this.uniform, true);
+        // Sodium defines uniformity only for the inner 8^3 biome cells. Keep
+        // the outer shell untouched so this fast path has exactly the same
+        // write domain as the original calculation.
+        for (int index = 0; index < this.uniform.length; index++) {
+            int z = index % 12;
+            int yz = index / 12;
+            int y = yz % 12;
+            int x = yz / 12;
+            if (x >= 2 && x <= 9 && y >= 2 && y <= 9 && z >= 2 && z <= 9) {
+                this.uniform[index] = true;
+            }
+        }
+
         ci.cancel();
     }
 }
