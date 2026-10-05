@@ -110,6 +110,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
         boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
         boolean sodiumSemanticP0 = Boolean.getBoolean("metallum.ci.sodiumSemanticP0");
+        String sodiumVersion = FabricLoader.getInstance().getModContainer("sodium")
+                .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                .orElse("");
         require(!(vanillaOnly && sodiumOnly), "Vanilla and Sodium-only lanes cannot both be selected");
         require(!sodiumSemanticP0 || sodiumOnly,
                 "Sodium semantic P0 evidence requires the Sodium-only lane");
@@ -120,6 +123,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Iris runtime presence disagrees with the requested lane");
         }
         if (sodiumSemanticP0) {
+            require(sodiumVersion.equals("0.9.3-alpha.1") || sodiumVersion.startsWith("0.9.3-alpha.1+"),
+                    "Sodium semantic P0 requires 0.9.3-alpha.1, observed " + sodiumVersion);
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullRecovery.selected"),
                     "Sodium cull-recovery mixin was not selected on the 0.9.3 runtime");
             require(Boolean.getBoolean("metallum.ci.sodiumSemantic.regionLookupCache.selected"),
