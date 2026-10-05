@@ -287,6 +287,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
                         context.waitTicks(10);
                         singleplayer.getConnection().waitForChunksRender();
+                        if (sodiumSemanticP0 && frameId == 1) {
+                            runCullReuseVerificationMotion(context, singleplayer, x, y, z);
+                        }
                         JsonObject waypoint = new JsonObject();
                         waypoint.addProperty("frameId", frameId);
                         waypoint.addProperty("x", x);
@@ -333,6 +336,26 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         return null;
                     });
                 }
+            }
+
+            if (sodiumSemanticP0) {
+                long cullReuseCandidates = sodiumCullReuseCounter("candidateCount");
+                long cullReuseMatches = sodiumCullReuseCounter("matchCount");
+                long cullReuseMismatches = sodiumCullReuseCounter("mismatchCount");
+                long cullReuseRacy = sodiumCullReuseCounter("racyCompletionCount");
+                JsonObject cullReuseEvidence = new JsonObject();
+                cullReuseEvidence.addProperty("candidates", cullReuseCandidates);
+                cullReuseEvidence.addProperty("matches", cullReuseMatches);
+                cullReuseEvidence.addProperty("mismatches", cullReuseMismatches);
+                cullReuseEvidence.addProperty("racyCompletions", cullReuseRacy);
+                worldEvidence.add("sodiumCullReuseVerify", cullReuseEvidence);
+
+                require(cullReuseCandidates > 0,
+                        "CullReuse verify lane produced no eligible same-section admissions");
+                require(cullReuseMatches > 0,
+                        "CullReuse verify lane produced no oracle-confirmed reusable cull");
+                require(cullReuseMismatches == 0,
+                        "CullReuse verify lane observed " + cullReuseMismatches + " oracle mismatches");
             }
 
             CaptureSample selected = selectBestCapture(samples);
@@ -529,6 +552,48 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             }
         }
         return best;
+    }
+
+    private static void runCullReuseVerificationMotion(
+            ClientGameTestContext context,
+            TestSingleplayerContext singleplayer,
+            int x,
+            int y,
+            int z
+    ) {
+        // Let the long-distance teleport's graph/build work settle before probing
+        // camera-only reuse. All probe points stay inside the same section.
+        context.waitTicks(20);
+        double[] offsets = {0.25, 0.50, 0.75, 0.50, 0.25};
+        for (double offset : offsets) {
+            double targetX = x + offset;
+            singleplayer.getServer().runCommand(
+                    "tp @a " + targetX + " " + y + " " + z + " -65 25"
+            );
+            context.waitFor(client -> client.player != null
+                    && Math.abs(client.player.getX() - targetX) < 0.05
+                    && Math.abs(client.player.getZ() - z) < 0.05);
+            context.waitTicks(8);
+        }
+
+        singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+        context.waitFor(client -> client.player != null
+                && Math.abs(client.player.getX() - x) < 0.05
+                && Math.abs(client.player.getZ() - z) < 0.05);
+        context.waitTicks(10);
+    }
+
+    private static long sodiumCullReuseCounter(String methodName) {
+        try {
+            Class<?> telemetry = Class.forName("com.metallum.client.sodium.SodiumCullReuseTelemetry");
+            return ((Number) telemetry.getMethod(methodName).invoke(null)).longValue();
+        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+                 | InvocationTargetException exception) {
+            throw new IllegalStateException(
+                    "Could not inspect Sodium CullReuse verifier telemetry via " + methodName,
+                    exception
+            );
+        }
     }
 
     private static void writeCaptureSamples(Path path, List<CaptureSample> samples, long selectedFrameId) {
