@@ -107,6 +107,65 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders() {
+        String name = "state_draw_transport";
+        vertexShaders.put("mrt_vertex", """
+                #version 450
+                layout(location=0) flat out int instance_id;
+                void main() {
+                    vec2 p[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+                    gl_Position = vec4(p[gl_VertexIndex - 3], 0, 1);
+                    instance_id = gl_InstanceIndex;
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) flat in int instance_id;
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(float(instance_id + 1) / 64.0, 0.125, 0.0625, 1); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM),
+                BlendFunction.ADDITIVE, ColorTargetState.WRITE_ALL);
+        ByteBuffer data = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        data.putShort((short) 999).putShort((short) 4).putShort((short) 5).putShort((short) 6).flip();
+        long before = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls();
+        long rejectedBefore = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (GpuBuffer indices = device.createBuffer(() -> "state draw indices", GpuBuffer.USAGE_INDEX, data)) {
+            for (int round = 0; round < 4; round++) {
+                try (PassWithViews pass = createPass(textures, null, false)) {
+                    pass.pass().setPipeline(pipeline);
+                    if ((round & 1) == 0) {
+                        pass.pass().draw(3, 2, 3, 3);
+                    } else {
+                        pass.pass().setIndexBuffer(indices, IndexType.SHORT);
+                        pass.pass().drawIndexed(3, 2, 1, -1, 3);
+                    }
+                    encoder.submitRenderPass();
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork();
+                }
+                ByteBuffer pixels = readback(textures.get(0));
+                for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                    assertByteNear(pixels.get(pixel * 4), 36, "instance/base-instance red");
+                    assertByteNear(pixels.get(pixel * 4 + 1), 64, "exactly two additive instances green");
+                    assertByteNear(pixels.get(pixel * 4 + 2), 32, "exactly one draw blue");
+                }
+            }
+        } finally {
+            closeTextures(textures);
+        }
+        if (Boolean.getBoolean("metallum.opt.fusedStateDraw")) {
+            assertTrue(com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge.drawAvailable(),
+                    "the enabled lane requires the shipping v2 entry, not legacy fallback");
+            assertTrue(com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls() >= before + 4,
+                    "every recreated encoder must actually activate fused state/draw transport");
+            assertEquals(rejectedBefore, com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls(),
+                    "valid direct and indexed draws must not silently fall back");
+        }
+    }
+
+    @Test
     void timestampQueriesWaitForGpuCompletionAndCalibrateToJvmClock() {
         ByteBuffer data = ByteBuffer.allocateDirect(256);
         for (int i = 0; i < data.capacity(); i++) data.put(i, (byte) (i * 7));

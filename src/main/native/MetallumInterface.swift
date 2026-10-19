@@ -262,6 +262,69 @@ public func metallum_render_state_packet_apply_v1(
     return appliedCount
 }
 
+// Feature 3, entry 1 (interface v2). The state packet remains v1.
+// Draw descriptor, 64 bytes: size/kind/primitive/indexType (UInt32),
+// indexBuffer/indexOffset (UInt64), firstOrBaseVertex/count/instances/baseInstance
+// (Int32), then two reserved zero UInt64 words. Kind 1 = direct, 2 = indexed.
+// Exactly 1 means a draw was encoded. Every other result guarantees NO draw;
+// an idempotent state prefix may have been applied and may safely be replayed.
+@_cdecl("metallum_render_state_packet_draw_v2")
+public func metallum_render_state_packet_draw_v2(
+    _ encoderPointer: UnsafeMutableRawPointer,
+    _ rawPacket: UnsafeRawPointer?,
+    _ rawByteCount: Int64,
+    _ rawDraw: UnsafeRawPointer?
+) -> Int32 {
+    guard let packet = rawPacket, rawByteCount >= renderStatePacketHeaderSize,
+          let draw = rawDraw,
+          packetLoad(draw, 0, as: UInt32.self) == 64,
+          packetLoad(draw, 48, as: UInt64.self) == 0,
+          packetLoad(draw, 56, as: UInt64.self) == 0,
+          let primitive = MTLPrimitiveType(rawValue: UInt(packetLoad(draw, 8, as: UInt32.self))) else {
+        return -1
+    }
+    let kind = packetLoad(draw, 4, as: UInt32.self)
+    let indexTypeRaw = packetLoad(draw, 12, as: UInt32.self)
+    let bufferAddress = packetLoad(draw, 16, as: UInt64.self)
+    let rawOffset = packetLoad(draw, 24, as: UInt64.self)
+    let first = Int(packetLoad(draw, 32, as: Int32.self))
+    let count = Int(packetLoad(draw, 36, as: Int32.self))
+    let instances = Int(packetLoad(draw, 40, as: Int32.self))
+    let baseInstance = Int(packetLoad(draw, 44, as: Int32.self))
+    guard count >= 0, instances >= 0, baseInstance >= 0 else { return -1 }
+    var indexBuffer: MTLBuffer?
+    var indexType: MTLIndexType = .uint16
+    var offset = 0
+    if kind == 1 {
+        guard first >= 0, bufferAddress == 0, rawOffset == 0, indexTypeRaw == 0 else { return -1 }
+    } else if kind == 2 {
+        guard let type = MTLIndexType(rawValue: UInt(indexTypeRaw)),
+              let buffer = packetObject(bufferAddress) as? MTLBuffer,
+              let checkedOffset = Int(exactly: rawOffset) else { return -1 }
+        let stride = type == .uint16 ? 2 : 4
+        guard checkedOffset % stride == 0, checkedOffset <= buffer.length,
+              count <= (buffer.length - checkedOffset) / stride else { return -1 }
+        indexBuffer = buffer
+        indexType = type
+        offset = checkedOffset
+    } else {
+        return -1
+    }
+    // All draw validation precedes state application. The established setters
+    // and draw exports preserve the same Metal 3/4 dispatch and counters.
+    let expected = Int64(packetLoad(packet, 12, as: UInt32.self))
+    let applied = metallum_render_state_packet_apply_v1(encoderPointer, packet, rawByteCount)
+    guard Int64(applied) == expected else { return -2 }
+    if let buffer = indexBuffer {
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoderPointer, primitive, count, indexType, buffer, offset, instances, first, baseInstance)
+    } else {
+        metallum_MTLRenderCommandEncoder_drawPrimitives(
+            encoderPointer, primitive, first, count, instances, baseInstance)
+    }
+    return 1
+}
+
 // MARK: - Versioned native interface
 //
 // The Java side reaches the dylib through per-symbol FFM downcalls, which makes
@@ -312,7 +375,7 @@ enum MetallumInterfaceFeature: Int32 {
         switch self {
         case .core: return 1
         case .metalFX: return 1
-        case .renderStatePacket: return 1
+        case .renderStatePacket: return 2
         }
     }
 }
@@ -427,6 +490,10 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
             functionPointer(
                 metallum_render_state_packet_apply_v1
                     as @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer?, Int64) -> Int32
+            ),
+            functionPointer(
+                metallum_render_state_packet_draw_v2
+                    as @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer?, Int64, UnsafeRawPointer?) -> Int32
             )
         ]
     }

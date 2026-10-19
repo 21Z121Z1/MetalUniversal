@@ -22,6 +22,8 @@ bash scripts/agent/verify_unified_eval.sh
 
 `scripts/agent/record_ci_subject.py` records which exact Git object a workflow tested. For branch work, derive current refs and merge bases from Git; branch names and dated reports are not current-state proof. Generated run evidence belongs under ignored `build/` paths.
 
+The [renderer reference study](renderer-reference-study.zh-CN.md) records the Ciderlight, Vantage and metal189 source snapshots, the opt-in state/draw transport, submission budget, and its validation boundaries.
+
 ## Historical material
 
 `handoffs/`, dated reports, old prompts, and earlier architecture plans preserve the reasoning and evidence from their original commit. The decisions under `agent/decisions/` explain choices made on earlier lines; check whether the referenced files still exist before using their procedures. The legacy Iris performance loop remains useful for focused compatibility, while the unified evaluation loop owns current acceptance.

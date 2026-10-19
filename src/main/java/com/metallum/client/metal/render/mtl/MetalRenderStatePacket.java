@@ -35,6 +35,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
     static final int OP_TEXTURE = 9;
     static final int OP_TEXTURE_AND_SAMPLER = 10;
     static final int OP_SCISSOR = 11;
+    static final int DRAW_BYTES = 64;
+    static final int DRAW_PRIMITIVES = 1;
+    static final int DRAW_INDEXED = 2;
 
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
@@ -53,10 +56,70 @@ final class MetalRenderStatePacket implements AutoCloseable {
     );
 
     private final @Nullable Arena arena;
+    private final MemorySegment backingStorage;
     private final MemorySegment storage;
     private int entryCount;
     private boolean active = true;
     private boolean closed;
+    private boolean drawActive = true;
+    private final MemorySegment drawStorage;
+    private @Nullable RuntimeException uncertainDrawFailure;
+
+    @FunctionalInterface
+    interface DrawSubmitter {
+        int submit(MemorySegment encoder, MemorySegment state, long bytes, MemorySegment draw);
+    }
+
+    private static final DrawSubmitter NATIVE_DRAW = MetalRenderStatePacketBridge::applyDraw;
+
+    boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
+                    final long indexType, final MemorySegment indexBuffer, final long indexOffset,
+                    final int firstOrBaseVertex, final int count, final int instances, final int baseInstance) {
+        return tryDraw(encoder, kind, primitive, indexType, indexBuffer, indexOffset,
+                firstOrBaseVertex, count, instances, baseInstance, NATIVE_DRAW);
+    }
+
+    /** Rejected packets retain their state for the ordinary flush followed by exactly one legacy draw. */
+    boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
+                    final long indexType, final MemorySegment indexBuffer, final long indexOffset,
+                    final int firstOrBaseVertex, final int count, final int instances, final int baseInstance,
+                    final DrawSubmitter submitter) {
+        ensureOpen();
+        if (!this.active || !this.drawActive || this.entryCount == 0) return false;
+        MemorySegment draw = this.drawStorage;
+        draw.fill((byte) 0);
+        draw.set(ValueLayout.JAVA_INT, 0, DRAW_BYTES);
+        draw.set(ValueLayout.JAVA_INT, 4, kind);
+        draw.set(ValueLayout.JAVA_INT, 8, Math.toIntExact(primitive));
+        draw.set(ValueLayout.JAVA_INT, 12, Math.toIntExact(indexType));
+        draw.set(ValueLayout.JAVA_LONG, 16, address(indexBuffer));
+        draw.set(ValueLayout.JAVA_LONG, 24, indexOffset);
+        draw.set(ValueLayout.JAVA_INT, 32, firstOrBaseVertex);
+        draw.set(ValueLayout.JAVA_INT, 36, count);
+        draw.set(ValueLayout.JAVA_INT, 40, instances);
+        draw.set(ValueLayout.JAVA_INT, 44, baseInstance);
+        int bytes = byteCount();
+        this.storage.set(ValueLayout.JAVA_INT, 8, bytes);
+        this.storage.set(ValueLayout.JAVA_INT, 12, this.entryCount);
+        final int result;
+        try {
+            result = submitter.submit(encoder, this.storage, bytes, draw);
+        } catch (RuntimeException failure) {
+            // A caller catching the failure must not reuse this encoder's packet
+            // and accidentally replay work whose draw outcome is unknown.
+            this.uncertainDrawFailure = failure;
+            throw failure;
+        }
+        if (result != 1) {
+            this.drawActive = false;
+            MetalRenderStatePacketTelemetry.recordFusedDraw(false);
+            return false;
+        }
+        MetalRenderStatePacketTelemetry.recordPacket(this.entryCount);
+        MetalRenderStatePacketTelemetry.recordFusedDraw(true);
+        reset();
+        return true;
+    }
 
     static @Nullable MetalRenderStatePacket createIfAvailable() {
         if (!ENABLED || !MetalRenderStatePacketBridge.available()) {
@@ -72,7 +135,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (storage == null) {
             // Native packet decoding is synchronous. Only CPU scratch storage
             // is reused; no GPU-visible resource or native encoder is pooled.
-            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE, Long.BYTES);
+            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE + DRAW_BYTES, Long.BYTES);
             MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         } else {
             MetalRenderStatePacketTelemetry.recordPacketStorageReuse();
@@ -82,7 +145,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
 
     private MetalRenderStatePacket(MemorySegment storage) {
         this.arena = null;
-        this.storage = storage;
+        this.backingStorage = storage;
+        this.storage = storage.asSlice(0, storage.byteSize() - DRAW_BYTES);
+        this.drawStorage = storage.asSlice(storage.byteSize() - DRAW_BYTES, DRAW_BYTES);
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
         resetHeader();
@@ -93,10 +158,13 @@ final class MetalRenderStatePacket implements AutoCloseable {
             throw new IllegalArgumentException("Render-state packet capacity must be positive");
         }
         this.arena = Arena.ofConfined();
-        this.storage = this.arena.allocate(
-                Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE)),
+        long stateBytes = Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE));
+        this.backingStorage = this.arena.allocate(
+                Math.addExact(stateBytes, DRAW_BYTES),
                 Long.BYTES
         );
+        this.storage = this.backingStorage.asSlice(0, stateBytes);
+        this.drawStorage = this.backingStorage.asSlice(stateBytes, DRAW_BYTES);
         MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
@@ -396,6 +464,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
     }
 
     private void ensureOpen() {
+        if (this.uncertainDrawFailure != null) throw this.uncertainDrawFailure;
         if (this.closed) {
             throw new IllegalStateException("Render-state packet is closed");
         }
@@ -410,7 +479,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (this.arena != null) {
             this.arena.close();
         } else if (IDLE_STORAGE.get() == null) {
-            IDLE_STORAGE.set(this.storage);
+            IDLE_STORAGE.set(this.backingStorage);
         }
     }
 }

@@ -13,6 +13,15 @@ public final class MetalRenderStatePacketTelemetry {
     private static final boolean REUSE_ACTIVATION_ENABLED = Boolean.getBoolean(
             "metallum.ci.reuseActivationTelemetry");
     private static final LongAdder packetCalls = new LongAdder();
+    private static final LongAdder fusedDrawCalls = new LongAdder();
+    private static final LongAdder rejectedFusedDrawCalls = new LongAdder();
+
+    static void recordFusedDraw(final boolean accepted) {
+        if (ENABLED) (accepted ? fusedDrawCalls : rejectedFusedDrawCalls).increment();
+    }
+
+    public static long fusedDrawCalls() { return fusedDrawCalls.sum(); }
+    public static long rejectedFusedDrawCalls() { return rejectedFusedDrawCalls.sum(); }
     private static final LongAdder packetEntries = new LongAdder();
     private static final LongAdder legacyReplays = new LongAdder();
     private static final LongAdder legacyReplayEntries = new LongAdder();
@@ -105,6 +114,8 @@ public final class MetalRenderStatePacketTelemetry {
     }
 
     public static void reset() {
+        fusedDrawCalls.reset();
+        rejectedFusedDrawCalls.reset();
         packetCalls.reset();
         packetEntries.reset();
         legacyReplays.reset();

@@ -66,6 +66,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private static final boolean BLIT_BATCH =
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
     private final MetalDevice device;
+    private final MetalSubmissionBackpressure submissionBackpressure = new MetalSubmissionBackpressure(
+            System.getProperty("metallum.maxSubmitsInFlight"));
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
@@ -620,6 +622,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             toClose.buffer.close();
             inFlight[slot] = null;
+        }
+
+        // A smaller latency budget adds a completion wait, but never shortens
+        // the storage ring or the conservative destruction/readback grace period.
+        if (submissionBackpressure.limit() < MAX_SUBMITS_IN_FLIGHT) {
+            long required = submissionBackpressure.completionRequiredBefore(currentSubmitIndex);
+            InFlight oldestAllowed = inFlight[(int) (required % MAX_SUBMITS_IN_FLIGHT)];
+            if (oldestAllowed != null && oldestAllowed.index == required && !oldestAllowed.completionHandled
+                    && !awaitInFlightCompletion(oldestAllowed, 5000L)) {
+                throw new IllegalStateException("5s timeout reached at Metal submission backpressure");
+            }
         }
 
         List<SubmitCallback> callbacks = List.copyOf(currentSubmitCallbacks);

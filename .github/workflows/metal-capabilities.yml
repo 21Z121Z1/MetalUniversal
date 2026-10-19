@@ -103,7 +103,10 @@ jobs:
             metal4PipelinePathTest \
             hostedMetalCoreIntegrationTest \
             hostedMetalIrisIntegrationTest \
-            hostedMetalIrisComputeGroupingTest
+            hostedMetalIrisComputeGroupingTest \
+            hostedMetalFusedStateDrawTest \
+            hostedMetalFusedStateDrawOneSubmitTest \
+            hostedMetalFusedStateDrawTwoSubmitsTest
       - name: State evidence boundary
         run: |
           cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt

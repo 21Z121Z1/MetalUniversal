@@ -2,6 +2,9 @@ package com.metallum.client.metal.render.bridge;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.SymbolLookup;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.lang.foreign.FunctionDescriptor;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,6 +26,43 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 final class MetalNativeInterfaceTest {
     private static final Path DYLIB = Path.of("src/main/resources/natives/macos/libmetallum.dylib");
+
+    @Test
+    void renderStateV2KeepsTheV1EntryAndRejectsMalformedDrawsBeforeTouchingAnEncoder() throws Throwable {
+        try (Arena arena = Arena.ofConfined()) {
+            SymbolLookup lookup = shippedDylib(arena);
+            MetalNativeInterface table = MetalNativeInterface.negotiate(
+                    lookup, MetalNativeInterface.Feature.RENDER_STATE_PACKET, 2).orElseThrow();
+            assertTrue(table.version() >= 2);
+            assertTrue(table.entryCount() >= 2);
+            assertTrue(table.supports(MetalNativeInterface.Capability.RENDER_STATE_PACKET));
+            assertEquals(lookup.find("metallum_render_state_packet_apply_v1").orElseThrow().address(),
+                    table.entryAddress(0), "v1 entry zero must remain ABI-compatible");
+            assertEquals(lookup.find("metallum_render_state_packet_draw_v2").orElseThrow().address(),
+                    table.entryAddress(1));
+            MethodHandle draw = table.entry(1, FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+            MemorySegment state = arena.allocate(16, 8);
+            state.set(ValueLayout.JAVA_INT, 0, 0x4D525350);
+            state.set(ValueLayout.JAVA_INT, 4, 1);
+            state.set(ValueLayout.JAVA_INT, 8, 16);
+            MemorySegment descriptor = arena.allocate(64, 8);
+            descriptor.set(ValueLayout.JAVA_INT, 0, 64);
+            descriptor.set(ValueLayout.JAVA_INT, 4, 1);
+            descriptor.set(ValueLayout.JAVA_INT, 8, 3);
+            descriptor.set(ValueLayout.JAVA_INT, 36, 3);
+            descriptor.set(ValueLayout.JAVA_INT, 40, 1);
+            // This cannot be a real encoder. Every malformed-input case must
+            // return before invoking a setter or issuing a draw through it.
+            MemorySegment unusedEncoder = MemorySegment.ofAddress(0x1234);
+            descriptor.set(ValueLayout.JAVA_LONG, 48, 1);
+            assertEquals(-1, (int) draw.invokeExact(unusedEncoder, state, 16L, descriptor));
+            descriptor.set(ValueLayout.JAVA_LONG, 48, 0);
+            state.set(ValueLayout.JAVA_INT, 0, 0); // bad state magic
+            assertEquals(-2, (int) draw.invokeExact(unusedEncoder, state, 16L, descriptor));
+            assertEquals(-1, (int) draw.invokeExact(unusedEncoder, state, 8L, descriptor));
+        }
+    }
 
     private static SymbolLookup shippedDylib(final Arena arena) {
         assumeTrue(Files.isRegularFile(DYLIB),

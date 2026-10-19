@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
@@ -9,6 +10,8 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
+    // Physical equivalence/performance acceptance is required before enabling by default.
+    private static final boolean FUSED_STATE_DRAW = Boolean.getBoolean("metallum.opt.fusedStateDraw");
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );
@@ -344,6 +347,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
+        if (FUSED_STATE_DRAW && this.statePacket != null && MetalRenderStatePacketBridge.drawAvailable()
+                && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_PRIMITIVES,
+                primitiveType.value, 0, MemorySegment.NULL, 0,
+                firstVertex, vertexCount, instanceCount, baseInstance)) return;
         flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitives(
                 encoder,
@@ -366,6 +373,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
+        if (FUSED_STATE_DRAW && this.statePacket != null && MetalRenderStatePacketBridge.drawAvailable()
+                && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_INDEXED,
+                primitiveType.value, indexType.value, indexBuffer, offset,
+                baseVertex, indexCount, instanceCount, baseInstance)) return;
         flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitives(
                 encoder,

@@ -192,4 +192,19 @@ gradle.projectsEvaluated {
         task.dependsOn(hostedBridgeFfmSmoke)
         task.systemProperty "metallum.iris.computeGrouping", "true"
     }
+
+    // Same independent pixel/offset/instancing oracle as the conservative path.
+    // The test asserts the v2 route actually ran; missing capability is a failure.
+    ["hostedMetalFusedStateDrawTest": 3,
+     "hostedMetalFusedStateDrawOneSubmitTest": 1,
+     "hostedMetalFusedStateDrawTwoSubmitsTest": 2].each { name, budget ->
+        configureHostedTest(name,
+                "Checks fused Java/FFM/Swift state/draw transport with a ${budget}-submit GPU budget.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"]).configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            task.systemProperty "metallum.opt.fusedStateDraw", "true"
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.maxSubmitsInFlight", budget.toString()
+        }
+    }
 }
