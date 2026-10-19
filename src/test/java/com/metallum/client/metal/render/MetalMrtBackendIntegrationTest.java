@@ -873,6 +873,64 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void indexedStageInShaderKeepsObservableVertexIndex() {
+        String name = "indexed_stage_in_vertex_index";
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) in vec2 position;
+                layout(location=0) out vec4 vertexColor;
+                void main() {
+                    gl_Position = vec4(position, 0, 1);
+                    vertexColor = gl_VertexIndex >= 3 ? vec4(0, 1, 0, 1) : vec4(0, 0, 1, 1);
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) in vec4 vertexColor;
+                layout(location=0) out vec4 color;
+                void main() { color = vertexColor; }
+                """);
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withVertexBinding(0, com.mojang.renderpearl.api.vertex.VertexFormat.builder(0)
+                        .addAttribute("position", GpuFormat.RG32_FLOAT).build())
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL)).build();
+        ByteBuffer vertices = ByteBuffer.allocateDirect(12 * Float.BYTES).order(ByteOrder.nativeOrder());
+        for (float value : new float[]{0, 0, 0, 0, 0, 0, -1, -1, 3, -1, -1, 3}) vertices.putFloat(value);
+        vertices.flip();
+        ByteBuffer indices = ByteBuffer.allocateDirect(3 * Short.BYTES).order(ByteOrder.nativeOrder());
+        indices.putShort((short) 0).putShort((short) 1).putShort((short) 2).flip();
+        long rebasesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, vertices);
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            try (PassWithViews pass = createPass(textures, null, false)) {
+                pass.pass().setPipeline(pipeline);
+                assertFalse(device.getOrCompilePipeline(pipeline).indexedVertexRebaseSafe());
+                pass.pass().setVertexBuffer(0, vertexBuffer.slice());
+                pass.pass().setIndexBuffer(indexBuffer, IndexType.SHORT);
+                pass.pass().drawIndexed(3, 1, 0, 3, 0);
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(pixels.get(pixel * 4), 0, "vertex-index observer red");
+                assertByteNear(pixels.get(pixel * 4 + 1), 255, "vertex-index observer green");
+                assertByteNear(pixels.get(pixel * 4 + 2), 0, "vertex-index observer blue");
+            }
+            assertEquals(rebasesBefore, com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases());
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @Test
     void renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance() {
         String name = "vanilla_indirect";
         vertexShaders.put(name, """

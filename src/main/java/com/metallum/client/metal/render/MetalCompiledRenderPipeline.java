@@ -682,7 +682,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         var formats = this.info.getVertexFormatBindings();
         return logicalSlot >= 0 && logicalSlot < formats.size() && formats.get(logicalSlot) != null
                 && !formats.get(logicalSlot).getElements().isEmpty()
-                && formats.get(logicalSlot).getStepRate() == 0;
+                && formats.get(logicalSlot).getStepRate() <= 0;
     }
 
     int genericVertexBufferSlot() {
