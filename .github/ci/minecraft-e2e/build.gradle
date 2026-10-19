@@ -247,7 +247,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         }
         jvmArgs.add("-Dmetallum.ci.transportProfile=${transportProfile}")
         if (transportProfile != 'default') {
-            ['fusedStateDraw', 'reuseEncoderState', 'reuseNativeEncoderArguments', 'dynamicUploadRangeCopy'].each { flag ->
+            ['fusedStateDraw', 'reuseEncoderState', 'reuseNativeEncoderArguments', 'dynamicUploadRangeCopy', 'batchIndexedVertexRebase'].each { flag ->
                 jvmArgs.add("-Dmetallum.opt.${flag}=${transportProfile == 'candidate'}")
             }
         }
@@ -293,7 +293,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // production transport defaults change. Conformance uses them above.
         jvmArgs.add('-Dmetallum.opt.fusedStateDraw=false')
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
-        ['dynamicUploadRangeCopy', 'nativeMultiDrawBatch', 'asyncPrecompile'].each { flag ->
+        ['dynamicUploadRangeCopy', 'batchIndexedVertexRebase', 'nativeMultiDrawBatch', 'asyncPrecompile'].each { flag ->
             jvmArgs.add("-Dmetallum.opt.${flag}=${providers.gradleProperty(flag).orElse('false').get()}")
         }
         jvmArgs.add("-Dmetallum.hotpath.telemetry=${providers.gradleProperty('efficiencyTelemetry').orElse('false').get()}")

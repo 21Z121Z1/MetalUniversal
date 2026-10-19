@@ -845,15 +845,17 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        for (int i = 0; i < drawCount; i++) {
-            int base = drawParameters.position() + i * 3;
-            // RenderPearl exposes the Vulkan struct's native field offsets:
-            // firstIndex=0, indexCount=4, vertexOffset=8.
-            int firstIndex = drawParameters.get(base);
-            int indexCount = drawParameters.get(base + 1);
-            int baseVertex = drawParameters.get(base + 2);
-            if (indexCount > 0) {
-                drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+        if (!tryDrawRebasedIndexedBatch(enc, nativeIndexBuffer, drawParameters, instanceCount, firstInstance, drawCount)) {
+            for (int i = 0; i < drawCount; i++) {
+                int base = drawParameters.position() + i * 3;
+                // RenderPearl exposes the Vulkan struct's native field offsets:
+                // firstIndex=0, indexCount=4, vertexOffset=8.
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount > 0) {
+                    drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+                }
             }
         }
         MetalSodiumDrawDiagnostics.capture(device, commandEncoder, compiledPipeline, vertexBuffers[0],
@@ -1418,6 +1420,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     }
 
     private boolean rebaseIndexedVertexBuffers(final MTLRenderCommandEncoder enc, final int baseVertex) {
+        if (!canRebaseIndexedVertexBuffers(baseVertex)) return false;
+        bindIndexedVertexBufferOffsets(enc, baseVertex);
+        return true;
+    }
+
+    private boolean canRebaseIndexedVertexBuffers(final int baseVertex) {
         if (baseVertex <= 0 || !compiledPipeline.indexedVertexRebaseSafe()) return false;
         boolean hasPerVertex = false;
         for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
@@ -1427,8 +1435,47 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             if (slice == null || bytes >= slice.length() || slice.buffer().isClosed()) return false;
             hasPerVertex = true;
         }
-        if (!hasPerVertex) return false;
-        bindIndexedVertexBufferOffsets(enc, baseVertex);
+        return hasPerVertex;
+    }
+
+    private boolean tryDrawRebasedIndexedBatch(final MTLRenderCommandEncoder enc,
+                                              final MetalGpuBuffer nativeIndexBuffer,
+                                              final IntBuffer parameters, final int instanceCount,
+                                              final int firstInstance, final int drawCount) {
+        if (!MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE || drawCount < 2 || instanceCount <= 0
+                || drawCount > parameters.remaining() / 3 || !compiledPipeline.indexedVertexRebaseSafe()) return false;
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        if (primitiveType == MTLPrimitiveType.TriangleFan) return false;
+        int position = parameters.position();
+        int largestBase = 0;
+        int activeDraws = 0;
+        // Validate the entire batch before encoding any draw. A rejected batch
+        // retains the ordinary per-draw binding/restore contract, including
+        // zero and negative baseVertex records and observable vertex IDs.
+        for (int i = 0; i < drawCount; i++) {
+            int record = position + i * 3;
+            if (parameters.get(record + 1) <= 0) continue;
+            int baseVertex = parameters.get(record + 2);
+            if (baseVertex <= 0) return false;
+            largestBase = Math.max(largestBase, baseVertex);
+            activeDraws++;
+        }
+        if (activeDraws < 2 || !canRebaseIndexedVertexBuffers(largestBase)) return false;
+        observeContractBuffer(nativeIndexBuffer);
+        MemorySegment indexHandle = nativeIndexBuffer.nativeHandle();
+        for (int i = 0; i < drawCount; i++) {
+            int record = position + i * 3;
+            int count = parameters.get(record + 1);
+            if (count <= 0) continue;
+            bindIndexedVertexBufferOffsets(enc, parameters.get(record + 2));
+            enc.drawIndexedPrimitives(primitiveType, count, indexType, indexHandle,
+                    (long) parameters.get(record) * indexType.bytes, instanceCount, 0, firstInstance);
+            MetalHotPathTelemetry.recordIndexedVertexRebase();
+        }
+        // Bindings are absolute within the batch. Restore once before returning
+        // to arbitrary caller work; uncertain native draws still never replay.
+        bindIndexedVertexBufferOffsets(enc, 0);
+        MetalHotPathTelemetry.recordIndexedRebaseBatch(activeDraws);
         return true;
     }
 

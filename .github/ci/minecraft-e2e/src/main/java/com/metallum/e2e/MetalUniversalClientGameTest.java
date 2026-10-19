@@ -705,7 +705,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("profile", profile);
         var gson = new GsonBuilder().setPrettyPrinting().create();
         JsonObject enabled = gson.toJsonTree(com.metallum.client.metal.render.MetalBackendOptimizations.snapshot()).getAsJsonObject();
-        for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy")) {
+        for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy", "batchIndexedVertexRebase")) {
             boolean value = enabled.get(flag).getAsBoolean();
             require(value == !profile.equals("baseline"), "Wrong optimization policy in " + profile + ": " + flag);
         }
@@ -729,8 +729,20 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("rejectedFusedDrawCalls", rejected);
         long rebases = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
         report.addProperty("indexedVertexRebases", rebases);
+        long batches = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches();
+        long batchDraws = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatchDraws();
+        long restoresAvoided = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseRestoresAvoided();
+        report.addProperty("indexedRebaseBatches", batches);
+        report.addProperty("indexedRebaseBatchDraws", batchDraws);
+        report.addProperty("indexedRebaseRestoresAvoided", restoresAvoided);
+        if (!enabled.get("batchIndexedVertexRebase").getAsBoolean()) {
+            require(batches == 0 && restoresAvoided == 0, "Indexed batch rebasing ignored its rollback property");
+        }
         if (FabricLoader.getInstance().isModLoaded("sodium")) {
             require(rebases > 0, "Sodium never activated the admitted indexed vertex-fetch rebasing path");
+            if (enabled.get("batchIndexedVertexRebase").getAsBoolean()) {
+                require(batches > 0 && restoresAvoided > 0, "Sodium never activated admitted indexed batch rebasing");
+            }
         }
         report.addProperty("verified", true);
         report.add("state", gson.toJsonTree(counters));
