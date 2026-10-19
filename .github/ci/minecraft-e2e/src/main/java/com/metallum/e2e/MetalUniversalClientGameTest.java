@@ -320,6 +320,13 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             writeCaptureSamples(evidenceDir.resolve("metal-framebuffer-samples.json"), samples, selected.frameId());
             writeOptimizationEvidence(evidenceDir.resolve("optimization-evidence.json"));
 
+            // The moving terrain samples are diagnostic images. Add an independent,
+            // known geometry/color expectation so shattered terrain cannot pass as
+            // a merely non-black framebuffer. Keep P1's stationary protocol intact.
+            if (!p1FramebufferScenario) {
+                verifyTerrainColorProbe(context, singleplayer, metalCaptureRoot, evidenceDir);
+            }
+
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             closeRenderContract();
 
@@ -345,8 +352,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     worldEvidence
             );
 
-            require(contractSnapshot.completedCaptures() == METAL_CAPTURE_SAMPLES,
-                    "Expected " + METAL_CAPTURE_SAMPLES + " completed Metal framebuffer captures: " + contractSnapshot);
+            int expectedCaptures = METAL_CAPTURE_SAMPLES + (p1FramebufferScenario ? 0 : 1);
+            require(contractSnapshot.completedCaptures() == expectedCaptures,
+                    "Expected " + expectedCaptures + " completed Metal framebuffer captures: " + contractSnapshot);
             require(contractSnapshot.failedCaptures() == 0,
                     "Metal render-contract reported failed captures: " + contractSnapshot);
             require(contractSnapshot.pendingCaptures() == 0,
@@ -358,6 +366,59 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             closeRenderContractQuietly();
+        }
+    }
+
+    private static void verifyTerrainColorProbe(ClientGameTestContext context,
+                                               TestSingleplayerContext singleplayer,
+                                               Path captureRoot, Path evidenceDir) {
+        int[] previousOptions = context.computeOnClient(client -> {
+            int[] previous = {client.gui.hud.isHidden() ? 1 : 0, client.options.fov().get()};
+            if (!client.gui.hud.isHidden()) client.gui.hud.toggle();
+            client.options.fov().set(70);
+            return previous;
+        });
+        try {
+            singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
+            context.waitFor(client -> client.player != null
+                    && Math.abs(client.player.getX() - 160.5) < 0.1
+                    && Math.abs(client.player.getZ() - 160.5) < 0.1);
+            singleplayer.getConnection().waitForChunksRender();
+            singleplayer.getServer().runCommand("fill 142 120 159 178 140 174 minecraft:air");
+            // Looking south, east is screen-left. The probe samples the center
+            // of each large wall, away from seams, silhouettes and the GUI.
+            singleplayer.getServer().runCommand("fill 166 124 172 178 136 172 minecraft:red_concrete");
+            singleplayer.getServer().runCommand("fill 155 124 172 165 136 172 minecraft:lime_concrete");
+            singleplayer.getServer().runCommand("fill 142 124 172 154 136 172 minecraft:blue_concrete");
+            singleplayer.getServer().runCommand("weather clear 1000000");
+            singleplayer.getServer().runCommand("time set noon");
+            context.waitTicks(30);
+            singleplayer.getConnection().waitForChunksRender();
+            long frame = METAL_CAPTURE_SAMPLES + 1L;
+            RenderContractSnapshot before = renderContractSnapshot();
+            beginRenderContractFrame(frame);
+            try {
+                requestFinalDrawableCapture(frame);
+                waitForCaptureCompletion(context, before.completedCaptures() + 1, frame, 100);
+            } finally { endRenderContractFrame(frame); }
+            Path png = findFrameArtifact(captureRoot, frame, "actual.png");
+            Path raw = findFrameArtifact(captureRoot, frame, "actual.bin");
+            try {
+                byte[] header = Files.readAllBytes(png);
+                int width = java.nio.ByteBuffer.wrap(header).getInt(16);
+                int height = java.nio.ByteBuffer.wrap(header).getInt(20);
+                JsonObject result = TerrainColorProbe.inspect(Files.readAllBytes(raw), width, height);
+                Files.copy(png, evidenceDir.resolve("terrain-color-probe.png"), StandardCopyOption.REPLACE_EXISTING);
+                Files.writeString(evidenceDir.resolve("terrain-color-probe.json"),
+                        new GsonBuilder().setPrettyPrinting().create().toJson(result));
+                require(result.get("passed").getAsBoolean(), "Terrain color/coverage probe failed: " + result);
+            } catch (IOException failure) { throw new IllegalStateException("Cannot read terrain probe", failure); }
+        } finally {
+            context.computeOnClient(client -> {
+                if (client.gui.hud.isHidden() != (previousOptions[0] != 0)) client.gui.hud.toggle();
+                client.options.fov().set(previousOptions[1]);
+                return null;
+            });
         }
     }
 

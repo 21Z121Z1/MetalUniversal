@@ -711,8 +711,9 @@ final class MetalMrtBackendIntegrationTest {
         }
     }
 
-    @Test
-    void sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 4, 1528541})
+    void sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw(int baseVertex) {
         String name = "sodium_compact_vertex_multidraw";
         vertexShaders.put(name, """
                 #version 450
@@ -721,15 +722,28 @@ final class MetalMrtBackendIntegrationTest {
                 layout(location=2) in uvec2 a_TexCoord;
                 layout(location=3) in uvec4 a_LightAndData;
                 layout(location=0) out vec4 vertexColor;
+                layout(std140) uniform u_Globals { vec4 transform; };
+                layout(std140) uniform Guard1 { uvec4 guard1; };
+                layout(std140) uniform Guard2 { uvec4 guard2; };
+                layout(std140) uniform Guard3 { uvec4 guard3; };
+                layout(push_constant) uniform PC {
+                    vec3 regionOffset;
+                    int currentTime;
+                    uint regionId;
+                };
                 void main() {
                     uvec3 hi = (uvec3(a_Position.x) >> uvec3(0, 10, 20)) & 1023u;
                     uvec3 lo = (uvec3(a_Position.y) >> uvec3(0, 10, 20)) & 1023u;
                     vec3 position = vec3((hi << 10u) | lo) * (32.0 / 1048576.0) - 8.0;
-                    gl_Position = vec4(position.xy / 8.0 - 1.0, 0, 1);
+                    gl_Position = vec4((position.xy + regionOffset.xy) * transform.xy + transform.zw, 0, 1);
                     bool dataValid = all(equal(a_LightAndData.xy, uvec2(248)))
                         && a_LightAndData.z == 79u
                         && (a_LightAndData.w == 37u || a_LightAndData.w == 199u)
-                        && all(lessThanEqual(a_TexCoord, uvec2(65535)));
+                        && all(lessThanEqual(a_TexCoord, uvec2(65535)))
+                        && all(equal(guard1, uvec4(1, 2, 3, 4)))
+                        && all(equal(guard2, uvec4(5, 6, 7, 8)))
+                        && all(equal(guard3, uvec4(9, 10, 11, 12)))
+                        && currentTime == 37 && regionId == 54321u;
                     vertexColor = dataValid ? a_Color : vec4(0, 0, 1, 1);
                 }
                 """);
@@ -747,10 +761,17 @@ final class MetalMrtBackendIntegrationTest {
                 .withFragmentShader("metallum_test/" + name)
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withVertexBinding(0, format).withCull(false)
+                .withPushConstantSize(20)
+                .withBindGroupLayout(com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
+                        .withUniform("u_Globals", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard1", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard2", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard3", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER).build())
                 .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
                         ColorTargetState.WRITE_ALL)).build();
         int prefix = 32;
-        ByteBuffer vertices = MemoryUtil.memCalloc(prefix + 12 * 20).order(ByteOrder.nativeOrder());
+        int vertexBytes = Math.multiplyExact(baseVertex + 8, 20);
+        ByteBuffer vertices = MemoryUtil.memCalloc(prefix + vertexBytes).order(ByteOrder.nativeOrder());
         ByteBuffer indices = MemoryUtil.memAlloc(11 * Integer.BYTES).order(ByteOrder.nativeOrder());
         ByteBuffer parameters = MemoryUtil.memAlloc(8 * Integer.BYTES).order(ByteOrder.nativeOrder());
         List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
@@ -768,7 +789,7 @@ final class MetalMrtBackendIntegrationTest {
                     point.v = 0.5f;
                     point.light = 0x00f000f0;
                 }
-                compact.getEncoder().write(MemoryUtil.memAddress(vertices) + prefix + (4 + quad * 4L) * 20,
+                compact.getEncoder().write(MemoryUtil.memAddress(vertices) + prefix + (baseVertex + quad * 4L) * 20,
                         79, points, quad == 0 ? 37 : 199);
             }
             for (int i = 0; i < 5; i++) indices.putInt(999);
@@ -776,20 +797,32 @@ final class MetalMrtBackendIntegrationTest {
             indices.flip();
             // Vulkan's interleaved record is firstIndex, indexCount, vertexOffset.
             parameters.putInt(999).putInt(999);
-            parameters.putInt(5).putInt(6).putInt(4);
-            parameters.putInt(5).putInt(6).putInt(8);
+            parameters.putInt(5).putInt(6).putInt(baseVertex);
+            parameters.putInt(5).putInt(6).putInt(baseVertex + 4);
             parameters.flip().position(2 * Integer.BYTES);
             try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, vertices);
                  GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
                 for (boolean multiDraw : List.of(false, true)) {
                     try (PassWithViews pass = createPass(textures, null, false)) {
                         pass.pass().setPipeline(pipeline);
-                        pass.pass().setVertexBuffer(0, vertexBuffer.slice(prefix, 12 * 20L));
+                        assertEquals(5, device.getOrCompilePipeline(pipeline).firstAvailableVertexBufferSlot());
+                        String[] names = {"u_Globals", "Guard1", "Guard2", "Guard3"};
+                        for (int uniform = 0; uniform < names.length; uniform++) {
+                            try (var mapped = encoder.transientMemory().allocateGpuMapped(16, 256, GpuBuffer.USAGE_UNIFORM)) {
+                                if (uniform == 0) mapped.data().putFloat(0.125f).putFloat(0.125f).putFloat(-1.5f).putFloat(-1.75f);
+                                else for (int i = 0; i < 4; i++) mapped.data().putInt((uniform - 1) * 4 + i + 1);
+                                pass.pass().setUniform(names[uniform], mapped.slice());
+                            }
+                        }
+                        ByteBuffer constants = ByteBuffer.allocateDirect(20).order(ByteOrder.nativeOrder());
+                        constants.putFloat(4).putFloat(6).putFloat(0).putInt(37).putInt(54321).flip();
+                        pass.pass().pushConstants(constants);
+                        pass.pass().setVertexBuffer(0, vertexBuffer.slice(prefix, vertexBytes));
                         pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
                         if (multiDraw) pass.pass().multiDrawIndexed(parameters.asIntBuffer(), 1, 0, 2);
                         else {
-                            pass.pass().drawIndexed(6, 1, 5, 4, 0);
-                            pass.pass().drawIndexed(6, 1, 5, 8, 0);
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex, 0);
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex + 4, 0);
                         }
                         encoder.submitRenderPass();
                     }
