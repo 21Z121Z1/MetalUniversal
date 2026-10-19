@@ -25,6 +25,19 @@ public final class MetalHotPathTelemetry {
     private static final LongAdder indexedRebaseBatches = new LongAdder();
     private static final LongAdder indexedRebaseBatchDraws = new LongAdder();
     private static final LongAdder indexedRebaseRestoresAvoided = new LongAdder();
+    private static final LongAdder nativeIndexedRebaseBatches = new LongAdder();
+    private static final LongAdder nativeIndexedRebaseDraws = new LongAdder();
+
+    public static void recordNativeIndexedRebaseBatch(int draws) {
+        if (ENABLED) {
+            nativeIndexedRebaseBatches.increment();
+            nativeIndexedRebaseDraws.add(draws);
+            indexedVertexRebases.add(draws);
+        }
+    }
+
+    public static long nativeIndexedRebaseBatches() { return nativeIndexedRebaseBatches.sum(); }
+    public static long nativeIndexedRebaseDraws() { return nativeIndexedRebaseDraws.sum(); }
 
     public static void recordIndexedVertexRebase() {
         if (ENABLED) indexedVertexRebases.increment();
@@ -114,6 +127,8 @@ public final class MetalHotPathTelemetry {
         indexedRebaseBatches.reset();
         indexedRebaseBatchDraws.reset();
         indexedRebaseRestoresAvoided.reset();
+        nativeIndexedRebaseBatches.reset();
+        nativeIndexedRebaseDraws.reset();
     }
 
     public static void recordDynamicUpload(boolean rangeCopy, int bytes) {

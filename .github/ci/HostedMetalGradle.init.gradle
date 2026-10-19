@@ -171,7 +171,8 @@ gradle.projectsEvaluated {
         "metallum.opt.reuseEncoderState",
         "metallum.opt.reuseNativeEncoderArguments",
         "metallum.opt.dynamicUploadRangeCopy",
-        "metallum.opt.batchIndexedVertexRebase"
+        "metallum.opt.batchIndexedVertexRebase",
+        "metallum.opt.nativeIndexedVertexRebase"
     ]
     // Keep a real legacy lane when production defaults are promoted. Default
     // coverage below must not inject the properties it is meant to validate.
@@ -199,9 +200,10 @@ gradle.projectsEvaluated {
                 "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders",
                 "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes",
                 "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.resizeRecreatePathProducesFreshContent"]
-        if (disabledProperty == "metallum.opt.batchIndexedVertexRebase") {
+        if (disabledProperty in ["metallum.opt.batchIndexedVertexRebase", "metallum.opt.nativeIndexedVertexRebase"]) {
             rollbackChecks.addAll([
                     "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw",
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedBatchPreservesPositionReadOnlyAndNonNativeParameterBuffers",
                     "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedBatchMixedBaseOffsetsKeepOriginalBindings",
                     "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedStageInShaderKeepsObservableVertexIndex"])
         }
@@ -251,6 +253,7 @@ gradle.projectsEvaluated {
             promotedProperties.each { property ->
                 task.systemProperty property, (property == "metallum.opt.batchIndexedVertexRebase" ? enabled : true).toString()
             }
+            task.systemProperty "metallum.opt.nativeIndexedVertexRebase", "false"
             task.systemProperty "metallum.ci.indexedBatchCost", "true"
             task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
             task.jvmArgs "-Xbatch"
@@ -259,6 +262,26 @@ gradle.projectsEvaluated {
         indexedBatchCostTasks.add(costTask)
     }
     project.tasks.register("hostedMetalIndexedBatchCost") { task -> task.dependsOn(indexedBatchCostTasks) }
+    def nativeIndexedBatchCostTasks = []
+    [false, true, true, false, false, true, true, false].eachWithIndex { enabled, index ->
+        def costTask = configureHostedTest("hostedMetalNativeIndexedBatchCost${index}",
+                "Measures only the native indexed batch entry with all five prior optimizations enabled.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.hostedNativeIndexedBatchCost"])
+        def previousCostTask = nativeIndexedBatchCostTasks.isEmpty() ? null : nativeIndexedBatchCostTasks.last()
+        costTask.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (previousCostTask != null) task.mustRunAfter(previousCostTask)
+            promotedProperties.each { property ->
+                task.systemProperty property, (property == "metallum.opt.nativeIndexedVertexRebase" ? enabled : true).toString()
+            }
+            task.systemProperty "metallum.ci.nativeIndexedBatchCost", "true"
+            task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            task.jvmArgs "-Xbatch"
+            task.outputs.upToDateWhen { false }
+        }
+        nativeIndexedBatchCostTasks.add(costTask)
+    }
+    project.tasks.register("hostedMetalNativeIndexedBatchCost") { task -> task.dependsOn(nativeIndexedBatchCostTasks) }
     configureHostedTest("hostedMetalUploadCopyCost",
             "Compares direct dynamic-upload copy cost in interleaved order.",
             ["com.metallum.client.metal.render.MetalBufferUploadTest.hostedUploadCopyCost"]).configure { task ->

@@ -114,7 +114,7 @@ jobs:
         run: |
           ./gradlew --no-daemon --stacktrace \
             -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalEncodingCost hostedMetalUploadCopyCost hostedMetalIndexedBatchCost
+            hostedMetalEncodingCost hostedMetalUploadCopyCost hostedMetalIndexedBatchCost hostedMetalNativeIndexedBatchCost
       - name: State evidence boundary
         run: |
           cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt

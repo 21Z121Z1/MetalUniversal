@@ -3,6 +3,7 @@ package com.metallum.client.metal.render.mtl;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.MetalBackendOptimizations;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
+import com.metallum.client.metal.render.bridge.MetalIndexedBatchDescriptor;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.Arena;
@@ -64,6 +65,8 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private boolean closed;
     private boolean drawActive = true;
     private final MemorySegment drawStorage;
+    private final MemorySegment indexedBatchStorage;
+    private boolean indexedBatchActive = true;
     private @Nullable RuntimeException uncertainDrawFailure;
 
     @FunctionalInterface
@@ -71,7 +74,37 @@ final class MetalRenderStatePacket implements AutoCloseable {
         int submit(MemorySegment encoder, MemorySegment state, long bytes, MemorySegment draw);
     }
 
+    @FunctionalInterface
+    interface IndexedBatchSubmitter {
+        int submit(MemorySegment encoder, MemorySegment descriptor, long bytes);
+    }
+
     private static final DrawSubmitter NATIVE_DRAW = MetalRenderStatePacketBridge::applyDraw;
+    private static final IndexedBatchSubmitter NATIVE_BATCH = MetalRenderStatePacketBridge::applyIndexedBatch;
+
+    @Nullable MemorySegment indexedBatchStorage() {
+        ensureOpen();
+        return this.indexedBatchActive ? this.indexedBatchStorage : null;
+    }
+
+    boolean tryIndexedBatch(MemorySegment encoder, long bytes) {
+        return tryIndexedBatch(encoder, bytes, NATIVE_BATCH);
+    }
+
+    boolean tryIndexedBatch(MemorySegment encoder, long bytes, IndexedBatchSubmitter submitter) {
+        ensureOpen();
+        if (!this.indexedBatchActive) return false;
+        final int result;
+        try {
+            result = submitter.submit(encoder, this.indexedBatchStorage, bytes);
+        } catch (RuntimeException failure) {
+            this.uncertainDrawFailure = failure;
+            throw failure;
+        }
+        if (result == 1) return true;
+        this.indexedBatchActive = false;
+        return false;
+    }
 
     boolean hasNativeStateBatch() {
         return this.entryCount >= MIN_NATIVE_ENTRIES;
@@ -147,7 +180,8 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (storage == null) {
             // Native packet decoding is synchronous. Only CPU scratch storage
             // is reused; no GPU-visible resource or native encoder is pooled.
-            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE + DRAW_BYTES, Long.BYTES);
+            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE
+                    + DRAW_BYTES + MetalIndexedBatchDescriptor.STORAGE_BYTES, Long.BYTES);
             MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         } else {
             MetalRenderStatePacketTelemetry.recordPacketStorageReuse();
@@ -158,8 +192,10 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private MetalRenderStatePacket(MemorySegment storage) {
         this.arena = null;
         this.backingStorage = storage;
-        this.storage = storage.asSlice(0, storage.byteSize() - DRAW_BYTES);
-        this.drawStorage = storage.asSlice(storage.byteSize() - DRAW_BYTES, DRAW_BYTES);
+        long stateBytes = storage.byteSize() - DRAW_BYTES - MetalIndexedBatchDescriptor.STORAGE_BYTES;
+        this.storage = storage.asSlice(0, stateBytes);
+        this.drawStorage = storage.asSlice(stateBytes, DRAW_BYTES);
+        this.indexedBatchStorage = storage.asSlice(stateBytes + DRAW_BYTES, MetalIndexedBatchDescriptor.STORAGE_BYTES);
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
         resetHeader();
@@ -172,11 +208,13 @@ final class MetalRenderStatePacket implements AutoCloseable {
         this.arena = Arena.ofConfined();
         long stateBytes = Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE));
         this.backingStorage = this.arena.allocate(
-                Math.addExact(stateBytes, DRAW_BYTES),
+                Math.addExact(stateBytes, DRAW_BYTES + MetalIndexedBatchDescriptor.STORAGE_BYTES),
                 Long.BYTES
         );
         this.storage = this.backingStorage.asSlice(0, stateBytes);
         this.drawStorage = this.backingStorage.asSlice(stateBytes, DRAW_BYTES);
+        this.indexedBatchStorage = this.backingStorage.asSlice(
+                stateBytes + DRAW_BYTES, MetalIndexedBatchDescriptor.STORAGE_BYTES);
         MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);

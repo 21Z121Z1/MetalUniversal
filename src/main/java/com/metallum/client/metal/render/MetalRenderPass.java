@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalIndexedBatchDescriptor;
 import com.metallum.client.validation.contract.ProducerType;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
@@ -33,6 +34,8 @@ import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 import org.lwjgl.vulkan.VkDrawIndirectCommand;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.ref.Reference;
+import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.HashMap;
@@ -1463,6 +1466,11 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         if (activeDraws < 2 || !canRebaseIndexedVertexBuffers(largestBase)) return false;
         observeContractBuffer(nativeIndexBuffer);
         MemorySegment indexHandle = nativeIndexBuffer.nativeHandle();
+        if (tryNativeIndexedBatch(enc, parameters, primitiveType, indexHandle, drawCount, instanceCount, firstInstance)) {
+            MetalHotPathTelemetry.recordNativeIndexedRebaseBatch(activeDraws);
+            MetalHotPathTelemetry.recordIndexedRebaseBatch(activeDraws);
+            return true;
+        }
         for (int i = 0; i < drawCount; i++) {
             int record = position + i * 3;
             int count = parameters.get(record + 1);
@@ -1477,6 +1485,36 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         bindIndexedVertexBufferOffsets(enc, 0);
         MetalHotPathTelemetry.recordIndexedRebaseBatch(activeDraws);
         return true;
+    }
+
+    private boolean tryNativeIndexedBatch(MTLRenderCommandEncoder enc, IntBuffer parameters,
+                                          MTLPrimitiveType primitive, MemorySegment indexHandle,
+                                          int drawCount, int instances, int firstInstance) {
+        if (!parameters.isDirect() || parameters.order() != ByteOrder.nativeOrder()) return false;
+        MemorySegment descriptor = enc.indexedBatchDescriptor();
+        if (descriptor == null) return false;
+        int bindingCount = 0;
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            MemorySegment buffer = ((MetalGpuBuffer) slice.buffer()).nativeHandle();
+            int nativeSlot = compiledPipeline.firstAvailableVertexBufferSlot() + slot;
+            // Re-establish the exact buffer identity through the normal cache
+            // before the native entry changes offsets without rebinding buffers.
+            enc.setBuffer(buffer, slice.offset(), nativeSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            MetalIndexedBatchDescriptor.binding(descriptor, bindingCount++,
+                    buffer, slice.offset(), compiledPipeline.vertexStride(slot), nativeSlot);
+        }
+        int bytes = MetalIndexedBatchDescriptor.initialize(descriptor, bindingCount, drawCount,
+                Math.toIntExact(primitive.value), Math.toIntExact(indexType.value), instances, firstInstance,
+                indexHandle, org.lwjgl.system.MemoryUtil.memAddress(parameters), (long) parameters.remaining() * Integer.BYTES);
+        try {
+            return enc.tryIndexedRebasedBatch(bytes);
+        } finally {
+            // Only the raw address crosses the ABI. Keep the direct buffer's
+            // cleaner from retiring its storage before synchronous consumption.
+            Reference.reachabilityFence(parameters);
+        }
     }
 
     private void bindIndexedVertexBufferOffsets(final MTLRenderCommandEncoder enc, final int baseVertex) {

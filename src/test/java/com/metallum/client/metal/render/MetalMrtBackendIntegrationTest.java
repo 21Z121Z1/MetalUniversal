@@ -110,7 +110,7 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     @EnabledIfSystemProperty(named = "metallum.ci.requireOptimizedDefaults", matches = "true")
     void productionDefaultsEnableTheValidatedCpuOptimizations() {
-        assertEquals(new MetalBackendOptimizations.Snapshot(true, true, true, true, true), MetalBackendOptimizations.snapshot());
+        assertEquals(new MetalBackendOptimizations.Snapshot(true, true, true, true, true, true), MetalBackendOptimizations.snapshot());
     }
 
     @Test
@@ -196,11 +196,26 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     @EnabledIfSystemProperty(named = "metallum.ci.indexedBatchCost", matches = "true")
     void hostedIndexedBatchCost() {
+        assertFalse(MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE,
+                "the prior batch benchmark must keep its original comparison");
+        assertEquals("candidate".equals(System.getProperty("metallum.ci.encodingCostProfile")),
+                MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE);
+        indexedBatchCost("HOSTED_INDEXED_BATCH_COST");
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.nativeIndexedBatchCost", matches = "true")
+    void hostedNativeIndexedBatchCost() {
+        assertTrue(MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE);
+        assertEquals("candidate".equals(System.getProperty("metallum.ci.encodingCostProfile")),
+                MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE);
+        indexedBatchCost("HOSTED_NATIVE_INDEXED_BATCH_COST");
+    }
+
+    private void indexedBatchCost(String marker) {
         assertTrue(MetalBackendOptimizations.FUSED_STATE_DRAW && MetalBackendOptimizations.REUSE_ENCODER_STATE
                 && MetalBackendOptimizations.REUSE_NATIVE_ENCODER_ARGUMENTS && MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY,
                 "the prior four optimizations must stay enabled in both cost lanes");
-        assertEquals("candidate".equals(System.getProperty("metallum.ci.encodingCostProfile")),
-                MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE);
         assertFalse(Boolean.getBoolean("metallum.hotpath.telemetry"), "timing must run without hot-path counters");
         assertFalse(Boolean.getBoolean("metallum.ci.reuseActivationTelemetry"), "timing must run without reuse counters");
         String name = "indexed_batch_cost";
@@ -245,7 +260,7 @@ final class MetalMrtBackendIntegrationTest {
                     encoder.submit();
                     device.waitForSubmittedGpuWork();
                 }
-                System.out.println("HOSTED_INDEXED_BATCH_COST {\"profile\":\""
+                System.out.println(marker + " {\"profile\":\""
                         + System.getProperty("metallum.ci.encodingCostProfile")
                         + "\",\"drawsPerBatch\":" + batchSize + ",\"nsPerDraw\":"
                         + java.util.Arrays.toString(timings) + ",\"javaBytesPerDraw\":"
@@ -828,6 +843,7 @@ final class MetalMrtBackendIntegrationTest {
         long rebasesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
         long batchesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches();
         long avoidedBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseRestoresAvoided();
+        long nativeBatchesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches();
         String name = "sodium_compact_vertex_multidraw";
         vertexShaders.put(name, """
                 #version 450
@@ -994,10 +1010,69 @@ final class MetalMrtBackendIntegrationTest {
             assertTrue(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases() >= rebasesBefore + 4,
                     "both direct and multi-draw must exercise the admitted vertex-buffer rebase");
             int admittedBatches = MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE ? 1 : 0;
+            int nativeBatches = admittedBatches != 0 && MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE ? 1 : 0;
+            assertEquals(nativeBatchesBefore + nativeBatches,
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches(),
+                    "the actual Sodium batch must use the native entry when admitted and enabled");
             assertEquals(batchesBefore + admittedBatches,
                     com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches());
             assertEquals(avoidedBefore + admittedBatches,
                     com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseRestoresAvoided());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"heap", "opposite-endian", "native-readonly", "native-short"})
+    void indexedBatchPreservesPositionReadOnlyAndNonNativeParameterBuffers(String kind) {
+        String name = "indexed_parameter_" + kind;
+        RenderPipeline pipeline = indexedColorPipeline(name);
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        boolean shortIndices = kind.equals("native-short");
+        int firstIndex = shortIndices ? 2 : 0;
+        java.nio.IntBuffer parameters;
+        if (kind.equals("heap")) parameters = java.nio.IntBuffer.allocate(8);
+        else parameters = ByteBuffer.allocateDirect(8 * Integer.BYTES).order(kind.startsWith("native")
+                ? ByteOrder.nativeOrder() : ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN
+                ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        parameters.put(999).put(999).put(firstIndex).put(6).put(4).put(firstIndex).put(6).put(8).flip().position(2);
+        parameters = parameters.asReadOnlyBuffer();
+        ByteBuffer indices = ByteBuffer.allocateDirect((6 + firstIndex) * (shortIndices ? Short.BYTES : Integer.BYTES))
+                .order(ByteOrder.nativeOrder());
+        for (int i = 0; i < firstIndex; i++) indices.putShort((short) 999);
+        for (int index : new int[]{0, 1, 2, 2, 3, 0}) {
+            if (shortIndices) indices.putShort((short) index);
+            else indices.putInt(index);
+        }
+        indices.flip();
+        long before = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches();
+        try (GpuBuffer vertices = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, indexedColorVertices(4));
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            try (PassWithViews pass = createPass(textures, null, false)) {
+                pass.pass().setPipeline(pipeline);
+                pass.pass().setVertexBuffer(0, vertices.slice());
+                pass.pass().setIndexBuffer(indexBuffer, shortIndices ? IndexType.SHORT : IndexType.INT);
+                pass.pass().multiDrawIndexed(parameters, 1, 0, 2);
+                assertEquals(2, parameters.position());
+                assertEquals(8, parameters.limit());
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    int pixel = (y * WIDTH + x) * 4;
+                    assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "parameter buffer red");
+                    assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "parameter buffer green");
+                    assertByteNear(pixels.get(pixel + 2), 0, "parameter buffer blue");
+                }
+            }
+            boolean expectedNative = kind.startsWith("native") && MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE
+                    && MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE;
+            assertEquals(before + (expectedNative ? 1 : 0),
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches());
+        } finally {
+            closeTextures(textures);
         }
     }
 

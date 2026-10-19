@@ -731,7 +731,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("profile", profile);
         var gson = new GsonBuilder().setPrettyPrinting().create();
         JsonObject enabled = gson.toJsonTree(com.metallum.client.metal.render.MetalBackendOptimizations.snapshot()).getAsJsonObject();
-        for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy", "batchIndexedVertexRebase")) {
+        for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy", "batchIndexedVertexRebase", "nativeIndexedVertexRebase")) {
             boolean value = enabled.get(flag).getAsBoolean();
             require(value == !profile.equals("baseline"), "Wrong optimization policy in " + profile + ": " + flag);
         }
@@ -761,6 +761,13 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("indexedRebaseBatches", batches);
         report.addProperty("indexedRebaseBatchDraws", batchDraws);
         report.addProperty("indexedRebaseRestoresAvoided", restoresAvoided);
+        long nativeBatches = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches();
+        long nativeDraws = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseDraws();
+        report.addProperty("nativeIndexedRebaseBatches", nativeBatches);
+        report.addProperty("nativeIndexedRebaseDraws", nativeDraws);
+        if (!enabled.get("nativeIndexedVertexRebase").getAsBoolean()) {
+            require(nativeBatches == 0 && nativeDraws == 0, "Native indexed batch ignored its rollback property");
+        }
         if (!enabled.get("batchIndexedVertexRebase").getAsBoolean()) {
             require(batches == 0 && restoresAvoided == 0, "Indexed batch rebasing ignored its rollback property");
         }
@@ -768,6 +775,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(rebases > 0, "Sodium never activated the admitted indexed vertex-fetch rebasing path");
             if (enabled.get("batchIndexedVertexRebase").getAsBoolean()) {
                 require(batches > 0 && restoresAvoided > 0, "Sodium never activated admitted indexed batch rebasing");
+                if (enabled.get("nativeIndexedVertexRebase").getAsBoolean()) {
+                    require(nativeBatches > 0 && nativeDraws > 0, "Sodium never activated the native indexed batch entry");
+                }
             }
         }
         report.addProperty("verified", true);

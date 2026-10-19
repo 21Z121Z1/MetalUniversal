@@ -28,6 +28,60 @@ final class MetalNativeInterfaceTest {
     private static final Path DYLIB = Path.of("src/main/resources/natives/macos/libmetallum.dylib");
 
     @Test
+    void renderStateV3KeepsOldEntriesAndRejectsAnInvalidBatchTailBeforeAnyDraw() throws Throwable {
+        try (Arena arena = Arena.ofConfined()) {
+            SymbolLookup lookup = shippedDylib(arena);
+            MetalNativeInterface table = MetalNativeInterface.negotiate(
+                    lookup, MetalNativeInterface.Feature.RENDER_STATE_PACKET, 3).orElseThrow();
+            assertTrue(table.version() >= 3);
+            assertTrue(table.entryCount() >= 3);
+            assertEquals(lookup.find("metallum_render_state_packet_apply_v1").orElseThrow().address(), table.entryAddress(0));
+            assertEquals(lookup.find("metallum_render_state_packet_draw_v2").orElseThrow().address(), table.entryAddress(1));
+            assertEquals(lookup.find("metallum_render_indexed_rebased_batch_v1").orElseThrow().address(), table.entryAddress(2));
+            MethodHandle batch = table.entry(2, FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+            MemorySegment descriptor = arena.allocate(96, 8);
+            MemorySegment records = arena.allocate(24, 8);
+            descriptor.set(ValueLayout.JAVA_INT, 0, 0x4D494242);
+            descriptor.set(ValueLayout.JAVA_INT, 4, 1);
+            descriptor.set(ValueLayout.JAVA_INT, 8, 96);
+            descriptor.set(ValueLayout.JAVA_INT, 12, 2);
+            descriptor.set(ValueLayout.JAVA_INT, 16, 3);
+            descriptor.set(ValueLayout.JAVA_INT, 20, 1);
+            descriptor.set(ValueLayout.JAVA_INT, 24, 1);
+            descriptor.set(ValueLayout.JAVA_LONG, 32, 0x1234);
+            descriptor.set(ValueLayout.JAVA_LONG, 40, records.address());
+            descriptor.set(ValueLayout.JAVA_LONG, 48, 24);
+            descriptor.set(ValueLayout.JAVA_INT, 56, 1);
+            descriptor.set(ValueLayout.JAVA_LONG, 64, 0x1234);
+            descriptor.set(ValueLayout.JAVA_LONG, 80, 12);
+            descriptor.set(ValueLayout.JAVA_INT, 88, 5);
+            records.set(ValueLayout.JAVA_INT, 4, 6);
+            records.set(ValueLayout.JAVA_INT, 8, 4);
+            records.set(ValueLayout.JAVA_INT, 16, 6);
+            // First draw is valid. The final base is zero: a streaming decoder
+            // that draws before validating the tail would touch the fake encoder.
+            MemorySegment unusedEncoder = MemorySegment.ofAddress(0x1234);
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            records.set(ValueLayout.JAVA_INT, 20, 8);
+            records.set(ValueLayout.JAVA_INT, 12, -1);
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            records.set(ValueLayout.JAVA_INT, 12, 0);
+            descriptor.set(ValueLayout.JAVA_LONG, 48, 23); // truncated stream
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            descriptor.set(ValueLayout.JAVA_LONG, 48, 24);
+            descriptor.set(ValueLayout.JAVA_LONG, 80, Long.MAX_VALUE); // offset multiplication overflow
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            descriptor.set(ValueLayout.JAVA_LONG, 80, 0); // no per-vertex stride
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            descriptor.set(ValueLayout.JAVA_LONG, 80, 12);
+            descriptor.set(ValueLayout.JAVA_INT, 88, 31); // slot is outside Metal's range
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 96L));
+            assertEquals(-1, (int) batch.invokeExact(unusedEncoder, descriptor, 63L));
+        }
+    }
+
+    @Test
     void renderStateV2KeepsTheV1EntryAndRejectsMalformedDrawsBeforeTouchingAnEncoder() throws Throwable {
         try (Arena arena = Arena.ofConfined()) {
             SymbolLookup lookup = shippedDylib(arena);

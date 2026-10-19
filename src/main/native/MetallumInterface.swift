@@ -375,7 +375,7 @@ enum MetallumInterfaceFeature: Int32 {
         switch self {
         case .core: return 1
         case .metalFX: return 1
-        case .renderStatePacket: return 2
+        case .renderStatePacket: return 3
         }
     }
 }
@@ -494,6 +494,10 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
             functionPointer(
                 metallum_render_state_packet_draw_v2
                     as @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer?, Int64, UnsafeRawPointer?) -> Int32
+            ),
+            functionPointer(
+                metallum_render_indexed_rebased_batch_v1
+                    as @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer?, Int64) -> Int32
             )
         ]
     }

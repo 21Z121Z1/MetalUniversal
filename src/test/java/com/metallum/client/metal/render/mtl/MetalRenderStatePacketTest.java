@@ -16,6 +16,50 @@ final class MetalRenderStatePacketTest {
     private static final MemorySegment ENCODER = MemorySegment.ofAddress(0x1000L);
 
     @Test
+    void indexedBatchScratchCannotOverwritePendingStateOrFusedDrawArguments() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            packet.indexedBatchStorage().fill((byte) 0x5a);
+            assertEquals(1, packet.entryCount());
+            assertTrue(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0, 0, 3, 1, 0,
+                    (enc, state, bytes, draw) -> {
+                        assertEquals(11, state.get(ValueLayout.JAVA_LONG, 24));
+                        assertEquals(13, state.get(ValueLayout.JAVA_LONG, 32));
+                        assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 48));
+                        assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 56));
+                        return 1;
+                    }));
+        }
+    }
+
+    @Test
+    void rejectedIndexedBatchDisablesItsEntryAndPreservesStateForOrdinaryWork() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            assertFalse(packet.tryIndexedBatch(ENCODER, 96, (enc, descriptor, bytes) -> -1));
+            assertEquals(1, packet.entryCount());
+            assertTrue(packet.active());
+            assertFalse(packet.tryIndexedBatch(ENCODER, 96,
+                    (enc, descriptor, bytes) -> { throw new AssertionError("rejected batch retried"); }));
+            packet.appendCullMode(ENCODER, 0);
+            assertEquals(2, packet.entryCount());
+        }
+    }
+
+    @Test
+    void uncertainIndexedBatchPoisonsLaterEncoderWorkWithoutReplay() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            RuntimeException failure = new IllegalStateException("uncertain batch outcome");
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.tryIndexedBatch(ENCODER, 96, (enc, descriptor, bytes) -> { throw failure; })));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> packet.flush(ENCODER)));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> packet.indexedBatchStorage()));
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.appendCullMode(ENCODER, 0)));
+        }
+    }
+
+    @Test
     void singleStateProductionDrawPreservesTheDirectSetterRoute() {
         try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
             packet.appendScissor(ENCODER, 11, 13, 32, 48);

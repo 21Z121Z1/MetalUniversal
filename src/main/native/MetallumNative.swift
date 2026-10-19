@@ -10429,6 +10429,132 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     }
 }
 
+private func indexedBatchLoad<T>(_ pointer: UnsafeRawPointer, _ offset: Int, as type: T.Type) -> T {
+    pointer.loadUnaligned(fromByteOffset: offset, as: type)
+}
+
+// Feature 3 entry 2 (interface v3). The 64-byte v1 batch header contains:
+// magic/version/bytes/drawCount/primitive/indexType/instances/baseInstance (u32,
+// except counts and instance values are i32), index buffer and parameter pointers
+// (u64), parameter bytes (u64), bindingCount/reserved (u32). Each 32-byte binding
+// is buffer/originalOffset/stride (u64), nativeSlot/reserved (u32). Parameters are
+// borrowed interleaved {firstIndex,indexCount,baseVertex} i32 records, read only
+// during this call. Java admits shader semantics and per-vertex step rates.
+// Return 1 only after the entire batch; every rejection changes no encoder state.
+@_cdecl("metallum_render_indexed_rebased_batch_v1")
+public func metallum_render_indexed_rebased_batch_v1(
+    _ encoderPointer: UnsafeMutableRawPointer,
+    _ rawDescriptor: UnsafeRawPointer?,
+    _ rawByteCount: Int64
+) -> Int32 {
+    guard let descriptor = rawDescriptor, rawByteCount >= 64, rawByteCount <= 64 + 31 * 32,
+          indexedBatchLoad(descriptor, 0, as: UInt32.self) == 0x4D494242,
+          indexedBatchLoad(descriptor, 4, as: UInt32.self) == 1,
+          Int64(indexedBatchLoad(descriptor, 8, as: UInt32.self)) == rawByteCount,
+          indexedBatchLoad(descriptor, 60, as: UInt32.self) == 0,
+          let primitive = MTLPrimitiveType(rawValue: UInt(indexedBatchLoad(descriptor, 16, as: UInt32.self))),
+          let indexType = MTLIndexType(rawValue: UInt(indexedBatchLoad(descriptor, 20, as: UInt32.self))) else { return -1 }
+    let drawCount = Int(indexedBatchLoad(descriptor, 12, as: Int32.self))
+    let instances = Int(indexedBatchLoad(descriptor, 24, as: Int32.self))
+    let firstInstance = Int(indexedBatchLoad(descriptor, 28, as: Int32.self))
+    let bindingCount = Int(indexedBatchLoad(descriptor, 56, as: UInt32.self))
+    let parameterBytes = indexedBatchLoad(descriptor, 48, as: UInt64.self)
+    guard drawCount >= 2, instances > 0, firstInstance >= 0,
+          bindingCount > 0, bindingCount <= 31, rawByteCount == 64 + Int64(bindingCount) * 32,
+          UInt64(drawCount) <= parameterBytes / 12,
+          let parameterAddress = UInt(exactly: indexedBatchLoad(descriptor, 40, as: UInt64.self)),
+          let parameters = UnsafeRawPointer(bitPattern: parameterAddress) else { return -1 }
+
+    let indexStride = indexType == .uint16 ? 2 : 4
+    var largestBase = 0
+    var largestIndexEnd = 0
+    var activeDraws = 0
+    // No Metal object or encoder is touched until the whole parameter stream is
+    // admitted. Inactive records intentionally carry no restrictions.
+    for draw in 0..<drawCount {
+        let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+        if count <= 0 { continue }
+        let first = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self))
+        let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+        guard first >= 0, base > 0 else { return -1 }
+        largestBase = max(largestBase, base)
+        largestIndexEnd = max(largestIndexEnd, (first + count) * indexStride)
+        activeDraws += 1
+    }
+    guard activeDraws >= 2 else { return -1 }
+    var occupiedSlots: UInt32 = 0
+    for binding in 0..<bindingCount {
+        let record = 64 + binding * 32
+        let slot = indexedBatchLoad(descriptor, record + 24, as: UInt32.self)
+        guard slot < 31, occupiedSlots & (UInt32(1) << slot) == 0,
+              indexedBatchLoad(descriptor, record + 28, as: UInt32.self) == 0,
+              let offset = Int(exactly: indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+              let stride = Int(exactly: indexedBatchLoad(descriptor, record + 16, as: UInt64.self)), stride > 0,
+              let address = UInt(exactly: indexedBatchLoad(descriptor, record, as: UInt64.self)),
+              let pointer = UnsafeMutableRawPointer(bitPattern: address) else { return -1 }
+        let (displacement, multiplyOverflow) = largestBase.multipliedReportingOverflow(by: stride)
+        let (end, addOverflow) = offset.addingReportingOverflow(displacement)
+        guard !multiplyOverflow, !addOverflow,
+              let buffer = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLBuffer,
+              end < buffer.length else { return -1 }
+        occupiedSlots |= UInt32(1) << slot
+    }
+    guard let indexAddress = UInt(exactly: indexedBatchLoad(descriptor, 32, as: UInt64.self)),
+          let indexPointer = UnsafeMutableRawPointer(bitPattern: indexAddress),
+          let indexBuffer = Unmanaged<AnyObject>.fromOpaque(indexPointer).takeUnretainedValue() as? MTLBuffer,
+          largestIndexEnd <= indexBuffer.length else { return -1 }
+
+    // State was flushed by the Java encoder. Only offsets change here, so its
+    // binding shadow remains valid after the originals are restored. Metal 4
+    // uses its existing argument-table lowering; no alternate resource owner.
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(encoderPointer) {
+        for draw in 0..<drawCount {
+            let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+            if count <= 0 { continue }
+            let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+            for binding in 0..<bindingCount {
+                let record = 64 + binding * 32
+                let offset = Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self))
+                    + base * Int(indexedBatchLoad(descriptor, record + 16, as: UInt64.self))
+                bridge.setBufferOffset(offset, index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)), stageMask: 1)
+            }
+            let offset = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self)) * indexStride
+            bridge.encoder.drawIndexedPrimitives(primitiveType: primitive, indexCount: count, indexType: indexType,
+                indexBuffer: indexBuffer.gpuAddress + UInt64(offset), indexBufferLength: indexBuffer.length - offset,
+                instanceCount: instances, baseVertex: 0, baseInstance: firstInstance)
+        }
+        for binding in 0..<bindingCount {
+            let record = 64 + binding * 32
+            bridge.setBufferOffset(Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+                index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)), stageMask: 1)
+        }
+        bridge.lease.encodingCounters?.directDraws += Int64(activeDraws)
+        return 1
+    }
+    let encoder = metal3RenderEncoder(encoderPointer)
+    for draw in 0..<drawCount {
+        let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+        if count <= 0 { continue }
+        let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+        for binding in 0..<bindingCount {
+            let record = 64 + binding * 32
+            let offset = Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self))
+                + base * Int(indexedBatchLoad(descriptor, record + 16, as: UInt64.self))
+            encoder.setVertexBufferOffset(offset, index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)))
+        }
+        let offset = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self)) * indexStride
+        encoder.drawIndexedPrimitives(type: primitive, indexCount: count, indexType: indexType,
+            indexBuffer: indexBuffer, indexBufferOffset: offset, instanceCount: instances, baseVertex: 0, baseInstance: firstInstance)
+    }
+    for binding in 0..<bindingCount {
+        let record = 64 + binding * 32
+        encoder.setVertexBufferOffset(Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+            index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)))
+    }
+    encodingCounters(encoder)?.directDraws += Int64(activeDraws)
+    return 1
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect")
 public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     _ pointer: UnsafeMutableRawPointer,

@@ -340,6 +340,19 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
                 indexBuffer, firstIndexOffsets, indexCounts, vertexOffsets, drawCount, 1L, 0L);
     }
 
+    /** Exclusive encoder scratch; native consumes all pointers before returning. */
+    public @Nullable MemorySegment indexedBatchDescriptor() {
+        if (!MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE || this.statePacket == null
+                || !MetalRenderStatePacketBridge.indexedBatchAvailable()) return null;
+        return this.statePacket.indexedBatchStorage();
+    }
+
+    public boolean tryIndexedRebasedBatch(long bytes) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        return this.statePacket != null && this.statePacket.tryIndexedBatch(encoder, bytes);
+    }
+
     public void drawPrimitives(
             final MTLPrimitiveType primitiveType,
             final int firstVertex,

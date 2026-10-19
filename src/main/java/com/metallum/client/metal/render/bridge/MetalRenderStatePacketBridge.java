@@ -61,6 +61,33 @@ public final class MetalRenderStatePacketBridge {
         }
     }
 
+    public static boolean indexedBatchAvailable() {
+        return IndexedBatchAccess.DRAW != null;
+    }
+
+    /** A rejection encodes no draw and changes no binding; an uncertain call must never replay. */
+    public static int applyIndexedBatch(MemorySegment encoder, MemorySegment descriptor, long bytes) {
+        MethodHandle handle = IndexedBatchAccess.DRAW;
+        if (handle == null) return -100;
+        try {
+            return (int) handle.invokeExact(encoder, descriptor, bytes);
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Uncertain native indexed batch outcome; draw replay is unsafe", failure);
+        }
+    }
+
+    private static final class IndexedBatchAccess {
+        private static final MethodHandle DRAW = resolve();
+
+        private static MethodHandle resolve() {
+            MetalNativeInterfaceTable table = MetalNativeInterfaceTable.negotiate(FEATURE_ID, 3);
+            if (table == null || table.entryCount() < 3
+                    || (table.buildCapabilities() & CAPABILITY_BIT) == 0L) return null;
+            return Linker.nativeLinker().downcallHandle(table.entry(2), FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+        }
+    }
+
     private static final class DrawAccess {
         private static final MethodHandle DRAW = resolve();
 
