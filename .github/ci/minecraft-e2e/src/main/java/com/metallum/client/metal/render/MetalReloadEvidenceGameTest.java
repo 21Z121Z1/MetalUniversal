@@ -76,6 +76,7 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
                             new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(
                                     java.util.Map.of("before", fxBefore, "after", fxAfter, "verified", true)) + "\n");
                 } catch (IOException failure) { throw new IllegalStateException("Could not write MetalFX reload evidence", failure); }
+                MetalFxLifecycleEvidence.verify(context, evidenceDir.resolve("metalfx-lifecycle-evidence.json"));
             }
 
             writeEvidence(evidenceDir.resolve("reload-evidence.json"), reloadTicks, snapshot);

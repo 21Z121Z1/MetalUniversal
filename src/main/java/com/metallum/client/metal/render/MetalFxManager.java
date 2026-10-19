@@ -397,6 +397,7 @@ public final class MetalFxManager {
             PreparedRenderType prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice projection,
             MetalEntityMotionCapture.Sample sample,
             MetalPreviousVertexHistory.DrawToken previousVertexToken
     ) {
@@ -406,6 +407,7 @@ public final class MetalFxManager {
             PreparedRenderType prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice projection,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
             GpuBufferSlice currentVertexBuffer,
@@ -821,10 +823,10 @@ public final class MetalFxManager {
     }
 
     /**
-     * Records a first-person fallback/history break for this source frame. Exact
-     * staged first-person replay does not call this method once it has committed
-     * previous geometry; only an unproven hand submission vetoes Frame Generation.
-     * Temporal remains enabled so its reactive/history safeguards can still run.
+     * Records the first-person fallback for this source frame. Previous staged
+     * vertices alone do not prove the separate HUD projection and model-view
+     * history. Temporal uses zero hand motion plus reactivity; interpolation
+     * stays rejected until that per-draw projection history is available.
      */
     public static void observeFirstPersonMotion() {
         MetalFxManager manager = active;
@@ -1754,18 +1756,6 @@ public final class MetalFxManager {
         }
     }
 
-    static void markExactFirstPersonProducerCandidate(
-            final MetalEntityMotionCapture.Sample sample
-    ) {
-        MetalFxManager manager = active;
-        if (manager != null && sample != null && sample.hasPrevious()) {
-            manager.markExactProducerCandidate(
-                    FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
-                    sample
-            );
-        }
-    }
-
     static void markExactParticleProducerCandidate(
             final MetalEntityMotionCapture.Sample sample
     ) {
@@ -1826,6 +1816,10 @@ public final class MetalFxManager {
         // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
         MetalPreviousVertexHistory.DrawToken previousVertexToken =
                 MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
+        if (sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON) {
+            MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
+            return;
+        }
         if (!sceneFrame) {
             MetalEntityMotionCapture.recordMotionDrawSkip("scene-frame-inactive");
             return;
@@ -1853,12 +1847,18 @@ public final class MetalFxManager {
             return;
         }
 
+        GpuBufferSlice projection = RenderSystem.getProjectionMatrixBuffer();
+        if (projection == null) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("source-projection-unavailable");
+            return;
+        }
         // Exact previous-position selection is intentionally deferred until flush. At that point all
         // feature draws have registered, so objectManifestMatches cannot accept a transient prefix.
         objectMotionReplays.add(new ObjectMotionReplay(
                 prepared,
                 executeInfo,
                 prepared.dynamicTransforms(),
+                projection,
                 sample,
                 previousVertexToken
         ));
@@ -1949,6 +1949,7 @@ public final class MetalFxManager {
                     prepared,
                     executeInfo,
                     replay.dynamicTransforms(),
+                    replay.projection(),
                     replay.sample(),
                     motionUniform,
                     currentVertexBuffer,
@@ -2019,6 +2020,9 @@ public final class MetalFxManager {
                     ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
                     : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
             RenderSystem.bindDefaultUniforms(pass);
+            // A later HUD or effect pass may have changed RenderSystem's global
+            // projection. Replay the actual source draw's same-frame slice.
+            pass.setUniform("Projection", replay.projection());
             pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
             pass.setUniform("MetallumMotion", replay.motionUniform());
             pass.setVertexBuffer(0, replay.currentVertexBuffer());

@@ -138,9 +138,7 @@ final class MetalMotionProducerGpuTest {
                 pass.setUniform("Projection", pr.slice());
                 pass.setUniform("DynamicTransforms", du.slice());
                 pass.setUniform("MetallumMotion", mo.slice());
-                if (f.alphaCutout() || f.source().equals("core/particle")) {
-                    pass.bindTexture("Sampler0", sampledView, sampler);
-                }
+                pass.bindTexture("Sampler0", sampledView, sampler);
                 pass.setVertexBuffer(0, (frame == 0 ? pv : cv).slice());
                 pass.setVertexBuffer(1, pp.slice());
                 pass.draw(6, 1, 0, 0);

@@ -21,6 +21,7 @@ import org.jspecify.annotations.Nullable;
  * source frame.</p>
  */
 public final class MetalSyntheticExactMotion {
+    static final String PROJECTION_HISTORY_UNAVAILABLE = "first-person-projection-history-unavailable";
     private static final long MAIN_HAND_OBJECT_ID = 0x4D46584D41494EL; // ASCII "MFXMAIN".
     private static final long OFF_HAND_OBJECT_ID = 0x4D46584F464648L;  // ASCII "MFXOFFH".
     // Real object lifetime generations are positive. Negative generations are reserved for
@@ -65,9 +66,8 @@ public final class MetalSyntheticExactMotion {
             final InteractionHand hand,
             final ItemStack itemStack
     ) {
-        // The native merge has a dedicated first-person validity plane. A hand with committed
-        // previous staged vertices can therefore contribute exact motion without the old blanket
-        // Frame Generation veto. Contract failures and history breaks below remain fail-closed.
+        // Geometry identity is useful history, but the hand uses a separate HUD projection.
+        // Do not turn matched vertices into an exact-motion receipt without that projection.
         if (!frameOpen || hand == null || itemStack == null || Boolean.TRUE.equals(FIRST_PERSON_ACTIVE.get())) {
             MetalFxManager.observeFirstPersonMotion();
             return null;
@@ -121,15 +121,8 @@ public final class MetalSyntheticExactMotion {
         );
         MetalEntityMotionCapture.attachState(state, sample);
         MetalEntityMotionCapture.requireExactState(state);
-        if (sample.hasPrevious()) {
-            MetalFxManager.markExactFirstPersonProducerCandidate(sample);
-        } else {
-            // First appearance, successful absence followed by reappearance, or an ItemStack
-            // lifetime transition has no trustworthy previous geometry. Reject exactly this
-            // generated-frame pair; a successfully submitted source frame establishes the next
-            // history generation transactionally.
-            MetalFxManager.observeFirstPersonMotion();
-        }
+        MetalEntityMotionCapture.failExactSample(sample, PROJECTION_HISTORY_UNAVAILABLE);
+        MetalFxManager.observeFirstPersonMotion();
         MetalEntityMotionCapture.beginEntitySubmission(state);
         FIRST_PERSON_ACTIVE.set(Boolean.TRUE);
         return sample;

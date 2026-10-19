@@ -5116,7 +5116,7 @@ func handOverlayMslSource() -> String {
 
     kernel void metallum_hand_overlay_motion(
       texture2d<float, access::read> handDepthTexture [[texture(0)]],
-      texture2d<half, access::write> objectMotionTexture [[texture(1)]],
+      texture2d<half, access::read_write> objectMotionTexture [[texture(1)]],
       texture2d<half, access::write> objectValidityTexture [[texture(2)]],
       texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
       texture2d<float, access::read> handExactValidityTexture [[texture(4)]],
