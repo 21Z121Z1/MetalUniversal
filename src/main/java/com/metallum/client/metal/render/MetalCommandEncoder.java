@@ -68,6 +68,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final MetalDevice device;
     private final MetalSubmissionBackpressure submissionBackpressure = new MetalSubmissionBackpressure(
             System.getProperty("metallum.maxSubmitsInFlight"));
+
+    int maxSubmitsInFlight() { return submissionBackpressure.limit(); }
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];

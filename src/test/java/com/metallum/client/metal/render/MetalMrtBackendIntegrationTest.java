@@ -107,6 +107,34 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void submissionBudgetBoundsObservedBacklogAndCompletesEachCallbackOnce() {
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+        int budget = new MetalSubmissionBackpressure(System.getProperty("metallum.maxSubmitsInFlight")).limit();
+        assertEquals(budget, encoder.maxSubmitsInFlight());
+        AtomicInteger committed = new AtomicInteger();
+        AtomicInteger completed = new AtomicInteger();
+        AtomicInteger outstanding = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        for (int i = 0; i < 12; i++) {
+            encoder.commandBuffer();
+            encoder.onCurrentSubmit(() -> {
+                committed.incrementAndGet();
+                peak.accumulateAndGet(outstanding.incrementAndGet(), Math::max);
+            }, () -> {
+                completed.incrementAndGet();
+                outstanding.decrementAndGet();
+            }, () -> fail("GPU submission failed"));
+            encoder.submit();
+        }
+        device.waitForSubmittedGpuWork();
+        assertEquals(12, committed.get());
+        assertEquals(12, completed.get(), "completion must be delivered exactly once across ring reuse");
+        assertEquals(0, outstanding.get());
+        assertTrue(peak.get() <= budget, "observed completion backlog exceeded the configured GPU budget");
+    }
+
+    @Test
     void stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders() {
         String name = "state_draw_transport";
         vertexShaders.put("mrt_vertex", """

@@ -155,6 +155,7 @@ gradle.projectsEvaluated {
         "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
         [
             "com.metallum.client.metal.render.MetalNativeBridgeCriticalPolicyTest",
+            "com.metallum.client.metal.render.bridge.MetalNativeInterfaceTest",
             "com.metallum.client.metal.render.MetalDepthStencilPipelinePolicyTest",
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
