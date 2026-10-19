@@ -137,6 +137,16 @@ public abstract class GameRendererMetalFxMixin {
         MetalFxManager.resetHistory("renderer reset");
     }
 
+    @Inject(method = "onResourceManagerReload", at = @At("TAIL"))
+    private void metallum$resetOnResourceReload(
+            final net.minecraft.server.packs.resources.ResourceManager resources,
+            final CallbackInfo ci
+    ) {
+        // LoadingOverlay's pause edge is not a reload contract: the game may
+        // already be paused, or a multiplayer world may never pause at all.
+        MetalFxManager.surfaceDiscontinuity("resource reload");
+    }
+
     @Inject(method = "close", at = @At("TAIL"))
     private void metallum$close(final CallbackInfo ci) {
         MetalFxManager.close();

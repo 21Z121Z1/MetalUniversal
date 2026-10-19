@@ -8,6 +8,10 @@ on:
       - 'src/main/native/**'
       - 'src/test/native/**'
       - 'src/main/java/com/metallum/client/metal/render/**'
+      - 'src/main/java/com/metallum/mixin/render/**'
+      - 'src/test/java/com/metallum/client/metal/render/**'
+      - 'build.gradle'
+      - '.github/ci/HostedMetalGradle.init.gradle'
       - '.github/ci/MetalFxCapabilityProbe.swift'
       - '.github/workflows/metalfx-contracts.yml'
 
