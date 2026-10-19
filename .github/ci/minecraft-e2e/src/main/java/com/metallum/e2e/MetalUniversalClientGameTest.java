@@ -10,9 +10,13 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
@@ -387,6 +391,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             context.waitFor(client -> client.player != null
                     && Math.abs(client.player.getX() - 160.5) < 0.1
                     && Math.abs(client.player.getZ() - 160.5) < 0.1);
+            // Returning from the moving route can briefly leave the server's
+            // destination chunks unloaded. Client render completion alone does
+            // not make /fill valid; it can succeed with no destination chunks.
+            singleplayer.getServer().waitFor(server ->
+                    server.overworld().hasChunksAt(142, 159, 178, 174), 1200);
             singleplayer.getConnection().waitForChunksRender();
             singleplayer.getServer().runCommand("fill 142 120 159 178 140 174 minecraft:air");
             // Looking south, east is screen-left. The probe samples the center
@@ -394,6 +403,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             singleplayer.getServer().runCommand("fill 166 124 172 178 136 172 minecraft:red_concrete");
             singleplayer.getServer().runCommand("fill 155 124 172 165 136 172 minecraft:lime_concrete");
             singleplayer.getServer().runCommand("fill 142 124 172 154 136 172 minecraft:blue_concrete");
+            require(singleplayer.getServer().computeOnServer(server -> hasTerrainProbeWalls(server.overworld())),
+                    "Terrain probe walls were not completely built on the server");
+            context.waitFor(client -> client.level != null && hasTerrainProbeWalls(client.level), 1200);
             singleplayer.getServer().runCommand("weather clear 1000000");
             singleplayer.getServer().runCommand("time set noon");
             context.waitTicks(30);
@@ -424,6 +436,16 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 return null;
             });
         }
+    }
+
+    private static boolean hasTerrainProbeWalls(BlockGetter level) {
+        for (int x = 142; x <= 178; x++) {
+            var expected = Blocks.CONCRETE.pick(x >= 166 ? DyeColor.RED : x >= 155 ? DyeColor.LIME : DyeColor.BLUE);
+            for (int y = 124; y <= 136; y++) {
+                if (!level.getBlockState(new BlockPos(x, y, 172)).is(expected)) return false;
+            }
+        }
+        return true;
     }
 
     private static void startRenderContract(Path output) {
