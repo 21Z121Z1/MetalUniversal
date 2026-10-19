@@ -65,6 +65,8 @@ private struct Case {
 private func cases(width: Int, height: Int) -> [Case] {
     var x = matrix_identity_float4x4; x.columns.3.x = 0.125
     var y = matrix_identity_float4x4; y.columns.3.y = 0.25
+    var forward = matrix_identity_float4x4; forward.columns.3.z = 0.1
+    var backward = matrix_identity_float4x4; backward.columns.3.z = -0.1
     let angle: Float = 0.05
     var rotation = matrix_identity_float4x4
     rotation.columns.0 = SIMD4(cos(angle), sin(angle), 0, 0)
@@ -104,6 +106,10 @@ private func cases(width: Int, height: Int) -> [Case] {
              expectedMotion: .zero, expectedRejection: true, reactiveMinimum: 0.84),
         Case(name: "history_reset_ignores_old_depth", previousDepth: 0.8,
              expectedMotion: .zero),
+        Case(name: "camera_depth_reprojection_reversed_z", previous: forward, previousDepth: 0.6,
+             history: true, expectedMotion: .zero),
+        Case(name: "camera_depth_reprojection_standard_z", previous: backward, previousDepth: 0.4,
+             history: true, reversed: false, expectedMotion: .zero),
         Case(name: "transparent_reactive_max_merge", reactive: 0.9,
              expectedMotion: .zero, reactiveMinimum: 0.89),
         Case(name: "reversed_z_sky", depth: 0, previousDepth: 0, history: true,

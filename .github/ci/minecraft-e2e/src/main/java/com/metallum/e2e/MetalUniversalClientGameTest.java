@@ -330,6 +330,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             if (!p1FramebufferScenario) {
                 verifyTerrainColorProbe(context, singleplayer, metalCaptureRoot, evidenceDir);
             }
+            writeMetalFxEvidence(context, evidenceDir.resolve("metalfx-runtime-evidence.json"));
 
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             closeRenderContract();
@@ -723,6 +724,35 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         byte[] chunk = new byte[65_536];
         for (int count; (count = input.read(chunk)) != -1;) digest.update(chunk, 0, count);
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void writeMetalFxEvidence(ClientGameTestContext context, Path output) {
+        var status = context.computeOnClient(client -> com.metallum.client.metal.render.MetalFxManager.scalingStatus());
+        String profile = System.getProperty("metallum.ci.metalfxProfile", "off");
+        if (profile.equals("requested-temporal")) {
+            require(status.requestedMode().equals("TEMPORAL"), "Temporal request never reached the production manager");
+            String expected = status.temporalSupported() && status.motionPipelineAvailable()
+                    ? "TEMPORAL" : status.spatialSupported() ? "SPATIAL" : "OFF";
+            require(status.effectiveMode().equals(expected) && !status.runtimeDisabled(),
+                    "Incorrect MetalFX capability fallback: " + status);
+            if (expected.equals("SPATIAL")) {
+                require(status.spatialEncodes() > 0 && status.temporalEncodes() == 0,
+                        "Spatial fallback must execute and must not count as Temporal: " + status);
+            } else if (expected.equals("TEMPORAL")) {
+                require(status.temporalEncodes() > 0, "Supported Temporal never encoded: " + status);
+            }
+            require(status.frameGenerationRequested() && !status.frameGenerationEnabled()
+                    && status.frameGenerationQueued() == 0, "Incomplete production motion gate must reject frame generation");
+        } else {
+            require(status.requestedMode().equals("OFF") && status.effectiveMode().equals("OFF"),
+                    "Ordinary conformance unexpectedly enabled MetalFX: " + status);
+        }
+        JsonObject report = new GsonBuilder().create().toJsonTree(status).getAsJsonObject();
+        report.addProperty("profile", profile);
+        report.addProperty("verified", true);
+        report.addProperty("boundary", "production encode activation and capability fallback; completion/pixels in separate evidence");
+        try { Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
+        catch (IOException failure) { throw new IllegalStateException("Could not write MetalFX runtime evidence", failure); }
     }
 
     private static void writeOptimizationEvidence(Path output) {

@@ -27,6 +27,7 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(20);
+            MetalFxManager.ScalingStatus fxBefore = context.computeOnClient(client -> MetalFxManager.scalingStatus());
 
             CompletableFuture<?> reload = context.computeOnClient(client -> startResourceReload(client));
             int reloadTicks = waitForReload(context, reload);
@@ -60,6 +61,22 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
             require(snapshot.worldLoaded(), "resource reload returned without a loaded client level");
             require(snapshot.presentation().completeAndSuccessful(),
                     "Metal presentation did not recover after resource reload: " + snapshot.presentation());
+            MetalFxManager.ScalingStatus fxAfter = context.computeOnClient(client -> MetalFxManager.scalingStatus());
+            if (System.getProperty("metallum.ci.metalfxProfile", "off").equals("requested-temporal")) {
+                require(fxAfter.effectiveMode().equals(fxBefore.effectiveMode()) && !fxAfter.runtimeDisabled(),
+                        "MetalFX mode did not recover after reload: " + fxAfter);
+                require(fxAfter.session() != fxBefore.session() || fxAfter.historyEpoch() > fxBefore.historyEpoch(),
+                        "Resource reload did not invalidate source history");
+                if (fxAfter.effectiveMode().equals("SPATIAL")) {
+                    require(fxAfter.spatialEncodes() > 0 && fxAfter.temporalEncodes() == 0,
+                            "Reloaded Spatial fallback did not execute or was counted as Temporal");
+                }
+                try {
+                    Files.writeString(evidenceDir.resolve("metalfx-reload-evidence.json"),
+                            new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(
+                                    java.util.Map.of("before", fxBefore, "after", fxAfter, "verified", true)) + "\n");
+                } catch (IOException failure) { throw new IllegalStateException("Could not write MetalFX reload evidence", failure); }
+            }
 
             writeEvidence(evidenceDir.resolve("reload-evidence.json"), reloadTicks, snapshot);
         }

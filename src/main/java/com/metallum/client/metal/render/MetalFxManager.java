@@ -234,6 +234,9 @@ public final class MetalFxManager {
     private boolean loggedFirstSuccessfulFrame;
     private boolean metalFxScalerEncodeObserved;
     private long temporalScalerEncodeCount;
+    private long spatialScalerEncodeCount;
+    private static final java.util.concurrent.atomic.AtomicLong NEXT_SCALING_SESSION = new java.util.concurrent.atomic.AtomicLong();
+    private final long scalingSession = NEXT_SCALING_SESSION.incrementAndGet();
     private boolean temporalScalerEncodeThisFrame;
     private boolean frameGenerationTemporalScalerLinkObserved;
     private int frameGenerationTemporalScalerLinkStatus;
@@ -1053,10 +1056,32 @@ public final class MetalFxManager {
         return manager != null && manager.frameGenerationEnabled && !manager.runtimeDisabled;
     }
 
-    /** Number of successful Temporal scaler outputs observed in this manager session. */
+    /** Accepted Temporal encodes; GPU completion must be checked separately. */
     public static long temporalScalerEncodeCount() {
         MetalFxManager manager = active;
         return manager == null ? 0L : manager.temporalScalerEncodeCount;
+    }
+
+    public record ScalingStatus(String requestedMode, String effectiveMode, boolean runtimeDisabled,
+                                boolean spatialSupported, boolean temporalSupported, boolean motionPipelineAvailable,
+                                long spatialEncodes, long temporalEncodes, boolean frameGenerationRequested,
+                                boolean frameGenerationEnabled, int frameGenerationQueued,
+                                int renderWidth, int renderHeight, int displayWidth, int displayHeight,
+                                long session, long historyEpoch) {}
+
+    /** Diagnostic snapshot sampled on the render owner; never enables an effect. */
+    public static ScalingStatus scalingStatus() {
+        MetalFxManager manager = active;
+        if (manager == null) return new ScalingStatus("OFF", "OFF", false, false, false, false,
+                0, 0, false, false, 0, 0, 0, 0, 0, 0, 0);
+        return new ScalingStatus(manager.config.requestedMode.name(),
+                manager.runtimeDisabled ? "OFF" : manager.effectiveMode.name(), manager.runtimeDisabled,
+                MetalNativeBridge.metallum_metalfx_supports_spatial(manager.device.metalDeviceHandle()),
+                MetalNativeBridge.metallum_metalfx_supports_temporal(manager.device.metalDeviceHandle()),
+                manager.motionPipelineV2Available, manager.spatialScalerEncodeCount, manager.temporalScalerEncodeCount,
+                manager.config.frameGeneration, manager.frameGenerationEnabled, manager.frameGenerationFramesQueued,
+                manager.renderWidth, manager.renderHeight, manager.displayWidth, manager.displayHeight,
+                manager.scalingSession, manager.historyEpoch);
     }
 
     /**
@@ -2401,8 +2426,12 @@ public final class MetalFxManager {
 
         if (scalerOutputAccepted) {
             this.metalFxScalerEncodeObserved = true;
-            this.temporalScalerEncodeCount++;
-            this.temporalScalerEncodeThisFrame = true;
+            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
+                this.temporalScalerEncodeCount++;
+                this.temporalScalerEncodeThisFrame = true;
+            } else if (effectiveMode == MetalFxConfig.Mode.SPATIAL) {
+                this.spatialScalerEncodeCount++;
+            }
         }
 
         if (frameGenerationEnabled) {

@@ -35,6 +35,10 @@ def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse
 def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
 def requireP1Metal4Evidence = p1Metal4Lane != "off"
 def gameplay = providers.gradleProperty('gameplay').orElse('false').get().toBoolean()
+def metalFxProfile = providers.gradleProperty('metalFxProfile').orElse('off').get()
+if (!(metalFxProfile in ['off', 'requested-temporal']) || (gameplay && metalFxProfile != 'off')) {
+    throw new GradleException('metalFxProfile is off or requested-temporal; gameplay keeps its existing protocol')
+}
 def transportProfile = providers.gradleProperty('transportProfile').orElse('default').get()
 if (!(transportProfile in ['default', 'baseline', 'candidate']) || (gameplay && transportProfile != 'default')) {
     throw new GradleException('transportProfile is default, baseline, or candidate and only overrides the conformance route')
@@ -234,9 +238,11 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
     jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods && !sodiumOnly}")
-    jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
-    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
+    jvmArgs.add("-Dmetallum.ci.metalfxProfile=${metalFxProfile}")
+    jvmArgs.add("-Dmetallum.metalfx.mode=${metalFxProfile == 'off' ? 'OFF' : 'TEMPORAL'}")
+    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=${metalFxProfile != 'off'}")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    if (metalFxProfile != 'off') jvmArgs.add('-Dmetallum.metalfx.scale=0.67')
     jvmArgs.add("-Dmetallum.metal.hud=false")
     jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")

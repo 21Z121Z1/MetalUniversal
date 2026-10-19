@@ -89,6 +89,8 @@ final class MetalMotionProducerGpuTest {
         var source = RenderPipeline.builder().withLocation("motion_contract/" + f.name())
                 .withVertexShader(f.source()).withFragmentShader(f.source())
                 .withVertexBinding(0, f.format()).withBindGroupLayout(resources)
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL))
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false);
         if (f.alphaCutout()) source.withShaderDefine("ALPHA_CUTOUT", 0.5F);
         var pipeline = MetalEntityMotionPipeline.forPreviousPositions(source.build());
@@ -102,7 +104,9 @@ final class MetalMotionProducerGpuTest {
         previousPositions.flip();
         ByteBuffer dynamic = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
         new Matrix4f().get(0, dynamic);
-        for (int i = 0; i < 4; i++) dynamic.putFloat(64+i*4, 1);
+        // Actual 26.3 dynamictransforms.glsl: ModelViewMat, TextureMat, ColorModulator, ModelOffset.
+        new Matrix4f().get(64, dynamic);
+        for (int i = 0; i < 4; i++) dynamic.putFloat(128+i*4, 1);
         ByteBuffer projection = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         new Matrix4f().get(0, projection);
         ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());

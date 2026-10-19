@@ -5135,7 +5135,13 @@ func handOverlayMslSource() -> String {
       if (!(isfinite(depth) && depth > 0.0000001)) return;
 
       float handExactValid = u.reserved > 0.5 ? handExactValidityTexture.read(pixel).r : 0.0;
-      if (!(isfinite(handExactValid) && handExactValid > 0.5)) {
+      bool ownsExactMotion = isfinite(handExactValid) && handExactValid > 0.5;
+      bool validExactMotion = false;
+      if (ownsExactMotion) {
+        float2 exactMotion = float2(objectMotionTexture.read(pixel).rg);
+        validExactMotion = all(isfinite(exactMotion)) && all(abs(exactMotion) <= float2(32.0));
+      }
+      if (!validExactMotion) {
         objectMotionTexture.write(half4(half(0.0)), pixel);
       }
       // Legacy merge has no hand-depth branch. Force it to select the shared
@@ -5146,6 +5152,7 @@ func handOverlayMslSource() -> String {
         pixel
       );
       float reactive = float(reactiveTexture.read(pixel).r);
+      if (ownsExactMotion && !validExactMotion) reactive = 1.0;
       reactiveTexture.write(
         half4(
           half(clamp(max(reactive, u.reactiveBoost), 0.0, 1.0)),

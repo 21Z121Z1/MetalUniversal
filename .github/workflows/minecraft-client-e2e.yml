@@ -27,12 +27,13 @@ env:
 
 jobs:
   minecraft-client-e2e:
-    name: Minecraft client E2E (${{ matrix.renderer }}, ${{ matrix.transport }})
+    name: "${{ matrix.metalfx == 'requested-temporal' && format('MetalFX client fallback ({0})', matrix.renderer) || format('Minecraft client E2E ({0}, {1})', matrix.renderer, matrix.transport) }}"
     strategy:
       fail-fast: false
       matrix:
         transport: [baseline, candidate, default]
         renderer: [vanilla, sodium]
+        metalfx: [off]
         include:
           - renderer: vanilla
             no_optional_mods: 'true'
@@ -40,11 +41,22 @@ jobs:
           - renderer: sodium
             no_optional_mods: 'false'
             sodium_only: 'true'
+          - renderer: vanilla
+            transport: default
+            metalfx: requested-temporal
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+          - renderer: sodium
+            transport: default
+            metalfx: requested-temporal
+            no_optional_mods: 'false'
+            sodium_only: 'true'
     runs-on: macos-26
     timeout-minutes: 30
     env:
       METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
       METALLUM_E2E_TRANSPORT: ${{ matrix.transport }}
+      METALLUM_E2E_METALFX: ${{ matrix.metalfx }}
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
@@ -98,6 +110,7 @@ jobs:
             -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
             -PtransportProfile=${{ matrix.transport }} \
+            -PmetalFxProfile=${{ matrix.metalfx }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -158,6 +171,19 @@ jobs:
               raise SystemExit(f'optimization activation was not verified: {optimization}')
           print('verified optimization activation:', json.dumps(optimization, sort_keys=True))
 
+          fx = json.loads((root / 'metalfx-runtime-evidence.json').read_text(encoding='utf-8'))
+          if fx.get('verified') is not True or fx.get('profile') != os.environ['METALLUM_E2E_METALFX']:
+              raise SystemExit(f'MetalFX runtime profile was not verified: {fx}')
+          if fx['profile'] == 'requested-temporal':
+              expected = 'TEMPORAL' if fx['temporalSupported'] and fx['motionPipelineAvailable'] else 'SPATIAL' if fx['spatialSupported'] else 'OFF'
+              if fx['requestedMode'] != 'TEMPORAL' or fx['effectiveMode'] != expected or fx['runtimeDisabled']:
+                  raise SystemExit(f'MetalFX capability fallback failed: {fx}')
+              if expected == 'SPATIAL' and not (fx['spatialEncodes'] > 0 and fx['temporalEncodes'] == 0):
+                  raise SystemExit(f'Spatial fallback was absent or falsely counted as Temporal: {fx}')
+              if fx['frameGenerationEnabled'] or fx['frameGenerationQueued'] != 0:
+                  raise SystemExit(f'Incomplete motion production admitted frame interpolation: {fx}')
+          print('verified MetalFX runtime:', json.dumps(fx, sort_keys=True))
+
           raw = required[1].read_bytes()
           if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
               raise SystemExit('invalid framebuffer PNG')
@@ -211,7 +237,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-${{ matrix.metalfx == 'requested-temporal' && 'metalfx-requested-temporal-' || '' }}e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             .github/ci/minecraft-e2e/build/evidence/
