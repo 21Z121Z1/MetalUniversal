@@ -23,7 +23,12 @@ env:
 
 jobs:
   metalfx-contracts:
-    runs-on: macos-26
+    name: metalfx-contracts (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       MTL_HUD_ENABLED: '0'
@@ -37,6 +42,11 @@ jobs:
       - name: Record source and SDK
         run: |
           set -euo pipefail
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            test -d /Applications/Xcode_26.3.app/Contents/Developer
+            echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+            export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          fi
           test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
           mkdir -p build/agent-evidence/metalfx build/metal-tests
           git status --porcelain > build/agent-evidence/metalfx/git-status.txt
@@ -60,6 +70,16 @@ jobs:
             -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
             src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
             src/test/native/MetalMotionContractValidation.swift -o build/metal-tests/MetalMotionContractValidation
+      - name: Execute supported temporal and interpolation checks independently
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalFXOffscreenValidation.swift -o build/metal-tests/MetalFXOffscreenValidation
+          build/metal-tests/MetalFXOffscreenValidation build/metal-validation/offscreen-current --capability-aware \
+            | tee build/agent-evidence/metalfx/offscreen.log
       - name: Execute shipping motion kernels with independent numeric oracles
         run: |
           set -euo pipefail
@@ -68,9 +88,10 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: metalfx-contracts-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: metalfx-contracts-${{ matrix.runner }}-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/metalfx/
             build/metal-validation/motion-current/
+            build/metal-validation/offscreen-current/
           if-no-files-found: error
           retention-days: 14

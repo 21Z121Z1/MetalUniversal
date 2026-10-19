@@ -171,6 +171,7 @@ public final class MetalFxManager {
     private int phaseCount;
     private int phase;
     private boolean historyReset = true;
+    private final PauseHistory pauseHistory = new PauseHistory();
     private boolean previousMatrixValid;
     private final Matrix4f previousViewProjection = new Matrix4f();
     private final Matrix4f currentViewProjection = new Matrix4f();
@@ -483,6 +484,30 @@ public final class MetalFxManager {
 
     public static void observeWindowVisibility(boolean visible) {
         windowVisible = visible;
+    }
+
+    /** Observe before extraction, so neither source receipts nor previous vertices cross a pause edge. */
+    public static void observePauseState(final boolean paused) {
+        MetalFxManager manager = active;
+        if (manager != null && manager.pauseHistory.observe(paused)) {
+            surfaceDiscontinuity(paused ? "scene paused" : "scene resumed");
+        }
+    }
+
+    static final class PauseHistory {
+        private boolean observed;
+        private boolean paused;
+
+        boolean observe(final boolean next) {
+            boolean changed = observed && paused != next;
+            observed = true;
+            paused = next;
+            return changed;
+        }
+
+        boolean paused() {
+            return paused;
+        }
     }
 
     /** Stop the old presenter before SDL/layer ownership or temporal history changes. */
@@ -1252,12 +1277,13 @@ public final class MetalFxManager {
             this.nativeOffFastPathFrames++;
             return;
         }
-        if (frameGenerationEnabled && (hasActiveGui() || immediatePresentMode || !windowVisible)) {
+        if (frameGenerationEnabled && (pauseHistory.paused() || hasActiveGui() || immediatePresentMode || !windowVisible)) {
             suspendFrameGenerationInternal(
-                    !windowVisible ? "window is inactive or minimized" : hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
+                    pauseHistory.paused() ? "scene paused" : !windowVisible ? "window is inactive or minimized" : hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
             );
         }
-        if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode && windowVisible) {
+        if (frameGenerationSuspended && !runtimeDisabled && !pauseHistory.paused()
+                && !hasActiveGui() && !immediatePresentMode && windowVisible) {
             frameGenerationSuspended = false;
             frameGenerationEnabled = true;
             frameGenerationEncodeObserved = false;
