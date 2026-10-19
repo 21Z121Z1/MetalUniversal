@@ -27,10 +27,12 @@ env:
 
 jobs:
   minecraft-client-e2e:
-    name: Minecraft client E2E (${{ matrix.renderer }})
+    name: Minecraft client E2E (${{ matrix.renderer }}, ${{ matrix.transport }})
     strategy:
       fail-fast: false
       matrix:
+        transport: [baseline, candidate, default]
+        renderer: [vanilla, sodium]
         include:
           - renderer: vanilla
             no_optional_mods: 'true'
@@ -42,6 +44,7 @@ jobs:
     timeout-minutes: 30
     env:
       METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
+      METALLUM_E2E_TRANSPORT: ${{ matrix.transport }}
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
@@ -92,6 +95,7 @@ jobs:
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
+            -PtransportProfile=${{ matrix.transport }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -147,6 +151,11 @@ jobs:
                   or runtime.get('chunksRendered') is not True):
               raise SystemExit(f'production client did not render the requested lane: {runtime}')
 
+          optimization = json.loads((root / 'optimization-evidence.json').read_text(encoding='utf-8'))
+          if optimization.get('profile') != os.environ['METALLUM_E2E_TRANSPORT'] or optimization.get('verified') is not True:
+              raise SystemExit(f'optimization activation was not verified: {optimization}')
+          print('verified optimization activation:', json.dumps(optimization, sort_keys=True))
+
           raw = required[1].read_bytes()
           if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
               raise SystemExit('invalid framebuffer PNG')
@@ -193,7 +202,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: minecraft-26.3-${{ matrix.renderer }}-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             .github/ci/minecraft-e2e/build/evidence/

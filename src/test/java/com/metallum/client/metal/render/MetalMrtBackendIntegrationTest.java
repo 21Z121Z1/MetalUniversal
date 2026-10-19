@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
@@ -107,6 +108,76 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.encodingCost", matches = "true")
+    void hostedEncodingCost() {
+        String name = "hosted_encoding_cost";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1, 0, 1, 1); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        var allocation = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        assertTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        try {
+            for (boolean manyEncoders : new boolean[] {false, true}) {
+                double[] timings = new double[8];
+                long[] allocatedBytes = new long[8];
+                int operations = manyEncoders ? 256 : 4096;
+                for (int round = -4; round < timings.length; round++) {
+                    long allocatedBefore = allocation.getCurrentThreadAllocatedBytes();
+                    long start;
+                    long elapsed;
+                    if (manyEncoders) {
+                        start = System.nanoTime();
+                        for (int i = 0; i < operations; i++) {
+                            try (PassWithViews pass = createPass(textures, null, false)) {
+                                pass.pass().setPipeline(pipeline);
+                                pass.pass().draw(0, 1, 3, 0);
+                                encoder.submitRenderPass();
+                            }
+                        }
+                        elapsed = System.nanoTime() - start;
+                    } else {
+                        try (PassWithViews pass = createPass(textures, null, false)) {
+                            pass.pass().setPipeline(pipeline);
+                            pass.pass().draw(0, 1, 3, 0); // PSO/bind setup is outside the window.
+                            start = System.nanoTime();
+                            for (int i = 0; i < operations; i++) {
+                                pass.pass().enableScissor(i & 1, 0, WIDTH - 1, HEIGHT);
+                                pass.pass().draw(0, 1, 3, 0);
+                            }
+                            elapsed = System.nanoTime() - start;
+                        }
+                    }
+                    long bytes = allocation.getCurrentThreadAllocatedBytes() - allocatedBefore;
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork(); // Never time the GPU wait as CPU encoding.
+                    if (round >= 0) {
+                        timings[round] = (double) elapsed / operations;
+                        allocatedBytes[round] = bytes / operations;
+                    }
+                }
+                System.out.println("HOSTED_ENCODING_COST {\"profile\":\""
+                        + System.getProperty("metallum.ci.encodingCostProfile") + "\",\"workload\":\""
+                        + (manyEncoders ? "encoder" : "state-draw") + "\",\"nsPerOperation\":"
+                        + java.util.Arrays.toString(timings) + ",\"javaBytesPerOperation\":"
+                        + java.util.Arrays.toString(allocatedBytes) + "}");
+            }
+            ByteBuffer pixels = readback(textures.get(0));
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(pixels.get(pixel * 4), 255, "cost workload red");
+                assertByteNear(pixels.get(pixel * 4 + 1), 0, "cost workload green");
+                assertByteNear(pixels.get(pixel * 4 + 2), 255, "cost workload blue");
+            }
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @Test
     void submissionBudgetBoundsObservedBacklogAndCompletesEachCallbackOnce() {
         encoder.submit();
         device.waitForSubmittedGpuWork();
@@ -158,6 +229,7 @@ final class MetalMrtBackendIntegrationTest {
         data.putShort((short) 999).putShort((short) 4).putShort((short) 5).putShort((short) 6).flip();
         long before = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls();
         long rejectedBefore = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls();
+        var reuseBefore = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
         List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
         try (GpuBuffer indices = device.createBuffer(() -> "state draw indices", GpuBuffer.USAGE_INDEX, data)) {
             for (int round = 0; round < 4; round++) {
@@ -190,6 +262,16 @@ final class MetalMrtBackendIntegrationTest {
                     "every recreated encoder must actually activate fused state/draw transport");
             assertEquals(rejectedBefore, com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls(),
                     "valid direct and indexed draws must not silently fall back");
+        }
+        if (com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
+            var after = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
+            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) {
+                assertTrue(after.shadowReuseHits() > reuseBefore.shadowReuseHits());
+                assertTrue(after.packetStorageReuseHits() > reuseBefore.packetStorageReuseHits());
+            }
+            if (Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments")) {
+                assertTrue(after.nativeEncoderArgumentReuseCalls() > reuseBefore.nativeEncoderArgumentReuseCalls());
+            }
         }
     }
 
@@ -402,6 +484,7 @@ final class MetalMrtBackendIntegrationTest {
 
     @Test
     void partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes() {
+        var telemetryBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
         ByteBuffer original = ByteBuffer.allocateDirect(64);
         for (int i = 0; i < 64; i++) original.put(i, (byte) i);
         ByteBuffer patch = ByteBuffer.allocateDirect(11);
@@ -428,6 +511,12 @@ final class MetalMrtBackendIntegrationTest {
             }
             assertEquals(2, patch.position());
             assertEquals(9, patch.limit());
+            if (Boolean.getBoolean("metallum.hotpath.telemetry")
+                    && Boolean.getBoolean("metallum.opt.dynamicUploadRangeCopy")) {
+                var afterCounters = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
+                assertEquals(telemetryBefore.dynamicRangeCopies() + 1, afterCounters.dynamicRangeCopies());
+                assertEquals(telemetryBefore.dynamicCopyBytesAvoided() + 7, afterCounters.dynamicCopyBytesAvoided());
+            }
         }
     }
 

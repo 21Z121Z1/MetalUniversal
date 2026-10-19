@@ -106,7 +106,14 @@ jobs:
             hostedMetalIrisComputeGroupingTest \
             hostedMetalFusedStateDrawTest \
             hostedMetalFusedStateDrawOneSubmitTest \
-            hostedMetalFusedStateDrawTwoSubmitsTest
+            hostedMetalFusedStateDrawTwoSubmitsTest \
+            hostedMetalOptimizationCandidateTest \
+            hostedMetalOptimizationDefaultTest
+      - name: Compare hosted encoding cost in ABBA order
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalEncodingCost hostedMetalUploadCopyCost
       - name: State evidence boundary
         run: |
           cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt

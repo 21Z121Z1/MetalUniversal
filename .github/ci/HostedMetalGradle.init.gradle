@@ -166,6 +166,57 @@ gradle.projectsEvaluated {
     )
     hostedCore.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
 
+    def promotedProperties = [
+        "metallum.opt.fusedStateDraw",
+        "metallum.opt.reuseEncoderState",
+        "metallum.opt.reuseNativeEncoderArguments",
+        "metallum.opt.dynamicUploadRangeCopy"
+    ]
+    // Keep a real legacy lane when production defaults are promoted. Default
+    // coverage below must not inject the properties it is meant to validate.
+    hostedCore.configure { task ->
+        promotedProperties.each { task.systemProperty it, "false" }
+    }
+    ["hostedMetalOptimizationCandidateTest": true,
+     "hostedMetalOptimizationDefaultTest": null].each { name, enabled ->
+        configureHostedTest(name,
+                "Checks optimized transport, scratch leases and dynamic uploads against independent GPU readbacks.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+                 "com.metallum.client.metal.render.mtl.MetalRenderStateShadowTest",
+                 "com.metallum.client.metal.render.mtl.MetalRenderStatePacketTest",
+                 "com.metallum.client.metal.render.bridge.MetalNativeBridgeArgumentScratchTest"]).configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (enabled != null) promotedProperties.each { task.systemProperty it, enabled.toString() }
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.ci.reuseActivationTelemetry", "true"
+        }
+    }
+
+    // Fresh JVM per sample lane; ABBA repeated twice on the same runner. These
+    // timings describe hosted CPU encoding only, never FPS or physical latency.
+    def costTasks = []
+    [false, true, true, false, false, true, true, false].eachWithIndex { enabled, index ->
+        def costTask = configureHostedTest("hostedMetalEncodingCost${index}",
+                "Measures a fixed shipping state/draw and encoder workload on the hosted GPU.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.hostedEncodingCost"])
+        def previousCostTask = costTasks.isEmpty() ? null : costTasks.last()
+        costTask.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (previousCostTask != null) task.mustRunAfter(previousCostTask)
+            promotedProperties.each { task.systemProperty it, enabled.toString() }
+            task.systemProperty "metallum.ci.encodingCost", "true"
+            task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            task.outputs.upToDateWhen { false }
+        }
+        costTasks.add(costTask)
+    }
+    project.tasks.register("hostedMetalEncodingCost") { task -> task.dependsOn(costTasks) }
+    configureHostedTest("hostedMetalUploadCopyCost",
+            "Compares direct dynamic-upload copy cost in interleaved order.",
+            ["com.metallum.client.metal.render.MetalBufferUploadTest.hostedUploadCopyCost"]).configure { task ->
+        task.systemProperty "metallum.ci.encodingCost", "true"
+    }
+
     def hostedIris = configureHostedTest(
         "hostedMetalIrisIntegrationTest",
         "Runs shipping Iris-on-Metal GPU integration tests after the hosted capability probe.",

@@ -318,6 +318,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 throw new IllegalStateException("Could not stage selected Metal framebuffer", exception);
             }
             writeCaptureSamples(evidenceDir.resolve("metal-framebuffer-samples.json"), samples, selected.frameId());
+            writeOptimizationEvidence(evidenceDir.resolve("optimization-evidence.json"));
 
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             closeRenderContract();
@@ -635,6 +636,45 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         byte[] chunk = new byte[65_536];
         for (int count; (count = input.read(chunk)) != -1;) digest.update(chunk, 0, count);
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void writeOptimizationEvidence(Path output) {
+        String profile = System.getProperty("metallum.ci.transportProfile", "default");
+        JsonObject report = new JsonObject();
+        report.addProperty("profile", profile);
+        JsonObject enabled = new JsonObject();
+        for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy")) {
+            boolean value = Boolean.parseBoolean(System.getProperty("metallum.opt." + flag, "false"));
+            if (!profile.equals("default")) require(value == profile.equals("candidate"), "Wrong optimization property: " + flag);
+            enabled.addProperty(flag, value);
+        }
+        report.add("enabled", enabled);
+        var counters = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
+        long fused = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls();
+        long rejected = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls();
+        if (enabled.get("fusedStateDraw").getAsBoolean()) {
+            require(fused > 0, "Production Minecraft never activated fused state/draw");
+            require(rejected == 0, "Production fused state/draw rejected valid packets");
+        } else require(fused == 0, "Fused state/draw ignored its rollback property");
+        if (enabled.get("reuseEncoderState").getAsBoolean()) {
+            require(counters.shadowReuseHits() > 0 && counters.packetStorageReuseHits() > 0,
+                    "Production Minecraft never reused encoder state storage");
+        } else require(counters.shadowReuseHits() == 0 && counters.packetStorageReuseHits() == 0,
+                "Encoder state reuse ignored its rollback property");
+        if (enabled.get("reuseNativeEncoderArguments").getAsBoolean()) {
+            require(counters.nativeEncoderArgumentReuseCalls() > 0, "Production Minecraft never reused native encoder arguments");
+        } else require(counters.nativeEncoderArgumentReuseCalls() == 0, "Native argument reuse ignored its rollback property");
+        report.addProperty("fusedDrawCalls", fused);
+        report.addProperty("rejectedFusedDrawCalls", rejected);
+        report.addProperty("verified", true);
+        var gson = new GsonBuilder().setPrettyPrinting().create();
+        report.add("state", gson.toJsonTree(counters));
+        report.add("uploads", gson.toJsonTree(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot()));
+        try {
+            Files.writeString(output, gson.toJson(report) + "\n", StandardCharsets.UTF_8);
+        } catch (IOException failure) {
+            throw new IllegalStateException("Cannot write optimization activation evidence", failure);
+        }
     }
 
     private static void writeEvidence(
