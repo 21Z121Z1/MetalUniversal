@@ -223,6 +223,8 @@ gradle.projectsEvaluated {
             promotedProperties.each { task.systemProperty it, enabled.toString() }
             task.systemProperty "metallum.ci.encodingCost", "true"
             task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            // Keep C2 compilation in warmup instead of racing the sample window.
+            task.jvmArgs "-Xbatch"
             task.outputs.upToDateWhen { false }
         }
         costTasks.add(costTask)
@@ -232,6 +234,7 @@ gradle.projectsEvaluated {
             "Compares direct dynamic-upload copy cost in interleaved order.",
             ["com.metallum.client.metal.render.MetalBufferUploadTest.hostedUploadCopyCost"]).configure { task ->
         task.systemProperty "metallum.ci.encodingCost", "true"
+        task.jvmArgs "-Xbatch"
     }
 
     def hostedIris = configureHostedTest(

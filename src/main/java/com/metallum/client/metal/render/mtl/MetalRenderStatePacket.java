@@ -73,6 +73,10 @@ final class MetalRenderStatePacket implements AutoCloseable {
 
     private static final DrawSubmitter NATIVE_DRAW = MetalRenderStatePacketBridge::applyDraw;
 
+    boolean hasNativeStateBatch() {
+        return this.entryCount >= MIN_NATIVE_ENTRIES;
+    }
+
     boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
                     final long indexType, final MemorySegment indexBuffer, final long indexOffset,
                     final int firstOrBaseVertex, final int count, final int instances, final int baseInstance) {
@@ -80,7 +84,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
         // Preserve the existing critical direct-setter route for tiny packets.
         // Fusion replaces an ordinary packet call plus draw, not two cheaper
         // critical calls with a newly introduced ordinary packet call.
-        if (this.entryCount < MIN_NATIVE_ENTRIES) return false;
+        if (!hasNativeStateBatch()) return false;
         return tryDraw(encoder, kind, primitive, indexType, indexBuffer, indexOffset,
                 firstOrBaseVertex, count, instances, baseInstance, NATIVE_DRAW);
     }
@@ -93,7 +97,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
         ensureOpen();
         if (!this.active || !this.drawActive || this.entryCount == 0) return false;
         MemorySegment draw = this.drawStorage;
-        draw.fill((byte) 0);
+        // Every live field is overwritten below. Reserved words remain zero in
+        // this exclusively owned, initially zeroed allocation; clearing the
+        // entire descriptor again would duplicate these stores on every draw.
         draw.set(ValueLayout.JAVA_INT, 0, DRAW_BYTES);
         draw.set(ValueLayout.JAVA_INT, 4, kind);
         draw.set(ValueLayout.JAVA_INT, 8, Math.toIntExact(primitive));

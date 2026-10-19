@@ -25,7 +25,7 @@
 - 候选组合：显式开启四项，执行 MRT、偏移／实例化、上传与资源寿命测试，并要求激活计数增加。
 - 生产默认：不注入这四个属性，使用相同 GPU 预期验证默认行为。
 - 逐项关闭：其余三项开启，验证关闭一项后读回、resize 和 fallback 行为。
-- 编码成本：同一 runner 上八个独立 JVM，顺序为 ABBAABBA；固定单／多状态变化加 draw 与重复 encoder 工作负载，记录每次操作时间和 Java 分配量。GPU 等待在计时区间外，timing JVM 不开启诊断计数。
+- 编码成本：同一 runner 上八个独立 JVM，顺序为 ABBAABBA；固定单／多状态变化加 draw 与重复 encoder 工作负载，记录每次操作时间和 Java 分配量。以 `-Xbatch` 将 JIT 编译留在预热阶段；绘制预热 32,768 次、encoder 预热 16,384 次。GPU 等待在计时区间外，timing JVM 不开启诊断计数。
 - 上传成本：64 B、64 KiB、1 MiB 的 direct buffer，四个 ABBA 块，按独立字节预期检查结果。
 
 `Minecraft 26.3 production client E2E` 对 Vanilla、Sodium 分别运行原路径、候选组合、生产默认。生产 JAR 必须与精确提交一致；检查有内容的 Metal framebuffer、呈现完成、资源重载和优化激活计数。客户端不再强制关闭状态包。

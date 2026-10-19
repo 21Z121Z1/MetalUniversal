@@ -19,7 +19,7 @@ final class MetalBufferUploadTest {
                 for (int i = 0; i < patchSize; i++) patch.put(i, (byte) (i * 3 + 1));
                 int iterations = Math.max(1024, 16777216 / size);
                 // Warm both paths before recording four ABBA blocks.
-                for (int warmup = 0; warmup < 4; warmup++) {
+                for (int warmup = 0; warmup < 16; warmup++) {
                     for (int i = 0; i < iterations; i++) MetalBufferUpload.copy(previous, fresh, size, offset, patch,
                             (warmup & 1) == 0 && MetalBufferUpload.useRangeCopy(size, patchSize));
                 }

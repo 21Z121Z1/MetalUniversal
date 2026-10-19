@@ -348,7 +348,8 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
-        if (FUSED_STATE_DRAW && this.statePacket != null && MetalRenderStatePacketBridge.drawAvailable()
+        if (FUSED_STATE_DRAW && this.statePacket != null && this.statePacket.hasNativeStateBatch()
+                && MetalRenderStatePacketBridge.drawAvailable()
                 && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_PRIMITIVES,
                 primitiveType.value, 0, MemorySegment.NULL, 0,
                 firstVertex, vertexCount, instanceCount, baseInstance)) return;
@@ -374,7 +375,8 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
-        if (FUSED_STATE_DRAW && this.statePacket != null && MetalRenderStatePacketBridge.drawAvailable()
+        if (FUSED_STATE_DRAW && this.statePacket != null && this.statePacket.hasNativeStateBatch()
+                && MetalRenderStatePacketBridge.drawAvailable()
                 && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_INDEXED,
                 primitiveType.value, indexType.value, indexBuffer, offset,
                 baseVertex, indexCount, instanceCount, baseInstance)) return;

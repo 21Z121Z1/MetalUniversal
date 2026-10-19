@@ -20,6 +20,7 @@ final class MetalRenderStatePacketTest {
         try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
             packet.appendScissor(ENCODER, 11, 13, 32, 48);
             assertFalse(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0, 0, 3, 1, 0));
+            assertFalse(packet.hasNativeStateBatch());
             assertEquals(1, packet.entryCount(), "the ordinary flush must still consume this state before drawing");
             assertTrue(packet.active());
         }
@@ -27,8 +28,8 @@ final class MetalRenderStatePacketTest {
 
     @Test
     void fusedDirectAndIndexedDrawsCarryExactArgumentsAndConsumeStateOnce() {
-        for (int kind : new int[]{1, 2}) {
-            try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+            for (int kind : new int[]{2, 1, 2}) {
                 // The v2 ABI accepts one entry; production dispatch applies its
                 // stricter native-packet threshold before calling this layer.
                 packet.appendScissor(ENCODER, 11, 13, 32, 48);

@@ -140,7 +140,8 @@ final class MetalMrtBackendIntegrationTest {
                 double[] timings = new double[8];
                 long[] allocatedBytes = new long[8];
                 int operations = manyEncoders ? 256 : 4096;
-                for (int round = -4; round < timings.length; round++) {
+                int warmupRounds = manyEncoders ? 64 : 8;
+                for (int round = -warmupRounds; round < timings.length; round++) {
                     long allocatedBefore = allocation.getCurrentThreadAllocatedBytes();
                     long start;
                     long elapsed;
