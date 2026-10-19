@@ -30,12 +30,6 @@ private struct CameraUniforms {
     var params: SIMD4<Float>
 }
 
-private struct MergeUniforms {
-    var viewport: SIMD4<UInt32>
-    var flags: SIMD4<UInt32>
-    var params: SIMD4<Float>
-}
-
 private struct HandUniforms {
     var width: UInt32
     var height: UInt32
@@ -76,6 +70,7 @@ private func cases(width: Int, height: Int) -> [Case] {
     jitter.columns.3.y = 1.0 / Float(height)
     var behind = matrix_identity_float4x4; behind.columns.3.w = -1
     var singular = matrix_identity_float4x4; singular.columns.3.w = 0
+    let negativeHomogeneousScale = simd_float4x4(diagonal: SIMD4<Float>(repeating: -1))
     return [
         Case(name: "static", expectedMotion: .zero),
         Case(name: "jitter_only", inverse: jitter, expectedMotion: .zero),
@@ -86,6 +81,8 @@ private func cases(width: Int, height: Int) -> [Case] {
              expectedRejection: true, reactiveMinimum: 0.99),
         Case(name: "singular_unprojection", inverse: singular, expectedMotion: .zero,
              expectedRejection: true, reactiveMinimum: 0.99),
+        Case(name: "negative_world_homogeneous_scale_is_valid", inverse: negativeHomogeneousScale,
+             history: true, expectedMotion: .zero),
         Case(name: "object_overrides_camera", previous: x, object: SIMD2(-0.25, 0.125),
              valid: 1, expectedMotion: SIMD2(-0.25, 0.125)),
         Case(name: "uncovered_object_ignored", object: SIMD2(8, 8), expectedMotion: .zero),
@@ -110,6 +107,10 @@ private func cases(width: Int, height: Int) -> [Case] {
              history: true, expectedMotion: .zero),
         Case(name: "camera_depth_reprojection_standard_z", previous: backward, previousDepth: 0.4,
              history: true, reversed: false, expectedMotion: .zero),
+        Case(name: "camera_depth_reprojection_still_rejects_occluder_reversed_z", previous: forward, previousDepth: 0.8,
+             history: true, expectedMotion: .zero, expectedRejection: true, reactiveMinimum: 0.84),
+        Case(name: "camera_depth_reprojection_still_rejects_occluder_standard_z", previous: backward, previousDepth: 0.2,
+             history: true, reversed: false, expectedMotion: .zero, expectedRejection: true, reactiveMinimum: 0.84),
         Case(name: "transparent_reactive_max_merge", reactive: 0.9,
              expectedMotion: .zero, reactiveMinimum: 0.89),
         Case(name: "reversed_z_sky", depth: 0, previousDepth: 0, history: true,
@@ -127,6 +128,10 @@ private final class Harness {
     let handPipeline: MTLComputePipelineState
 
     init() throws {
+        guard MemoryLayout<MetalFxMotionMergeUniforms>.stride == 112,
+              MemoryLayout<MetalFxMotionMergeUniforms>.offset(of: \.previousFromCurrentClip) == 48 else {
+            throw ContractError("Shipping Swift/MSL merge constant layout mismatch")
+        }
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             throw ContractError("No Metal device/queue")
         }
@@ -145,6 +150,60 @@ private final class Harness {
         cameraPipeline = try make(motionCameraV2MslSource(), "metallum_motion_camera_v2")
         mergePipeline = try make(motionMergeV2MslSource(), "metallum_motion_merge_v2")
         handPipeline = try make(handOverlayMslSource(), "metallum_hand_overlay_motion")
+    }
+
+    func presentationOrientation(root: URL) throws -> [[String: Any]] {
+        let width = 13, height = 9
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = [.shaderRead, .renderTarget]
+        guard let source = device.makeTexture(descriptor: descriptor) else { throw ContractError("Orientation source allocation") }
+        var bytes = [UInt8](repeating: 255, count: width*height*4)
+        for y in 0..<height { for x in 0..<width {
+            let p = (y*width+x)*4
+            bytes[p] = UInt8(x*17); bytes[p+1] = UInt8(y*23); bytes[p+2] = UInt8((x+3*y)*7%256)
+        }}
+        bytes.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0,0,width,height), mipmapLevel: 0,
+                                               withBytes: $0.baseAddress!, bytesPerRow: width*4) }
+        try png(bytes, width: width, height: height, to: root.appendingPathComponent("orientation-source.png"))
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear; samplerDescriptor.magFilter = .linear
+        samplerDescriptor.sAddressMode = .clampToEdge; samplerDescriptor.tAddressMode = .clampToEdge
+        guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else { throw ContractError("Orientation sampler") }
+        var results = [[String: Any]]()
+        for flip in [false, true] {
+            let name = flip ? "shipping_present_flips_y" : "shipping_internal_copy_preserves_y"
+            let library = try device.makeLibrary(source: flip ? presentMslSource() : copyMslSource(), options: nil)
+            let pso = MTLRenderPipelineDescriptor()
+            pso.vertexFunction = library.makeFunction(name: "metallum_present_vs")
+            pso.fragmentFunction = library.makeFunction(name: "metallum_present_fs")
+            pso.colorAttachments[0].pixelFormat = .rgba8Unorm
+            let pipeline = try device.makeRenderPipelineState(descriptor: pso)
+            guard let output = device.makeTexture(descriptor: descriptor), let cb = queue.makeCommandBuffer() else {
+                throw ContractError("Orientation output/command allocation")
+            }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = output
+            pass.colorAttachments[0].loadAction = .clear; pass.colorAttachments[0].storeAction = .store
+            guard let encoder = cb.makeRenderCommandEncoder(descriptor: pass) else { throw ContractError("Orientation encoder") }
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setFragmentTexture(source, index: 0); encoder.setFragmentSamplerState(sampler, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+            guard cb.status == .completed else { throw ContractError("Orientation GPU command failed: \(String(describing:cb.error))") }
+            let actual = [UInt8](read(output, bytesPerPixel: 4))
+            var violations = 0, maxError = 0
+            for y in 0..<height { for x in 0..<width { for channel in 0..<4 {
+                let expected = bytes[((flip ? height-1-y : y)*width+x)*4+channel]
+                let error = abs(Int(actual[(y*width+x)*4+channel])-Int(expected))
+                maxError = max(maxError,error); if error > 1 { violations += 1 }
+            }}}
+            try png(actual, width: width, height: height, to: root.appendingPathComponent(name+".png"))
+            results.append(["name":name,"passed":violations == 0,"violations":violations,"maxByteError":maxError,
+                            "width":width,"height":height,"scope":"actual shipping shader offscreen; not scanout/pacing"])
+            print("PRESENT_ORIENTATION \(violations == 0 ? "PASS" : "FAIL") \(name) violations=\(violations)")
+        }
+        return results
     }
 
     func texture(_ format: MTLPixelFormat, _ width: Int, _ height: Int,
@@ -227,8 +286,10 @@ private final class Harness {
             var cu = CameraUniforms(current: u.current, inverse: u.inverse, previous: u.previous,
                                     viewport: u.viewport, flags: SIMD4(1, c.sky ? 1 : 0, 0, 0), params: SIMD4(0.5, 0, 0, 0))
             try encode(cb, cameraPipeline, &cu, [depth, camera, rejection, reactive], c.name + " camera")
-            var mu = MergeUniforms(viewport: SIMD4(UInt32(width), UInt32(height), c.history ? 1 : 0, c.reversed ? 1 : 0),
-                                   flags: SIMD4(c.sky ? 1 : 0, 0, 0, 0), params: SIMD4(0.85, 0, 0, 0))
+            var mu = MetalFxMotionMergeUniforms(
+                viewport: SIMD4(UInt32(width), UInt32(height), c.history ? 1 : 0, c.reversed ? 1 : 0),
+                flags: SIMD4(c.sky ? 1 : 0, 0, 0, 0), params: SIMD4(0.85, 0, 0, 0),
+                previousFromCurrentClip: c.previous * c.inverse)
             try encode(cb, mergePipeline, &mu, [camera, object, valid, rejection, motion, reactive, previous, depth], c.name + " merge")
         }
         let encodeMilliseconds = (ProcessInfo.processInfo.systemUptime - encodeStart) * 1000
@@ -321,10 +382,13 @@ private enum MetalMotionContractValidation {
                     }
                 }
             }
+            let orientation = try h.presentationOrientation(root: root)
             let failed = results.filter { ($0["passed"] as? Bool) != true }.count
+                + orientation.filter { ($0["passed"] as? Bool) != true }.count
             let result: [String: Any] = ["sourceCommit":ProcessInfo.processInfo.environment["METALLUM_SOURCE_SHA"] ?? "unknown",
                                        "device":h.device.name,"passed":failed == 0,"cases":results,"failedCases":failed,
                                        "kernel":"shipping fused, camera, merge and hand kernels","metalfxQualityValidated":false,
+                                       "presentationShaderOrientation":orientation,
                                        "presentationValidated":false]
             try JSONSerialization.data(withJSONObject: result, options:[.prettyPrinted,.sortedKeys])
                 .write(to:root.appendingPathComponent("summary.json"),options:.atomic)

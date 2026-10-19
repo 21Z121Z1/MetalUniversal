@@ -74,9 +74,19 @@ final class MetalFxLifecycleEvidence {
                     && MetalFxManager.scalingStatus().historyEpoch() > restored.historyEpoch(), 100);
             var paused = snapshot(context);
             states.put("paused", paused);
+            // LoadingOverlay pauses singleplayer too. Reload while already paused
+            // so pause/resume invalidation cannot accidentally hide a missing reload hook.
+            var reload = context.computeOnClient(client -> client.reloadResourcePacks());
+            context.waitFor(client -> reload.isDone(), 600);
+            reload.join();
+            context.waitFor(client -> client.gui.overlay() == null && client.isPaused(), 100);
+            var pausedReload = snapshot(context);
+            states.put("reloadedWhilePaused", pausedReload);
+            require(pausedReload.session() != paused.session() || pausedReload.historyEpoch() > paused.historyEpoch(),
+                    "Resource reload reused history while pause state stayed unchanged: " + pausedReload);
             context.runOnClient(client -> client.gui.setScreen(null));
             context.waitFor(client -> !client.isPaused()
-                    && MetalFxManager.scalingStatus().historyEpoch() > paused.historyEpoch(), 100);
+                    && MetalFxManager.scalingStatus().historyEpoch() > pausedReload.historyEpoch(), 100);
             states.put("resumed", snapshot(context));
             for (var entry : states.entrySet()) {
                 var s = entry.getValue();

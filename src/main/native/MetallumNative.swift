@@ -4560,13 +4560,13 @@ private func fullscreenMslSource(flipY: Bool) -> String {
     """
 }
 
-private func presentMslSource() -> String {
+func presentMslSource() -> String {
     // CAMetalLayer presents with the opposite vertical orientation from the
     // framebuffer convention used by the original Metallum backend.
     return fullscreenMslSource(flipY: true)
 }
 
-private func copyMslSource() -> String {
+func copyMslSource() -> String {
     // Texture-to-texture copies stay within the same Metal coordinate space;
     // applying the drawable flip here would make the later present double
     // flip MetalFX output and the GUI seed texture.
@@ -5479,6 +5479,15 @@ func motionCameraV2MslSource() -> String {
     """
 }
 
+// Shared by Metal 3, Metal 4 and the GPU contract executable. This is an
+// internal compute constant layout, not a Java/FFM exported descriptor.
+struct MetalFxMotionMergeUniforms {
+    var viewport: SIMD4<UInt32>
+    var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
+    var previousFromCurrentClip: simd_float4x4
+}
+
 func motionMergeV2MslSource() -> String {
     """
     #include <metal_stdlib>
@@ -5488,6 +5497,7 @@ func motionMergeV2MslSource() -> String {
       uint4 viewport;
       uint4 flags;   // x = sky far-plane motion, y = reprojection depth dilation
       float4 params; // x = disocclusion reactive cap
+      float4x4 previousFromCurrentClip;
     };
 
     inline bool validDepth(float depth) {
@@ -5528,9 +5538,22 @@ func motionMergeV2MslSource() -> String {
         if (skyCurrent) {
           currentDepth = 0.00002;
         }
+        // Raw depths from different camera spaces cannot be compared directly.
+        // RG object/hand motion has no previous Z, so keep its conservative
+        // depth policy; camera-only pixels have an exact previous-space Z.
+        float comparisonDepth = currentDepth;
+        if (!(isfinite(objectValid) && objectValid > 0.5)) {
+          float2 uv = (float2(pixel) + 0.5) / float2(u.viewport.xy);
+          float4 previousClip = u.previousFromCurrentClip
+              * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, currentDepth, 1.0);
+          // The combined matrix retains unprojection's homogeneous scale;
+          // camera reconstruction already checks front-facing visibility.
+          comparisonDepth = all(isfinite(previousClip)) && abs(previousClip.w) > 0.000001
+              ? previousClip.z / previousClip.w : -1.0;
+        }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(u.viewport.xy) * 0.5;
-        if (!validDepth(currentDepth)
+        if (!validDepth(currentDepth) || !validDepth(comparisonDepth)
             || !all(isfinite(previousPixel))
             || previousPixel.x < 0.0 || previousPixel.y < 0.0
             || previousPixel.x >= float(u.viewport.x)
@@ -5542,7 +5565,7 @@ func motionMergeV2MslSource() -> String {
           // nearest-neighbour probe on the far side of the edge on alternating
           // frames, and leaf-vs-sky always clears the threshold below, so the
           // whole foliage/sky border was re-flagged as disoccluded every other
-          // frame. Take the neighbourhood sample closest to the current depth
+          // frame. Take the neighbourhood sample closest to the expected previous depth
           // instead; radius 0 reproduces the legacy single probe exactly.
           int radius = u.flags.y != 0u ? 1 : 0;
           float previousDepth = 0.0;
@@ -5562,7 +5585,7 @@ func motionMergeV2MslSource() -> String {
                 probeDepth = 0.00002;
               }
               float delta = isfinite(probeDepth)
-                  ? abs(probeDepth - currentDepth)
+                  ? abs(probeDepth - comparisonDepth)
                   : 1.0e30;
               if (bestDelta < 0.0 || delta < bestDelta) {
                 bestDelta = delta;
@@ -5577,10 +5600,10 @@ func motionMergeV2MslSource() -> String {
             // sky-colored history is invalid for it.
             disocclusion = 1.0;
           } else {
-            float threshold = max(0.0025, abs(currentDepth) * 0.01);
+            float threshold = max(0.0025, abs(comparisonDepth) * 0.01);
             bool wasOccluded = u.viewport.w != 0u
-                ? previousDepth > currentDepth + threshold
-                : previousDepth < currentDepth - threshold;
+                ? previousDepth > comparisonDepth + threshold
+                : previousDepth < comparisonDepth - threshold;
             if (!validDepth(previousDepth) || wasOccluded) {
               disocclusion = 1.0;
             }
@@ -5683,6 +5706,7 @@ func motionFusedV2MslSource() -> String {
 
       float currentDepth = depthTexture.read(pixel).r;
       float reconstructionDepth = currentDepth;
+      float cameraPreviousDepth = -1.0;
       float2 cameraMotion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
       float disocclusion = 0.0;
@@ -5712,13 +5736,14 @@ func motionFusedV2MslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (!isfinite(currentClip.w) || currentClip.w <= 0.000001
-              || !isfinite(previousClip.w) || previousClip.w <= 0.000001) {
+          if (!all(isfinite(currentClip)) || currentClip.w <= 0.000001
+              || !all(isfinite(previousClip)) || previousClip.w <= 0.000001) {
             disocclusion = 1.0;
             reactive = 1.0;
           } else {
             currentClip /= currentClip.w;
             previousClip /= previousClip.w;
+            cameraPreviousDepth = previousClip.z;
             cameraMotion = float2(
               previousClip.x - currentClip.x,
               currentClip.y - previousClip.y
@@ -5769,9 +5794,11 @@ func motionFusedV2MslSource() -> String {
         }
       }
 
+      bool handCovered = false;
       if (u.options.z != 0u) {
         float handDepth = handDepthTexture.read(pixel).r;
         if (isfinite(handDepth) && handDepth > 0.0000001) {
+          handCovered = true;
           // Hand pixels have their own ownership proof. A world entity directly
           // behind the hand may set objectValidityTexture at the same pixel, so
           // that plane is intentionally ignored here. Exact first-person motion
@@ -5804,6 +5831,9 @@ func motionFusedV2MslSource() -> String {
             && reprojectedCurrentDepth >= 0.0 && reprojectedCurrentDepth <= 0.00001;
         if (skyCurrent) {
           reprojectedCurrentDepth = 0.00002;
+        }
+        if (!(isfinite(objectValid) && objectValid > 0.5) && !handCovered) {
+          reprojectedCurrentDepth = cameraPreviousDepth;
         }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(width, height) * 0.5;
@@ -7009,17 +7039,13 @@ private func metal4MetalFxEncodeV2(
                        (2, disocclusionTexture), (3, reactiveTexture)],
             width: Int(inputWidth), height: Int(inputHeight)
         ) else { return 0 }
-        struct MergeUniforms {
-            var viewport: SIMD4<UInt32>
-            var flags: SIMD4<UInt32>
-            var params: SIMD4<Float>
-        }
-        let mergeUniforms = MergeUniforms(
+        let mergeUniforms = MetalFxMotionMergeUniforms(
             viewport: SIMD4(UInt32(inputWidth), UInt32(inputHeight),
                             previousDepthIsValid ? 1 : 0, depthReversed != 0 ? 1 : 0),
             flags: SIMD4(NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
                          NativeState.mergeDepthDilation > 0.5 ? 1 : 0, 0, 0),
-            params: SIMD4(NativeState.disocclusionReactiveCap, 0, 0, 0)
+            params: SIMD4(NativeState.disocclusionReactiveCap, 0, 0, 0),
+            previousFromCurrentClip: previousMatrix * inverseMatrix
         )
         guard encodeMetal4Compute(
             lease: lease, label: "MetalFX Object and Camera Motion Merge (Metal 4)",
@@ -7267,15 +7293,10 @@ private func metal3MetalFxEncodeV2(
                 return 0
             }
             NativeState.lastTemporalScalerForInterpolation = scalerObject
-            struct MergeUniforms {
-                var viewport: SIMD4<UInt32>
-                var flags: SIMD4<UInt32>
-                var params: SIMD4<Float>
-            }
             let currentMatrix = makeMatrix(currentViewProjection)
             let inverseMatrix = makeMatrix(inverseCurrentViewProjection)
             let previousMatrix = makeMatrix(previousViewProjection)
-            let mergeUniforms = MergeUniforms(
+            let mergeUniforms = MetalFxMotionMergeUniforms(
                 viewport: SIMD4<UInt32>(
                     UInt32(inputWidth),
                     UInt32(inputHeight),
@@ -7288,7 +7309,8 @@ private func metal3MetalFxEncodeV2(
                     0,
                     0
                 ),
-                params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0)
+                params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0),
+                previousFromCurrentClip: previousMatrix * inverseMatrix
             )
             if NativeState.legacyMotionPasses {
                 guard let cameraEncoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -7346,7 +7368,7 @@ private func metal3MetalFxEncodeV2(
                 mergeEncoder.setComputePipelineState(pipelines.merge)
                 mergeEncoder.setBytes(
                     &mutableMergeUniforms,
-                    length: MemoryLayout<MergeUniforms>.stride,
+                    length: MemoryLayout<MetalFxMotionMergeUniforms>.stride,
                     index: 0
                 )
                 mergeEncoder.setTexture(cameraMotionTexture, index: 0)
@@ -14098,8 +14120,8 @@ func metal4WaitForCompletion(
 ///   ClearUniforms 48 B (the only vertex one, and the only one that can repeat
 ///   many times per frame — once per clear), CutoutReactiveUniforms 32 B,
 ///   HandOverlayUniforms 16 B, SIMD2<UInt32> 8 B, TransparencyMaskUniforms 48 B,
-///   MergeUniforms 48 B, and MotionUniforms 240 B, the largest (three 4x4
-///   matrices plus three vectors).
+///   MetalFxMotionMergeUniforms 112 B, MotionUniforms 240 B, and fused motion
+///   uniforms 256 B (three 4x4 matrices plus four vectors), the largest.
 /// Every one of those has an alignment requirement of at most 16 B, so the 16 B
 /// default below covers them; `allocate` still takes an alignment so a future
 /// uniform with a stricter requirement cannot silently be under-aligned.

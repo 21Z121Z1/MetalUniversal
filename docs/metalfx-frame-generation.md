@@ -1,7 +1,10 @@
 # MetalFX Frame Generation
 
-Status: presenter, object-motion producer and validation infrastructure
-implemented; production gate closed pending the attended 13.4 visual/pacing QA.
+Status (2026-10-19): presenter, partial motion producers and validation
+infrastructure exist; the production gate remains closed. First-person
+projection history is unproven, and both probed hosted GPUs reject Temporal
+and FrameInterpolator support. Historical acceptance does not establish current
+quality or pacing. See the [current audit](metalfx-closure-study.zh-CN.md).
 
 Frame interpolation is a macOS 26+ path based on
 `MTLFXFrameInterpolator`. The code is present and automatically testable, but
@@ -11,8 +14,8 @@ Minecraft cannot enable it while
 ### FrameInterpolator camera contract
 
 The macOS 26 SDK's `MTLFXFrameInterpolatorBase` contract supplies scalar camera
-inputs (`fieldOfView`, `nearPlane`, `farPlane`, `aspectRatio`,
-`deltaTime`, and `isDepthReversed`) plus per-frame
+inputs (`fieldOfView` in degrees, `nearPlane`, `farPlane`, `aspectRatio`,
+`deltaTime` in seconds, and `isDepthReversed`) plus per-frame
 `jitterOffsetX/Y`. Apple's current API reference marks
 `worldToViewMatrix` and `viewToClipMatrix` as macOS 27.0 beta properties,
 not macOS 26 properties. Consequently the macOS 26 Java-to-FFM-to-Swift ABI

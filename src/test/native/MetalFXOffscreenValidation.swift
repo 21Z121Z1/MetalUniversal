@@ -1002,7 +1002,9 @@ private func runScenario(
     let disocclusionBytes = try exportTexture(harness: harness, texture: disocclusion, name: "disocclusion", directory: directory)
     let reactiveBytes = try exportTexture(harness: harness, texture: reactive, name: "reactive", directory: directory)
     _ = try exportTexture(harness: harness, texture: temporalOutput, name: "temporal_output", directory: directory)
-    var differenceValues: [String: Any] = ["status": "blocked", "reason": "FrameInterpolator supportsDevice=false"]
+    var interpolationBlockReason = "FrameInterpolator supportsDevice=false"
+    if #unavailable(macOS 26.0) { interpolationBlockReason = "FrameInterpolator requires macOS 26" }
+    var differenceValues: [String: Any] = ["status": "blocked", "reason": interpolationBlockReason]
     if interpolationEnabled {
         let interpolatedBytes = try exportTexture(harness: harness, texture: interpolatedOutput, name: "interpolated_output", directory: directory)
         let truthBytes = try exportTexture(harness: harness, texture: groundTruth.color, name: "ground_truth_t0_5", directory: directory)
@@ -1369,8 +1371,10 @@ private enum MetalFXOffscreenValidationMain {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let harness = try OffscreenHarness()
             let temporalSupported = MTLFXTemporalScalerDescriptor.supportsDevice(harness.device)
+            var interpolationApiAvailable = false
             var interpolationSupported = false
             if #available(macOS 26.0, *) {
+                interpolationApiAvailable = true
                 interpolationSupported = MTLFXFrameInterpolatorDescriptor.supportsDevice(harness.device)
             }
             if !capabilityAware {
@@ -1404,7 +1408,10 @@ private enum MetalFXOffscreenValidationMain {
                 "sourceCommit": ProcessInfo.processInfo.environment["METALLUM_SOURCE_SHA"] ?? "unknown",
                 "allSupportedChecksPassed": true,
                 "temporal": ["supported":temporalSupported, "execution":temporalSupported ? "passed" : "blocked: supportsDevice=false"],
-                "frameInterpolation": ["supported":interpolationSupported, "execution":interpolationSupported ? "passed" : "blocked: supportsDevice=false"],
+                "frameInterpolation": ["apiAvailable":interpolationApiAvailable,
+                                       "supported":interpolationSupported,
+                                       "execution":interpolationSupported ? "passed"
+                                           : interpolationApiAvailable ? "blocked: supportsDevice=false" : "blocked: requires macOS 26"],
                 "qualityScope": "synthetic offscreen inputs; standalone interpolation, not Minecraft or display pacing acceptance",
                 "device": harness.device.name,
                 "scenario_count": results.count,
