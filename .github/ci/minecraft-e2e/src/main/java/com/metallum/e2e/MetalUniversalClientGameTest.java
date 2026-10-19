@@ -46,7 +46,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final int P1_FRAMEBUFFER_YAW = -65;
     private static final int P1_FRAMEBUFFER_PITCH = 25;
 
-    private static void requestStationaryServerHalt(TestSingleplayerContext singleplayer) {
+    private static void requestServerOwnedHalt(TestSingleplayerContext singleplayer) {
         // Fabric's TestSingleplayerContext.close() disconnects the client and then
         // calls IntegratedServer.halt() from the client thread. In 26.3 that halt
         // executes server work synchronously and can deadlock the GameTest phase
@@ -150,7 +150,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             if (Boolean.getBoolean("metallum.ci.gameplay")) {
                 VanillaGameplay.run(context, singleplayer, evidenceDir, worldEvidence);
                 if (Boolean.getBoolean("metallum.ci.stationaryBaseline")) {
-                    requestStationaryServerHalt(singleplayer);
+                    requestServerOwnedHalt(singleplayer);
                 }
                 return;
             }
@@ -363,6 +363,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     "Metal render-contract dropped framebuffer captures: " + contractSnapshot);
             require(selected.nonBlackPixels() > 0 && selected.distinctRgb() > 1,
                     "All sampled Metal framebuffers were black/constant; best sample=" + selected);
+            // Ordinary conformance uses the same Fabric phase barrier as the
+            // stationary lane. Halt on the server owner before Fabric closes
+            // the client, without bypassing its disconnect/wait or later tests.
+            requestServerOwnedHalt(singleplayer);
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             closeRenderContractQuietly();
