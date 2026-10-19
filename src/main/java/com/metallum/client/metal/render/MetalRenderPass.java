@@ -856,6 +856,8 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
             }
         }
+        MetalSodiumDrawDiagnostics.capture(device, commandEncoder, compiledPipeline, vertexBuffers[0],
+                nativeIndexBuffer, indexType, drawParameters, drawCount, uniforms);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
