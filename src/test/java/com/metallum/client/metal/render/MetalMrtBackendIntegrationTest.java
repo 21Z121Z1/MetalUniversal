@@ -712,6 +712,109 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw() {
+        String name = "sodium_compact_vertex_multidraw";
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) in uvec2 a_Position;
+                layout(location=1) in vec4 a_Color;
+                layout(location=2) in uvec2 a_TexCoord;
+                layout(location=3) in uvec4 a_LightAndData;
+                layout(location=0) out vec4 vertexColor;
+                void main() {
+                    uvec3 hi = (uvec3(a_Position.x) >> uvec3(0, 10, 20)) & 1023u;
+                    uvec3 lo = (uvec3(a_Position.y) >> uvec3(0, 10, 20)) & 1023u;
+                    vec3 position = vec3((hi << 10u) | lo) * (32.0 / 1048576.0) - 8.0;
+                    gl_Position = vec4(position.xy / 8.0 - 1.0, 0, 1);
+                    bool dataValid = all(equal(a_LightAndData.xy, uvec2(248)))
+                        && a_LightAndData.z == 79u
+                        && (a_LightAndData.w == 37u || a_LightAndData.w == 199u)
+                        && all(lessThanEqual(a_TexCoord, uvec2(65535)));
+                    vertexColor = dataValid ? a_Color : vec4(0, 0, 1, 1);
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) in vec4 vertexColor;
+                layout(location=0) out vec4 color;
+                void main() { color = vertexColor; }
+                """);
+        var format = net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex.VERTEX_FORMAT;
+        assertEquals(20, format.getVertexSize());
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withVertexBinding(0, format).withCull(false)
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL)).build();
+        int prefix = 32;
+        ByteBuffer vertices = MemoryUtil.memCalloc(prefix + 12 * 20).order(ByteOrder.nativeOrder());
+        ByteBuffer indices = MemoryUtil.memAlloc(11 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer parameters = MemoryUtil.memAlloc(8 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try {
+            var compact = new net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex();
+            for (int quad = 0; quad < 2; quad++) {
+                var points = net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder.Vertex.uninitializedQuad();
+                for (int i = 0; i < 4; i++) {
+                    var point = points[i];
+                    point.x = quad * 8 + (i == 1 || i == 2 ? 8 : 0);
+                    point.y = i >= 2 ? 16 : 0;
+                    point.color = quad == 0 ? 0xff00ff00 : 0xff0000ff;
+                    point.ao = 1;
+                    point.u = 0.25f;
+                    point.v = 0.5f;
+                    point.light = 0x00f000f0;
+                }
+                compact.getEncoder().write(MemoryUtil.memAddress(vertices) + prefix + (4 + quad * 4L) * 20,
+                        79, points, quad == 0 ? 37 : 199);
+            }
+            for (int i = 0; i < 5; i++) indices.putInt(999);
+            for (int i : new int[]{0, 1, 2, 2, 3, 0}) indices.putInt(i);
+            indices.flip();
+            // Vulkan's interleaved record is firstIndex, indexCount, vertexOffset.
+            parameters.putInt(999).putInt(999);
+            parameters.putInt(5).putInt(6).putInt(4);
+            parameters.putInt(5).putInt(6).putInt(8);
+            parameters.flip().position(2 * Integer.BYTES);
+            try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, vertices);
+                 GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+                for (boolean multiDraw : List.of(false, true)) {
+                    try (PassWithViews pass = createPass(textures, null, false)) {
+                        pass.pass().setPipeline(pipeline);
+                        pass.pass().setVertexBuffer(0, vertexBuffer.slice(prefix, 12 * 20L));
+                        pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
+                        if (multiDraw) pass.pass().multiDrawIndexed(parameters.asIntBuffer(), 1, 0, 2);
+                        else {
+                            pass.pass().drawIndexed(6, 1, 5, 4, 0);
+                            pass.pass().drawIndexed(6, 1, 5, 8, 0);
+                        }
+                        encoder.submitRenderPass();
+                    }
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork();
+                    ByteBuffer pixels = readback(textures.getFirst());
+                    for (int y = 0; y < HEIGHT; y++) {
+                        for (int x = 0; x < WIDTH; x++) {
+                            int pixel = (y * WIDTH + x) * 4;
+                            assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "compact vertex red, multiDraw=" + multiDraw);
+                            assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "compact vertex green, multiDraw=" + multiDraw);
+                            assertByteNear(pixels.get(pixel + 2), 0, "compact vertex blue, multiDraw=" + multiDraw);
+                        }
+                    }
+                }
+            }
+        } finally {
+            closeTextures(textures);
+            MemoryUtil.memFree(parameters);
+            MemoryUtil.memFree(indices);
+            MemoryUtil.memFree(vertices);
+        }
+    }
+
+    @Test
     void renderPearlIndirectDrawsPreserveOffsetsAndFirstInstance() {
         String name = "vanilla_indirect";
         vertexShaders.put(name, """

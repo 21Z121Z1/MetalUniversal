@@ -50,6 +50,8 @@ jobs:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      # Preserve the exact translated stages when a non-black frame is visually wrong.
+      METALLUM_MSL_CACHE_DIR: ${{ github.workspace }}/build/agent-evidence/msl-cache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
