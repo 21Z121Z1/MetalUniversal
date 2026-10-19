@@ -67,6 +67,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final boolean writesDepth;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
+    private final boolean indexedVertexRebaseSafe;
 
     private final MemorySegment depthStencilState;
     private final boolean hasDepthStencilState;
@@ -144,6 +145,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().size();
+        this.indexedVertexRebaseSafe = !MetalCrossShaderCompiler.observesVertexIndex(vertexMsl);
         this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
                 this.firstAvailableVertexBufferSlot,
                 this.vertexBufferCount,
@@ -670,6 +672,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             return 0;
         }
         return formats.get(binding).getVertexSize();
+    }
+
+    boolean indexedVertexRebaseSafe() {
+        return indexedVertexRebaseSafe;
+    }
+
+    boolean perVertexBuffer(final int logicalSlot) {
+        var formats = this.info.getVertexFormatBindings();
+        return logicalSlot >= 0 && logicalSlot < formats.size() && formats.get(logicalSlot) != null
+                && !formats.get(logicalSlot).getElements().isEmpty()
+                && formats.get(logicalSlot).getStepRate() == 0;
     }
 
     int genericVertexBufferSlot() {

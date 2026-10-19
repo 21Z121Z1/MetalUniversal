@@ -714,6 +714,7 @@ final class MetalMrtBackendIntegrationTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(ints = {1, 4, 1528541})
     void sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw(int baseVertex) {
+        long rebasesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
         String name = "sodium_compact_vertex_multidraw";
         vertexShaders.put(name, """
                 #version 450
@@ -721,6 +722,7 @@ final class MetalMrtBackendIntegrationTest {
                 layout(location=1) in vec4 a_Color;
                 layout(location=2) in uvec2 a_TexCoord;
                 layout(location=3) in uvec4 a_LightAndData;
+                layout(location=4) in vec4 instanceColor;
                 layout(location=0) out vec4 vertexColor;
                 layout(std140) uniform u_Globals { vec4 transform; };
                 layout(std140) uniform Guard1 { uvec4 guard1; };
@@ -744,7 +746,7 @@ final class MetalMrtBackendIntegrationTest {
                         && all(equal(guard2, uvec4(5, 6, 7, 8)))
                         && all(equal(guard3, uvec4(9, 10, 11, 12)))
                         && currentTime == 37 && regionId == 54321u;
-                    vertexColor = dataValid ? a_Color : vec4(0, 0, 1, 1);
+                    vertexColor = dataValid ? a_Color * instanceColor : vec4(0, 0, 1, 1);
                 }
                 """);
         fragmentShaders.put(name, """
@@ -761,6 +763,8 @@ final class MetalMrtBackendIntegrationTest {
                 .withFragmentShader("metallum_test/" + name)
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withVertexBinding(0, format).withCull(false)
+                .withVertexBinding(1, com.mojang.renderpearl.api.vertex.VertexFormat.builder(1)
+                        .addAttribute("instanceColor", GpuFormat.RGBA8_UNORM).build())
                 .withPushConstantSize(20)
                 .withBindGroupLayout(com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
                         .withUniform("u_Globals", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
@@ -800,8 +804,11 @@ final class MetalMrtBackendIntegrationTest {
             parameters.putInt(5).putInt(6).putInt(baseVertex);
             parameters.putInt(5).putInt(6).putInt(baseVertex + 4);
             parameters.flip().position(2 * Integer.BYTES);
-            try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, vertices);
-                 GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            ByteBuffer instanceColors = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());
+            instanceColors.putInt(0xffff0000).putInt(0xffff0000).putInt(0xffffffff).flip();
+            try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_SRC, vertices);
+                 GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices);
+                 GpuBuffer instanceBuffer = device.createBuffer(() -> name + " instance colors", GpuBuffer.USAGE_VERTEX, instanceColors)) {
                 for (boolean multiDraw : List.of(false, true)) {
                     try (PassWithViews pass = createPass(textures, null, false)) {
                         pass.pass().setPipeline(pipeline);
@@ -818,16 +825,30 @@ final class MetalMrtBackendIntegrationTest {
                         constants.putFloat(4).putFloat(6).putFloat(0).putInt(37).putInt(54321).flip();
                         pass.pass().pushConstants(constants);
                         pass.pass().setVertexBuffer(0, vertexBuffer.slice(prefix, vertexBytes));
+                        pass.pass().setVertexBuffer(1, instanceBuffer.slice());
                         pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
-                        if (multiDraw) pass.pass().multiDrawIndexed(parameters.asIntBuffer(), 1, 0, 2);
+                        if (multiDraw) pass.pass().multiDrawIndexed(parameters.asIntBuffer(), 1, 2, 2);
                         else {
-                            pass.pass().drawIndexed(6, 1, 5, baseVertex, 0);
-                            pass.pass().drawIndexed(6, 1, 5, baseVertex + 4, 0);
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex, 2);
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex + 4, 2);
                         }
                         encoder.submitRenderPass();
                     }
                     encoder.submit();
                     device.waitForSubmittedGpuWork();
+                    // Verify the uploaded bytes after drawing, so this proof
+                    // cannot hide an upload/fetch ordering failure with a
+                    // readback barrier before the draw under test.
+                    try (MetalGpuBuffer input = (MetalGpuBuffer) device.createBuffer(() -> "compact input proof",
+                            GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 8 * 20)) {
+                        encoder.copyToBuffer(vertexBuffer.slice(prefix + (long) baseVertex * 20, 8 * 20), input.slice());
+                        encoder.submit();
+                        device.waitForSubmittedGpuWork();
+                        ByteBuffer uploaded = input.currentStorage();
+                        for (int i = 0; i < 8 * 20; i++) {
+                            assertEquals(vertices.get(prefix + baseVertex * 20 + i), uploaded.get(i), "compact uploaded byte " + i);
+                        }
+                    }
                     ByteBuffer pixels = readback(textures.getFirst());
                     for (int y = 0; y < HEIGHT; y++) {
                         for (int x = 0; x < WIDTH; x++) {
@@ -844,6 +865,10 @@ final class MetalMrtBackendIntegrationTest {
             MemoryUtil.memFree(parameters);
             MemoryUtil.memFree(indices);
             MemoryUtil.memFree(vertices);
+        }
+        if (Boolean.getBoolean("metallum.hotpath.telemetry")) {
+            assertTrue(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases() >= rebasesBefore + 4,
+                    "both direct and multi-draw must exercise the admitted vertex-buffer rebase");
         }
     }
 

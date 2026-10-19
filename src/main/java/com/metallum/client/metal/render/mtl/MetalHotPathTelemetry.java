@@ -21,6 +21,13 @@ public final class MetalHotPathTelemetry {
     private static final LongAdder dynamicRangeCopies = new LongAdder();
     private static final LongAdder preparedPipelines = new LongAdder();
     private static final LongAdder dynamicCopyBytesAvoided = new LongAdder();
+    private static final LongAdder indexedVertexRebases = new LongAdder();
+
+    public static void recordIndexedVertexRebase() {
+        if (ENABLED) indexedVertexRebases.increment();
+    }
+
+    public static long indexedVertexRebases() { return indexedVertexRebases.sum(); }
 
     private MetalHotPathTelemetry() {
     }
@@ -88,6 +95,7 @@ public final class MetalHotPathTelemetry {
         dynamicRangeCopies.reset();
         dynamicCopyBytesAvoided.reset();
         preparedPipelines.reset();
+        indexedVertexRebases.reset();
     }
 
     public static void recordDynamicUpload(boolean rangeCopy, int bytes) {

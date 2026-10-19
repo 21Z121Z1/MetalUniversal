@@ -727,6 +727,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         } else require(counters.nativeEncoderArgumentReuseCalls() == 0, "Native argument reuse ignored its rollback property");
         report.addProperty("fusedDrawCalls", fused);
         report.addProperty("rejectedFusedDrawCalls", rejected);
+        long rebases = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
+        report.addProperty("indexedVertexRebases", rebases);
+        if (FabricLoader.getInstance().isModLoaded("sodium")) {
+            require(rebases > 0, "Sodium never activated the admitted indexed vertex-fetch rebasing path");
+        }
         report.addProperty("verified", true);
         report.add("state", gson.toJsonTree(counters));
         report.add("uploads", gson.toJsonTree(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot()));

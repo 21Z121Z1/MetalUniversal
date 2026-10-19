@@ -242,7 +242,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.presentation.telemetry=${!gameplay}")
     if (!gameplay) {
         jvmArgs.add('-Dmetallum.ci.reuseActivationTelemetry=true')
-        jvmArgs.add("-Dmetallum.ci.sodiumDrawEvidenceDir=${file('build/evidence/sodium-draws').absolutePath}")
+        if (providers.gradleProperty('sodiumDrawEvidence').orElse('false').get().toBoolean()) {
+            jvmArgs.add("-Dmetallum.ci.sodiumDrawEvidenceDir=${file('build/evidence/sodium-draws').absolutePath}")
+        }
         jvmArgs.add("-Dmetallum.ci.transportProfile=${transportProfile}")
         if (transportProfile != 'default') {
             ['fusedStateDraw', 'reuseEncoderState', 'reuseNativeEncoderArguments', 'dynamicUploadRangeCopy'].each { flag ->

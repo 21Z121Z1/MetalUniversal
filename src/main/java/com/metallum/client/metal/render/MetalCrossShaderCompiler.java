@@ -54,6 +54,14 @@ final class MetalCrossShaderCompiler {
     private static final int MSL_VERSION_4_0 = 0x040000;
     static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    private static final Pattern VERTEX_INDEX_BUILTIN = Pattern.compile(
+            "\\[\\[\\s*(?:vertex_id|base_vertex)\\s*\\]\\]"
+    );
+
+    /** Only stage-in fetch may be rebased when the shader cannot observe the original index. */
+    static boolean observesVertexIndex(final String vertexMsl) {
+        return VERTEX_INDEX_BUILTIN.matcher(vertexMsl).find();
+    }
 
     private MetalCrossShaderCompiler() {
     }

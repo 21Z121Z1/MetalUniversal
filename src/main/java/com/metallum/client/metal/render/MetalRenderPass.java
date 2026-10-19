@@ -1402,7 +1402,44 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 );
             }
         } else {
-            enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(), indexOffsetBytes, instanceCount, baseVertex, baseInstance);
+            // Keep indexed stage-in fetch local to its binding. The hosted GPU
+            // reproduces corrupt fetches for Sodium's large arena baseVertex;
+            // adding the same byte displacement to per-vertex bindings is
+            // equivalent only when the compiled shader cannot observe vertex_id
+            // or base_vertex. Instance-rate and generic constant bindings stay put.
+            boolean rebased = rebaseIndexedVertexBuffers(enc, baseVertex);
+            enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(),
+                    indexOffsetBytes, instanceCount, rebased ? 0 : baseVertex, baseInstance);
+            if (rebased) {
+                bindIndexedVertexBufferOffsets(enc, 0);
+                MetalHotPathTelemetry.recordIndexedVertexRebase();
+            }
+        }
+    }
+
+    private boolean rebaseIndexedVertexBuffers(final MTLRenderCommandEncoder enc, final int baseVertex) {
+        if (baseVertex <= 0 || !compiledPipeline.indexedVertexRebaseSafe()) return false;
+        boolean hasPerVertex = false;
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            long bytes = (long) baseVertex * compiledPipeline.vertexStride(slot);
+            if (slice == null || bytes >= slice.length() || slice.buffer().isClosed()) return false;
+            hasPerVertex = true;
+        }
+        if (!hasPerVertex) return false;
+        bindIndexedVertexBufferOffsets(enc, baseVertex);
+        return true;
+    }
+
+    private void bindIndexedVertexBufferOffsets(final MTLRenderCommandEncoder enc, final int baseVertex) {
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            long offset = slice.offset() + (long) baseVertex * compiledPipeline.vertexStride(slot);
+            enc.setBuffer(((MetalGpuBuffer) slice.buffer()).nativeHandle(), offset,
+                    compiledPipeline.firstAvailableVertexBufferSlot() + slot,
+                    MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
     }
 
