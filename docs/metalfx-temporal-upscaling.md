@@ -65,9 +65,11 @@ at 1.0, 18 at 0.67, and 32 at 0.5.
 
 Frame generation consumes the temporal result only after this encode has
 completed. It uses the full-resolution scene output, a native-resolution UI
-composition, and the same render-resolution depth/motion inputs. The UI is
-marked as precomposited for `MTLFXFrameInterpolator`, so HUD pixels are not
-treated as moving scene content. See `metalfx-frame-generation.md` for the
+composition, and the same render-resolution depth/motion inputs. The current
+presenter sets `uiTexture=nil` and `isUITextureComposited=false`, interpolates
+scene color, then overlays the native-resolution UI onto both generated and
+real outputs. HUD pixels do not enter Temporal history or scene interpolation.
+See `metalfx-frame-generation.md` for the
 separate PresentThread and synchronization contract.
 
 ## Game Porting Toolkit contract audit (2026-07-27)
@@ -95,9 +97,10 @@ earlier review session stopped before producing this result.
 - Resize, render/display size changes, projection/FOV changes, teleport,
   invalid matrices, world transitions, command-buffer failure, and explicit
   lifecycle events reset history and restart the jitter sequence.
-- GUI/HUD is rendered after Temporal at native resolution. Frame Generation
-  receives the native UI texture through the precomposited UI contract; it does
-  not put GUI pixels into Temporal history.
+- GUI/HUD is rendered after Temporal at native resolution. The current Frame
+  Generation presenter composites UI after interpolating scene color. It does
+  not put GUI pixels into Temporal history; the older precomposited-UI account
+  below predates the current presenter and is not its execution contract.
 
 Verification on Apple M1 Pro with Metal API Validation enabled:
 

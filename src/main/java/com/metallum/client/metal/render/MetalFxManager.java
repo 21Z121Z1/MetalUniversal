@@ -1857,6 +1857,7 @@ public final class MetalFxManager {
         MetalCommandEncoder encoder = this.device.commandEncoder();
         Matrix4f currentUnjitteredFromRaster =
                 new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
+        MetalMotionContract.minecraftToMetalFxClip(currentUnjitteredFromRaster);
         if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
             replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform"));
             return;
@@ -1883,6 +1884,7 @@ public final class MetalFxManager {
                     : new Matrix4f(previousViewProjection)
                             .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
                             .mul(inverseCurrentViewProjection);
+            MetalMotionContract.minecraftToMetalFxClip(previousFromRaster);
             if (!MetalFxMath.isFinite(previousFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-previous-transform");
                 continue;
@@ -2114,6 +2116,7 @@ public final class MetalFxManager {
             } else {
                 MetalFxMath.pixelJitter(this.pixelJitter, phase, phaseCount);
                 MetalFxMath.clipJitter(this.clipJitter, this.pixelJitter, renderWidth, renderHeight);
+                MetalMotionContract.minecraftRasterJitter(this.clipJitter);
                 MetalFxMath.applyProjectionJitter(projectionMatrix, clipJitter);
             }
             // The depth buffer was produced with the jittered projection, so

@@ -10,6 +10,23 @@ private func assertScalerLinkStatusContract() {
     precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4LinkRejected.isLinked)
 }
 
+private func testFrameCameraContract() throws {
+    try expect(MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                 aspect: 16.0/9.0, jitterX: -0.5, jitterY: 0.5),
+               "Production camera with pixel jitter must be accepted")
+    let invalidValues: [Float] = [0, -1, 180, .nan, .infinity]
+    for invalid in invalidValues {
+        try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: invalid, near: 0.05, far: 1000,
+                                                      aspect: 1, jitterX: 0, jitterY: 0), "Invalid perspective FOV must be rejected")
+    }
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 1, far: 1,
+                                                  aspect: 1, jitterX: 0, jitterY: 0), "Degenerate depth range must be rejected")
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                  aspect: 0, jitterX: 0, jitterY: 0), "Zero aspect must be rejected")
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                  aspect: 1, jitterX: .nan, jitterY: 0), "Nonfinite jitter must be rejected")
+}
+
 private enum TestFailure: Error, CustomStringConvertible {
     case assertion(String)
 
@@ -313,6 +330,7 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("frame camera scalar contract", testFrameCameraContract),
             ("native scaler-link status", assertScalerLinkStatusContract),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),

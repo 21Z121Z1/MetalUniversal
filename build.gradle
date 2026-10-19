@@ -122,6 +122,7 @@ if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) 
 tasks.test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
+	exclude "**/MetalMotionProducerGpuTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 	exclude "**/MetalIrisTargetsIntegrationTest.class"
 	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"

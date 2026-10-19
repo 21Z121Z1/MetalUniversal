@@ -2945,7 +2945,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
-        guard sceneColor.width > 0, sceneColor.height > 0,
+        guard MetalFxFrameCameraContract.isValid(
+                fieldOfViewDegrees: fieldOfView, near: nearPlane, far: farPlane,
+                aspect: aspectRatio, jitterX: jitterX, jitterY: jitterY),
+              sourceDeltaSeconds.isFinite, sourceDeltaSeconds >= 0,
+              sceneColor.width > 0, sceneColor.height > 0,
               nativeSceneColor.width > 0, nativeSceneColor.height > 0,
               uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
@@ -5098,7 +5102,7 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
     }
 }
 
-private func handOverlayMslSource() -> String {
+func handOverlayMslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5278,8 +5282,8 @@ private func motionReconstructionMslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (isfinite(currentClip.w) && abs(currentClip.w) > 0.000001
-              && isfinite(previousClip.w) && abs(previousClip.w) > 0.000001) {
+          if (isfinite(currentClip.w) && currentClip.w > 0.000001
+              && isfinite(previousClip.w) && previousClip.w > 0.000001) {
             currentClip /= currentClip.w;
             previousClip /= previousClip.w;
             // Both projections are unjittered. The depth reconstruction uses
@@ -5436,8 +5440,8 @@ func motionCameraV2MslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (!isfinite(currentClip.w) || abs(currentClip.w) <= 0.000001
-              || !isfinite(previousClip.w) || abs(previousClip.w) <= 0.000001) {
+          if (!isfinite(currentClip.w) || currentClip.w <= 0.000001
+              || !isfinite(previousClip.w) || previousClip.w <= 0.000001) {
             disocclusion = 1.0;
             reactive = 1.0;
           } else {
@@ -5701,8 +5705,8 @@ func motionFusedV2MslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (!isfinite(currentClip.w) || abs(currentClip.w) <= 0.000001
-              || !isfinite(previousClip.w) || abs(previousClip.w) <= 0.000001) {
+          if (!isfinite(currentClip.w) || currentClip.w <= 0.000001
+              || !isfinite(previousClip.w) || previousClip.w <= 0.000001) {
             disocclusion = 1.0;
             reactive = 1.0;
           } else {
@@ -6848,7 +6852,8 @@ private func metal4MetalFxEncodeV2(
     inputWidth: Int32, inputHeight: Int32, reset: Int32, depthReversed: Int32,
     preserveReactiveMask: Int32, emitMotionDiagnostics: Int32
 ) -> Int32 {
-    guard inputWidth > 0, inputHeight > 0,
+    guard MTLFXTemporalScalerDescriptor.supportsMetal4FX(device),
+          inputWidth > 0, inputHeight > 0,
           colorTexture.width == Int(inputWidth), colorTexture.height == Int(inputHeight),
           depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
           handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
@@ -6861,6 +6866,11 @@ private func metal4MetalFxEncodeV2(
           objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
           disocclusionTexture.width == Int(inputWidth), disocclusionTexture.height == Int(inputHeight),
           motionTexture.width == Int(inputWidth), motionTexture.height == Int(inputHeight),
+          reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
+          cameraMotionTexture.pixelFormat == .rg16Float,
+          objectMotionTexture.pixelFormat == .rg16Float, motionTexture.pixelFormat == .rg16Float,
+          objectValidityTexture.pixelFormat == .r8Unorm, disocclusionTexture.pixelFormat == .r8Unorm,
+          reactiveTexture.pixelFormat == .r8Unorm,
           let currentViewProjection, let inverseCurrentViewProjection, let previousViewProjection,
           let pipelines = ensureMotionV2Pipelines(device),
           let compiler = NativeState.metal4Compiler(device) else {
@@ -7145,7 +7155,8 @@ private func metal3MetalFxEncodeV2(
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 13.0, *) {
         return autoreleasepool {
-            guard inputWidth > 0, inputHeight > 0,
+            guard MTLFXTemporalScalerDescriptor.supportsDevice(device),
+                  inputWidth > 0, inputHeight > 0,
                   colorTexture.width == Int(inputWidth), colorTexture.height == Int(inputHeight),
                   depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
                   handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
@@ -7158,6 +7169,11 @@ private func metal3MetalFxEncodeV2(
                   objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
                   disocclusionTexture.width == Int(inputWidth), disocclusionTexture.height == Int(inputHeight),
                   motionTexture.width == Int(inputWidth), motionTexture.height == Int(inputHeight),
+                  reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
+                  cameraMotionTexture.pixelFormat == .rg16Float,
+                  objectMotionTexture.pixelFormat == .rg16Float, motionTexture.pixelFormat == .rg16Float,
+                  objectValidityTexture.pixelFormat == .r8Unorm, disocclusionTexture.pixelFormat == .r8Unorm,
+                  reactiveTexture.pixelFormat == .r8Unorm,
                   let currentViewProjection,
                   let inverseCurrentViewProjection,
                   let previousViewProjection,
@@ -7742,7 +7758,11 @@ public func metallum_metalfx_frame_interpolator_encode_offscreen(
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 26.0, *) {
         return autoreleasepool {
-            guard currentColorTexture.width > 0,
+            guard MTLFXFrameInterpolatorDescriptor.supportsDevice(device),
+                  MetalFxFrameCameraContract.isValid(
+                    fieldOfViewDegrees: fieldOfView, near: nearPlane, far: farPlane,
+                    aspect: aspectRatio, jitterX: jitterX, jitterY: jitterY),
+                  currentColorTexture.width > 0,
                   currentColorTexture.height > 0,
                   currentColorTexture.width == previousColorTexture.width,
                   currentColorTexture.height == previousColorTexture.height,

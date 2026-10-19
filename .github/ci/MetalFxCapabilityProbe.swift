@@ -12,6 +12,7 @@ enum MetalFxCapabilityProbe {
         var spatial = false
         var temporal = false
         var interpolation = false
+        var interpolationApiAvailable = false
         var temporalMetal4 = false
         var interpolationMetal4 = false
         if #available(macOS 13.0, *) {
@@ -19,6 +20,7 @@ enum MetalFxCapabilityProbe {
             temporal = MTLFXTemporalScalerDescriptor.supportsDevice(device)
         }
         if #available(macOS 26.0, *) {
+            interpolationApiAvailable = true
             interpolation = MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
             temporalMetal4 = MTLFXTemporalScalerDescriptor.supportsMetal4FX(device)
             interpolationMetal4 = MTLFXFrameInterpolatorDescriptor.supportsMetal4FX(device)
@@ -31,10 +33,12 @@ enum MetalFxCapabilityProbe {
             "spatialSupported": spatial,
             "temporalSupported": temporal,
             "frameInterpolationSupported": interpolation,
+            "frameInterpolationApiAvailable": interpolationApiAvailable,
             "temporalMetal4Supported": temporalMetal4,
             "frameInterpolationMetal4Supported": interpolationMetal4,
             "temporalExecution": temporal ? "pending" : "blocked: supportsDevice=false",
-            "frameInterpolationExecution": interpolation ? "pending" : "blocked: supportsDevice=false",
+            "frameInterpolationExecution": interpolation ? "pending"
+                : interpolationApiAvailable ? "blocked: supportsDevice=false" : "blocked: requires macOS 26",
             "qualityValidated": false,
             "presentationValidated": false
         ]

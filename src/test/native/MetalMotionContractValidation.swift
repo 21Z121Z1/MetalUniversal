@@ -21,6 +21,28 @@ private struct FusedUniforms {
     var params: SIMD4<Float>
 }
 
+private struct CameraUniforms {
+    var current: simd_float4x4
+    var inverse: simd_float4x4
+    var previous: simd_float4x4
+    var viewport: SIMD4<Float>
+    var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
+}
+
+private struct MergeUniforms {
+    var viewport: SIMD4<UInt32>
+    var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
+}
+
+private struct HandUniforms {
+    var width: UInt32
+    var height: UInt32
+    var boost: Float
+    var exact: Float
+}
+
 private struct Case {
     var name: String
     var previous = matrix_identity_float4x4
@@ -74,6 +96,8 @@ private func cases(width: Int, height: Int) -> [Case] {
              expectedMotion: SIMD2(-0.25, 0.125), reactiveMinimum: 0.49),
         Case(name: "invalid_exact_hand", object: SIMD2(.nan, .infinity),
              valid: 1, hand: 0.9, handExact: 1, expectedMotion: .zero, reactiveMinimum: 0.99),
+        Case(name: "invalid_exact_hand_moving_camera", previous: x, object: SIMD2(.nan, .infinity),
+             valid: 1, hand: 0.9, handExact: 1, expectedMotion: .zero, reactiveMinimum: 0.99),
         Case(name: "reversed_z_occlusion", previousDepth: 0.8, history: true,
              expectedMotion: .zero, expectedRejection: true, reactiveMinimum: 0.84),
         Case(name: "standard_z_occlusion", previousDepth: 0.2, history: true, reversed: false,
@@ -92,6 +116,9 @@ private final class Harness {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLComputePipelineState
+    let cameraPipeline: MTLComputePipelineState
+    let mergePipeline: MTLComputePipelineState
+    let handPipeline: MTLComputePipelineState
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
@@ -104,6 +131,14 @@ private final class Harness {
             throw ContractError("Shipping fused kernel missing")
         }
         pipeline = try device.makeComputePipelineState(function: function)
+        func make(_ source: String, _ name: String) throws -> MTLComputePipelineState {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let f = library.makeFunction(name: name) else { throw ContractError("Missing shipping kernel \(name)") }
+            return try device.makeComputePipelineState(function: f)
+        }
+        cameraPipeline = try make(motionCameraV2MslSource(), "metallum_motion_camera_v2")
+        mergePipeline = try make(motionMergeV2MslSource(), "metallum_motion_merge_v2")
+        handPipeline = try make(handOverlayMslSource(), "metallum_hand_overlay_motion")
     }
 
     func texture(_ format: MTLPixelFormat, _ width: Int, _ height: Int,
@@ -139,8 +174,23 @@ private final class Harness {
         return data
     }
 
-    func run(_ c: Case, width: Int, height: Int, root: URL) throws -> [String: Any] {
-        let dir = root.appendingPathComponent("\(width)x\(height)-\(c.name)")
+    func encode<U>(_ cb: MTLCommandBuffer, _ pipeline: MTLComputePipelineState,
+                   _ uniforms: inout U, _ textures: [MTLTexture], _ label: String) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else { throw ContractError("Compute encoder failed") }
+        encoder.label = label
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBytes(&uniforms, length: MemoryLayout<U>.stride, index: 0)
+        for (index, texture) in textures.enumerated() { encoder.setTexture(texture, index: index) }
+        let w = max(1, min(pipeline.threadExecutionWidth, 64))
+        let h = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / w))
+        encoder.dispatchThreads(MTLSize(width: textures[0].width, height: textures[0].height, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        encoder.endEncoding()
+    }
+
+    func run(_ c: Case, width: Int, height: Int, root: URL, fused: Bool) throws -> [String: Any] {
+        let backend = fused ? "fused" : "split"
+        let dir = root.appendingPathComponent("\(backend)-\(width)x\(height)-\(c.name)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let depth = try texture(.r32Float, width, height, SIMD2(c.depth, 0))
         let object = try texture(.rg16Float, width, height, c.object)
@@ -157,20 +207,26 @@ private final class Harness {
                               flags: SIMD4(1, c.sky ? 1 : 0, c.history ? 1 : 0, c.reversed ? 1 : 0),
                               options: SIMD4(0, 1, c.hand > 0 ? 1 : 0, c.handExact > 0 ? 1 : 0),
                               params: SIMD4(0.5, 0.85, 0.5, 0))
-        guard let cb = queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else {
+        guard let cb = queue.makeCommandBuffer() else {
             throw ContractError("Command buffer allocation failed")
         }
-        encoder.label = c.name
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBytes(&u, length: MemoryLayout<FusedUniforms>.stride, index: 0)
-        for (index, texture) in [depth, object, valid, previous, motion, reactive, camera, rejection, hand, handExact].enumerated() {
-            encoder.setTexture(texture, index: index)
+        let encodeStart = ProcessInfo.processInfo.systemUptime
+        if fused {
+            try encode(cb, pipeline, &u, [depth, object, valid, previous, motion, reactive, camera, rejection, hand, handExact], c.name)
+        } else {
+            if c.hand > 0 {
+                var hu = HandUniforms(width: UInt32(width), height: UInt32(height), boost: 0.5, exact: c.handExact > 0 ? 1 : 0)
+                try encode(cb, handPipeline, &hu, [hand, object, valid, reactive, handExact], c.name + " hand")
+            }
+            var cu = CameraUniforms(current: u.current, inverse: u.inverse, previous: u.previous,
+                                    viewport: u.viewport, flags: SIMD4(1, c.sky ? 1 : 0, 0, 0), params: SIMD4(0.5, 0, 0, 0))
+            try encode(cb, cameraPipeline, &cu, [depth, camera, rejection, reactive], c.name + " camera")
+            var mu = MergeUniforms(viewport: SIMD4(UInt32(width), UInt32(height), c.history ? 1 : 0, c.reversed ? 1 : 0),
+                                   flags: SIMD4(c.sky ? 1 : 0, 0, 0, 0), params: SIMD4(0.85, 0, 0, 0))
+            try encode(cb, mergePipeline, &mu, [camera, object, valid, rejection, motion, reactive, previous, depth], c.name + " merge")
         }
-        let w = max(1, min(pipeline.threadExecutionWidth, 64))
-        let h = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / w))
-        encoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
-        encoder.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        let encodeMilliseconds = (ProcessInfo.processInfo.systemUptime - encodeStart) * 1000
+        cb.commit(); cb.waitUntilCompleted()
         guard cb.status == .completed, cb.error == nil else { throw ContractError("GPU failed: \(String(describing: cb.error))") }
         let motionData = read(motion, bytesPerPixel: 4), reactiveData = read(reactive, bytesPerPixel: 1)
         let rejectionData = read(rejection, bytesPerPixel: 1)
@@ -207,7 +263,16 @@ private final class Harness {
             if Float(reactiveData[p])/255 < c.reactiveMinimum { violations += 1 }
         }}
         try png(visualization, width: width, height: height, to: dir.appendingPathComponent("motion.png"))
+        var scalar = [UInt8](repeating: 255, count: width*height*4)
+        for p in 0..<width*height {
+            for channel in 0..<3 { scalar[p*4+channel] = reactiveData[p] }
+        }
+        try png(scalar, width: width, height: height, to: dir.appendingPathComponent("reactive.png"))
+        let depthValue = UInt8(max(0,min(255,c.depth*255)))
+        for p in 0..<width*height { for channel in 0..<3 { scalar[p*4+channel] = depthValue } }
+        try png(scalar, width: width, height: height, to: dir.appendingPathComponent("depth.png"))
         let result: [String: Any] = ["name":c.name,"width":width,"height":height,
+                                   "backend":backend,"cpuEncodingMilliseconds":encodeMilliseconds,
                                    "passed":violations == 0,"violations":violations,"checkedPixels":checked,
                                    "maxNdcError":maximumError.isFinite ? maximumError : -1,
                                    "motionUnit":"unjittered current-to-previous NDC, top-left Y",
@@ -215,7 +280,7 @@ private final class Harness {
                                    "gpuMilliseconds":max(0,(cb.gpuEndTime-cb.gpuStartTime)*1000)]
         try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted,.sortedKeys])
             .write(to: dir.appendingPathComponent("result.json"))
-        print("MOTION_CONTRACT \(violations == 0 ? "PASS" : "FAIL") \(width)x\(height) \(c.name) violations=\(violations) error=\(maximumError)")
+        print("MOTION_CONTRACT \(violations == 0 ? "PASS" : "FAIL") \(backend) \(width)x\(height) \(c.name) violations=\(violations) error=\(maximumError)")
         return result
     }
 }
@@ -244,12 +309,16 @@ private enum MetalMotionContractValidation {
             let h = try Harness()
             var results = [[String: Any]]()
             for (width,height) in [(32,24),(37,19)] {
-                for c in cases(width:width,height:height) { results.append(try h.run(c,width:width,height:height,root:root)) }
+                for fused in [true, false] {
+                    for c in cases(width:width,height:height) {
+                        results.append(try h.run(c,width:width,height:height,root:root,fused:fused))
+                    }
+                }
             }
             let failed = results.filter { ($0["passed"] as? Bool) != true }.count
             let result: [String: Any] = ["sourceCommit":ProcessInfo.processInfo.environment["METALLUM_SOURCE_SHA"] ?? "unknown",
                                        "device":h.device.name,"passed":failed == 0,"cases":results,"failedCases":failed,
-                                       "kernel":"shipping metallum_motion_fused_v2","metalfxQualityValidated":false,
+                                       "kernel":"shipping fused, camera, merge and hand kernels","metalfxQualityValidated":false,
                                        "presentationValidated":false]
             try JSONSerialization.data(withJSONObject: result, options:[.prettyPrinted,.sortedKeys])
                 .write(to:root.appendingPathComponent("summary.json"),options:.atomic)

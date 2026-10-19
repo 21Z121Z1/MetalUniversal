@@ -86,7 +86,7 @@ final class MetalMotionShaderCompilationTest {
 
     // Only expand imports. Do not invent vanilla uniforms, change versions or auto-map locations.
     // Conditional source is left intact for the real GLSL preprocessor.
-    private static String expandIncludes(String resource, Set<String> active) throws IOException {
+    static String expandIncludes(String resource, Set<String> active) throws IOException {
         if (!active.add(resource)) throw new IOException("Recursive shader import: " + resource);
         try {
             var matcher = INCLUDE.matcher(readResource(resource));

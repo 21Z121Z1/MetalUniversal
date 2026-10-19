@@ -406,7 +406,8 @@ private final class OffscreenHarness {
         preserveReactiveMask: Bool,
         label: String,
         handDepth: MTLTexture? = nil,
-        emitMotionDiagnostics: Bool = true
+        emitMotionDiagnostics: Bool = true,
+        expectEncoded: Bool = true
     ) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not create \(label) temporal command buffer")
@@ -462,7 +463,7 @@ private final class OffscreenHarness {
                 }
             }
         }
-        try require(result == 1, "\(label) MetalFX Temporal encode was rejected")
+        try require(result == (expectEncoded ? 1 : 0), "\(label) unexpected MetalFX Temporal result: \(result)")
         try commitAndWait(commandBuffer, label: label)
     }
 
@@ -518,7 +519,8 @@ private final class OffscreenHarness {
         motion: MTLTexture,
         output: MTLTexture,
         reset: Bool,
-        label: String
+        label: String,
+        expectEncoded: Bool = true
     ) throws {
         let ui = try makeWorkingTexture(
             format: .rgba8Unorm,
@@ -539,7 +541,7 @@ private final class OffscreenHarness {
             output,
             0.0,
             0.0,
-            60.0 * .pi / 180.0,
+            60.0, // MetalFX fieldOfView is in degrees, as in the production Java path.
             0.05,
             1000.0,
             Float(width) / Float(height),
@@ -548,7 +550,7 @@ private final class OffscreenHarness {
             reset ? 1 : 0,
             1
         )
-        try require(result == 1, "\(label) MetalFX Frame Interpolator encode was rejected")
+        try require(result == (expectEncoded ? 1 : 0), "\(label) unexpected FrameInterpolator result: \(result)")
         try commitAndWait(commandBuffer, label: label)
     }
 
@@ -1306,6 +1308,35 @@ private func runTransparencyAlphaContract(
     ]
 }
 
+private func runUnsupportedContracts(harness: OffscreenHarness, temporal: Bool, interpolation: Bool) throws -> [String: Any] {
+    let scenario = scenarios()[0]
+    let frame = try harness.render(current: scenario.start, previous: scenario.start, scenario: scenario, label: "unsupported input")
+    let camera = try harness.makeWorkingTexture(format: .rg16Float, label: "unsupported camera")
+    let motion = try harness.makeWorkingTexture(format: .rg16Float, label: "unsupported motion")
+    let rejection = try harness.makeWorkingTexture(format: .r8Unorm, label: "unsupported disocclusion")
+    let reactive = try harness.makeWorkingTexture(format: .r8Unorm, label: "unsupported reactive")
+    let output = try harness.makeWorkingTexture(format: .rgba8Unorm, label: "unsupported output sentinel")
+    try harness.clearColor(output, color: MTLClearColor(red: 1, green: 0, blue: 1, alpha: 1))
+    if !temporal {
+        try harness.encodeTemporal(frame: frame, cameraMotion: camera, objectMotion: frame.objectMotion,
+                                    validity: frame.validity, disocclusion: rejection, mergedMotion: motion,
+                                    reactive: reactive, output: output,
+                                    previousViewProjection: matrix_identity_float4x4, reset: true,
+                                    preserveReactiveMask: false, label: "unsupported temporal rejects", expectEncoded: false)
+    }
+    if !interpolation {
+        try harness.encodeInterpolation(previous: frame, current: frame, motion: motion, output: output,
+                                        reset: true, label: "unsupported interpolation rejects", expectEncoded: false)
+    }
+    let bytes = try harness.readback(output)
+    for p in stride(from: 0, to: bytes.count, by: 4) {
+        try require(bytes[p] == 255 && bytes[p+1] == 0 && bytes[p+2] == 255 && bytes[p+3] == 255,
+                    "Rejected unsupported effect modified its output")
+    }
+    return ["scenario":"unsupported_native_rejection","temporalRejectionTested":!temporal,
+            "interpolationRejectionTested":!interpolation,"outputSentinelUnchanged":true]
+}
+
 private func runStandaloneInterpolation(harness: OffscreenHarness, root: URL) throws -> [[String: Any]] {
     var results = [[String: Any]]()
     for scenario in scenarios() where scenario.name == "static" || scenario.name == "translation" {
@@ -1348,6 +1379,10 @@ private enum MetalFXOffscreenValidationMain {
             }
 
             var results: [[String: Any]] = []
+            if !temporalSupported || !interpolationSupported {
+                results.append(try runUnsupportedContracts(harness: harness, temporal: temporalSupported,
+                                                          interpolation: interpolationSupported))
+            }
             if temporalSupported {
                 for scenario in scenarios() {
                     print("[offscreen] running \(scenario.name)")
