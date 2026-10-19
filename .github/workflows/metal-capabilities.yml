@@ -108,7 +108,8 @@ jobs:
             hostedMetalFusedStateDrawOneSubmitTest \
             hostedMetalFusedStateDrawTwoSubmitsTest \
             hostedMetalOptimizationCandidateTest \
-            hostedMetalOptimizationDefaultTest
+            hostedMetalOptimizationDefaultTest \
+            hostedMetalOptimizationRollbackTest
       - name: Compare hosted encoding cost in ABBA order
         run: |
           ./gradlew --no-daemon --stacktrace \

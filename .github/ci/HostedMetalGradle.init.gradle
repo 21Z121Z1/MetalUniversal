@@ -187,10 +187,27 @@ gradle.projectsEvaluated {
                  "com.metallum.client.metal.render.bridge.MetalNativeBridgeArgumentScratchTest"]).configure { task ->
             task.dependsOn(hostedBridgeFfmSmoke)
             if (enabled != null) promotedProperties.each { task.systemProperty it, enabled.toString() }
+            else task.systemProperty "metallum.ci.requireOptimizedDefaults", "true"
             task.systemProperty "metallum.hotpath.telemetry", "true"
             task.systemProperty "metallum.ci.reuseActivationTelemetry", "true"
         }
     }
+    def rollbackTasks = []
+    promotedProperties.eachWithIndex { disabledProperty, index ->
+        def rollback = configureHostedTest("hostedMetalOptimizationRollback${index}Test",
+                "Checks independent rollback of ${disabledProperty} with the other optimized paths enabled.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders",
+                 "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes",
+                 "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.resizeRecreatePathProducesFreshContent"])
+        rollback.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            promotedProperties.each { property -> task.systemProperty property, (property != disabledProperty).toString() }
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.ci.reuseActivationTelemetry", "true"
+        }
+        rollbackTasks.add(rollback)
+    }
+    project.tasks.register("hostedMetalOptimizationRollbackTest") { task -> task.dependsOn(rollbackTasks) }
 
     // Fresh JVM per sample lane; ABBA repeated twice on the same runner. These
     // timings describe hosted CPU encoding only, never FPS or physical latency.

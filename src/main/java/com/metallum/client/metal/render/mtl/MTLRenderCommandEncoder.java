@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
+import com.metallum.client.metal.render.MetalBackendOptimizations;
+
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import net.fabricmc.api.EnvType;
@@ -10,8 +12,7 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
-    // Physical equivalence/performance acceptance is required before enabling by default.
-    private static final boolean FUSED_STATE_DRAW = Boolean.getBoolean("metallum.opt.fusedStateDraw");
+    private static final boolean FUSED_STATE_DRAW = MetalBackendOptimizations.FUSED_STATE_DRAW;
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );

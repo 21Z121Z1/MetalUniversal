@@ -16,10 +16,21 @@ final class MetalRenderStatePacketTest {
     private static final MemorySegment ENCODER = MemorySegment.ofAddress(0x1000L);
 
     @Test
+    void singleStateProductionDrawPreservesTheDirectSetterRoute() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            assertFalse(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0, 0, 3, 1, 0));
+            assertEquals(1, packet.entryCount(), "the ordinary flush must still consume this state before drawing");
+            assertTrue(packet.active());
+        }
+    }
+
+    @Test
     void fusedDirectAndIndexedDrawsCarryExactArgumentsAndConsumeStateOnce() {
         for (int kind : new int[]{1, 2}) {
             try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
-                // One state update is enough to save a crossing when fused.
+                // The v2 ABI accepts one entry; production dispatch applies its
+                // stricter native-packet threshold before calling this layer.
                 packet.appendScissor(ENCODER, 11, 13, 32, 48);
                 var calls = new java.util.concurrent.atomic.AtomicInteger();
                 MemorySegment indices = kind == 2 ? MemorySegment.ofAddress(0x5678) : MemorySegment.NULL;

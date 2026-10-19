@@ -22,7 +22,7 @@ bash scripts/agent/verify_unified_eval.sh
 
 `scripts/agent/record_ci_subject.py` records which exact Git object a workflow tested. For branch work, derive current refs and merge bases from Git; branch names and dated reports are not current-state proof. Generated run evidence belongs under ignored `build/` paths.
 
-The [renderer reference study](renderer-reference-study.zh-CN.md) records the Ciderlight, Vantage and metal189 source snapshots, the opt-in state/draw transport, submission budget, and its validation boundaries.
+The [renderer reference study](renderer-reference-study.zh-CN.md) records the Ciderlight, Vantage and metal189 source snapshots, state/draw transport, submission budget, and validation boundaries. See [optimization defaults and Actions validation](optimization-defaults.zh-CN.md) for the current promotion scope and the remaining experimental paths.
 
 ## Historical material
 

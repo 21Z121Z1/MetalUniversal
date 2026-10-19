@@ -286,6 +286,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         jvmArgs.add("-Dmetallum.validation.forceMetal=true")
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
         jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
+        // Preserve the historical single-candidate gameplay protocols when
+        // production transport defaults change. Conformance uses them above.
+        jvmArgs.add('-Dmetallum.opt.fusedStateDraw=false')
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
         ['dynamicUploadRangeCopy', 'nativeMultiDrawBatch', 'asyncPrecompile'].each { flag ->
             jvmArgs.add("-Dmetallum.opt.${flag}=${providers.gradleProperty(flag).orElse('false').get()}")

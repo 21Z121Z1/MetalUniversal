@@ -13,11 +13,11 @@ Ciderlight 为 Apache-2.0，Vantage 自有代码为 MIT。本次实现基于 Met
 
 ## 状态与绘制合并
 
-`-Dmetallum.opt.fusedStateDraw=true` 显式启用，默认关闭。
+`metallum.opt.fusedStateDraw` 默认开启，显式 `-Dmetallum.opt.fusedStateDraw=false` 回退。其他晋升项与未启用实验的具体边界见[优化默认值](optimization-defaults.zh-CN.md)。
 
 - 协商 feature 3 的 interface v2：entry 0 保留状态包 v1，entry 1 增加 `metallum_render_state_packet_draw_v2`。
 - 状态记录布局不变；绘制描述符为 64 字节定宽结构，格式在 `MetallumInterface.swift` 中定义。
-- 仅合并有待应用状态的直接或索引绘制；无状态、旧 dylib、多绘制、间接绘制、三角扇及特殊辅助操作保留原路径。
+- 仅合并达到既有原生状态包门槛的直接或索引绘制；单项变化继续使用原 critical setter。无状态、旧 dylib、多绘制、间接绘制、三角扇及特殊辅助操作保留原路径。
 - 同步消费 CPU scratch，不延长 GPU 资源寿命，不重排绘制、屏障或资源操作；Metal 3/4 均调用已有执行函数。
 - 只有返回 1 才表示已绘制。其他 native 状态保证没有绘制，状态前缀可幂等重放，然后执行一次普通绘制。FFM 异常结果不明确，禁止重放并使该状态包保持失败。
 - `metallum.hotpath.telemetry=true` 可记录 `fusedDrawCalls`、`rejectedFusedDrawCalls`。客户端验证报告会输出请求开关与调用计数。符合条件的状态包加绘制从两次跨语言调用变为一次；这不是 FPS 提升的实测结论。
@@ -50,4 +50,4 @@ GitHub Actions 的 `metal-capabilities` 在 macOS 上先运行 GPU 能力探针�
 
 三个候选使用相同 MRT/资源寿命测试与独立像素预期，必须证明合并路径真正激活，不能用回退冒充通过。提交预算测试连续跨越三槽环，核查完成回调恰好一次和已观测积压上限。原生接口测试另外核查旧入口地址和错误描述符拒绝。
 
-托管 GPU 读回证明特定提交的 ABI 与离屏执行，不证明 WindowServer 呈现、游戏视觉兼容、MetalFX 质量、Metal 4 硬件路径、稳定性能或输入延迟。优化保持默认关闭，直到相关证据完成。
+托管 GPU 读回证明特定提交的 ABI 与离屏执行；客户端 Actions 另外验证原版／Sodium 的生产默认、候选与原路径。四项常规 CPU 优化已晋升为默认开启，仍保留独立回退开关。托管结果不证明 MetalFX 质量、Metal 4 硬件路径、稳定实机 FPS 或输入延迟。

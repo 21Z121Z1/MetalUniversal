@@ -13,6 +13,12 @@ public final class MetalBufferUpload {
         }
     }
 
+    /** Two retained-range copies pay off only for a substantial overwritten region. */
+    static boolean useRangeCopy(long bufferSize, int uploadedBytes) {
+        return uploadedBytes >= 4096 && uploadedBytes < bufferSize
+                && uploadedBytes >= bufferSize - uploadedBytes;
+    }
+
     static void copy(ByteBuffer previous, ByteBuffer fresh, long logicalSize, long offset,
                      ByteBuffer data, boolean omitOverwrittenBytes) {
         validate(logicalSize, offset, logicalSize - offset, data.remaining());

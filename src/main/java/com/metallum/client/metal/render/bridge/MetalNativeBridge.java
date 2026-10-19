@@ -2,6 +2,7 @@ package com.metallum.client.metal.render.bridge;
 
 import com.metallum.client.metal.render.mtl.*;
 import com.metallum.client.metal.render.FrameEvidenceRuntime;
+import com.metallum.client.metal.render.MetalBackendOptimizations;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
@@ -38,12 +39,11 @@ public final class MetalNativeBridge {
             ThreadLocal.withInitial(MetalFxMatrixScratch::new);
     /**
      * The RenderEncoderV3 bridge consumes all argument pointers synchronously. Keep
-     * the optional scratch path behind an explicit property so the shipping
-     * route retains the old per-call arena lifetime until a paired run proves
-     * this allocation reduction safe and useful.
+     * bounded thread-local storage behind a non-reentrant lease. The explicit
+     * false property retains the scoped-arena route for rollback and comparison.
      */
     private static final boolean REUSE_NATIVE_ENCODER_ARGUMENTS =
-            Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments");
+            MetalBackendOptimizations.REUSE_NATIVE_ENCODER_ARGUMENTS;
     static final ThreadLocal<RenderEncoderArgumentScratch> RENDER_ENCODER_ARGUMENT_SCRATCH =
             ThreadLocal.withInitial(RenderEncoderArgumentScratch::new);
     private static final int MAX_RENDER_ENCODER_COLOR_ATTACHMENTS = 8;

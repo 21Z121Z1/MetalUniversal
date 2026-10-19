@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
+import com.metallum.client.metal.render.MetalBackendOptimizations;
+
 import java.lang.foreign.MemorySegment;
 
 /**
@@ -12,7 +14,7 @@ import java.lang.foreign.MemorySegment;
  * both individual stage shadows.</p>
  */
 final class MetalRenderStateShadow {
-    private static final boolean REUSE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    private static final boolean REUSE = MetalBackendOptimizations.REUSE_ENCODER_STATE;
     // At most one idle CPU shadow per encoding thread; concurrent encoders never share it.
     private static final ThreadLocal<MetalRenderStateShadow> IDLE = new ThreadLocal<>();
 

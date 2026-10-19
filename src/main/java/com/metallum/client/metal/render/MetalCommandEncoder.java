@@ -1744,7 +1744,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 throw new IllegalStateException("Dynamic upload backing has no CPU storage");
             }
             ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(contents, size).order(ByteOrder.nativeOrder());
-            boolean rangeCopy = DynamicUploadPolicy.RANGE_COPY;
+            boolean rangeCopy = DynamicUploadPolicy.RANGE_COPY && MetalBufferUpload.useRangeCopy(buffer.size(), data.remaining());
             MetalBufferUpload.copy(buffer.currentStorage(), freshStorage, buffer.size(), offset, data, rangeCopy);
             buffer.swapBacking(fresh, freshStorage);
             published = true;
@@ -1757,7 +1757,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private static final class DynamicUploadPolicy {
-        static final boolean RANGE_COPY = Boolean.getBoolean("metallum.opt.dynamicUploadRangeCopy");
+        static final boolean RANGE_COPY = MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY;
     }
 
     private MemorySegment acquireDynamicBacking(final long size, final long resourceOptions) {

@@ -108,6 +108,12 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.requireOptimizedDefaults", matches = "true")
+    void productionDefaultsEnableTheValidatedCpuOptimizations() {
+        assertEquals(new MetalBackendOptimizations.Snapshot(true, true, true, true), MetalBackendOptimizations.snapshot());
+    }
+
+    @Test
     @EnabledIfSystemProperty(named = "metallum.ci.encodingCost", matches = "true")
     void hostedEncodingCost() {
         String name = "hosted_encoding_cost";
@@ -117,12 +123,20 @@ final class MetalMrtBackendIntegrationTest {
                 void main() { color = vec4(1, 0, 1, 1); }
                 """);
         RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        RenderPipeline alternatePipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM),
+                BlendFunction.ADDITIVE, ColorTargetState.WRITE_ALL);
         List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
         var allocation = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
         assertTrue(allocation.isThreadAllocatedMemorySupported());
         allocation.setThreadAllocatedMemoryEnabled(true);
         try {
-            for (boolean manyEncoders : new boolean[] {false, true}) {
+            // Precompile both variants before any measured draw. Alpha=1 and
+            // saturated magenta make both blend states produce the same pixels.
+            device.getOrCompilePipeline(pipeline);
+            device.getOrCompilePipeline(alternatePipeline);
+            for (int workload = 0; workload < 3; workload++) {
+                boolean manyEncoders = workload == 2;
+                boolean multipleStates = workload == 1;
                 double[] timings = new double[8];
                 long[] allocatedBytes = new long[8];
                 int operations = manyEncoders ? 256 : 4096;
@@ -135,7 +149,7 @@ final class MetalMrtBackendIntegrationTest {
                         for (int i = 0; i < operations; i++) {
                             try (PassWithViews pass = createPass(textures, null, false)) {
                                 pass.pass().setPipeline(pipeline);
-                                pass.pass().draw(0, 1, 3, 0);
+                                pass.pass().draw(3, 1, 0, 0);
                                 encoder.submitRenderPass();
                             }
                         }
@@ -143,11 +157,12 @@ final class MetalMrtBackendIntegrationTest {
                     } else {
                         try (PassWithViews pass = createPass(textures, null, false)) {
                             pass.pass().setPipeline(pipeline);
-                            pass.pass().draw(0, 1, 3, 0); // PSO/bind setup is outside the window.
+                            pass.pass().draw(3, 1, 0, 0); // PSO/bind setup is outside the window.
                             start = System.nanoTime();
                             for (int i = 0; i < operations; i++) {
+                                if (multipleStates) pass.pass().setPipeline((i & 1) == 0 ? pipeline : alternatePipeline);
                                 pass.pass().enableScissor(i & 1, 0, WIDTH - 1, HEIGHT);
-                                pass.pass().draw(0, 1, 3, 0);
+                                pass.pass().draw(3, 1, 0, 0);
                             }
                             elapsed = System.nanoTime() - start;
                         }
@@ -162,7 +177,7 @@ final class MetalMrtBackendIntegrationTest {
                 }
                 System.out.println("HOSTED_ENCODING_COST {\"profile\":\""
                         + System.getProperty("metallum.ci.encodingCostProfile") + "\",\"workload\":\""
-                        + (manyEncoders ? "encoder" : "state-draw") + "\",\"nsPerOperation\":"
+                        + (manyEncoders ? "encoder" : multipleStates ? "multiple-state-draw" : "single-state-draw") + "\",\"nsPerOperation\":"
                         + java.util.Arrays.toString(timings) + ",\"javaBytesPerOperation\":"
                         + java.util.Arrays.toString(allocatedBytes) + "}");
             }
@@ -255,7 +270,7 @@ final class MetalMrtBackendIntegrationTest {
         } finally {
             closeTextures(textures);
         }
-        if (Boolean.getBoolean("metallum.opt.fusedStateDraw")) {
+        if (MetalBackendOptimizations.FUSED_STATE_DRAW) {
             assertTrue(com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge.drawAvailable(),
                     "the enabled lane requires the shipping v2 entry, not legacy fallback");
             assertTrue(com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls() >= before + 4,
@@ -265,11 +280,11 @@ final class MetalMrtBackendIntegrationTest {
         }
         if (com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
             var after = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
-            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) {
+            if (MetalBackendOptimizations.REUSE_ENCODER_STATE) {
                 assertTrue(after.shadowReuseHits() > reuseBefore.shadowReuseHits());
                 assertTrue(after.packetStorageReuseHits() > reuseBefore.packetStorageReuseHits());
             }
-            if (Boolean.getBoolean("metallum.opt.reuseNativeEncoderArguments")) {
+            if (MetalBackendOptimizations.REUSE_NATIVE_ENCODER_ARGUMENTS) {
                 assertTrue(after.nativeEncoderArgumentReuseCalls() > reuseBefore.nativeEncoderArgumentReuseCalls());
             }
         }
@@ -485,37 +500,38 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes() {
         var telemetryBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
-        ByteBuffer original = ByteBuffer.allocateDirect(64);
-        for (int i = 0; i < 64; i++) original.put(i, (byte) i);
-        ByteBuffer patch = ByteBuffer.allocateDirect(11);
-        for (int i = 0; i < 11; i++) patch.put(i, (byte) (100 + i));
-        patch.position(2).limit(9);
+        int size = 65536, patchOffset = 8192, patchLength = 49152;
+        ByteBuffer original = ByteBuffer.allocateDirect(size);
+        for (int i = 0; i < size; i++) original.put(i, (byte) i);
+        ByteBuffer patch = ByteBuffer.allocateDirect(patchLength + 4);
+        for (int i = 0; i < patch.capacity(); i++) patch.put(i, (byte) (100 + i));
+        patch.position(2).limit(patchLength + 2);
         try (MetalGpuBuffer source = (MetalGpuBuffer) device.createBuffer(
-                    () -> "dynamic source", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_SRC | GpuBuffer.USAGE_COPY_DST, 64);
+                    () -> "dynamic source", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_SRC | GpuBuffer.USAGE_COPY_DST, size);
              MetalGpuBuffer before = (MetalGpuBuffer) device.createBuffer(
-                    () -> "old consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64);
+                    () -> "old consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size);
              MetalGpuBuffer after = (MetalGpuBuffer) device.createBuffer(
-                    () -> "new consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64)) {
-            encoder.writeToBuffer(source.slice(0, 64), original);
+                    () -> "new consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size)) {
+            encoder.writeToBuffer(source.slice(0, size), original);
             MemorySegment oldBacking = source.nativeHandle();
-            encoder.copyToBuffer(source.slice(0, 64), before.slice(0, 64));
-            encoder.writeToBuffer(source.slice(17, 7), patch);
+            encoder.copyToBuffer(source.slice(0, size), before.slice(0, size));
+            encoder.writeToBuffer(source.slice(patchOffset, patchLength), patch);
             assertNotEquals(oldBacking, source.nativeHandle());
-            encoder.copyToBuffer(source.slice(0, 64), after.slice(0, 64));
+            encoder.copyToBuffer(source.slice(0, size), after.slice(0, size));
             encoder.submit();
             device.waitForSubmittedGpuWork();
-            for (int i = 0; i < 64; i++) {
+            for (int i = 0; i < size; i++) {
                 assertEquals((byte) i, before.currentStorage().get(i), "prior GPU consumer byte " + i);
-                byte expected = i >= 17 && i < 24 ? (byte) (102 + i - 17) : (byte) i;
+                byte expected = i >= patchOffset && i < patchOffset + patchLength ? (byte) (102 + i - patchOffset) : (byte) i;
                 assertEquals(expected, after.currentStorage().get(i), "updated consumer byte " + i);
             }
             assertEquals(2, patch.position());
-            assertEquals(9, patch.limit());
+            assertEquals(patchLength + 2, patch.limit());
             if (Boolean.getBoolean("metallum.hotpath.telemetry")
-                    && Boolean.getBoolean("metallum.opt.dynamicUploadRangeCopy")) {
+                    && MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY) {
                 var afterCounters = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
                 assertEquals(telemetryBefore.dynamicRangeCopies() + 1, afterCounters.dynamicRangeCopies());
-                assertEquals(telemetryBefore.dynamicCopyBytesAvoided() + 7, afterCounters.dynamicCopyBytesAvoided());
+                assertEquals(telemetryBefore.dynamicCopyBytesAvoided() + patchLength, afterCounters.dynamicCopyBytesAvoided());
             }
         }
     }

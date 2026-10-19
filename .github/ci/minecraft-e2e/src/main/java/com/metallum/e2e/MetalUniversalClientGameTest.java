@@ -642,11 +642,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         String profile = System.getProperty("metallum.ci.transportProfile", "default");
         JsonObject report = new JsonObject();
         report.addProperty("profile", profile);
-        JsonObject enabled = new JsonObject();
+        var gson = new GsonBuilder().setPrettyPrinting().create();
+        JsonObject enabled = gson.toJsonTree(com.metallum.client.metal.render.MetalBackendOptimizations.snapshot()).getAsJsonObject();
         for (String flag : List.of("fusedStateDraw", "reuseEncoderState", "reuseNativeEncoderArguments", "dynamicUploadRangeCopy")) {
-            boolean value = Boolean.parseBoolean(System.getProperty("metallum.opt." + flag, "false"));
-            if (!profile.equals("default")) require(value == profile.equals("candidate"), "Wrong optimization property: " + flag);
-            enabled.addProperty(flag, value);
+            boolean value = enabled.get(flag).getAsBoolean();
+            require(value == !profile.equals("baseline"), "Wrong optimization policy in " + profile + ": " + flag);
         }
         report.add("enabled", enabled);
         var counters = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
@@ -667,7 +667,6 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("fusedDrawCalls", fused);
         report.addProperty("rejectedFusedDrawCalls", rejected);
         report.addProperty("verified", true);
-        var gson = new GsonBuilder().setPrettyPrinting().create();
         report.add("state", gson.toJsonTree(counters));
         report.add("uploads", gson.toJsonTree(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot()));
         try {

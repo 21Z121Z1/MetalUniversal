@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.MetalBackendOptimizations;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import org.jspecify.annotations.Nullable;
 
@@ -42,7 +43,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
     );
-    private static final boolean REUSE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    private static final boolean REUSE = MetalBackendOptimizations.REUSE_ENCODER_STATE;
     private static final ThreadLocal<MemorySegment> IDLE_STORAGE = new ThreadLocal<>();
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
@@ -75,6 +76,11 @@ final class MetalRenderStatePacket implements AutoCloseable {
     boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
                     final long indexType, final MemorySegment indexBuffer, final long indexOffset,
                     final int firstOrBaseVertex, final int count, final int instances, final int baseInstance) {
+        ensureOpen();
+        // Preserve the existing critical direct-setter route for tiny packets.
+        // Fusion replaces an ordinary packet call plus draw, not two cheaper
+        // critical calls with a newly introduced ordinary packet call.
+        if (this.entryCount < MIN_NATIVE_ENTRIES) return false;
         return tryDraw(encoder, kind, primitive, indexType, indexBuffer, indexOffset,
                 firstOrBaseVertex, count, instances, baseInstance, NATIVE_DRAW);
     }
