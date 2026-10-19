@@ -1,0 +1,76 @@
+name: MetalFX motion and capability contracts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/main/native/**'
+      - 'src/test/native/**'
+      - 'src/main/java/com/metallum/client/metal/render/**'
+      - '.github/ci/MetalFxCapabilityProbe.swift'
+      - '.github/workflows/metalfx-contracts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metalfx-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  metalfx-contracts:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - name: Record source and SDK
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          mkdir -p build/agent-evidence/metalfx build/metal-tests
+          git status --porcelain > build/agent-evidence/metalfx/git-status.txt
+          test ! -s build/agent-evidence/metalfx/git-status.txt
+          git rev-parse HEAD > build/agent-evidence/metalfx/source-commit.txt
+          sw_vers > build/agent-evidence/metalfx/os.txt
+          xcodebuild -version > build/agent-evidence/metalfx/xcode.txt
+          xcrun --sdk macosx --show-sdk-version > build/agent-evidence/metalfx/sdk.txt
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          cp -R "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
+          shasum -a 256 src/main/native/MetallumNative.swift src/test/native/MetalMotionContractValidation.swift > build/agent-evidence/metalfx/source-sha256.txt
+      - name: Probe actual MetalFX device support
+        run: |
+          xcrun swiftc -parse-as-library -O -framework Foundation -framework Metal -framework MetalFX \
+            .github/ci/MetalFxCapabilityProbe.swift -o build/metal-tests/MetalFxCapabilityProbe
+          build/metal-tests/MetalFxCapabilityProbe build/agent-evidence/metalfx/capabilities.json
+      - name: Compile shipping motion contract executable
+        run: |
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalMotionContractValidation.swift -o build/metal-tests/MetalMotionContractValidation
+      - name: Execute shipping motion kernels with independent numeric oracles
+        run: |
+          set -euo pipefail
+          build/metal-tests/MetalMotionContractValidation build/metal-validation/motion-current \
+            | tee build/agent-evidence/metalfx/motion-contract.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: metalfx-contracts-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/metalfx/
+            build/metal-validation/motion-current/
+          if-no-files-found: error
+          retention-days: 14

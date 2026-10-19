@@ -5344,7 +5344,9 @@ private func ensureMotionPipeline(_ device: MTLDevice) -> MTLComputePipelineStat
     }
 }
 
-private func motionCameraV2MslSource() -> String {
+// Internal so the native contract executable compiles the shipping kernels,
+// even on a device without a MetalFX scaler. This is not a Java/native ABI.
+func motionCameraV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5466,7 +5468,7 @@ private func motionCameraV2MslSource() -> String {
     """
 }
 
-private func motionMergeV2MslSource() -> String {
+func motionMergeV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5593,7 +5595,7 @@ private func motionMergeV2MslSource() -> String {
     """
 }
 
-private func motionFusedV2MslSource() -> String {
+func motionFusedV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
