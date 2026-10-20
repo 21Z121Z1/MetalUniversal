@@ -28,7 +28,9 @@ import java.util.Map;
  *
  * <p>Pending positions replace previous positions only after the source frame was accepted. A
  * complete per-object draw manifest must also match before a previous stream can be consumed;
- * this prevents an optional feature draw from shifting ordinal correspondence.</p>
+ * this prevents an optional feature draw from shifting ordinal correspondence. Explicit particle
+ * IDs may cross group partitions only with a complete, compatible old transform/material/uniform
+ * proof for each current draw. Other producer manifests retain ordinal correspondence.</p>
  */
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexHistory {
@@ -114,20 +116,21 @@ final class MetalPreviousVertexHistory {
 
     private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
                             @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds,
-                            @Nullable MetalSourceUniforms sourceUniforms) {
+                            @Nullable MetalSourceUniforms sourceUniforms, boolean particleBatch) {
         Snapshot withTransform(final @Nullable DrawTransform value) {
-            return new Snapshot(signature, positions, value, surface, particleIds,sourceUniforms);
+            return new Snapshot(signature, positions, value, surface, particleIds,sourceUniforms,particleBatch);
         }
         Snapshot withSurface(final @Nullable SurfaceIdentity value) {
-            return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms);
+            return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms,particleBatch);
         }
         Snapshot withSourceUniforms(final @Nullable MetalSourceUniforms value) {
-            return new Snapshot(signature,positions,transform,surface,particleIds,value);
+            return new Snapshot(signature,positions,transform,surface,particleIds,value,particleBatch);
         }
     }
 
     private static final Map<DrawKey, Snapshot> PREVIOUS = new HashMap<>();
     private static final Map<DrawKey, Snapshot> PENDING = new HashMap<>();
+    private static final Map<ObjectKey, Map<DrawKey, Snapshot>> PARTICLE_MATCHES = new HashMap<>();
     private static final Map<ObjectKey, Integer> PREVIOUS_DRAW_COUNTS = new HashMap<>();
     private static final Map<ObjectKey, Integer> CURRENT_DRAW_COUNTS = new HashMap<>();
     private static @Nullable CameraPosition previousCamera;
@@ -139,6 +142,7 @@ final class MetalPreviousVertexHistory {
 
     static void beginFrame() {
         PENDING.clear();
+        PARTICLE_MATCHES.clear();
         CURRENT_DRAW_COUNTS.clear();
         pendingCamera = null;
         frameOpen = true;
@@ -169,6 +173,7 @@ final class MetalPreviousVertexHistory {
         ObjectKey object = new ObjectKey(sample.objectId(), sample.generation());
         int ordinal = CURRENT_DRAW_COUNTS.getOrDefault(object, 0);
         CURRENT_DRAW_COUNTS.put(object, ordinal + 1);
+        PARTICLE_MATCHES.remove(object);
         return new DrawToken(new DrawKey(object, ordinal), pipeline.getLocation().toString());
     }
 
@@ -225,7 +230,10 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null, null,null));
+            stagePending(token.key(), new Snapshot(signature, new Positions(positions), null, null, null,null,false));
+        } else if (frameOpen && token != null) {
+            PENDING.remove(token.key());
+            PARTICLE_MATCHES.remove(token.key().object());
         }
     }
 
@@ -249,27 +257,29 @@ final class MetalPreviousVertexHistory {
                 || s.vertexSize() != com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getVertexSize()
                 || s.vertexCount() != (long)ids.size()*4 || s.indexCount() != (long)ids.size()*6) {
             PENDING.remove(token.key());
+            PARTICLE_MATCHES.remove(token.key().object());
             return;
         }
-        PENDING.put(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(), List.copyOf(ids),snapshot.sourceUniforms()));
+        stagePending(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(),
+                List.copyOf(ids),snapshot.sourceUniforms(),positiveOnly));
     }
 
     /** Attaches uniforms to the same pending draw/geometry transaction, never a separate history. */
     static void stageDrawTransform(final @Nullable DrawToken token, final @Nullable DrawTransform transform) {
         Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
         if (snapshot != null) {
-            PENDING.put(token.key(), snapshot.withTransform(transform != null && transform.finite() ? transform : null));
+            stagePending(token.key(), snapshot.withTransform(transform != null && transform.finite() ? transform : null));
         }
     }
 
     static void stageSurface(final @Nullable DrawToken token, final @Nullable SurfaceIdentity surface) {
         Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
-        if (snapshot != null) PENDING.put(token.key(), snapshot.withSurface(surface));
+        if (snapshot != null) stagePending(token.key(), snapshot.withSurface(surface));
     }
 
     static void stageSourceUniforms(final @Nullable DrawToken token, final @Nullable MetalSourceUniforms uniforms) {
         Snapshot snapshot=frameOpen && token!=null ? PENDING.get(token.key()) : null;
-        if(snapshot!=null)PENDING.put(token.key(),snapshot.withSourceUniforms(uniforms));
+        if(snapshot!=null)stagePending(token.key(),snapshot.withSourceUniforms(uniforms));
     }
 
     static @Nullable MetalSourceUniforms currentSourceUniforms(final @Nullable DrawToken token) {
@@ -282,10 +292,10 @@ final class MetalPreviousVertexHistory {
         ObjectKey object=token.key().object();
         for(int ordinal=0;ordinal<CURRENT_DRAW_COUNTS.get(object);ordinal++) {
             DrawKey key=new DrawKey(object,ordinal);
-            if(PENDING.get(key).sourceUniforms()==null || PREVIOUS.get(key).sourceUniforms()==null
-                    || PENDING.get(key).transform()==null || PREVIOUS.get(key).transform()==null)return null;
+            if(PENDING.get(key).sourceUniforms()==null || previousFor(key).sourceUniforms()==null
+                    || PENDING.get(key).transform()==null || previousFor(key).transform()==null)return null;
         }
-        return PREVIOUS.get(token.key()).sourceUniforms();
+        return previousFor(token.key()).sourceUniforms();
     }
 
     /** Visibility resources are checked after the complete source manifest has been staged. */
@@ -294,7 +304,7 @@ final class MetalPreviousVertexHistory {
         ObjectKey object = token.key().object();
         for (int ordinal = 0; ordinal < CURRENT_DRAW_COUNTS.get(object); ordinal++) {
             DrawKey key = new DrawKey(object, ordinal);
-            SurfaceIdentity current = PENDING.get(key).surface(), previous = PREVIOUS.get(key).surface();
+            SurfaceIdentity current = PENDING.get(key).surface(), previous = previousFor(key).surface();
             if (current == null || !current.equals(previous)) return false;
         }
         return true;
@@ -320,11 +330,11 @@ final class MetalPreviousVertexHistory {
         ObjectKey object = token.key().object();
         for (int ordinal = 0; ordinal < CURRENT_DRAW_COUNTS.get(object); ordinal++) {
             DrawKey key = new DrawKey(object, ordinal);
-            if (PENDING.get(key).transform() == null || PREVIOUS.get(key).transform() == null) {
+            if (PENDING.get(key).transform() == null || previousFor(key).transform() == null) {
                 return null;
             }
         }
-        Snapshot snapshot = PREVIOUS.get(token.key());
+        Snapshot snapshot = previousFor(token.key());
         return snapshot == null ? null : snapshot.transform();
     }
 
@@ -334,6 +344,8 @@ final class MetalPreviousVertexHistory {
             return null;
         }
         Snapshot current = PENDING.get(token.key());
+        Snapshot remapped = particleMatches(token.key().object()).get(token.key());
+        if (remapped != null) return remapped.positions().values();
         Snapshot previous = PREVIOUS.get(token.key());
         if (current == null || previous == null || !compatible(current, previous)) {
             return null;
@@ -382,9 +394,9 @@ final class MetalPreviousVertexHistory {
 
     static boolean objectManifestMatches(final ObjectKey object) {
         int currentCount = CURRENT_DRAW_COUNTS.getOrDefault(object, 0);
-        if (currentCount <= 0 || currentCount != PREVIOUS_DRAW_COUNTS.getOrDefault(object, -1)) {
-            return false;
-        }
+        if (currentCount <= 0) return false;
+        if (particleMatches(object).size() == currentCount) return true;
+        if (currentCount != PREVIOUS_DRAW_COUNTS.getOrDefault(object, -1)) return false;
         for (int ordinal = 0; ordinal < currentCount; ordinal++) {
             DrawKey key = new DrawKey(object, ordinal);
             Snapshot current = PENDING.get(key);
@@ -394,6 +406,57 @@ final class MetalPreviousVertexHistory {
             }
         }
         return true;
+    }
+
+    private static void stagePending(final DrawKey key, final Snapshot snapshot) {
+        PENDING.put(key, snapshot);
+        PARTICLE_MATCHES.remove(key.object());
+    }
+
+    /** Caller first proves the complete manifest; ordinal fallback never crosses a group. */
+    private static Snapshot previousFor(final DrawKey key) {
+        Snapshot remapped = particleMatches(key.object()).get(key);
+        return remapped != null ? remapped : java.util.Objects.requireNonNull(PREVIOUS.get(key), "Missing proven previous draw");
+    }
+
+    private static Map<DrawKey, Snapshot> particleMatches(final ObjectKey object) {
+        Map<DrawKey, Snapshot> cached = PARTICLE_MATCHES.get(object);
+        if (cached != null) return cached;
+        Map<DrawKey, Snapshot> matches = new HashMap<>();
+        var current = particleBatches(object, PENDING, CURRENT_DRAW_COUNTS.getOrDefault(object, 0));
+        var previous = particleBatches(object, PREVIOUS, PREVIOUS_DRAW_COUNTS.getOrDefault(object, 0));
+        if (current != null && previous != null) {
+            var resolved = MetalParticleQuadHistory.remap(previous, current,
+                    (fresh, old) -> compatible(fresh, old) && fresh.transform() != null && old.transform() != null
+                            && fresh.sourceUniforms() != null && old.sourceUniforms() != null
+                            && fresh.surface() != null && fresh.surface().equals(old.surface()),
+                    (a, b) -> a.transform().equals(b.transform()) && a.surface().equals(b.surface())
+                            && a.sourceUniforms().sameHistoryInputs(b.sourceUniforms()));
+            for (int ordinal = 0; ordinal < resolved.size(); ordinal++) {
+                var match = resolved.get(ordinal);
+                if (match.isEmpty()) continue;
+                Snapshot fresh = current.get(ordinal).proof(), old = match.get().previousProof();
+                matches.put(new DrawKey(object, ordinal), new Snapshot(fresh.signature(), new Positions(match.get().positions()),
+                        old.transform(), old.surface(), fresh.particleIds(), old.sourceUniforms(), true));
+            }
+        }
+        Map<DrawKey, Snapshot> immutable = Map.copyOf(matches);
+        PARTICLE_MATCHES.put(object, immutable);
+        return immutable;
+    }
+
+    private static @Nullable List<MetalParticleQuadHistory.Batch<Snapshot>> particleBatches(
+            final ObjectKey object, final Map<DrawKey, Snapshot> snapshots, final int count) {
+        if (count <= 0) return null;
+        var batches = new ArrayList<MetalParticleQuadHistory.Batch<Snapshot>>(count);
+        for (int ordinal = 0; ordinal < count; ordinal++) {
+            Snapshot snapshot = snapshots.get(new DrawKey(object, ordinal));
+            // Explicit SingleQuadParticle identities only. Weather/cloud and entity
+            // manifests retain their existing complete ordinal/layout contract.
+            if (snapshot == null || !snapshot.particleBatch() || snapshot.particleIds() == null) return null;
+            batches.add(new MetalParticleQuadHistory.Batch<>(snapshot.particleIds(), snapshot.positions().values(), snapshot));
+        }
+        return batches;
     }
 
     static void commitSubmittedFrame() {
@@ -408,6 +471,7 @@ final class MetalPreviousVertexHistory {
         PREVIOUS_DRAW_COUNTS.putAll(CURRENT_DRAW_COUNTS);
         previousCamera = pendingCamera;
         PENDING.clear();
+        PARTICLE_MATCHES.clear();
         CURRENT_DRAW_COUNTS.clear();
         pendingCamera = null;
         frameOpen = false;
@@ -415,6 +479,7 @@ final class MetalPreviousVertexHistory {
 
     static void discardFrame() {
         PENDING.clear();
+        PARTICLE_MATCHES.clear();
         CURRENT_DRAW_COUNTS.clear();
         pendingCamera = null;
         frameOpen = false;
@@ -425,6 +490,7 @@ final class MetalPreviousVertexHistory {
         PREVIOUS.clear();
         PREVIOUS_DRAW_COUNTS.clear();
         PENDING.clear();
+        PARTICLE_MATCHES.clear();
         CURRENT_DRAW_COUNTS.clear();
         previousCamera = null;
         pendingCamera = null;

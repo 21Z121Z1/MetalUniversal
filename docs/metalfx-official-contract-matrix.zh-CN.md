@@ -25,7 +25,7 @@
 | 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调 | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史 |
 | 遮挡 | V4 surface resolver 与 `MetalMotionContractValidation` | previous 表面 Z、前帧 HUD 遮挡、标准／反向 Z、中心遮挡、无效对应不得回退为相机运动 |
 | 透明与特殊材质 | source draw 真实状态、材质 reactive 与 previous validity 分离 | 单一运动不能表示多层混合；未知 pipeline／格式仍拒绝，reactive 不算完整 FG 对应 |
-| 粒子 | `MetalParticleBatchMotion`、粒子 ID、独立 Layer 事务 | 出生／死亡／排序与失败提交；跨 group 分区改变及任意自定义发射仍需完整 manifest |
+| 粒子 | `MetalParticleBatchMotion`、粒子 ID、独立 Layer 事务；`MetalParticleQuadHistory` | 合并／拆分／重排按粒子 ID 对应；一个当前 draw 只能共享一致的旧投影、模型视图、材质／raster 状态和有效 uniform 输入。出生、发射数量变化及跨 draw 的歧义多发射保留无效顶点；实体／天气仍使用原有完整 manifest，失败提交不推进。任意自定义发射尚须实际入口证明 |
 | 天气／环境 | `WeatherEffectRendererMetalFxMixin`、`MetalWeatherMotion`、`MetalWeatherCorrespondence`、`CloudRendererMetalFxMixin` | 雨雪按实际上传 XYZ／UV、随机漂移、列身份和 sampler 重建旧纹理表面点，片元拒绝旧范围外历史；源顶点冻结、雨雪分层并随源提交推进，关闭捕获期间的新上传也使旧准备数据失效。云和剩余环境动画仍未证明，不解除完整 FG 准入 |
 | 生物／方块实体 | staged CPU posed positions、所有者 generation、完整 draw manifest | 现有可审计模型已接入；未知／剩余渲染器、Iris／模组语义保持未证明 |
 | 手部 | 独立 HUD 覆盖、透明手部 current Z、前帧手部表面 | 无源深度的透明手部也不归入世界；缺历史明确反遮挡；真实客户端摆动质量仍需支持硬件 |

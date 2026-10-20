@@ -81,6 +81,11 @@ final class MetalSourceUniforms {
     }
     boolean hasGlobals() { return globals != null; }
     boolean hasFog() { return fog != null; }
+    /** Compare shader inputs, excluding only the unused std140 ModelOffset padding. */
+    boolean sameHistoryInputs(final MetalSourceUniforms other) {
+        return java.util.Arrays.equals(dynamic, 0, 156, other.dynamic, 0, 156)
+                && java.util.Arrays.equals(globals, other.globals) && java.util.Arrays.equals(fog, other.fog);
+    }
     float glintAlpha() {
         if (globals == null) throw new IllegalStateException("Source Globals were not bound");
         return bytes(globals).getFloat(12);
