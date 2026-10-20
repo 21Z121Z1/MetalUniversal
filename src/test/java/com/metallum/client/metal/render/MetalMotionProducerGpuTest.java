@@ -1185,7 +1185,14 @@ final class MetalMotionProducerGpuTest {
                     double expectedX=-.5*(2*(p%W+.5)/W-1),expectedY=.25*(1-2*(p/W+.5)/H);
                     if(!Float.isFinite(x)||!Float.isFinite(y)
                             ||Math.abs(x-expectedX)*W/2>halfRoundingBudgetPixels(expectedX,W)+.0001
-                            ||Math.abs(y-expectedY)*H/2>halfRoundingBudgetPixels(expectedY,H)+.0001)wrongMotion++;
+                            ||Math.abs(y-expectedY)*H/2>halfRoundingBudgetPixels(expectedY,H)+.0001) {
+                        if(wrongMotion<4)System.out.println("PREVIOUS_RASTER_DIAGNOSTIC pixel="+p
+                                +" actualXY="+x+","+y+" expectedXY="+expectedX+","+expectedY
+                                +" errorPixels="+(Math.abs(x-expectedX)*W/2)+","+(Math.abs(y-expectedY)*H/2)
+                                +" halfBudgetPixels="+halfRoundingBudgetPixels(expectedX,W)+","+halfRoundingBudgetPixels(expectedY,H)
+                                +" actualZ="+before+","+now);
+                        wrongMotion++;
+                    }
                 } else if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
                 float expectedBefore=survived.getFloat(p*4);
                 float expectedNow=survived.getFloat(p*4);
@@ -1215,6 +1222,7 @@ final class MetalMotionProducerGpuTest {
                     +",\"reactiveMaterial\":"+reactive+",\"specialVertexLayout\":"+special+",\"wrongAlphaPixels\":"+wrongAlpha
                     +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth
                     +",\"previousDepthComparisons\":"+previousDepthComparisons+",\"currentSlopeNegativeControls\":"+currentSlopeNegativeControls+"}");
+            if(scaledHistory)System.out.println("PREVIOUS_RASTER_RESULT "+Files.readString(dir.resolve("result.json")));
             assertEquals(0,mismatches,"Motion must follow original fragment survival and the actual alpha blend contribution");
             assertEquals(0,wrongAlpha,"Independent original material alpha");
             assertEquals(0,wrongTag,"Reactive material tags must preserve exact geometry");
