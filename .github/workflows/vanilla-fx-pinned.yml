@@ -1,0 +1,304 @@
+name: Pinned Vanilla MetalFX fallback
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/vanilla-fx-aff7f0f0-validation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinned-vanilla-fx-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: 'aff7f0f07222bc41eeb2ff68557ccb77d50b94e8'
+
+jobs:
+  pinned-vanilla-fx:
+    name: Vanilla requested-temporal moving on pinned source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - renderer: vanilla
+            transport: default
+            metalfx: requested-temporal
+            scene: moving
+            runner: macos-26
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+    runs-on: ${{ matrix.runner || 'macos-26' }}
+    timeout-minutes: 30
+    env:
+      METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
+      METALLUM_E2E_TRANSPORT: ${{ matrix.transport }}
+      METALLUM_E2E_METALFX: ${{ matrix.metalfx }}
+      METALLUM_E2E_SCENE: ${{ matrix.scene }}
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      # Preserve the exact translated stages when a non-black frame is visually wrong.
+      METALLUM_MSL_CACHE_DIR: ${{ github.workspace }}/build/agent-evidence/msl-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Select current SDK for the Metal 3 client
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          mkdir -p build/agent-evidence
+          {
+            echo "source=$METALLUM_SOURCE_SHA"
+            echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun swiftc --version
+          } | tee build/agent-evidence/metal3-client-toolchain.txt
+          # The common dylib contains availability-gated Metal 4 declarations
+          # even when this macOS 15 client executes the maintained Metal 3 path.
+          cat > "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift" <<'SWIFT'
+          import Metal
+          @available(macOS 26.0, *)
+          func requireNativeDeclarations(_ compiler: any MTL4Compiler, _ buffer: any MTL4CommandBuffer) {
+              let control: InlineArray<2, UInt32> = [1, 2]
+              _ = control[0]
+              _ = compiler
+              _ = buffer
+          }
+          SWIFT
+          xcrun --sdk macosx swiftc -typecheck -target arm64-apple-macosx14.0 \
+            "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift"
+      - name: Record pinned product source and workflow harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          test "$(uname -m)" = arm64
+          mkdir -p build/agent-evidence
+          python3 - <<'PY_IDENTITY'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+
+          def bind_source(expected, tested, dirty, harness):
+              if any(re.fullmatch(r"[0-9a-f]{40}", value or "") is None for value in (expected, tested, harness)):
+                  raise ValueError("invalid source or workflow SHA")
+              if tested != expected or dirty:
+                  raise ValueError("pinned source checkout is mismatched or dirty")
+              return {"schema_version": 1, "proof_subject": "pinned-source", "tested_commit_sha": tested,
+                      "expected_tested_commit_sha": expected, "workflow_harness_sha": harness, "exact_match": True}
+
+          assert bind_source("a"*40, "a"*40, "", "b"*40)["tested_commit_sha"] == "a"*40
+          for args in (("a"*40,"c"*40,"","b"*40), ("a"*40,"a"*40," M file","b"*40),
+                       ("a"*40,"a"*40,"","not-a-sha"), ("bad","bad","","b"*40)):
+              try:
+                  bind_source(*args)
+              except ValueError:
+                  pass
+              else:
+                  raise AssertionError("invalid pinned source identity accepted")
+          print("Pinned source identity self-test: PASS")
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          result = bind_source(os.environ["METALLUM_SOURCE_SHA"], git("rev-parse", "HEAD"),
+                               git("status", "--porcelain"), os.environ["GITHUB_SHA"])
+          path = Path(".github/workflows/minecraft-client-e2e.yml")
+          actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+          if actual_hash != "82a9b4adfd19b2ade33bd83499ed2588c117675afe2a927850587c52bf5ceb89":
+              raise SystemExit("canonical pinned workflow bytes differ")
+          result.update({"tested_tree_sha": git("rev-parse", "HEAD^{tree}"),
+                         "canonical_workflow_sha256": actual_hash,
+                         "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+                         "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                         "renderer": "vanilla", "transport": "default", "metalfx": "requested-temporal", "scene": "moving",
+                         "boundary": "Product source is pinned independently from this workflow harness; not candidate-head evidence for the harness SHA."})
+          out = Path("build/agent-evidence/pinned-source-context.json")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(json.dumps(result, sort_keys=True, indent=2)+"\n")
+          print(json.dumps(result, sort_keys=True))
+          PY_IDENTITY
+          uname -a
+          sw_vers
+          xcodebuild -version
+      - name: Build the Minecraft 26.3 production artifact
+        id: metallum
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace \
+            -x buildIOSNative -x buildIOSSpvc \
+            jar verifyIsolatedClientProfiles
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+      - name: Run the ${{ matrix.renderer }} Minecraft 26.3 production client GameTest
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            -p .github/ci/minecraft-e2e \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
+            -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
+            -PtransportProfile=${{ matrix.transport }} \
+            -PmetalFxProfile=${{ matrix.metalfx }} \
+            -PstationaryFramebufferScene=${{ matrix.scene == 'stationary' }} \
+            test runProductionClientGameTest
+      - name: Verify framebuffer, presentation, and reload evidence
+        run: |
+          set -euo pipefail
+          root='.github/ci/minecraft-e2e/build/evidence'
+          log='.github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log'
+          python3 - "$root" "${{ steps.metallum.outputs.jar }}" <<'PY'
+          import json
+          import pathlib
+          import struct
+          import sys
+          import os
+          import hashlib
+
+          root = pathlib.Path(sys.argv[1])
+          required = [
+              root / 'readback-control' / 'suite.json',
+              root / 'metal-framebuffer.png',
+              root / 'metal-framebuffer-samples.json',
+              root / 'runtime-evidence.json',
+              root / 'presentation-evidence.json',
+              root / 'reload-evidence.json',
+              root / 'artifact-identity.json',
+          ]
+          for path in required:
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'missing E2E evidence: {path}')
+
+          suite = json.loads(required[0].read_text(encoding='utf-8'))
+          if suite.get('allExact') is not True:
+              raise SystemExit(f'readback controls failed: {suite}')
+
+          renderer = os.environ['METALLUM_E2E_RENDERER']
+          expected_sodium = renderer == 'sodium'
+          identity = json.loads(required[6].read_text(encoding='utf-8'))
+          mods = identity.get('mods', {})
+          if identity.get('rendererMode') != renderer or not isinstance(mods, dict) or (
+                  ('sodium' in mods) != expected_sodium or 'iris' in mods):
+              raise SystemExit(f'production test used the wrong renderer mods: {identity}')
+          if identity.get('build', {}).get('sourceSha') != os.environ['METALLUM_SOURCE_SHA'] or identity['build'].get('dirty') is not False:
+              raise SystemExit('loaded artifact does not prove the clean candidate HEAD')
+          loaded = pathlib.Path(identity['loadedJavaArtifact'])
+          expected_jar_hash = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
+          if hashlib.sha256(loaded.read_bytes()).hexdigest() != expected_jar_hash or identity.get('javaArtifactSha256') != expected_jar_hash:
+              raise SystemExit('loaded production JAR hash does not match the evidence')
+
+          runtime = json.loads(required[3].read_text(encoding='utf-8'))
+          if (runtime.get('backend', '').lower() != 'metal'
+                  or runtime.get('productionRuntime') is not True
+                  or runtime.get('sodiumLoaded') is not expected_sodium
+                  or runtime.get('irisLoaded') is not False
+                  or runtime.get('worldLoaded') is not True
+                  or runtime.get('chunksRendered') is not True):
+              raise SystemExit(f'production client did not render the requested lane: {runtime}')
+
+          if os.environ['METALLUM_E2E_SCENE'] == 'stationary':
+              sys.path.insert(0, 'scripts/agent')
+              from check_metal4_main_e2e_pair import stationary_scene, stationary_terrain_control
+              scene = stationary_scene(runtime)
+              print('verified stationary time and camera receipts:', json.dumps(scene, sort_keys=True))
+              print('verified isolated terrain capture:', json.dumps(stationary_terrain_control(root), sort_keys=True))
+
+          optimization = json.loads((root / 'optimization-evidence.json').read_text(encoding='utf-8'))
+          if optimization.get('profile') != os.environ['METALLUM_E2E_TRANSPORT'] or optimization.get('verified') is not True:
+              raise SystemExit(f'optimization activation was not verified: {optimization}')
+          print('verified optimization activation:', json.dumps(optimization, sort_keys=True))
+
+          fx = json.loads((root / 'metalfx-runtime-evidence.json').read_text(encoding='utf-8'))
+          if fx.get('verified') is not True or fx.get('profile') != os.environ['METALLUM_E2E_METALFX']:
+              raise SystemExit(f'MetalFX runtime profile was not verified: {fx}')
+          if fx['profile'] == 'requested-temporal':
+              expected = 'TEMPORAL' if fx['temporalSupported'] and fx['motionPipelineAvailable'] else 'SPATIAL' if fx['spatialSupported'] else 'OFF'
+              if fx['requestedMode'] != 'TEMPORAL' or fx['effectiveMode'] != expected or fx['runtimeDisabled']:
+                  raise SystemExit(f'MetalFX capability fallback failed: {fx}')
+              if expected == 'SPATIAL' and not (fx['spatialEncodes'] > 0 and fx['temporalEncodes'] == 0):
+                  raise SystemExit(f'Spatial fallback was absent or falsely counted as Temporal: {fx}')
+              if fx['frameGenerationEnabled'] or fx['frameGenerationQueued'] != 0:
+                  raise SystemExit(f'Incomplete motion production admitted frame interpolation: {fx}')
+          print('verified MetalFX runtime:', json.dumps(fx, sort_keys=True))
+
+          raw = required[1].read_bytes()
+          if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
+              raise SystemExit('invalid framebuffer PNG')
+          width, height = struct.unpack('>II', raw[16:24])
+          if width <= 1 or height <= 1:
+              raise SystemExit(f'invalid framebuffer dimensions: {width}x{height}')
+
+          samples = json.loads(required[2].read_text(encoding='utf-8'))
+          selected_id = samples.get('selectedFrameId')
+          selected = next((x for x in samples.get('samples', []) if x.get('frameId') == selected_id), None)
+          if not selected:
+              raise SystemExit(f'selected frame is absent: {selected_id}')
+          if selected.get('byteCount') != width * height * 4:
+              raise SystemExit(f'framebuffer byte count mismatch: {selected}')
+          if selected.get('nonBlackPixels', 0) <= 0 or selected.get('distinctRgb', 0) <= 1:
+              raise SystemExit(f'framebuffer has no useful content: {selected}')
+
+          probe = json.loads((root / 'terrain-color-probe.json').read_text(encoding='utf-8'))
+          if probe.get('passed') is not True or [x.get('expected') for x in probe.get('bands', [])] != ['red', 'lime', 'blue']:
+              raise SystemExit(f'terrain geometry/color coverage failed: {probe}')
+          if not (root / 'terrain-color-probe.png').is_file():
+              raise SystemExit('missing terrain geometry/color screenshot')
+          print('verified terrain geometry/color coverage:', json.dumps(probe, sort_keys=True))
+
+          presentation = json.loads(required[4].read_text(encoding='utf-8'))
+          if presentation.get('completeAndSuccessful') is not True:
+              raise SystemExit(f'presentation lifecycle failed: {presentation}')
+
+          reload = json.loads(required[5].read_text(encoding='utf-8'))
+          if reload.get('reloadCompleted') is not True:
+              raise SystemExit(f'resource reload did not complete: {reload}')
+          if str(reload.get('backendAfterReload', '')).lower() != 'metal':
+              raise SystemExit(f'backend was not Metal after reload: {reload}')
+          if reload.get('worldLoadedAfterReload') is not True:
+              raise SystemExit(f'world was lost after reload: {reload}')
+          if reload.get('postReloadPresentationHealthy') is not True:
+              raise SystemExit(f'presentation did not recover after reload: {reload}')
+
+          print(f'verified Minecraft Metal framebuffer: {width}x{height}, frame={selected_id}')
+          PY
+          test -s "$log"
+          ! grep -Fq 'nextDrawable() returned nil' "$log"
+      - name: State evidence boundary
+        run: |
+          cat <<'BOUNDARY' > build/agent-evidence/minecraft-e2e-boundary.txt
+          This job proves the explicitly pinned source JAR can run its Minecraft 26.3 client GameTest
+          with the requested Vanilla or Sodium-only runtime on the hosted Apple Silicon
+          environment and emit valid Metal readback evidence.
+          It does not prove attended visual parity, stable performance, thermals, or release readiness.
+          BOUNDARY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: pinned-minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-${{ matrix.metalfx == 'requested-temporal' && 'metalfx-requested-temporal-' || '' }}${{ matrix.scene == 'stationary' && 'stationary-' || '' }}e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/
+            .github/ci/minecraft-e2e/build/evidence/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/
+            .github/ci/minecraft-e2e/build/reports/
+          if-no-files-found: warn
+          retention-days: 14
