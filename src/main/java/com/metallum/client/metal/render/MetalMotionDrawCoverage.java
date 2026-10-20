@@ -179,8 +179,8 @@ public final class MetalMotionDrawCoverage {
                 counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
-                MetalUiDrawCoverage.snapshot().frameId()==lastSourceFrame.frameId()
-                        ? MetalUiDrawCoverage.snapshot() : lastUiFrame);
+                MetalUiDrawCoverage.forSourceFrame(lastSourceFrame.frameId(),lastSourceFrame.epoch(),
+                        MetalUiDrawCoverage.snapshot(),lastUiFrame));
     }
 
     static void sourceExecution(final @Nullable OitStage stage,

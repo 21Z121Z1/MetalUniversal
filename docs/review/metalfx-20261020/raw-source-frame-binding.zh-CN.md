@@ -4,6 +4,8 @@
 
 本修正为每个raw请求建立独立证据owner，在原有source observation关闭点冻结当前不可变census与cloud层快照；不移动关闭点，不改变颜色/运动编码、深度、容差或功能准入。冻结要求collected、closed以及相同frame/epoch，且只能成功一次。GPU完成回调只消费该owner，不重新读取当前全局状态。结果和`source-frame-evidence.json`全部写完后才完成future。
 
+UI清单选择也同时核对frame和epoch；当当前及上次UI都不属于对应源帧时返回明确的未观察状态，不能凭相同frameId借用另一个epoch的clear-only条件。source证据JSON逐条写入Writer，避免为整个清单再构造一份大字符串。
+
 尚未冻结的请求在历史重置、禁用、关闭或被后续源帧取代时保留明确失败原因；GPU回调仍按原路径释放读回buffer。已经冻结的旧帧数据可以等待真实GPU完成，即使之后客户端进入另一帧或epoch。跨线程发布通过AtomicReference，cloud映射另作不可变拷贝。
 
 真实客户端的普通、后处理手部以及FAST/FANCY×ordinary/OIT四种cloud读回都必须复核文件中的源码SHA、frame与epoch，并用冻结的census/layers写入cloud报告。整数身份不允许字符串、分数或溢出隐式转换；缺失、尚未关闭及错误源码也不能成为证据。局部producer拒绝原因继续保留，不把诊断采集当完整FG准入。

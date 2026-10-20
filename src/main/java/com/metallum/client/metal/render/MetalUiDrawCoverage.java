@@ -14,6 +14,8 @@ public final class MetalUiDrawCoverage {
                            boolean completeWriteCoverageProven,boolean premultipliedProven,MetalUiContentProof.Snapshot content) {}
     private static final Map<String,Program> PROGRAMS=new TreeMap<>();
     private static final MetalUiContentProof CONTENT=new MetalUiContentProof();
+    private static final Snapshot UNAVAILABLE=new Snapshot(0,0,0,0,false,false,Map.of(),false,false,false,
+            new MetalUiContentProof.Snapshot(0,0,0,Map.of(),false,"ui-not-observed-for-source-frame"));
     private static FrameSynthesisContract.FrameStamp stamp;
     private static MetalGpuTexture target;
     private static boolean separated,overflow;
@@ -60,6 +62,12 @@ public final class MetalUiDrawCoverage {
         return new Snapshot(stamp==null ? 0 : stamp.frameId(),stamp==null ? 0 : stamp.historyEpoch(),
                 target==null ? 0 : target.allocationId(),target==null ? 0 : target.allocationIdentity().generation(),
                 separated,overflow,Map.copyOf(PROGRAMS),false,false,false,CONTENT.snapshot());
+    }
+    static Snapshot forSourceFrame(long frameId,long epoch,Snapshot current,Snapshot previous) {
+        if(frameId<=0 || epoch<=0)return UNAVAILABLE;
+        if(current.frameId()==frameId && current.epoch()==epoch)return current;
+        if(previous.frameId()==frameId && previous.epoch()==epoch)return previous;
+        return UNAVAILABLE;
     }
     private MetalUiDrawCoverage() {}
 }
