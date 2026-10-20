@@ -33,7 +33,7 @@ final class MetalMotionShaderCompilationTest {
             paths = files.filter(path -> path.getFileName().toString().contains("motion."))
                     .sorted().toList();
         }
-        assertEquals(16, paths.size(), "Review the shader matrix when adding/removing a motion shader");
+        assertEquals(21, paths.size(), "Review the shader matrix when adding/removing a motion shader");
         for (Path path : paths) {
             String name = path.getFileName().toString();
             List<List<String>> variants = List.of(List.of());
@@ -48,10 +48,47 @@ final class MetalMotionShaderCompilationTest {
                 }
             } else if (name.startsWith("text_background")) {
                 variants = List.of(List.of(), List.of("IS_SEE_THROUGH"));
-            } else if (name.startsWith("block_") || name.startsWith("entity_")) {
-                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"));
+            } else if (name.startsWith("lightning_")) {
+                variants=List.of(List.of(),List.of("METALLUM_ALPHA_COMPOSITE"),
+                        List.of("METALLUM_ALPHA_COMPOSITE","OIT_ACCUMULATE","OIT_ADDITIVE"));
+            } else if (name.startsWith("entity_")) {
+                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
+                        List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"),
+                        List.of("GLINT", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("DISSOLVE", "PER_FACE_LIGHTING", "ALPHA_CUTOUT=0.1", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("GLINT", "GLINT_SPECIAL", "METALLUM_ENTITY_GLINT_SPECIAL", "METALLUM_ITEM_SOURCE", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("OIT_ADDITIVE", "ALPHA_CUTOUT=1.0"),
+                        List.of("APPLY_TEXTURE_MATRIX", "DISSOLVE", "METALLUM_ITEM_SOURCE", "METALLUM_ALPHA_COMPOSITE"));
+            } else if (name.startsWith("block_")) {
+                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
+                        List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"));
             }
-            for (List<String> defines : variants) cases.add(Arguments.of(name, defines));
+            if(name.startsWith("entity_")) {
+                var withLightmap=new ArrayList<List<String>>(variants);
+                for(var original:variants) {
+                    var lit=new ArrayList<String>(original);lit.add("METALLUM_ENTITY_LIGHTMAP");withLightmap.add(lit);
+                }
+                variants=withLightmap;
+            }
+            for (List<String> defines : variants) {
+                cases.add(Arguments.of(name, defines));
+                List<String> depthDefines = new ArrayList<>(defines);
+                depthDefines.add("METALLUM_MOTION_DEPTH");
+                depthDefines.add("METALLUM_REACTIVE_MATERIAL");
+                if (name.endsWith("previous_motion.vsh")) depthDefines.add("METALLUM_PREVIOUS_VALIDITY");
+                cases.add(Arguments.of(name, depthDefines));
+                List<String> overlayDefines=new ArrayList<>(depthDefines);
+                overlayDefines.add("METALLUM_MOTION_OVERLAY");
+                cases.add(Arguments.of(name,overlayDefines));
+                List<String> biasDefines=new ArrayList<>(depthDefines);
+                biasDefines.add("METALLUM_PREVIOUS_DEPTH_BIAS");
+                cases.add(Arguments.of(name,biasDefines));
+                if(name.startsWith("particle_")) {
+                    List<String> coverageDefines=new ArrayList<>(biasDefines);
+                    coverageDefines.add("METALLUM_PREVIOUS_COVERAGE");
+                    cases.add(Arguments.of(name,coverageDefines));
+                }
+            }
         }
         return cases.stream();
     }
@@ -71,6 +108,29 @@ final class MetalMotionShaderCompilationTest {
     }
 
     @Test
+    void independentSurfacePositionOracleCompilesWithoutMotionShaderDependencies() {
+        Compilation vertex = compile(MetalMotionProducerGpuTest.surfacePointVertexSource(),
+                Shaderc.shaderc_vertex_shader,"independent-surface-point-vertex",List.of());
+        Compilation fragment = compile(MetalMotionProducerGpuTest.surfacePointFragmentSource(),
+                Shaderc.shaderc_fragment_shader,"independent-surface-point-fragment",List.of());
+        assertEquals(Shaderc.shaderc_compilation_status_success,vertex.status(),vertex.message());
+        assertEquals(Shaderc.shaderc_compilation_status_success,fragment.status(),fragment.message());
+    }
+
+    static Stream<String> sourceDepthComparisons() {
+        return Stream.of("GREATER_THAN_OR_EQUAL","GREATER_THAN","LESS_THAN_OR_EQUAL","LESS_THAN","EQUAL","NOT_EQUAL","NEVER_PASS");
+    }
+
+    @ParameterizedTest
+    @MethodSource("sourceDepthComparisons")
+    void independentSourceDepthTestCompilesForEveryDepthComparison(String comparison) throws IOException {
+        String source=expandIncludes("assets/metallum/shaders/core/entity_motion.fsh",new HashSet<>());
+        Compilation result=compile(source,Shaderc.shaderc_fragment_shader,"original-source-depth-"+comparison,
+                List.of("METALLUM_MOTION_DEPTH","METALLUM_TEST_SOURCE_DEPTH","METALLUM_SOURCE_DEPTH_"+comparison));
+        assertEquals(Shaderc.shaderc_compilation_status_success,result.status(),result.message());
+    }
+
+    @Test
     void independentCompilerRejectsExplicitStageLocationsWithoutRequiredExtension() {
         String source = """
                 #version 330
@@ -86,7 +146,7 @@ final class MetalMotionShaderCompilationTest {
 
     // Only expand imports. Do not invent vanilla uniforms, change versions or auto-map locations.
     // Conditional source is left intact for the real GLSL preprocessor.
-    private static String expandIncludes(String resource, Set<String> active) throws IOException {
+    static String expandIncludes(String resource, Set<String> active) throws IOException {
         if (!active.add(resource)) throw new IOException("Recursive shader import: " + resource);
         try {
             var matcher = INCLUDE.matcher(readResource(resource));

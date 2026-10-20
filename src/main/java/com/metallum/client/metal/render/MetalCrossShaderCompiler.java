@@ -54,6 +54,14 @@ final class MetalCrossShaderCompiler {
     private static final int MSL_VERSION_4_0 = 0x040000;
     static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    private static final Pattern VERTEX_INDEX_BUILTIN = Pattern.compile(
+            "\\[\\[\\s*(?:vertex_id|base_vertex)\\s*\\]\\]"
+    );
+
+    /** Only stage-in fetch may be rebased when the shader cannot observe the original index. */
+    static boolean observesVertexIndex(final String vertexMsl) {
+        return VERTEX_INDEX_BUILTIN.matcher(vertexMsl).find();
+    }
 
     private MetalCrossShaderCompiler() {
     }
@@ -81,6 +89,10 @@ final class MetalCrossShaderCompiler {
             // buffers in place. Work on private native copies instead.
             vertexSpirv = mutableSpirvCopy(vertex.spv());
             fragmentSpirv = mutableSpirvCopy(fragment.spv());
+            // Raster writeDepth is independent of an actual shader FragDepth output.
+            // Reflect the source module even on a disk-cache hit: cached MSL does not
+            // own this contract, and valid attachment-free color draws must survive.
+            boolean writesFragmentDepth = writesFragmentDepth(fragmentSpirv);
 
             int firstStorageBinding = info.uniforms().size();
             List<RasterStorageResource> storageResources = rebindRasterStorageResources(
@@ -106,7 +118,8 @@ final class MetalCrossShaderCompiler {
                             cached.vertexEntryPoint(),
                             cached.fragmentEntryPoint(),
                             cached.resources(),
-                            cached.genericVertexInputs()
+                            cached.genericVertexInputs(),
+                            writesFragmentDepth
                     );
                 }
             }
@@ -149,7 +162,8 @@ final class MetalCrossShaderCompiler {
                     vertexEntryPoint,
                     fragmentEntryPoint,
                     resources,
-                    genericInputs
+                    genericInputs,
+                    writesFragmentDepth
             );
         } catch (ShaderCompileException exception) {
             throw new IllegalStateException("Failed to translate RenderPearl pipeline " + info.name(), exception);
@@ -178,6 +192,27 @@ final class MetalCrossShaderCompiler {
         copy.put(view);
         copy.flip();
         return copy;
+    }
+
+    static boolean writesFragmentDepth(final ByteBuffer spirvBytes) throws ShaderCompileException {
+        try (MemoryStack stack=MemoryStack.stackPush()) {
+            IntBuffer words=spirvBytes.asIntBuffer();
+            if(words.remaining()<5)throw new ShaderCompileException("SPIR-V is too small");
+            PointerBuffer pointer=stack.mallocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pointer),"depth reflection context");
+            long context=pointer.get(0);
+            try {
+                checkSpvc(Spvc.spvc_context_parse_spirv(context,words,words.remaining(),pointer),"depth reflection parse");
+                checkSpvc(Spvc.spvc_context_create_compiler(context,Spvc.SPVC_BACKEND_NONE,pointer.get(0),
+                        Spvc.SPVC_CAPTURE_MODE_COPY,pointer),"depth reflection compiler");
+                long compiler=pointer.get(0);
+                if(Spvc.spvc_compiler_get_execution_model(compiler)!=Spv.SpvExecutionModelFragment)return false;
+                Spvc.spvc_compiler_update_active_builtins(compiler);
+                return Spvc.spvc_compiler_has_active_builtin(compiler,Spv.SpvBuiltInFragDepth,Spv.SpvStorageClassOutput);
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
     }
 
     private static String renderPearlCacheKey(

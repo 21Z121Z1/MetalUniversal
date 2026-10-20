@@ -137,6 +137,18 @@ final class MetalFxMathTest {
     }
 
     @Test
+    void previousPointBehindTheCameraCannotProvideReprojectionHistory() {
+        Matrix4f previous = new Matrix4f().m33(-1.0F);
+        Vector2f motion = MetalFxMath.reconstructMotion(
+                0.5F, 10.0F, 12.0F, 64, 48,
+                new Matrix4f(), new Matrix4f(), previous
+        );
+        assertEquals(0.0F, motion.x, 1.0E-6F,
+                "A negative previous clip.w is behind the camera, not mirrored valid history");
+        assertEquals(0.0F, motion.y, 1.0E-6F);
+    }
+
+    @Test
     void fixedCameraAndMovingObjectProducesObjectMotion() {
         MetalMotionContract.VertexMotion motion = MetalMotionContract.projectVertex(
                 new Vector4f(0.0F, 0.0F, 0.0F, 1.0F),

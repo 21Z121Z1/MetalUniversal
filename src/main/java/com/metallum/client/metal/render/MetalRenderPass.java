@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalIndexedBatchDescriptor;
 import com.metallum.client.validation.contract.ProducerType;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
@@ -33,6 +34,8 @@ import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 import org.lwjgl.vulkan.VkDrawIndirectCommand;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.ref.Reference;
+import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.HashMap;
@@ -87,6 +90,38 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private MTLRenderCommandEncoder nativeEncoder;
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
+    private boolean motionReplayFlushOnClose;
+
+    /** Actual source bindings, captured before another draw can replace this pass's state. */
+    MetalPreviousVertexReplay.@Nullable SourceDrawInputs motionDrawInputs() {
+        GpuBufferSlice projection = this.uniforms.get("Projection");
+        GpuBufferSlice transforms = this.uniforms.get("DynamicTransforms");
+        RenderPipeline source=compiledPipeline == null ? null : compiledPipeline.sourcePipeline();
+        return projection == null || transforms == null ? null
+                : new MetalPreviousVertexReplay.SourceDrawInputs(projection, transforms, this.depthTexture,
+                        this.uniforms.get("Globals"),source!=null && MetalEntityMotionPipeline.requiresFogSnapshot(source)
+                        ? this.uniforms.get("Fog") : null);
+    }
+
+    MetalPreviousVertexReplay.@Nullable SourceGeometry motionSourceGeometry() {
+        return indexBuffer==null ? null
+                : new MetalPreviousVertexReplay.SourceGeometry(vertexBuffers[0],indexBuffer,
+                        indexType==MTLIndexType.UInt16 ? IndexType.SHORT : IndexType.INT);
+    }
+
+    void flushMotionReplayAfterClose() {motionReplayFlushOnClose=true;}
+    @Nullable GpuBufferSlice motionUniform(final String name) {return uniforms.get(name);}
+
+    MetalPreviousVertexReplay.@Nullable SourceState motionSourceState() {
+        RenderPipeline source = compiledPipeline == null ? null : compiledPipeline.sourcePipeline();
+        return source == null ? null : new MetalPreviousVertexReplay.SourceState(
+                source, samplers, scissorState.enabled()
+                ? new RenderPass.RenderArea(scissorState.x(), scissorState.y(), scissorState.width(), scissorState.height())
+                : null,depthTexture != null,new MetalPreviousVertexReplay.RasterState(
+                        renderArea.width(),renderArea.height(),
+                        depthTexture == null ? 0 : compiledPipeline.depthBiasScaleFactor(),
+                        depthTexture == null ? 0 : compiledPipeline.depthBiasConstant()));
+    }
 
     /**
      * Prepares the live terrain encoder for the visibility producer. Kept as a
@@ -377,6 +412,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     @Override
     public void close() {
         commandEncoder.submitRenderPass();
+        if(motionReplayFlushOnClose) {
+            motionReplayFlushOnClose=false;
+            MetalFxManager.flushEntityMotionReplays();
+        }
     }
 
     @Override
@@ -828,6 +867,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
         bindDrawState(enc);
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, indexCount > 0 && instanceCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW_INDEXED, Map.of(
                     "indexCount", Integer.toString(indexCount),
@@ -845,17 +885,22 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        for (int i = 0; i < drawCount; i++) {
-            int base = drawParameters.position() + i * 3;
-            // RenderPearl exposes the Vulkan struct's native field offsets:
-            // firstIndex=0, indexCount=4, vertexOffset=8.
-            int firstIndex = drawParameters.get(base);
-            int indexCount = drawParameters.get(base + 1);
-            int baseVertex = drawParameters.get(base + 2);
-            if (indexCount > 0) {
-                drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+        if (!tryDrawRebasedIndexedBatch(enc, nativeIndexBuffer, drawParameters, instanceCount, firstInstance, drawCount)) {
+            for (int i = 0; i < drawCount; i++) {
+                int base = drawParameters.position() + i * 3;
+                // RenderPearl exposes the Vulkan struct's native field offsets:
+                // firstIndex=0, indexCount=4, vertexOffset=8.
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount > 0) {
+                    drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+                }
             }
         }
+        MetalSodiumDrawDiagnostics.capture(device, commandEncoder, compiledPipeline, vertexBuffers[0],
+                nativeIndexBuffer, indexType, drawParameters, drawCount, uniforms);
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -884,6 +929,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(vertexOffsets)),
                 drawCount
         );
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
         }
@@ -911,6 +957,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             Metallum.LOGGER.warn("[metallum] drawIndexedIndirect command buffer too small: need {} bytes, have {} (drawCount={})", needed, commands.length(), drawCount);
             return;
         }
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
 
         // Sodium's VKIndirectDrawBatch marks this lexical call as a terrain
         // pass.  The probe ends/reopens only that compatible encoder and keeps
@@ -1031,6 +1078,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             } else {
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
             }
+            MetalMotionDrawCoverage.actualDraw(compiledPipeline, 1);
         }
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW, Map.of(
@@ -1049,6 +1097,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         bindDrawState(enc);
 
         int position = drawParameters.position();
+        boolean issued = false;
         for (int draw = 0; draw < drawCount; draw++) {
             int base = position + draw * 2;
             // VkMultiDrawInfoEXT layout used by RenderPearl 26.3:
@@ -1058,6 +1107,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             if (vertexCount <= 0 || instanceCount <= 0) {
                 continue;
             }
+            issued = true;
             if (primitiveType == MTLPrimitiveType.TriangleFan) {
                 drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
             } else {
@@ -1065,6 +1115,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, issued ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -1081,12 +1132,14 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
         int firstPosition = firstVertices.position();
         int countPosition = vertexCounts.position();
+        boolean issued = false;
         for (int draw = 0; draw < drawCount; draw++) {
             int firstVertex = firstVertices.get(firstPosition + draw);
             int vertexCount = vertexCounts.get(countPosition + draw);
             if (vertexCount <= 0) {
                 continue;
             }
+            issued = true;
             if (primitiveType == MTLPrimitiveType.TriangleFan) {
                 drawTriangleFan(enc, firstVertex, vertexCount, 1, 0);
             } else {
@@ -1094,6 +1147,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, issued ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -1120,6 +1174,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
         );
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
         }
@@ -1400,7 +1455,124 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 );
             }
         } else {
-            enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(), indexOffsetBytes, instanceCount, baseVertex, baseInstance);
+            // Keep indexed stage-in fetch local to its binding. The hosted GPU
+            // reproduces corrupt fetches for Sodium's large arena baseVertex;
+            // adding the same byte displacement to per-vertex bindings is
+            // equivalent only when the compiled shader cannot observe vertex_id
+            // or base_vertex. Instance-rate and generic constant bindings stay put.
+            boolean rebased = rebaseIndexedVertexBuffers(enc, baseVertex);
+            enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(),
+                    indexOffsetBytes, instanceCount, rebased ? 0 : baseVertex, baseInstance);
+            if (rebased) {
+                bindIndexedVertexBufferOffsets(enc, 0);
+                MetalHotPathTelemetry.recordIndexedVertexRebase();
+            }
+        }
+    }
+
+    private boolean rebaseIndexedVertexBuffers(final MTLRenderCommandEncoder enc, final int baseVertex) {
+        if (!canRebaseIndexedVertexBuffers(baseVertex)) return false;
+        bindIndexedVertexBufferOffsets(enc, baseVertex);
+        return true;
+    }
+
+    private boolean canRebaseIndexedVertexBuffers(final int baseVertex) {
+        if (baseVertex <= 0 || !compiledPipeline.indexedVertexRebaseSafe()) return false;
+        boolean hasPerVertex = false;
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            long bytes = (long) baseVertex * compiledPipeline.vertexStride(slot);
+            if (slice == null || bytes >= slice.length() || slice.buffer().isClosed()) return false;
+            hasPerVertex = true;
+        }
+        return hasPerVertex;
+    }
+
+    private boolean tryDrawRebasedIndexedBatch(final MTLRenderCommandEncoder enc,
+                                              final MetalGpuBuffer nativeIndexBuffer,
+                                              final IntBuffer parameters, final int instanceCount,
+                                              final int firstInstance, final int drawCount) {
+        if (!MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE || drawCount < 2 || instanceCount <= 0
+                || drawCount > parameters.remaining() / 3 || !compiledPipeline.indexedVertexRebaseSafe()) return false;
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        if (primitiveType == MTLPrimitiveType.TriangleFan) return false;
+        int position = parameters.position();
+        int largestBase = 0;
+        int activeDraws = 0;
+        // Validate the entire batch before encoding any draw. A rejected batch
+        // retains the ordinary per-draw binding/restore contract, including
+        // zero and negative baseVertex records and observable vertex IDs.
+        for (int i = 0; i < drawCount; i++) {
+            int record = position + i * 3;
+            if (parameters.get(record + 1) <= 0) continue;
+            int baseVertex = parameters.get(record + 2);
+            if (baseVertex <= 0) return false;
+            largestBase = Math.max(largestBase, baseVertex);
+            activeDraws++;
+        }
+        if (activeDraws < 2 || !canRebaseIndexedVertexBuffers(largestBase)) return false;
+        observeContractBuffer(nativeIndexBuffer);
+        MemorySegment indexHandle = nativeIndexBuffer.nativeHandle();
+        if (tryNativeIndexedBatch(enc, parameters, primitiveType, indexHandle, drawCount, instanceCount, firstInstance)) {
+            MetalHotPathTelemetry.recordNativeIndexedRebaseBatch(activeDraws);
+            MetalHotPathTelemetry.recordIndexedRebaseBatch(activeDraws);
+            return true;
+        }
+        for (int i = 0; i < drawCount; i++) {
+            int record = position + i * 3;
+            int count = parameters.get(record + 1);
+            if (count <= 0) continue;
+            bindIndexedVertexBufferOffsets(enc, parameters.get(record + 2));
+            enc.drawIndexedPrimitives(primitiveType, count, indexType, indexHandle,
+                    (long) parameters.get(record) * indexType.bytes, instanceCount, 0, firstInstance);
+            MetalHotPathTelemetry.recordIndexedVertexRebase();
+        }
+        // Bindings are absolute within the batch. Restore once before returning
+        // to arbitrary caller work; uncertain native draws still never replay.
+        bindIndexedVertexBufferOffsets(enc, 0);
+        MetalHotPathTelemetry.recordIndexedRebaseBatch(activeDraws);
+        return true;
+    }
+
+    private boolean tryNativeIndexedBatch(MTLRenderCommandEncoder enc, IntBuffer parameters,
+                                          MTLPrimitiveType primitive, MemorySegment indexHandle,
+                                          int drawCount, int instances, int firstInstance) {
+        if (!parameters.isDirect() || parameters.order() != ByteOrder.nativeOrder()) return false;
+        MemorySegment descriptor = enc.indexedBatchDescriptor();
+        if (descriptor == null) return false;
+        int bindingCount = 0;
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            MemorySegment buffer = ((MetalGpuBuffer) slice.buffer()).nativeHandle();
+            int nativeSlot = compiledPipeline.firstAvailableVertexBufferSlot() + slot;
+            // Re-establish the exact buffer identity through the normal cache
+            // before the native entry changes offsets without rebinding buffers.
+            enc.setBuffer(buffer, slice.offset(), nativeSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            MetalIndexedBatchDescriptor.binding(descriptor, bindingCount++,
+                    buffer, slice.offset(), compiledPipeline.vertexStride(slot), nativeSlot);
+        }
+        int bytes = MetalIndexedBatchDescriptor.initialize(descriptor, bindingCount, drawCount,
+                Math.toIntExact(primitive.value), Math.toIntExact(indexType.value), instances, firstInstance,
+                indexHandle, org.lwjgl.system.MemoryUtil.memAddress(parameters), (long) parameters.remaining() * Integer.BYTES);
+        try {
+            return enc.tryIndexedRebasedBatch(bytes);
+        } finally {
+            // Only the raw address crosses the ABI. Keep the direct buffer's
+            // cleaner from retiring its storage before synchronous consumption.
+            Reference.reachabilityFence(parameters);
+        }
+    }
+
+    private void bindIndexedVertexBufferOffsets(final MTLRenderCommandEncoder enc, final int baseVertex) {
+        for (int slot = 0; slot < compiledPipeline.vertexBufferCount(); slot++) {
+            if (!compiledPipeline.perVertexBuffer(slot)) continue;
+            GpuBufferSlice slice = vertexBuffers[slot];
+            long offset = slice.offset() + (long) baseVertex * compiledPipeline.vertexStride(slot);
+            enc.setBuffer(((MetalGpuBuffer) slice.buffer()).nativeHandle(), offset,
+                    compiledPipeline.firstAvailableVertexBufferSlot() + slot,
+                    MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
     }
 
@@ -1423,12 +1595,13 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             enc.setRenderPipelineState(pipelineHandle);
             pipelineDirty = false;
 
-            MemorySegment depthState = compiledPipeline.getDepthStencilState();
+            boolean hasDepthAttachment = depthFormat != MTLPixelFormat.Invalid;
+            MemorySegment depthState = compiledPipeline.getDepthStencilState(hasDepthAttachment);
             if (MetalNativeBridge.isNullHandle(depthState)) {
                 throw new IllegalStateException("Native depth state is unavailable");
             }
             enc.setDepthStencilState(depthState);
-            if (hasAttachment && compiledPipeline.hasDepthStencilState()) {
+            if (hasDepthAttachment && compiledPipeline.hasDepthStencilState()) {
                 enc.setDepthBias(
                         compiledPipeline.depthBiasConstant(),
                         compiledPipeline.depthBiasScaleFactor(),

@@ -64,11 +64,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final MTLTriangleFillMode fillMode;
     private final float depthBiasScaleFactor;
     private final float depthBiasConstant;
-    private final boolean writesDepth;
+    private final boolean writesFragmentDepth;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
+    private final boolean indexedVertexRebaseSafe;
 
     private final MemorySegment depthStencilState;
+    private final MemorySegment attachmentFreeDepthStencilState;
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
     private final List<MTLPixelFormat> colorFormatsView;
@@ -90,6 +92,19 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final boolean lazyVariants;
     private final MetalDevice device;
     private final RenderPipeline info;
+
+    // info is a backend-only layout reconstructed from SPIR-V. Its attribute
+    // names are synthetic and shader defines are absent; it cannot own motion semantics.
+    @Nullable private volatile RenderPipeline sourcePipeline;
+
+    @Nullable RenderPipeline sourcePipeline() { return sourcePipeline; }
+
+    void captureSourcePipeline(final RenderPipeline source) {
+        if (sourcePipeline != null && sourcePipeline != source) {
+            throw new IllegalStateException("A compiled pipeline cannot change source identity: " + info.getLocation());
+        }
+        sourcePipeline = source;
+    }
     private final String validationPipelineId;
     private final List<String> validationShaderIds;
     // Keep source identity, not borrowed function handles from a cache that reload can clear.
@@ -112,7 +127,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final String vertexEntryPoint,
             final String fragmentEntryPoint,
             final List<ResourceBinding> resources,
-            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            final boolean writesFragmentDepth
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
@@ -144,6 +160,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().size();
+        this.indexedVertexRebaseSafe = !MetalCrossShaderCompiler.observesVertexIndex(vertexMsl);
         this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
                 this.firstAvailableVertexBufferSlot,
                 this.vertexBufferCount,
@@ -192,7 +209,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         int depthWrite;
         var depthStencilState = info.getDepthStencilState();
         this.hasDepthStencilState = depthStencilState != null;
-        this.writesDepth = depthStencilState != null && depthStencilState.writeDepth();
+        this.writesFragmentDepth = writesFragmentDepth;
         if (depthStencilState == null) {
             depthCompareOp = MTLCompareFunction.Always;
             depthWrite = 0;
@@ -216,6 +233,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 depthCompareOp,
                 depthWrite
         );
+        // Both handles borrow the existing immutable native device cache. State packets
+        // require an explicit state object, including a pass with no depth attachment.
+        this.attachmentFreeDepthStencilState = depthStencilState == null ? this.depthStencilState
+                : MetalNativeBridge.MTLDevice_makeDepthStencilState(device.metalDeviceHandle(),MTLCompareFunction.Always,0);
 
         List<@Nullable ColorTargetState> colorTargets = info.getColorTargetStates();
         if (colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS) {
@@ -448,7 +469,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     }
 
     private List<DepthStencilFormats> supportedDepthStencilFormats() {
-        if (this.writesDepth) {
+        if (this.writesFragmentDepth) {
             // A fragment shader that writes depth cannot be paired with an
             // invalid depth attachment on Apple Metal. Keep only signatures
             // that can actually receive the shader output.
@@ -473,7 +494,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
      * real demand; async prewarm may additionally create it in the background.
      */
     private List<DepthStencilFormats> eagerDepthStencilFormats() {
-        if (this.writesDepth) {
+        if (this.writesFragmentDepth) {
             return List.of(new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid));
         }
         return List.of(
@@ -607,6 +628,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         return this.depthStencilState;
     }
 
+    MemorySegment getDepthStencilState(final boolean depthAttachmentPresent) {
+        return depthAttachmentPresent ? this.depthStencilState : this.attachmentFreeDepthStencilState;
+    }
+
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
         return nativePipeline(depthFormat, stencilFormat).handle();
     }
@@ -618,7 +643,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private NativePipeline nativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
         if (this.closed) throw new IllegalStateException("Metal pipeline is closed");
         if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)
-                || (this.writesDepth && depthFormat == MTLPixelFormat.Invalid)) {
+                || (this.writesFragmentDepth && depthFormat == MTLPixelFormat.Invalid)) {
             throw new IllegalArgumentException(
                     "Unsupported Metal depth/stencil attachment signature: depth=" + depthFormat
                             + ", stencil=" + stencilFormat
@@ -670,6 +695,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             return 0;
         }
         return formats.get(binding).getVertexSize();
+    }
+
+    boolean indexedVertexRebaseSafe() {
+        return indexedVertexRebaseSafe;
+    }
+
+    boolean perVertexBuffer(final int logicalSlot) {
+        var formats = this.info.getVertexFormatBindings();
+        return logicalSlot >= 0 && logicalSlot < formats.size() && formats.get(logicalSlot) != null
+                && !formats.get(logicalSlot).getElements().isEmpty()
+                && formats.get(logicalSlot).getStepRate() <= 0;
     }
 
     int genericVertexBufferSlot() {

@@ -1,5 +1,6 @@
 package com.metallum.client.validation;
 
+import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -1033,6 +1034,11 @@ public final class MetalValidationClient implements ClientModInitializer {
             MetalRenderStatePacketTelemetry.Snapshot packet = MetalRenderStatePacketTelemetry.snapshot();
             bindingPathReport.addProperty("packetCalls", packet.packetCalls());
             bindingPathReport.addProperty("packetEntries", packet.packetEntries());
+            bindingPathReport.addProperty("fusedDrawCalls", MetalRenderStatePacketTelemetry.fusedDrawCalls());
+            bindingPathReport.addProperty("rejectedFusedDrawCalls", MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls());
+            bindingPathReport.addProperty("fusedStateDrawRequested", com.metallum.client.metal.render.MetalBackendOptimizations.FUSED_STATE_DRAW);
+            bindingPathReport.add("cpuOptimizations", new Gson().toJsonTree(com.metallum.client.metal.render.MetalBackendOptimizations.snapshot()));
+            bindingPathReport.addProperty("maxSubmitsInFlightRequested", System.getProperty("metallum.maxSubmitsInFlight", "3"));
             bindingPathReport.addProperty("legacyReplays", packet.legacyReplays());
             bindingPathReport.addProperty("singleEntryBypasses", packet.singleEntryBypasses());
             bindingPathReport.addProperty("capacityFlushes", packet.capacityFlushes());

@@ -21,6 +21,11 @@ import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
 import net.minecraft.client.renderer.entity.state.TntRenderState;
 import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
+import net.minecraft.client.renderer.entity.state.EndCrystalRenderState;
+import net.minecraft.client.renderer.entity.state.ExperienceOrbRenderState;
+import net.minecraft.client.renderer.entity.state.ShulkerBulletRenderState;
+import net.minecraft.client.renderer.entity.state.LightningBoltRenderState;
+import net.minecraft.client.renderer.entity.state.EnderDragonRenderState;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypeIds;
@@ -87,6 +92,7 @@ final class MetalFxMotionEligibility {
                 || state instanceof TntRenderState
                 || state instanceof MinecartTntRenderState
                 || state instanceof PaintingRenderState
+                || isAuditedAdditionalEntity(state)
                 || isExactGenericEntityType(state)) {
             return true;
         }
@@ -95,6 +101,7 @@ final class MetalFxMotionEligibility {
     }
 
     static int incompleteEntityReason(final EntityRenderState state) {
+        if (isAuditedAdditionalEntity(state)) return 0;
         if (state instanceof LivingEntityRenderState) {
             // Candidate only. EntityRenderDispatcherMetalFxMixin marks the whole object
             // exact-required, so setupAnim/model-layer deformation can never fall back to a
@@ -129,7 +136,8 @@ final class MetalFxMotionEligibility {
         if (isExactGenericEntityType(state)) {
             // Dragon fireballs use ENTITY cutout custom geometry; leash knots use the ordinary
             // ModelFeature path. Do not admit all EntityRenderState users: WindCharge shares this
-            // Java state class but uses its own breeze-wind pipeline and remains fail-closed.
+            // Java state class. Wind charges are separately audited entity/item-style model
+            // geometry with TextureMat visibility, not a blanket generic-state admission.
             return 0;
         }
         if (state instanceof ThrownItemRenderState
@@ -156,6 +164,21 @@ final class MetalFxMotionEligibility {
         return UNKNOWN_ENTITY;
     }
 
+    private static boolean isAuditedAdditionalEntity(final EntityRenderState state) {
+        // End crystal: model plus optional ENTITY-format custom beam. Experience orb: camera-
+        // facing ENTITY custom quad. Shulker bullet: model plus translucent model overlay.
+        // Lightning branches reset on seed changes. Dragon includes model/eyes/dissolve, beam and
+        // fixed-seed death rays. Every optional layer and complete draw manifest must still match.
+        return state instanceof EndCrystalRenderState || state instanceof ExperienceOrbRenderState
+                || state instanceof ShulkerBulletRenderState || state instanceof LightningBoltRenderState
+                || state instanceof EnderDragonRenderState;
+    }
+
+    /** A new random bolt is a newly appearing surface, even when its draw sizes match. */
+    static long geometryDiscontinuity(final EntityRenderState state) {
+        return state instanceof LightningBoltRenderState bolt ? bolt.seed : 0;
+    }
+
     private static boolean isExactGenericEntityType(final EntityRenderState state) {
         return state != null
                 && state.entityType != null
@@ -164,6 +187,8 @@ final class MetalFxMotionEligibility {
 
     static boolean isExactGenericEntityTypeKey(final ResourceKey<EntityType<?>> key) {
         return EntityTypeIds.DRAGON_FIREBALL.equals(key)
-                || EntityTypeIds.LEASH_KNOT.equals(key);
+                || EntityTypeIds.LEASH_KNOT.equals(key)
+                || EntityTypeIds.WIND_CHARGE.equals(key)
+                || EntityTypeIds.BREEZE_WIND_CHARGE.equals(key);
     }
 }

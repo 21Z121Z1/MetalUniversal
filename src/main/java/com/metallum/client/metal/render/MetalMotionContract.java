@@ -115,6 +115,32 @@ final class MetalMotionContract {
         return new Vector2f(inputWidth * 0.5F, inputHeight * 0.5F);
     }
 
+    /** Boundary between Minecraft's pre-SPIRV-Cross clip coordinates and MetalFX texture coordinates. */
+    static Matrix4f minecraftToMetalFxClip(final Matrix4f matrix) {
+        // The shipping translator flips gl_Position.y after the GLSL shader.
+        // Motion varyings must use that same final clip space before converting
+        // Y-up NDC to top-left texture pixels. Do not flip gl_Position twice.
+        return matrix.scaleLocal(1.0F, -1.0F, 1.0F);
+    }
+
+    static float[] cameraMatrix(final Matrix4fc matrix, final float[] destination, final boolean inverse) {
+        matrix.get(destination);
+        if (inverse) {
+            // inverse(F * VP) = inverse(VP) * F: negate column 1.
+            for (int index = 4; index < 8; index++) destination[index] = -destination[index];
+        } else {
+            // F * VP: negate row 1 in the column-major Java/FFM/simd layout.
+            for (int index = 1; index < 16; index += 4) destination[index] = -destination[index];
+        }
+        return destination;
+    }
+
+    static void minecraftRasterJitter(final Vector2f clipJitter) {
+        // MetalFX receives raw-texture pixel jitter; account for the later
+        // compiler flip while applying that jitter to Minecraft's projection.
+        clipJitter.y = -clipJitter.y;
+    }
+
     /**
      * Reference merge semantics shared by the numerical tests and the native
      * per-pixel merge shader. An invalid object sample never becomes a zero

@@ -155,15 +155,148 @@ gradle.projectsEvaluated {
         "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
         [
             "com.metallum.client.metal.render.MetalNativeBridgeCriticalPolicyTest",
+            "com.metallum.client.metal.render.bridge.MetalNativeInterfaceTest",
             "com.metallum.client.metal.render.MetalDepthStencilPipelinePolicyTest",
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+            "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
         ]
     )
     hostedCore.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
+
+    configureHostedTest(
+        "hostedMetalMotionProducerTest",
+        "Runs actual packaged previous-position shaders and verifies raster-space displacement.",
+        ["com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+         "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
+    )
+
+    def promotedProperties = [
+        "metallum.opt.fusedStateDraw",
+        "metallum.opt.reuseEncoderState",
+        "metallum.opt.reuseNativeEncoderArguments",
+        "metallum.opt.dynamicUploadRangeCopy",
+        "metallum.opt.batchIndexedVertexRebase",
+        "metallum.opt.nativeIndexedVertexRebase"
+    ]
+    // Keep a real legacy lane when production defaults are promoted. Default
+    // coverage below must not inject the properties it is meant to validate.
+    hostedCore.configure { task ->
+        promotedProperties.each { task.systemProperty it, "false" }
+    }
+    ["hostedMetalOptimizationCandidateTest": true,
+     "hostedMetalOptimizationDefaultTest": null].each { name, enabled ->
+        configureHostedTest(name,
+                "Checks optimized transport, scratch leases and dynamic uploads against independent GPU readbacks.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+                 "com.metallum.client.metal.render.mtl.MetalRenderStateShadowTest",
+                 "com.metallum.client.metal.render.mtl.MetalRenderStatePacketTest",
+                 "com.metallum.client.metal.render.bridge.MetalNativeBridgeArgumentScratchTest"]).configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (enabled != null) promotedProperties.each { task.systemProperty it, enabled.toString() }
+            else task.systemProperty "metallum.ci.requireOptimizedDefaults", "true"
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.ci.reuseActivationTelemetry", "true"
+        }
+    }
+    def rollbackTasks = []
+    promotedProperties.eachWithIndex { disabledProperty, index ->
+        def rollbackChecks = [
+                "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders",
+                "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes",
+                "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.resizeRecreatePathProducesFreshContent"]
+        if (disabledProperty in ["metallum.opt.batchIndexedVertexRebase", "metallum.opt.nativeIndexedVertexRebase"]) {
+            rollbackChecks.addAll([
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw",
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedBatchPreservesPositionReadOnlyAndNonNativeParameterBuffers",
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedBatchMixedBaseOffsetsKeepOriginalBindings",
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.indexedStageInShaderKeepsObservableVertexIndex"])
+        }
+        def rollback = configureHostedTest("hostedMetalOptimizationRollback${index}Test",
+                "Checks independent rollback of ${disabledProperty} with the other optimized paths enabled.",
+                rollbackChecks)
+        rollback.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            promotedProperties.each { property -> task.systemProperty property, (property != disabledProperty).toString() }
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.ci.reuseActivationTelemetry", "true"
+        }
+        rollbackTasks.add(rollback)
+    }
+    project.tasks.register("hostedMetalOptimizationRollbackTest") { task -> task.dependsOn(rollbackTasks) }
+
+    // Fresh JVM per sample lane; ABBA repeated twice on the same runner. These
+    // timings describe hosted CPU encoding only, never FPS or physical latency.
+    def costTasks = []
+    [false, true, true, false, false, true, true, false].eachWithIndex { enabled, index ->
+        def costTask = configureHostedTest("hostedMetalEncodingCost${index}",
+                "Measures a fixed shipping state/draw and encoder workload on the hosted GPU.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.hostedEncodingCost"])
+        def previousCostTask = costTasks.isEmpty() ? null : costTasks.last()
+        costTask.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (previousCostTask != null) task.mustRunAfter(previousCostTask)
+            promotedProperties.each { task.systemProperty it, enabled.toString() }
+            task.systemProperty "metallum.ci.encodingCost", "true"
+            task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            // Keep C2 compilation in warmup instead of racing the sample window.
+            task.jvmArgs "-Xbatch"
+            task.outputs.upToDateWhen { false }
+        }
+        costTasks.add(costTask)
+    }
+    project.tasks.register("hostedMetalEncodingCost") { task -> task.dependsOn(costTasks) }
+    def indexedBatchCostTasks = []
+    [false, true, true, false, false, true, true, false].eachWithIndex { enabled, index ->
+        def costTask = configureHostedTest("hostedMetalIndexedBatchCost${index}",
+                "Measures only indexed batch rebasing with all prior CPU optimizations held enabled.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.hostedIndexedBatchCost"])
+        def previousCostTask = indexedBatchCostTasks.isEmpty() ? null : indexedBatchCostTasks.last()
+        costTask.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (previousCostTask != null) task.mustRunAfter(previousCostTask)
+            promotedProperties.each { property ->
+                task.systemProperty property, (property == "metallum.opt.batchIndexedVertexRebase" ? enabled : true).toString()
+            }
+            task.systemProperty "metallum.opt.nativeIndexedVertexRebase", "false"
+            task.systemProperty "metallum.ci.indexedBatchCost", "true"
+            task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            task.jvmArgs "-Xbatch"
+            task.outputs.upToDateWhen { false }
+        }
+        indexedBatchCostTasks.add(costTask)
+    }
+    project.tasks.register("hostedMetalIndexedBatchCost") { task -> task.dependsOn(indexedBatchCostTasks) }
+    def nativeIndexedBatchCostTasks = []
+    [false, true, true, false, false, true, true, false].eachWithIndex { enabled, index ->
+        def costTask = configureHostedTest("hostedMetalNativeIndexedBatchCost${index}",
+                "Measures only the native indexed batch entry with all five prior optimizations enabled.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest.hostedNativeIndexedBatchCost"])
+        def previousCostTask = nativeIndexedBatchCostTasks.isEmpty() ? null : nativeIndexedBatchCostTasks.last()
+        costTask.configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            if (previousCostTask != null) task.mustRunAfter(previousCostTask)
+            promotedProperties.each { property ->
+                task.systemProperty property, (property == "metallum.opt.nativeIndexedVertexRebase" ? enabled : true).toString()
+            }
+            task.systemProperty "metallum.ci.nativeIndexedBatchCost", "true"
+            task.systemProperty "metallum.ci.encodingCostProfile", enabled ? "candidate" : "baseline"
+            task.jvmArgs "-Xbatch"
+            task.outputs.upToDateWhen { false }
+        }
+        nativeIndexedBatchCostTasks.add(costTask)
+    }
+    project.tasks.register("hostedMetalNativeIndexedBatchCost") { task -> task.dependsOn(nativeIndexedBatchCostTasks) }
+    configureHostedTest("hostedMetalUploadCopyCost",
+            "Compares direct dynamic-upload copy cost in interleaved order.",
+            ["com.metallum.client.metal.render.MetalBufferUploadTest.hostedUploadCopyCost"]).configure { task ->
+        task.systemProperty "metallum.ci.encodingCost", "true"
+        task.jvmArgs "-Xbatch"
+    }
 
     def hostedIris = configureHostedTest(
         "hostedMetalIrisIntegrationTest",
@@ -191,5 +324,20 @@ gradle.projectsEvaluated {
     groupedIrisCompute.configure { task ->
         task.dependsOn(hostedBridgeFfmSmoke)
         task.systemProperty "metallum.iris.computeGrouping", "true"
+    }
+
+    // Same independent pixel/offset/instancing oracle as the conservative path.
+    // The test asserts the v2 route actually ran; missing capability is a failure.
+    ["hostedMetalFusedStateDrawTest": 3,
+     "hostedMetalFusedStateDrawOneSubmitTest": 1,
+     "hostedMetalFusedStateDrawTwoSubmitsTest": 2].each { name, budget ->
+        configureHostedTest(name,
+                "Checks fused Java/FFM/Swift state/draw transport with a ${budget}-submit GPU budget.",
+                ["com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"]).configure { task ->
+            task.dependsOn(hostedBridgeFfmSmoke)
+            task.systemProperty "metallum.opt.fusedStateDraw", "true"
+            task.systemProperty "metallum.hotpath.telemetry", "true"
+            task.systemProperty "metallum.maxSubmitsInFlight", budget.toString()
+        }
     }
 }

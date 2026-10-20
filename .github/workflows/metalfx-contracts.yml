@@ -1,0 +1,127 @@
+name: MetalFX motion and capability contracts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/main/native/**'
+      - 'src/test/native/**'
+      - 'src/main/java/com/metallum/client/metal/render/**'
+      - 'src/main/java/com/metallum/mixin/render/**'
+      - 'src/test/java/com/metallum/client/metal/render/**'
+      - 'build.gradle'
+      - '.github/ci/HostedMetalGradle.init.gradle'
+      - '.github/ci/MetalFxCapabilityProbe.swift'
+      - '.github/workflows/metalfx-contracts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metalfx-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  metalfx-contracts:
+    name: metalfx-contracts (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Record source and SDK
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            test -d /Applications/Xcode_26.3.app/Contents/Developer
+            echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+            export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          fi
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          mkdir -p build/agent-evidence/metalfx build/metal-tests
+          git status --porcelain > build/agent-evidence/metalfx/git-status.txt
+          test ! -s build/agent-evidence/metalfx/git-status.txt
+          git rev-parse HEAD > build/agent-evidence/metalfx/source-commit.txt
+          sw_vers > build/agent-evidence/metalfx/os.txt
+          xcodebuild -version > build/agent-evidence/metalfx/xcode.txt
+          xcrun --sdk macosx --show-sdk-version > build/agent-evidence/metalfx/sdk.txt
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          cp -R "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
+          shasum -a 256 src/main/native/MetallumNative.swift src/test/native/MetalMotionContractValidation.swift > build/agent-evidence/metalfx/source-sha256.txt
+      - name: Execute raw Metal and native lifecycle contracts
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o build/metal-tests/RawMetalProbe
+          build/metal-tests/RawMetalProbe | tee build/agent-evidence/metalfx/raw-metal.log
+          xcrun swiftc -O src/main/native/MetalFrameGenerationLifecycle.swift \
+            src/test/native/MetalFrameGenerationLifecycleTest.swift -o build/metal-tests/FrameLifecycleContracts
+          build/metal-tests/FrameLifecycleContracts | tee build/agent-evidence/metalfx/lifecycle.log
+      - name: Probe actual MetalFX device support
+        run: |
+          xcrun swiftc -parse-as-library -O -framework Foundation -framework Metal -framework MetalFX \
+            .github/ci/MetalFxCapabilityProbe.swift -o build/metal-tests/MetalFxCapabilityProbe
+          build/metal-tests/MetalFxCapabilityProbe build/agent-evidence/metalfx/capabilities.json
+      - name: Compile shipping motion contract executable
+        id: compile_motion
+        run: |
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalMotionContractValidation.swift -o build/metal-tests/MetalMotionContractValidation
+      - name: Execute supported temporal and interpolation checks independently
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalFXOffscreenValidation.swift -o build/metal-tests/MetalFXOffscreenValidation
+          build/metal-tests/MetalFXOffscreenValidation build/metal-validation/offscreen-current --capability-aware \
+            | tee build/agent-evidence/metalfx/offscreen.log
+      - name: Execute shipping motion kernels with independent numeric oracles
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          build/metal-tests/MetalMotionContractValidation build/metal-validation/motion-current \
+            | tee build/agent-evidence/metalfx/motion-contract.log
+      - name: Execute packaged motion producers through Java and FFM
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalMotionProducerTest -x buildIOSNative -x buildIOSSpvc
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: metalfx-contracts-${{ matrix.runner }}-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/metalfx/
+            build/metal-validation/motion-current/
+            build/metal-validation/offscreen-current/
+            build/agent-evidence/motion-producers/
+            build/test-results/hostedMetalMotionProducerTest/
+            build/hosted-metal-msl-cache/
+          if-no-files-found: error
+          retention-days: 14

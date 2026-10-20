@@ -406,7 +406,8 @@ private final class OffscreenHarness {
         preserveReactiveMask: Bool,
         label: String,
         handDepth: MTLTexture? = nil,
-        emitMotionDiagnostics: Bool = true
+        emitMotionDiagnostics: Bool = true,
+        expectEncoded: Bool = true
     ) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not create \(label) temporal command buffer")
@@ -462,7 +463,7 @@ private final class OffscreenHarness {
                 }
             }
         }
-        try require(result == 1, "\(label) MetalFX Temporal encode was rejected")
+        try require(result == (expectEncoded ? 1 : 0), "\(label) unexpected MetalFX Temporal result: \(result)")
         try commitAndWait(commandBuffer, label: label)
     }
 
@@ -518,7 +519,8 @@ private final class OffscreenHarness {
         motion: MTLTexture,
         output: MTLTexture,
         reset: Bool,
-        label: String
+        label: String,
+        expectEncoded: Bool = true
     ) throws {
         let ui = try makeWorkingTexture(
             format: .rgba8Unorm,
@@ -539,7 +541,7 @@ private final class OffscreenHarness {
             output,
             0.0,
             0.0,
-            60.0 * .pi / 180.0,
+            60.0, // MetalFX fieldOfView is in degrees, as in the production Java path.
             0.05,
             1000.0,
             Float(width) / Float(height),
@@ -548,7 +550,7 @@ private final class OffscreenHarness {
             reset ? 1 : 0,
             1
         )
-        try require(result == 1, "\(label) MetalFX Frame Interpolator encode was rejected")
+        try require(result == (expectEncoded ? 1 : 0), "\(label) unexpected FrameInterpolator result: \(result)")
         try commitAndWait(commandBuffer, label: label)
     }
 
@@ -884,7 +886,8 @@ private func scenarios() -> [Scenario] {
 private func runScenario(
     _ scenario: Scenario,
     harness: OffscreenHarness,
-    root: URL
+    root: URL,
+    interpolationEnabled: Bool = true
 ) throws -> [String: Any] {
     let directory = root.appendingPathComponent(scenario.name, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -970,6 +973,7 @@ private func runScenario(
         format: .rgba8Unorm,
         label: "\(scenario.name) interpolated output"
     )
+    if interpolationEnabled {
     try harness.encodeInterpolation(
         previous: frame0,
         current: frame1,
@@ -978,6 +982,7 @@ private func runScenario(
         reset: scenario.sceneCut || scenario.historyReset,
         label: scenario.name
     )
+    }
 
     _ = try exportTexture(harness: harness, texture: frame0.color, name: "input_color_t0", directory: directory)
     _ = try exportTexture(harness: harness, texture: frame1.color, name: "input_color_t1", directory: directory)
@@ -997,25 +1002,19 @@ private func runScenario(
     let disocclusionBytes = try exportTexture(harness: harness, texture: disocclusion, name: "disocclusion", directory: directory)
     let reactiveBytes = try exportTexture(harness: harness, texture: reactive, name: "reactive", directory: directory)
     _ = try exportTexture(harness: harness, texture: temporalOutput, name: "temporal_output", directory: directory)
-    let interpolatedBytes = try exportTexture(harness: harness, texture: interpolatedOutput, name: "interpolated_output", directory: directory)
-    let truthBytes = try exportTexture(harness: harness, texture: groundTruth.color, name: "ground_truth_t0_5", directory: directory)
-
-    let (difference, differenceValues) = differenceMetrics(
-        interpolated: interpolatedBytes,
-        groundTruth: truthBytes,
-        width: harness.width,
-        height: harness.height
-    )
-    try Data(difference).write(
-        to: directory.appendingPathComponent("difference.bin"),
-        options: .atomic
-    )
-    try writePNG(
-        difference,
-        width: harness.width,
-        height: harness.height,
-        url: directory.appendingPathComponent("difference.png")
-    )
+    var interpolationBlockReason = "FrameInterpolator supportsDevice=false"
+    if #unavailable(macOS 26.0) { interpolationBlockReason = "FrameInterpolator requires macOS 26" }
+    var differenceValues: [String: Any] = ["status": "blocked", "reason": interpolationBlockReason]
+    if interpolationEnabled {
+        let interpolatedBytes = try exportTexture(harness: harness, texture: interpolatedOutput, name: "interpolated_output", directory: directory)
+        let truthBytes = try exportTexture(harness: harness, texture: groundTruth.color, name: "ground_truth_t0_5", directory: directory)
+        let (difference, values) = differenceMetrics(interpolated: interpolatedBytes, groundTruth: truthBytes,
+                                                    width: harness.width, height: harness.height)
+        differenceValues = values
+        try Data(difference).write(to: directory.appendingPathComponent("difference.bin"), options: .atomic)
+        try writePNG(difference, width: harness.width, height: harness.height,
+                     url: directory.appendingPathComponent("difference.png"))
+    }
 
     var expectedMeanX = 0.0
     var expectedMeanY = 0.0
@@ -1138,10 +1137,12 @@ private func runScenario(
             "scene cut did not reject prior history"
         )
     }
-    try require(
-        ((differenceValues["mae"] as? Double) ?? 1.0) < 0.05,
-        "\(scenario.name) frame interpolation MAE exceeded 0.05"
-    )
+    if interpolationEnabled {
+        try require(
+            ((differenceValues["mae"] as? Double) ?? 1.0) < 0.05,
+            "\(scenario.name) frame interpolation MAE exceeded 0.05"
+        )
+    }
     return metrics
 }
 
@@ -1309,40 +1310,109 @@ private func runTransparencyAlphaContract(
     ]
 }
 
+private func runUnsupportedContracts(harness: OffscreenHarness, temporal: Bool, interpolation: Bool) throws -> [String: Any] {
+    let scenario = scenarios()[0]
+    let frame = try harness.render(current: scenario.start, previous: scenario.start, scenario: scenario, label: "unsupported input")
+    let camera = try harness.makeWorkingTexture(format: .rg16Float, label: "unsupported camera")
+    let motion = try harness.makeWorkingTexture(format: .rg16Float, label: "unsupported motion")
+    let rejection = try harness.makeWorkingTexture(format: .r8Unorm, label: "unsupported disocclusion")
+    let reactive = try harness.makeWorkingTexture(format: .r8Unorm, label: "unsupported reactive")
+    let output = try harness.makeWorkingTexture(format: .rgba8Unorm, label: "unsupported output sentinel")
+    try harness.clearColor(output, color: MTLClearColor(red: 1, green: 0, blue: 1, alpha: 1))
+    if !temporal {
+        try harness.encodeTemporal(frame: frame, cameraMotion: camera, objectMotion: frame.objectMotion,
+                                    validity: frame.validity, disocclusion: rejection, mergedMotion: motion,
+                                    reactive: reactive, output: output,
+                                    previousViewProjection: matrix_identity_float4x4, reset: true,
+                                    preserveReactiveMask: false, label: "unsupported temporal rejects", expectEncoded: false)
+    }
+    if !interpolation {
+        try harness.encodeInterpolation(previous: frame, current: frame, motion: motion, output: output,
+                                        reset: true, label: "unsupported interpolation rejects", expectEncoded: false)
+    }
+    let bytes = try harness.readback(output)
+    for p in stride(from: 0, to: bytes.count, by: 4) {
+        try require(bytes[p] == 255 && bytes[p+1] == 0 && bytes[p+2] == 255 && bytes[p+3] == 255,
+                    "Rejected unsupported effect modified its output")
+    }
+    return ["scenario":"unsupported_native_rejection","temporalRejectionTested":!temporal,
+            "interpolationRejectionTested":!interpolation,"outputSentinelUnchanged":true]
+}
+
+private func runStandaloneInterpolation(harness: OffscreenHarness, root: URL) throws -> [[String: Any]] {
+    var results = [[String: Any]]()
+    for scenario in scenarios() where scenario.name == "static" || scenario.name == "translation" {
+        let dir = root.appendingPathComponent("standalone-" + scenario.name)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let previous = try harness.render(current: scenario.start, previous: scenario.start, scenario: scenario, label: "standalone t0")
+        let current = try harness.render(current: scenario.end, previous: scenario.start, scenario: scenario, label: "standalone t1")
+        let truth = try harness.render(current: scenario.middle, previous: scenario.start, scenario: scenario, label: "standalone truth")
+        let output = try harness.makeWorkingTexture(format: .rgba8Unorm, label: "standalone interpolation")
+        try harness.encodeInterpolation(previous: previous, current: current, motion: current.objectMotion,
+                                        output: output, reset: false, label: "standalone " + scenario.name)
+        let bytes = try exportTexture(harness: harness, texture: output, name: "interpolated", directory: dir)
+        let groundTruth = try exportTexture(harness: harness, texture: truth.color, name: "ground_truth", directory: dir)
+        let (difference, metrics) = differenceMetrics(interpolated: bytes, groundTruth: groundTruth,
+                                                     width: harness.width, height: harness.height)
+        try writePNG(difference, width: harness.width, height: harness.height, url: dir.appendingPathComponent("difference.png"))
+        try require(((metrics["mae"] as? Double) ?? 1) < 0.05, "Standalone interpolation MAE exceeded 0.05")
+        results.append(["scenario":scenario.name,"feature":"standaloneFrameInterpolation","difference":metrics])
+    }
+    return results
+}
+
 @main
 private enum MetalFXOffscreenValidationMain {
     static func main() {
         do {
-            guard #available(macOS 26.0, *) else {
-                throw ValidationFailure.message("macOS 26 is required for MTLFXFrameInterpolator")
-            }
-            let root = URL(
-                fileURLWithPath: CommandLine.arguments.dropFirst().first
-                    ?? "build/metal-validation/offscreen-current",
-                isDirectory: true
-            ).standardizedFileURL
+            let capabilityAware = CommandLine.arguments.contains("--capability-aware")
+            let root = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first
+                           ?? "build/metal-validation/offscreen-current", isDirectory: true).standardizedFileURL
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let harness = try OffscreenHarness()
-            try require(
-                MTLFXTemporalScalerDescriptor.supportsDevice(harness.device),
-                "MTLFXTemporalScaler is unsupported on this device"
-            )
-            try require(
-                MTLFXFrameInterpolatorDescriptor.supportsDevice(harness.device),
-                "MTLFXFrameInterpolator is unsupported on this device"
-            )
+            let temporalSupported = MTLFXTemporalScalerDescriptor.supportsDevice(harness.device)
+            var interpolationApiAvailable = false
+            var interpolationSupported = false
+            if #available(macOS 26.0, *) {
+                interpolationApiAvailable = true
+                interpolationSupported = MTLFXFrameInterpolatorDescriptor.supportsDevice(harness.device)
+            }
+            if !capabilityAware {
+                try require(temporalSupported, "MTLFXTemporalScaler is unsupported on this device")
+                try require(interpolationSupported, "MTLFXFrameInterpolator is unsupported on this device")
+            }
 
             var results: [[String: Any]] = []
-            for scenario in scenarios() {
-                print("[offscreen] running \(scenario.name)")
-                results.append(try runScenario(scenario, harness: harness, root: root))
+            if !temporalSupported || !interpolationSupported {
+                results.append(try runUnsupportedContracts(harness: harness, temporal: temporalSupported,
+                                                          interpolation: interpolationSupported))
+            }
+            if temporalSupported {
+                for scenario in scenarios() {
+                    print("[offscreen] running \(scenario.name)")
+                    results.append(try runScenario(scenario, harness: harness, root: root,
+                                                   interpolationEnabled: interpolationSupported))
+                }
+            }
+            if interpolationSupported && !temporalSupported {
+                results.append(contentsOf: try runStandaloneInterpolation(harness: harness, root: root))
             }
             print("[offscreen] running transparency_alpha_contract")
             results.append(try runTransparencyAlphaContract(harness: harness, root: root))
-            print("[offscreen] running hand_fusion_steady")
-            results.append(try runHandFusionScenario(harness: harness, root: root))
+            if temporalSupported {
+                print("[offscreen] running hand_fusion_steady")
+                results.append(try runHandFusionScenario(harness: harness, root: root))
+            }
             let summary: [String: Any] = [
-                "status": "passed",
+                "status": temporalSupported && interpolationSupported ? "passed" : "partial",
+                "sourceCommit": ProcessInfo.processInfo.environment["METALLUM_SOURCE_SHA"] ?? "unknown",
+                "allSupportedChecksPassed": true,
+                "temporal": ["supported":temporalSupported, "execution":temporalSupported ? "passed" : "blocked: supportsDevice=false"],
+                "frameInterpolation": ["apiAvailable":interpolationApiAvailable,
+                                       "supported":interpolationSupported,
+                                       "execution":interpolationSupported ? "passed"
+                                           : interpolationApiAvailable ? "blocked: supportsDevice=false" : "blocked: requires macOS 26"],
+                "qualityScope": "synthetic offscreen inputs; standalone interpolation, not Minecraft or display pacing acceptance",
                 "device": harness.device.name,
                 "scenario_count": results.count,
                 "scenarios": results,
@@ -1356,7 +1426,7 @@ private enum MetalFXOffscreenValidationMain {
                 options: [.prettyPrinted, .sortedKeys]
             )
             try data.write(to: root.appendingPathComponent("summary.json"), options: .atomic)
-            print("MetalFX offscreen validation passed; artifacts: \(root.path)")
+            print("MetalFX supported checks passed; temporal=\(temporalSupported) interpolation=\(interpolationSupported); artifacts: \(root.path)")
         } catch {
             fputs("MetalFX offscreen validation failed: \(error)\n", stderr)
             exit(1)

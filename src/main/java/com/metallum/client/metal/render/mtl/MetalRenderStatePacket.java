@@ -1,7 +1,9 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.MetalBackendOptimizations;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
+import com.metallum.client.metal.render.bridge.MetalIndexedBatchDescriptor;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.Arena;
@@ -35,11 +37,14 @@ final class MetalRenderStatePacket implements AutoCloseable {
     static final int OP_TEXTURE = 9;
     static final int OP_TEXTURE_AND_SAMPLER = 10;
     static final int OP_SCISSOR = 11;
+    static final int DRAW_BYTES = 64;
+    static final int DRAW_PRIMITIVES = 1;
+    static final int DRAW_INDEXED = 2;
 
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
     );
-    private static final boolean REUSE = Boolean.getBoolean("metallum.opt.reuseEncoderState");
+    private static final boolean REUSE = MetalBackendOptimizations.REUSE_ENCODER_STATE;
     private static final ThreadLocal<MemorySegment> IDLE_STORAGE = new ThreadLocal<>();
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
@@ -53,10 +58,113 @@ final class MetalRenderStatePacket implements AutoCloseable {
     );
 
     private final @Nullable Arena arena;
+    private final MemorySegment backingStorage;
     private final MemorySegment storage;
     private int entryCount;
     private boolean active = true;
     private boolean closed;
+    private boolean drawActive = true;
+    private final MemorySegment drawStorage;
+    private final MemorySegment indexedBatchStorage;
+    private boolean indexedBatchActive = true;
+    private @Nullable RuntimeException uncertainDrawFailure;
+
+    @FunctionalInterface
+    interface DrawSubmitter {
+        int submit(MemorySegment encoder, MemorySegment state, long bytes, MemorySegment draw);
+    }
+
+    @FunctionalInterface
+    interface IndexedBatchSubmitter {
+        int submit(MemorySegment encoder, MemorySegment descriptor, long bytes);
+    }
+
+    private static final DrawSubmitter NATIVE_DRAW = MetalRenderStatePacketBridge::applyDraw;
+    private static final IndexedBatchSubmitter NATIVE_BATCH = MetalRenderStatePacketBridge::applyIndexedBatch;
+
+    @Nullable MemorySegment indexedBatchStorage() {
+        ensureOpen();
+        return this.indexedBatchActive ? this.indexedBatchStorage : null;
+    }
+
+    boolean tryIndexedBatch(MemorySegment encoder, long bytes) {
+        return tryIndexedBatch(encoder, bytes, NATIVE_BATCH);
+    }
+
+    boolean tryIndexedBatch(MemorySegment encoder, long bytes, IndexedBatchSubmitter submitter) {
+        ensureOpen();
+        if (!this.indexedBatchActive) return false;
+        final int result;
+        try {
+            result = submitter.submit(encoder, this.indexedBatchStorage, bytes);
+        } catch (RuntimeException failure) {
+            this.uncertainDrawFailure = failure;
+            throw failure;
+        }
+        if (result == 1) return true;
+        this.indexedBatchActive = false;
+        return false;
+    }
+
+    boolean hasNativeStateBatch() {
+        return this.entryCount >= MIN_NATIVE_ENTRIES;
+    }
+
+    boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
+                    final long indexType, final MemorySegment indexBuffer, final long indexOffset,
+                    final int firstOrBaseVertex, final int count, final int instances, final int baseInstance) {
+        ensureOpen();
+        // Preserve the existing critical direct-setter route for tiny packets.
+        // Fusion replaces an ordinary packet call plus draw, not two cheaper
+        // critical calls with a newly introduced ordinary packet call.
+        if (!hasNativeStateBatch()) return false;
+        return tryDraw(encoder, kind, primitive, indexType, indexBuffer, indexOffset,
+                firstOrBaseVertex, count, instances, baseInstance, NATIVE_DRAW);
+    }
+
+    /** Rejected packets retain their state for the ordinary flush followed by exactly one legacy draw. */
+    boolean tryDraw(final MemorySegment encoder, final int kind, final long primitive,
+                    final long indexType, final MemorySegment indexBuffer, final long indexOffset,
+                    final int firstOrBaseVertex, final int count, final int instances, final int baseInstance,
+                    final DrawSubmitter submitter) {
+        ensureOpen();
+        if (!this.active || !this.drawActive || this.entryCount == 0) return false;
+        MemorySegment draw = this.drawStorage;
+        // Every live field is overwritten below. Reserved words remain zero in
+        // this exclusively owned, initially zeroed allocation; clearing the
+        // entire descriptor again would duplicate these stores on every draw.
+        draw.set(ValueLayout.JAVA_INT, 0, DRAW_BYTES);
+        draw.set(ValueLayout.JAVA_INT, 4, kind);
+        draw.set(ValueLayout.JAVA_INT, 8, Math.toIntExact(primitive));
+        draw.set(ValueLayout.JAVA_INT, 12, Math.toIntExact(indexType));
+        draw.set(ValueLayout.JAVA_LONG, 16, address(indexBuffer));
+        draw.set(ValueLayout.JAVA_LONG, 24, indexOffset);
+        draw.set(ValueLayout.JAVA_INT, 32, firstOrBaseVertex);
+        draw.set(ValueLayout.JAVA_INT, 36, count);
+        draw.set(ValueLayout.JAVA_INT, 40, instances);
+        draw.set(ValueLayout.JAVA_INT, 44, baseInstance);
+        int bytes = byteCount();
+        this.storage.set(ValueLayout.JAVA_INT, 8, bytes);
+        this.storage.set(ValueLayout.JAVA_INT, 12, this.entryCount);
+        final int result;
+        try {
+            result = submitter.submit(encoder, this.storage, bytes, draw);
+        } catch (RuntimeException failure) {
+            // A caller catching the failure must not reuse this encoder's packet
+            // and accidentally replay work whose draw outcome is unknown.
+            this.uncertainDrawFailure = failure;
+            throw failure;
+        }
+        if (result != 1) {
+            this.drawActive = false;
+            MetalRenderStatePacketTelemetry.recordFusedDraw(false);
+            return false;
+        }
+        MetalRenderStatePacketTelemetry.recordPacket(this.entryCount);
+        MetalRenderStatePacketTelemetry.recordFusedDraw(true);
+        reset();
+        return true;
+    }
 
     static @Nullable MetalRenderStatePacket createIfAvailable() {
         if (!ENABLED || !MetalRenderStatePacketBridge.available()) {
@@ -72,7 +180,8 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (storage == null) {
             // Native packet decoding is synchronous. Only CPU scratch storage
             // is reused; no GPU-visible resource or native encoder is pooled.
-            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE, Long.BYTES);
+            storage = Arena.ofAuto().allocate(HEADER_SIZE + (long) CAPACITY * ENTRY_SIZE
+                    + DRAW_BYTES + MetalIndexedBatchDescriptor.STORAGE_BYTES, Long.BYTES);
             MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         } else {
             MetalRenderStatePacketTelemetry.recordPacketStorageReuse();
@@ -82,7 +191,11 @@ final class MetalRenderStatePacket implements AutoCloseable {
 
     private MetalRenderStatePacket(MemorySegment storage) {
         this.arena = null;
-        this.storage = storage;
+        this.backingStorage = storage;
+        long stateBytes = storage.byteSize() - DRAW_BYTES - MetalIndexedBatchDescriptor.STORAGE_BYTES;
+        this.storage = storage.asSlice(0, stateBytes);
+        this.drawStorage = storage.asSlice(stateBytes, DRAW_BYTES);
+        this.indexedBatchStorage = storage.asSlice(stateBytes + DRAW_BYTES, MetalIndexedBatchDescriptor.STORAGE_BYTES);
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
         resetHeader();
@@ -93,10 +206,15 @@ final class MetalRenderStatePacket implements AutoCloseable {
             throw new IllegalArgumentException("Render-state packet capacity must be positive");
         }
         this.arena = Arena.ofConfined();
-        this.storage = this.arena.allocate(
-                Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE)),
+        long stateBytes = Math.addExact(HEADER_SIZE, Math.multiplyExact(capacity, ENTRY_SIZE));
+        this.backingStorage = this.arena.allocate(
+                Math.addExact(stateBytes, DRAW_BYTES + MetalIndexedBatchDescriptor.STORAGE_BYTES),
                 Long.BYTES
         );
+        this.storage = this.backingStorage.asSlice(0, stateBytes);
+        this.drawStorage = this.backingStorage.asSlice(stateBytes, DRAW_BYTES);
+        this.indexedBatchStorage = this.backingStorage.asSlice(
+                stateBytes + DRAW_BYTES, MetalIndexedBatchDescriptor.STORAGE_BYTES);
         MetalRenderStatePacketTelemetry.recordPacketStorageAllocation();
         this.storage.set(ValueLayout.JAVA_INT, 0L, MAGIC);
         this.storage.set(ValueLayout.JAVA_INT, 4L, VERSION);
@@ -396,6 +514,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
     }
 
     private void ensureOpen() {
+        if (this.uncertainDrawFailure != null) throw this.uncertainDrawFailure;
         if (this.closed) {
             throw new IllegalStateException("Render-state packet is closed");
         }
@@ -410,7 +529,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (this.arena != null) {
             this.arena.close();
         } else if (IDLE_STORAGE.get() == null) {
-            IDLE_STORAGE.set(this.storage);
+            IDLE_STORAGE.set(this.backingStorage);
         }
     }
 }

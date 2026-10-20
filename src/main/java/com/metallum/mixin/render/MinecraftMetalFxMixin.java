@@ -21,6 +21,7 @@ public abstract class MinecraftMetalFxMixin {
         var window = minecraft.getWindow();
         MetalFramePacing.observeWindow(window.isFocused(), window.isIconified(), window.getWidth(), window.getHeight());
         FrameEvidenceRuntime.beginFrame(advanceGameTime);
+        MetalFxManager.observePauseState(minecraft.isPaused());
         MetalFxManager.beginFrame();
         MetalValidationClient.beforeFrame(minecraft.gameRenderer);
     }

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,6 +63,17 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void blendedEntityAndOitColorHaveExactGeometryButNoRigidFallback() {
+        for (var source : java.util.List.of(net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT,
+                net.minecraft.client.renderer.RenderPipelines.OIT_ENTITY.accumulatePipeline())) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            assertFalse(MetalEntityMotionPipeline.supports(source));
+            assertTrue(MetalEntityMotionPipeline.forPreviousPositions(source).getDepthStencilState().writeDepth(),
+                    "transparent overlap resolves against a private depth copy");
+        }
+    }
+
+    @Test
     void entityShadowUsesExactPreviousPositionsDespiteTranslucentSource() {
         RenderPipeline shadow = pipeline("core/rendertype_entity_shadow", DefaultVertexFormat.ENTITY);
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(shadow));
@@ -84,7 +96,128 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void lightningAndDragonRaysUseExactPositionColorAndFrozenFog() {
+        var source=pipeline("core/rendertype_lightning",DefaultVertexFormat.POSITION_COLOR);
+        assertFalse(MetalEntityMotionPipeline.supports(source));
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+        assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
+        var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertEquals("core/lightning_previous_motion",exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals(DefaultVertexFormat.POSITION_COLOR,exact.getVertexFormatBinding(0));
+        assertTrue(exact.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(pipeline("core/rendertype_lightning",DefaultVertexFormat.ENTITY)));
+    }
+
+    @Test
+    void specialGlintAndDissolveRetainTheirExactOriginalLayouts() {
+        for (var source : java.util.List.of(net.minecraft.client.renderer.RenderPipelines.ITEM_CUTOUT_GLINT_SPECIAL,
+                net.minecraft.client.renderer.RenderPipelines.ITEM_TRANSLUCENT_GLINT_SPECIAL,
+                net.minecraft.client.renderer.RenderPipelines.OIT_ITEM_GLINT_SPECIAL.accumulatePipeline(),
+                net.minecraft.client.renderer.RenderPipelines.ENTITY_CUTOUT_DISSOLVE)) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+            assertEquals(source.getVertexFormatBinding(0),exact.getVertexFormatBinding(0));
+            assertTrue(exact.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+        }
+        assertFalse(MetalEntityMotionPipeline.supports(net.minecraft.client.renderer.RenderPipelines.ENTITY_CUTOUT_DISSOLVE),
+                "Dissolving geometry requires exact history, without a rigid fallback");
+        var wrong=pipeline("core/item",DefaultVertexFormat.ENTITY,"GLINT","GLINT_SPECIAL");
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(wrong));
+        assertFalse(MetalEntityMotionPipeline.supports(wrong));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
+                pipeline("core/entity",DefaultVertexFormat.ENTITY_GLINT_SPECIAL,"GLINT","GLINT_SPECIAL")));
+    }
+
+    @Test
+    void blockExactReplayKeepsItsFourAttributeAbiAndItsOwnFragmentSemantics() {
+        var source=pipeline("core/block",DefaultVertexFormat.BLOCK);
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+        var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertEquals("core/block_previous_motion",exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/block_motion",exact.getShaders().get(ShaderType.FRAGMENT).getPath());
+        assertEquals(DefaultVertexFormat.BLOCK,exact.getVertexFormatBinding(0));
+        assertEquals(16,exact.getVertexFormatBinding(1).getVertexSize());
+    }
+
+    @Test
+    void proceduralCloudsRequireDecodedFaceGeometryAndOwnFogRatherThanRigidFallback() {
+        for(var source:java.util.List.of(net.minecraft.client.renderer.RenderPipelines.CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.FLAT_CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.OIT_CLOUDS.accumulatePipeline())) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            assertFalse(MetalEntityMotionPipeline.supports(source));
+            assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
+            var replay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+            assertNull(replay.getVertexFormatBinding(0),
+                    "Current raster positions must retain the original procedural CloudFaces expression");
+            assertEquals("core/cloud_previous_motion",replay.getShaders().get(ShaderType.VERTEX).getPath());
+            assertTrue(replay.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler0"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler2"));
+        }
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(pipeline("core/clouds",DefaultVertexFormat.POSITION_COLOR)),
+                "Custom attribute-based clouds cannot masquerade as the audited procedural source ABI");
+    }
+
+    @Test
+    void sourceAttachmentPresenceSelectsIndependentDepthPolicies() {
+        var source=net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT;
+        var tested=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);
+        var overlay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,false);
+        assertTrue(tested.getShaderDefines().flags().contains("METALLUM_TEST_SOURCE_DEPTH"));
+        assertFalse(tested.getShaderDefines().flags().contains("METALLUM_MOTION_OVERLAY"));
+        assertTrue(overlay.getShaderDefines().flags().contains("METALLUM_MOTION_OVERLAY"));
+        assertFalse(overlay.getShaderDefines().flags().contains("METALLUM_TEST_SOURCE_DEPTH"));
+        assertEquals(com.mojang.renderpearl.api.pipeline.CompareOp.ALWAYS_PASS,overlay.getDepthStencilState().depthTest());
+    }
+
+    @Test
+    void previousBiasUniformAndOverlayRasterBiasFollowActualAttachmentPresence() {
+        var source=RenderPipeline.builder().withLocation("test/biased_overlay")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withDepthStencilState(new com.mojang.renderpearl.api.pipeline.DepthStencilState(
+                        com.mojang.renderpearl.api.pipeline.CompareOp.ALWAYS_PASS,false,2,-10)).build();
+        var attached=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);
+        var detached=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,false);
+        assertTrue(attached.getShaderDefines().flags().contains("METALLUM_PREVIOUS_DEPTH_BIAS"));
+        assertEquals(2,attached.getDepthStencilState().depthBiasScaleFactor());
+        assertEquals(-10,attached.getDepthStencilState().depthBiasConstant());
+        assertFalse(detached.getShaderDefines().flags().contains("METALLUM_PREVIOUS_DEPTH_BIAS"));
+        assertEquals(0,detached.getDepthStencilState().depthBiasScaleFactor());
+        assertEquals(0,detached.getDepthStencilState().depthBiasConstant());
+    }
+
+    @Test
+    void materialLightmapAdmissionFollowsActualSourceFamiliesIncludingSpecialItems() {
+        for(var source:java.util.List.of(pipeline("core/entity",DefaultVertexFormat.ENTITY),
+                pipeline("core/item",DefaultVertexFormat.ENTITY,"EMISSIVE"),
+                net.minecraft.client.renderer.RenderPipelines.ITEM_TRANSLUCENT_GLINT_SPECIAL)) {
+            assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(source));
+            assertTrue(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source).getShaderDefines().flags()
+                    .contains("METALLUM_ENTITY_LIGHTMAP"));
+        }
+        for(var source:java.util.List.of(pipeline("core/entity",DefaultVertexFormat.ENTITY,"EMISSIVE"),
+                pipeline("core/rendertype_entity_shadow",DefaultVertexFormat.ENTITY))) {
+            assertFalse(MetalEntityMotionPipeline.usesVisibilityLightmap(source));
+            assertFalse(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source).getShaderDefines().flags()
+                    .contains("METALLUM_ENTITY_LIGHTMAP"));
+        }
+        assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/block",DefaultVertexFormat.BLOCK)));
+        assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/text",DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR)));
+        assertFalse(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/text",DefaultVertexFormat.POSITION_TEX_COLOR,"IS_SEE_THROUGH")));
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
+        RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
+                .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))
+                .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS).build();
+        assertFalse(MetalEntityMotionPipeline.supports(replacement));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(replacement),
+                "a matching path in a different namespace does not prove matching vertex semantics");
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
                 pipeline("core/rendertype_leash", DefaultVertexFormat.ENTITY)));
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(

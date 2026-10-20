@@ -21,6 +21,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /** RenderPearl 26.3 SPIR-V reflection and Metal generic-input contracts. */
 final class MetalVertexInputLayoutTest {
     @Test
+    void indexedRebaseRequiresNoVertexIndexObserverInTheCompiledInterface() {
+        org.junit.jupiter.api.Assertions.assertFalse(MetalCrossShaderCompiler.observesVertexIndex(
+                "vertex Out main0(In in [[stage_in]]) { return Out{}; }"));
+        org.junit.jupiter.api.Assertions.assertTrue(MetalCrossShaderCompiler.observesVertexIndex(
+                "vertex Out main0(uint index [[vertex_id]]) { return Out{}; }"));
+        org.junit.jupiter.api.Assertions.assertTrue(MetalCrossShaderCompiler.observesVertexIndex(
+                "vertex Out main0(int base [[ base_vertex ]]) { return Out{}; }"));
+    }
+
+    @Test
     void declaredVertexFormatNamesRemainThePhysicalAttributeMap() {
         RenderPipeline pipeline = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath("metallum", "iris_entity_vertex_layout_test"))
