@@ -23,6 +23,7 @@ layout(std140) uniform MetallumMotion {
 #include <metallum:motion_vertex.glsl>
 layout(location = 2) out vec2 metallumTexCoord;
 layout(location = 3) flat out float metallumVertexColorGuard;
+layout(location = 4) out float metallumVertexAlpha;
 
 void main() {
     // The one thing that separates this family from core/entity: block geometry
@@ -40,4 +41,5 @@ void main() {
     metallumSetClipHistory(currentClip, previousClip);
     metallumTexCoord = UV0;
     metallumVertexColorGuard = Color.a;
+    metallumVertexAlpha = Color.a;
 }

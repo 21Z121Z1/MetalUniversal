@@ -60,6 +60,28 @@ final class MetalSourceUniformsTest {
     }
 
     @Test
+    void blockPreviousPositionsUseTheAcceptedOffsetAndNeverTheCurrentOrFailedOffset() {
+        var source=RenderPipeline.builder().withLocation("test/block_offset_history")
+                .withVertexShader("core/block").withFragmentShader("core/block").withVertexBinding(0,DefaultVertexFormat.BLOCK)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).build();
+        MetalPreviousVertexHistory.DrawToken token=null;
+        for(int frame=0;frame<3;frame++) {
+            MetalPreviousVertexHistory.beginFrame();token=MetalPreviousVertexHistory.reserveDraw(SAMPLE,source);
+            MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                    DefaultVertexFormat.BLOCK.getElements(),DefaultVertexFormat.BLOCK.getVertexSize(),PrimitiveTopology.TRIANGLES,1,3),
+                    new float[]{2,3,4});
+            MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
+            MetalPreviousVertexHistory.stageSourceUniforms(token,MetalSourceUniforms.decode(dynamic(frame==0 ? 1 : frame==1 ? 99 : 7),null));
+            if(frame==0)MetalPreviousVertexHistory.commitSubmittedFrame();
+            if(frame==1)MetalPreviousVertexHistory.discardFrame();
+        }
+        assertArrayEquals(new float[]{3,7,9},MetalPreviousVertexReplay.previousPositionsForSource(source,token));
+        assertArrayEquals(new float[]{2,3,4},MetalPreviousVertexHistory.matchedPreviousPositions(token),
+                "Offset adjustment must not mutate accepted source geometry");
+        assertArrayEquals(new float[]{3,7,9},MetalPreviousVertexReplay.previousPositionsForSource(source,token));
+    }
+
+    @Test
     void materialTimeAndOffsetAdvanceWithTheAcceptedGeometryTransaction() {
         MetalPreviousVertexHistory.beginFrame();var first=stage(1,.1F);
         assertNull(MetalPreviousVertexHistory.matchedPreviousSourceUniforms(first));

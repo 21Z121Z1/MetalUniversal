@@ -990,15 +990,18 @@ final class MetalMotionProducerGpuTest {
                 "dissolve_replaces_alpha", "dissolve_hidden", "dissolve_before_modulator", "dissolve_cutout_first",
                 "entity_additive_cutout", "item_additive_flag_does_not_clamp", "zero_alpha_blended", "zero_alpha_opaque",
                 "entity_texture_matrix_visibility", "item_ignores_entity_texture_matrix", "per_face_dissolve",
-                "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth");
+                "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth",
+                "block_cutout_after_vertex_alpha", "block_cutout_after_modulator", "block_alpha_composite_zero",
+                "block_opaque_zero_alpha", "block_visible_offset_and_alpha");
     }
 
     @ParameterizedTest(name = "actual material visibility: {0}")
     @MethodSource("materialVisibilityFixtures")
     void materialMotionMatchesActualMinecraftColorAndFragmentSurvival(String name) throws Exception {
         boolean item=name.startsWith("item_"), special=name.contains("special"), glint=name.contains("glint");
+        boolean block=name.startsWith("block_");
         boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
-        boolean blended=!name.equals("zero_alpha_opaque"), perFace=name.equals("per_face_dissolve");
+        boolean blended=!name.equals("zero_alpha_opaque")&&!name.equals("block_opaque_zero_alpha"), perFace=name.equals("per_face_dissolve");
         boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
         boolean projective=name.equals("entity_projective_self_depth");
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
@@ -1019,9 +1022,17 @@ final class MetalMotionProducerGpuTest {
             case "item_ignores_entity_texture_matrix" -> visible=false;
             case "per_face_dissolve" -> vertexAlpha=.6F;
             case "entity_glint_zero_modulator" -> { modAlpha=0;expectedAlpha=.6F; }
+            case "block_cutout_after_vertex_alpha" -> {vertexAlpha=.05F;cutout=.1F;visible=false;}
+            case "block_cutout_after_modulator" -> {modAlpha=.05F;cutout=.1F;visible=false;}
+            case "block_alpha_composite_zero" -> {vertexAlpha=0;visible=false;}
+            case "block_opaque_zero_alpha" -> {vertexAlpha=0;expectedAlpha=0;}
+            case "block_visible_offset_and_alpha" -> {vertexAlpha=.6F;modAlpha=.5F;cutout=.1F;expectedAlpha=.3F;}
         }
-        var format=special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
-        String shader=item ? "core/item" : "core/entity";
+        var format=block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
+        String shader=block ? "core/block" : item ? "core/item" : "core/entity";
+        float offsetX=name.equals("block_visible_offset_and_alpha") ? .125F : 0;
+        float offsetY=name.equals("block_visible_offset_and_alpha") ? -.05F : 0;
+        float offsetZ=name.equals("block_visible_offset_and_alpha") ? -.1F : 0;
         var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
                 .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
                 .withUniform("Lighting",UniformType.UNIFORM_BUFFER).withUniform("Globals",UniformType.UNIFORM_BUFFER)
@@ -1054,17 +1065,20 @@ final class MetalMotionProducerGpuTest {
             int base=i*format.getVertexSize();
             mesh.putInt(base+format.getElement("Color").offset(),0x00FFFFFF|Math.round(vertexAlpha*255)<<24);
             int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);
-            mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
+            if(format.getElement("Normal")!=null)mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
             if(sloped)mesh.putFloat(base+8,.5F+.1F*mesh.getFloat(base));
             if(special) {int extra=base+format.getElement("UV3").offset();mesh.putFloat(extra,.5F).putFloat(extra+4,.5F);}
         }
         ByteBuffer old=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
-        assertTrue(MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6),old));old.flip();
+        float[] oldPositions=MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6);
+        if(block)for(int i=0;i<oldPositions.length;i+=3) {oldPositions[i]+=offsetX;oldPositions[i+1]+=offsetY;oldPositions[i+2]+=offsetZ;}
+        assertTrue(MetalPreviousVertexReplay.writePreviousPositions(oldPositions,old));old.flip();
         Matrix4f modelView=projective ? new Matrix4f().translate(.1F,-.05F,-2).rotateY(.2F).rotateZ(.1F) : new Matrix4f();
         Matrix4f projectionMatrix=projective ? new Matrix4f().perspective((float)Math.toRadians(70),(float)W/H,.1F,100,true) : new Matrix4f();
         ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());modelView.get(0,dynamic);
         new Matrix4f().translation(matrix ? .5F : 0,0,0).get(64,dynamic);
         for(int i=0;i<4;i++)dynamic.putFloat(128+i*4,i==3 ? modAlpha : 1);
+        dynamic.putFloat(144,offsetX).putFloat(148,offsetY).putFloat(152,offsetZ);
         ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());projectionMatrix.get(0,projection);
         ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
@@ -1136,7 +1150,7 @@ final class MetalMotionProducerGpuTest {
                 if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
                 if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
-                float expectedBefore=projective ? survived.getFloat(p*4) : sloped ? .5F+.1F*(2F*(p%W+.5F)/W-1) : .5F;
+                float expectedBefore=projective||block ? survived.getFloat(p*4) : sloped ? .5F+.1F*(2F*(p%W+.5F)/W-1) : .5F;
                 float expectedNow=survived.getFloat(p*4);
                 if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-expectedBefore)>3e-6||Math.abs(now-expectedNow)>3e-6)wrongDepth++;
             }
@@ -1152,6 +1166,113 @@ final class MetalMotionProducerGpuTest {
             assertEquals(0,wrongMotion,"An unchanged exact surface must retain zero XY");
             assertEquals(0,wrongDepth,"The extra special-glint attribute must not alias previous XYZ/validity");
             if(visible)assertTrue(count>100);else assertEquals(0,count);
+        }
+    }
+
+    @Test
+    void blockMotionUsesPreviousAcceptedModelOffsetAgainstActualMinecraftFrames() throws Exception {
+        var source=RenderPipeline.builder().withLocation("motion_contract/block_offset_history")
+                .withVertexShader("core/block").withFragmentShader("core/block")
+                .withVertexBinding(0,DefaultVertexFormat.BLOCK).withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withShaderDefine("ALPHA_CUTOUT",.1F).withDepthStencilState(DepthStencilState.DEFAULT)
+                .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA8_UNORM,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        var fixture=new Fixture("block_offset","core/block",DefaultVertexFormat.BLOCK,true,true,false,false);
+        ByteBuffer[] mesh={vertices(fixture,true),vertices(fixture,false)},dynamic=new ByteBuffer[2];
+        byte[][] dynamicBytes=new byte[2][],masks=new byte[2][],sourceDepths=new byte[2][];
+        float[][] offsets={{-.1F,.08F,-.1F},{.12F,-.05F,.1F}};
+        for(int frame=0;frame<2;frame++) {
+            dynamic[frame]=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());
+            new Matrix4f().get(0,dynamic[frame]);new Matrix4f().get(64,dynamic[frame]);
+            for(int c=0;c<4;c++)dynamic[frame].putFloat(128+c*4,1);
+            for(int c=0;c<3;c++)dynamic[frame].putFloat(144+c*4,offsets[frame][c]);
+            dynamicBytes[frame]=new byte[160];dynamic[frame].get(0,dynamicBytes[frame]);
+        }
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        var sample=new MetalEntityMotionCapture.Sample(81013,8,new Matrix4f(),new Matrix4f());
+        MetalPreviousVertexHistory.DrawToken token=null;
+        try(var v0=device.createBuffer(()->"previous block source",GpuBuffer.USAGE_VERTEX,mesh[0]);
+            var v1=device.createBuffer(()->"current block source",GpuBuffer.USAGE_VERTEX,mesh[1]);
+            var d0=device.createBuffer(()->"previous block offset",GpuBuffer.USAGE_UNIFORM,dynamic[0]);
+            var d1=device.createBuffer(()->"current block offset",GpuBuffer.USAGE_UNIFORM,dynamic[1]);
+            var pr=device.createBuffer(()->"block projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var fo=device.createBuffer(()->"block fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var sampled=texture("block material and lightmap",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var color=texture("original block source color",GpuFormat.RGBA8_UNORM,copy);
+            var scene=texture("original block source Z",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var ownership=texture("block private depth",GpuFormat.D32_FLOAT,copy);
+            var flow=texture("block XY",GpuFormat.RG16_FLOAT,copy);var valid=texture("block exact validity",GpuFormat.R8_UNORM,copy);
+            var pair=texture("block previous/current Z",GpuFormat.RG32_FLOAT,copy);
+            var sv=device.createTextureView(sampled);var cv=device.createTextureView(color);var sd=device.createTextureView(scene);
+            var od=device.createTextureView(ownership);var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled,new Vector4f(1));
+            for(int frame=0;frame<2;frame++) {
+                MetalPreviousVertexHistory.beginFrame();token=MetalPreviousVertexHistory.reserveDraw(sample,source);
+                MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                        DefaultVertexFormat.BLOCK.getElements(),DefaultVertexFormat.BLOCK.getVertexSize(),PrimitiveTopology.TRIANGLES,6,6),
+                        MetalPreviousVertexHistory.extractPositions(DefaultVertexFormat.BLOCK,java.util.List.of(mesh[frame]),6));
+                MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
+                MetalPreviousVertexHistory.stageSourceUniforms(token,MetalSourceUniforms.decode(dynamicBytes[frame],null));
+                MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(source,java.util.Map.of()));
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent original Minecraft block frame")
+                        .withColorAttachment(cv,Optional.of(new Vector4f(0))).withDepthAttachment(sd,java.util.OptionalDouble.of(0))
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                    pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",(frame==0 ? d0 : d1).slice());
+                    pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler2",sv,sampler);
+                    pass.setVertexBuffer(0,(frame==0 ? v0 : v1).slice());pass.draw(6,1,0,0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();byte[] rgba=readback(color);
+                masks[frame]=new byte[W*H];for(int p=0;p<W*H;p++)masks[frame][p]=rgba[p*4+3];
+                sourceDepths[frame]=readback(scene);
+                if(frame==0)MetalPreviousVertexHistory.commitSubmittedFrame();
+            }
+            var transforms=MetalPreviousVertexReplay.worldTransforms(token);assertNotNull(transforms);
+            float[] positions=MetalPreviousVertexReplay.previousPositionsForSource(source,token);assertNotNull(positions);
+            ByteBuffer old=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());assertTrue(MetalPreviousVertexReplay.writePreviousPositions(positions,old));old.flip();
+            ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+            transforms.currentUnjitteredFromRaster().get(0,motion);transforms.previousFromPosition().get(64,motion);
+            try(var previous=device.createBuffer(()->"accepted block offset positions",GpuBuffer.USAGE_VERTEX,old);
+                var mo=device.createBuffer(()->"accepted block transform",GpuBuffer.USAGE_UNIFORM,motion)) {
+                encoder.copyTextureToTexture(scene,ownership,0,0,0,0,0,W,H);
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Production exact block offset replay")
+                        .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                        .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withDepthAttachment(od)
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                    pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));pass.setUniform("Projection",pr.slice());
+                    pass.setUniform("DynamicTransforms",d1.slice());pass.setUniform("MetallumMotion",mo.slice());
+                    pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("MetallumSourceDepth",sd,sampler);
+                    pass.setVertexBuffer(0,v1.slice());pass.setVertexBuffer(1,previous.slice());pass.draw(6,1,0,0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();
+                byte[] mask=readback(valid),xy=readback(flow),depth=readback(pair);ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder());
+                ByteBuffer depths=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());int covered=0,mismatches=0,wrongDepth=0;double x=0,y=0;
+                for(int p=0;p<W*H;p++) {
+                    boolean reference=Byte.toUnsignedInt(masks[1][p])>127;
+                    if(reference!=(Byte.toUnsignedInt(mask[p])==255))mismatches++;
+                    if(!reference)continue;covered++;
+                    float vx=Float.float16ToFloat(vectors.getShort(p*4)),vy=Float.float16ToFloat(vectors.getShort(p*4+2));
+                    x+=vx*W/2;y+=vy*H/2;
+                    if(!Float.isFinite(depths.getFloat(p*8))||!Float.isFinite(depths.getFloat(p*8+4))
+                            ||Math.abs(depths.getFloat(p*8)-.4F)>3e-6||Math.abs(depths.getFloat(p*8+4)-.6F)>3e-6)wrongDepth++;
+                }
+                if(covered>0) {x/=covered;y/=covered;}
+                double[] before=centroid(masks[0]),after=centroid(masks[1]);
+                Path dir=Path.of("build/agent-evidence/motion-producers/block-offset-history");Files.createDirectories(dir);
+                Files.write(dir.resolve("previous-source.r8"),masks[0]);Files.write(dir.resolve("current-source.r8"),masks[1]);
+                Files.write(dir.resolve("previous-source.d32f"),sourceDepths[0]);Files.write(dir.resolve("current-source.d32f"),sourceDepths[1]);
+                Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("ownership.r8"),mask);Files.write(dir.resolve("correspondence.rg32f"),depth);
+                Files.writeString(dir.resolve("result.json"),"{\"coveredPixels\":"+covered+",\"coverageMismatches\":"+mismatches
+                        +",\"wrongDepthPixels\":"+wrongDepth+",\"motionPixels\":["+x+","+y+"],\"sourceDisplacementPixels\":["
+                        +(before[0]-after[0])+","+(before[1]-after[1])+"]}");
+                assertTrue(covered>100&&before[2]>100);assertEquals(0,mismatches);assertEquals(0,wrongDepth);
+                assertEquals(before[0]-after[0],x,.6);assertEquals(before[1]-after[1],y,.6);
+            }
         }
     }
 

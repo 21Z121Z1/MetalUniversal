@@ -115,6 +115,17 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void blockExactReplayKeepsItsFourAttributeAbiAndItsOwnFragmentSemantics() {
+        var source=pipeline("core/block",DefaultVertexFormat.BLOCK);
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+        var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertEquals("core/block_previous_motion",exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/block_motion",exact.getShaders().get(ShaderType.FRAGMENT).getPath());
+        assertEquals(DefaultVertexFormat.BLOCK,exact.getVertexFormatBinding(0));
+        assertEquals(16,exact.getVertexFormatBinding(1).getVertexSize());
+    }
+
+    @Test
     void sourceAttachmentPresenceSelectsIndependentDepthPolicies() {
         var source=net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT;
         var tested=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);

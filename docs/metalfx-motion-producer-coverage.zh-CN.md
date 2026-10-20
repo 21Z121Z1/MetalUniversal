@@ -92,6 +92,10 @@ V4 能力位新增源深度策略，Java 要求完整能力 15；旧模块保守
 
 `f78a995` 的 macOS 15 为 83/98。采样声明修复后，20 项材质／自身偏移／透视用例全部通过，七项顺序量化对照也通过；剩余失败集中在无深度附件的普通颜色绘制。原生打包状态入口要求非空 MTLDepthStencilState，nil 不能沿用这一提交路径。改为复用既有设备缓存的 Always／write=false 状态，并保持零 depth bias；不创建影子模块，也不改变原生 ABI。需再次验证原色参考和全部旧颜色绘制。
 
+BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previous position/validity=4/5；前帧位置加上前一接受提交的 ModelOffset，再乘前帧真实 MVP，当前顶点继续使用冻结的当前 ModelOffset。失败提交不会推进偏移，补偿不会改写保留的原始顶点。BLOCK 的 alpha cutout 按原版在纹理、smooth 顶点 alpha 与 ColorModulator 相乘之后执行，零贡献透明层保留独立裁剪语义。新增五项材质覆盖、两帧原版 BLOCK／前帧偏移 GPU 对照，以及真实移动 falling-block 的 source/history/encode 断言。新增 GPU 场景仍待对应提交验收。
+
+原始斜面附件还揭示后续闭环目标：`f78a995` 的 current Z 已包含真实 raster depth bias，previous Z 仍是几何 clip Z。斜面样本相差约 0.00625；它可能使没有遮挡的表面被判为历史不匹配。必须进一步补齐前帧偏移并用原版前帧深度独立对照，不能只以“自身偏移用例通过”宣称 previous raster Z 已完整。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
