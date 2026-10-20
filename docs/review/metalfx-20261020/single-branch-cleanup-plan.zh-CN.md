@@ -24,7 +24,7 @@
 | agent/upstream-26.3-renderpearl | `7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82` | 旧 26.3 移植／工作台已由 canonical RenderPearl/native ABI 取代；不整支覆盖当前实现，历史由恢复标签保存 |
 | agent/upstream-26.3-workbench-20260923 | `be6f578151ca7a765e67c0d7e7aa216c41774d02` | 旧 26.3 移植／工作台已由 canonical RenderPearl/native ABI 取代；不整支覆盖当前实现，历史由恢复标签保存 |
 | codex/consolidated-metal-20261020 | `36a9f3b1d7d82be73091ce091a037d7460a6181b` | 当前工程候选；必须准确 SHA 的整轮 CI／真实客户端通过并经父侧审核后，正常纳入 main |
-| codex/mcopt-semantic-convergence-20261005 | `7b83bc4df3d93bc979a8c34caa551ad818595ce9` | 排除未验证的私有 Sodium 0.9.3-alpha 变更及失败 palette 验收；183 个独有提交持久可恢复，详见 branch-review.md |
+| codex/mcopt-semantic-convergence-20261005 | `7b83bc4df3d93bc979a8c34caa551ad818595ce9` | 未晋升的默认关闭实验优化，部分已有旧版本运行证据；183为提交数、70新增文件，多模块并非全依赖Sodium。旧Vanilla/sodium-fast成功，sodium-verify保存时palette编码等价校验失败，不称存档损坏。整包持久恢复、暂不晋升，详见PR89-decision.zh-CN.md |
 | codex/metal-renderer-research | `a43637d08164a2e95116edaa4e7dda1b4fd2a155` | 已选择性纳入 weather、lightmap、云冻结源与关闭终态增量；本分支保留更严格 streaming／生命周期／颜色／R32F／粒子／oracle；需原写入者明确停写 |
 | codex/metalfx-official-audit-20261020 | `fe547607b3bdfb2dda9d373fd3bbe8415f19e328` | 审计历史为整合分支祖先；保留恢复锚点 |
 | codex/p1-framebuffer-determinism | `1548c41d9e0ea65fad932740854d75804ff81d07` | 选择相机／固定源时间收据；排除忽略 alpha 的弱验收；完整 RGBA 与独立 terrain 8+1 保留 |
@@ -51,4 +51,4 @@
 4. 父侧审核通过且满足删除条件后，按最新 expected-old-OID 原子删除其余分支；任何漂移立即拒绝，不覆盖新写入者。
 5. 再读远端确认仅剩 main；备份标签保留。恢复时从对应注释标签 peeled commit 正常创建原 ref，遇到同名新分支不得覆盖。
 
-本会话尚未删除分支、修改 main/default/保护、发布、创建 PR 或评论。备份标签只承担恢复用途。
+本文件保留36a9快照时的19头清单与执行条件。后续已创建用户仓库内的Draft PR #91；当前20头、准确候选、全量独有/等价提交、恢复tag映射与fresh-clone原文，以该PR正文链接的不可变证据tag为准。未删除分支、修改main/default/保护或发布；未向第三方上游发送PR/评论。备份标签只承担恢复用途。

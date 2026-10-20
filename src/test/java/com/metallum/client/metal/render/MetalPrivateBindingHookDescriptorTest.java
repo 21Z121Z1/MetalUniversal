@@ -33,7 +33,8 @@ final class MetalPrivateBindingHookDescriptorTest {
         String resource="net/caffeinemc/mods/sodium/client/render/chunk/RenderSectionManager";
         ClassNode type=load(resource);
         var methods=new java.util.LinkedHashMap<String,Object>();
-        for(var method:type.methods)if(method.name.equals("prepareRenderTrees") || method.name.equals("consumeCullTaskResults")) {
+        for(var method:type.methods)if(method.name.equals("prepareRenderTrees") || method.name.equals("consumeCullTaskResults")
+                || method.name.equals("scheduleAsyncWork")) {
             var rows=new java.util.ArrayList<String>();int index=0;
             var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();
             for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);

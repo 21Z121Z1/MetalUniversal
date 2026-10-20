@@ -478,6 +478,24 @@ final class MetalComputeBackendIntegrationTest {
             }
             assertEquals(2,MetalUiDrawCoverage.snapshot().content().potentialShaderWrites());
             assertFalse(MetalUiDrawCoverage.snapshot().premultipliedProven());
+            // The texture cache is production state, independent of UI capture.
+            MetalUiDrawCoverage.reset();
+            for(boolean indirect:new boolean[]{false,true}) {
+                encoder.clearColorTexture(target,new Vector4f(0));encoder.flushPendingClear(target);
+                assertTrue(target.clearIsRedundant(new Vector4f(0),null));
+                try(var pass=encoder.createComputePass()) {
+                    pass.setPipeline(pipeline).bindTexture(0,target);
+                    if(indirect)pass.dispatchIndirect(arguments,0);else pass.dispatchGroups(WIDTH/8,HEIGHT/4,1);
+                }
+                var pixels=readbackTexture(target,0,WIDTH,HEIGHT);
+                assertFalse(MetalUiDrawCoverage.observing());
+                for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+                assertFalse(target.clearIsRedundant(new Vector4f(0),null));
+                encoder.clearColorTexture(target,new Vector4f(0));
+                var cleared=readbackTexture(target,0,WIDTH,HEIGHT);
+                for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)),
+                        "The equal clear must execute with UI capture disabled too");
+            }
         } finally {MetalUiDrawCoverage.reset();}
     }
 

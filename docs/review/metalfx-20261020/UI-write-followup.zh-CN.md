@@ -12,6 +12,7 @@
 
 - 普通/间接imageStore分别写RGB=.8、alpha=.1。全图原始RGBA读回必须RGB>alpha，clear-only证明必须撤销，旧clear缓存不得仍声称等于0。
 - 接着再次请求相同clear 0；全图每一通道必须真为0，不能只检查缓存字段或函数返回。之后clear-only必要条件才可重新成立。
+- UI观察关闭后，再分别执行普通／间接imageStore→同值clear 0，保留全图非零写入与清零读回；生产清空缓存的正确性不得依赖诊断开关。
 - raster imageStore将独立UI纹理作为storage image，FBO颜色附件是另一个目标。要求实际非PMA像素被读回、UI的颜色draw清单为空而潜在shader写计数非零；随后同值clear必须实际擦除。UI owner关闭后证明失效，即使view仍保留GPU资源。
 - HDR独立控制保留RGBA16F输入4.0/2.0辐射及alpha=.25，SDR decoder拒绝前后字节一致且不分配SDR输出。这不等于实现HDR tone mapping。
 

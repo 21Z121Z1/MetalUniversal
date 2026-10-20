@@ -2078,8 +2078,12 @@ final class MetalMrtBackendIntegrationTest {
             MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(995,3),ui,true);
             encoder.clearColorTexture(ui,new Vector4f(0));readback(ui);
             assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            // RenderPearl's ordinary UniformType has no storage image. Use the
+            // same explicit storage admission as production Iris raster passes.
+            var storagePipeline=device.precompilePipeline(
+                    pipeline("ui_image_store",List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL),null,true);
             try(var pass=createPass(attachments,null,false)) {
-                pass.pass().setPipeline(pipeline("ui_image_store",List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL));
+                pass.pass().setPipeline(storagePipeline);
                 pass.pass().bindStorageImage("uiStore",uiView);pass.pass().draw(3,1,0,0);
                 encoder.submitRenderPass();encoder.submit();device.waitForSubmittedGpuWork();
             }
