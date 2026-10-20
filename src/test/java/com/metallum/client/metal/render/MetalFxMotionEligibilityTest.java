@@ -88,7 +88,19 @@ final class MetalFxMotionEligibilityTest {
     void genericStateAdmissionUsesRegistryKeysWithoutBootstrappingEntityTypes() {
         assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.DRAGON_FIREBALL));
         assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.LEASH_KNOT));
-        assertFalse(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.WIND_CHARGE));
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.WIND_CHARGE));
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.BREEZE_WIND_CHARGE));
+        assertFalse(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.LIGHTNING_BOLT));
+    }
+
+    @Test
+    void crystalBeamOrbBillboardAndBulletOverlayRequireCompleteExactHistory() {
+        for (var state : java.util.List.of(new net.minecraft.client.renderer.entity.state.EndCrystalRenderState(),
+                new net.minecraft.client.renderer.entity.state.ExperienceOrbRenderState(),
+                new net.minecraft.client.renderer.entity.state.ShulkerBulletRenderState())) {
+            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(state));
+            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(state));
+        }
     }
 
     @Test

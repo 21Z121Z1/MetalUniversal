@@ -763,15 +763,50 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         boolean previous = context.computeOnClient(client -> client.options.improvedTransparency().get());
         try {
             singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
+            singleplayer.getServer().runCommand("difficulty normal");
             singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
+            singleplayer.getServer().runCommand("summon minecraft:end_crystal 163 128 169 {beam_target:[I;160,131,171],ShowBottom:0b}");
+            singleplayer.getServer().runCommand("summon minecraft:shulker_bullet 159 130 166 {NoGravity:1b}");
+            singleplayer.getServer().runCommand("summon minecraft:wind_charge 157 130 167 {NoGravity:1b}");
+            singleplayer.getServer().runCommand("summon minecraft:breeze_wind_charge 162 130 166 {NoGravity:1b}");
+            singleplayer.getServer().runCommand("setblock 156 128 165 minecraft:enchanting_table");
+            singleplayer.getServer().runCommand("setblock 158 128 165 minecraft:lectern[facing=north,has_book=true]{Book:{id:\"minecraft:writable_book\",count:1}}");
+            singleplayer.getServer().runCommand("setblock 160 128 168 minecraft:conduit");
+            singleplayer.getServer().runCommand("setblock 162 128 165 minecraft:decorated_pot");
+            singleplayer.getServer().runCommand("setblock 164 128 165 minecraft:skeleton_skull");
             for (boolean oit : new boolean[]{false, true}) {
                 context.runOnClient(client -> client.options.improvedTransparency().set(oit));
+                if (oit) {
+                    // A visible vertical 16-block frame exercises the active cage/wind/eye path,
+                    // after the ordinary phase has exercised the inactive shell.
+                    singleplayer.getServer().runCommand("fill 159 127 167 161 129 169 minecraft:water");
+                    singleplayer.getServer().runCommand("fill 158 126 168 162 126 168 minecraft:prismarine");
+                    singleplayer.getServer().runCommand("fill 158 130 168 162 130 168 minecraft:prismarine");
+                    singleplayer.getServer().runCommand("fill 158 127 168 158 129 168 minecraft:prismarine");
+                    singleplayer.getServer().runCommand("fill 162 127 168 162 129 168 minecraft:prismarine");
+                    singleplayer.getServer().runCommand("setblock 160 128 168 minecraft:conduit");
+                    context.waitFor(client -> client.level != null
+                            && client.level.getBlockEntity(new BlockPos(160, 128, 168)) instanceof net.minecraft.world.level.block.entity.ConduitBlockEntity conduit
+                            && conduit.isActive(), 200);
+                }
                 singleplayer.getServer().runCommand("particle minecraft:flame 160.5 128 164 1 1 1 0.01 100 force @a");
                 singleplayer.getServer().runCommand("particle minecraft:campfire_cosy_smoke 160.5 128 165 1 1 1 0.01 100 force @a");
                 context.waitTicks(12);
             }
+            singleplayer.getServer().runCommand("setblock 158 128 165 minecraft:lectern[facing=north,has_book=false]");
+            context.waitFor(client -> client.level != null && !client.level.getBlockState(new BlockPos(158, 128, 165))
+                    .getValue(net.minecraft.world.level.block.LecternBlock.HAS_BOOK));
+            context.waitTicks(3);
+            var beforeEmpty = context.computeOnClient(client -> com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
+            context.waitTicks(5);
             var census = context.computeOnClient(client -> com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
-            require(census.captureOnlyValidation(), "Real draw coverage capture was not enabled");
+            JsonObject report = new GsonBuilder().create().toJsonTree(census).getAsJsonObject();
+            report.addProperty("verified", false);
+            report.addProperty("boundary", "real Minecraft source draw/owner/history and GPU motion replay; Temporal/FG quality checked separately");
+            try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
+                    new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
+            catch (IOException failure) { throw new IllegalStateException("Could not write pending source motion evidence", failure); }
+            require(census.rawMotionValidation(), "Real draw coverage capture was not enabled");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
                 var rows = census.pipelines().entrySet().stream().filter(row -> row.getKey().endsWith("/" + suffix)).toList();
                 require(!rows.isEmpty(), "Minecraft never executed particle source pipeline " + suffix + ": " + census);
@@ -786,11 +821,39 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             }
             long oitFeatures = census.pipelines().entrySet().stream()
                     .filter(row -> row.getKey().contains("oit_accumulate_entity"))
-                    .mapToLong(row -> row.getValue().hookedExecutions()).sum();
-            require(oitFeatures > 0, "PreparedRenderType OIT color hook never executed");
-            JsonObject report = new GsonBuilder().create().toJsonTree(census).getAsJsonObject();
+                    .mapToLong(row -> row.getValue().encodedMotionDraws()).sum();
+            require(oitFeatures > 0, "PreparedRenderType OIT color never encoded owned motion");
+            var beam = census.pipelines().get("minecraft:pipeline/end_crystal_beam");
+            require(beam != null && beam.ownedColorExecutions() > 0 && beam.encodedMotionDraws() > 0,
+                    "Crystal model alone cannot prove its optional custom beam: " + beam);
+            for (String state : new String[]{"EnchantTableRenderState", "LecternRenderState", "DecoratedPotRenderState", "ConduitRenderState", "SkullBlockRenderState"}) {
+                var counts = census.owners().get("net.minecraft.client.renderer.blockentity.state." + state);
+                require(counts != null && counts.sourceColorDraws() > 0 && counts.matchingGeometryDraws() > 0
+                                && counts.matchingTransformDraws() > 0 && counts.matchingSurfaceDraws() > 0 && counts.encodedMotionDraws() > 0,
+                        "Block entity never proved its real source draw and complete previous history: " + state + " " + counts);
+            }
+            for (String state : new String[]{"EndCrystalRenderState", "ExperienceOrbRenderState", "ShulkerBulletRenderState",
+                    "EntityRenderState[minecraft:wind_charge]", "EntityRenderState[minecraft:breeze_wind_charge]"}) {
+                var counts = census.owners().get("net.minecraft.client.renderer.entity.state." + state);
+                require(counts != null && counts.sourceColorDraws() > 0 && counts.matchingGeometryDraws() > 0
+                                && counts.matchingTransformDraws() > 0 && counts.matchingSurfaceDraws() > 0 && counts.encodedMotionDraws() > 0,
+                        "Entity never proved its real source draw and complete previous history: " + state + " " + counts);
+            }
+            String lecternClass = "net.minecraft.client.renderer.blockentity.state.LecternRenderState";
+            require(beforeEmpty.owners().get(lecternClass).capturedStates() == census.owners().get(lecternClass).capturedStates(),
+                    "Empty lectern must not claim source geometry or become an exact candidate");
+            var rawCapture = context.computeOnClient(client -> com.metallum.client.metal.render.MetalFxManager
+                    .requestRawMotionValidation(output.resolve("raw-source-motion")));
+            context.waitFor(client -> rawCapture.isDone(), 200);
+            var raw = rawCapture.join();
+            require(raw.sourceCommit().equals(System.getProperty("metallum.ci.expectedSourceSha"))
+                            && raw.frameId() > 0 && raw.historyEpoch() > 0 && raw.worldValidPixels() > 0
+                            && raw.finiteValidPixels() >= raw.worldValidPixels() && raw.maxMotionPixels() > 0
+                            && !raw.temporalQualityValidated() && !raw.frameGenerationQualityValidated(),
+                    "Real producer GPU motion readback failed or claimed unsupported quality: " + raw);
             report.addProperty("verified", true);
-            report.addProperty("boundary", "real Minecraft source draw/owner capture; not Temporal or FG execution/quality");
+            report.addProperty("activeConduitExercised", true);
+            report.addProperty("emptyLecternAbsent", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
             catch (IOException failure) { throw new IllegalStateException("Could not write source motion evidence", failure); }

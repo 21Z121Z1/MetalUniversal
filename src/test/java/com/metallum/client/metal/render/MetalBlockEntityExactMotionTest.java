@@ -6,6 +6,11 @@ import net.minecraft.client.renderer.blockentity.state.BellRenderState;
 import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.client.renderer.blockentity.state.ChestRenderState;
 import net.minecraft.client.renderer.blockentity.state.ShulkerBoxRenderState;
+import net.minecraft.client.renderer.blockentity.state.EnchantTableRenderState;
+import net.minecraft.client.renderer.blockentity.state.LecternRenderState;
+import net.minecraft.client.renderer.blockentity.state.DecoratedPotRenderState;
+import net.minecraft.client.renderer.blockentity.state.ConduitRenderState;
+import net.minecraft.client.renderer.blockentity.state.SkullBlockRenderState;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,8 +25,19 @@ final class MetalBlockEntityExactMotionTest {
         assertTrue(MetalBlockEntityExactMotion.supportsStateClass(BannerRenderState.class));
         assertTrue(MetalBlockEntityExactMotion.supportsStateClass(ShulkerBoxRenderState.class));
         assertTrue(MetalBlockEntityExactMotion.supportsStateClass(BellRenderState.class));
+        for (Class<?> type : java.util.List.of(EnchantTableRenderState.class, LecternRenderState.class,
+                DecoratedPotRenderState.class, ConduitRenderState.class, SkullBlockRenderState.class)) {
+            assertTrue(MetalBlockEntityExactMotion.supportsStateClass(type));
+        }
         assertFalse(MetalBlockEntityExactMotion.supportsStateClass(BeaconRenderState.class));
         assertFalse(MetalBlockEntityExactMotion.supportsStateClass(BlockEntityRenderState.class));
+    }
+
+    @Test
+    void moddedSubclassesStayUnproven() {
+        class ModdedLectern extends LecternRenderState {}
+        assertFalse(MetalBlockEntityExactMotion.supportsStateClass(ModdedLectern.class));
+        assertFalse(MetalBlockEntityExactMotion.hasGeometry(null));
     }
 
     @Test

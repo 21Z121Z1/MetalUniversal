@@ -71,6 +71,122 @@ final class MetalFirstPersonMotionGpuTest {
         MetalPreviousVertexHistory.reset();
     }
 
+    @Test
+    void worldDrawHistoryMatchesActualMinecraftColorShaderRaster() throws Exception {
+        var source = RenderPipeline.builder().withLocation("source_contract/world_entity")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0, DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withColorTargetState(ColorTargetState.DEFAULT).withCull(false)
+                .withShaderDefine("NO_CARDINAL_LIGHTING").withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE")
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        Fixture geometry = new Fixture("world_source", "core/entity", 75, 75, false, true, false, false, .1F);
+        Matrix4f baseP = projection(75), oldP = new Matrix4f(baseP).m20(.011F).m21(-.007F);
+        Matrix4f newP = new Matrix4f(baseP).m20(-.009F).m21(.005F);
+        Matrix4f oldView = new Matrix4f().translate(-.04F, .06F, 0).rotateZ(.08F);
+        Matrix4f view = new Matrix4f().translate(.03F, -.02F, 0).rotateZ(-.06F);
+        ByteBuffer oldMesh = vertices(geometry, true, oldView), mesh = vertices(geometry, false, view);
+        float[] oldPositions = positions(oldMesh), currentPositions = positions(mesh);
+        ByteBuffer fogBytes = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fogBytes.putFloat(16, 1000).putFloat(20, 2000).putFloat(24, 1000).putFloat(28, 2000);
+        ByteBuffer indexBytes = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());
+        for (short i=0; i<6; i++) indexBytes.putShort(i); indexBytes.flip();
+        var sample = new MetalEntityMotionCapture.Sample(8801, 4, new Matrix4f(), new Matrix4f());
+        try (var oldV = device.createBuffer(() -> "previous world pose", GpuBuffer.USAGE_VERTEX, oldMesh);
+             var currentV = device.createBuffer(() -> "current world pose", GpuBuffer.USAGE_VERTEX, mesh);
+             var index = device.createBuffer(() -> "world indices", GpuBuffer.USAGE_INDEX, indexBytes);
+             var oldProjection = projectionBuffer(oldP); var currentProjection = projectionBuffer(newP);
+             var referenceProjection = projectionBuffer(baseP);
+             var oldDynamic = dynamicBuffer(oldView); var dynamic = dynamicBuffer(view);
+             var fog = device.createBuffer(() -> "real shader fog", GpuBuffer.USAGE_UNIFORM, fogBytes);
+             var sampled = texture("source material", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_TEXTURE_BINDING);
+             var color = texture("real Minecraft color", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_COPY_SRC);
+             var flow = texture("world flow", GpuFormat.RG16_FLOAT, GpuTexture.USAGE_COPY_SRC);
+             var validity = texture("world validity", GpuFormat.R8_UNORM, GpuTexture.USAGE_COPY_SRC);
+             var sampledView = device.createTextureView(sampled); var colorView = device.createTextureView(color);
+             var flowView = device.createTextureView(flow); var validityView = device.createTextureView(validity);
+             var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE,
+                     FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled, new Vector4f(1));
+            byte[][] reference = new byte[2][], actualSource = new byte[2][];
+            MetalPreviousVertexHistory.DrawToken token = null;
+            for (int frame=0; frame<2; frame++) {
+                MetalPreviousVertexHistory.beginFrame();
+                token = MetalPreviousVertexHistory.reserveDraw(sample, source);
+                var format = source.getVertexFormatBinding(0);
+                MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(
+                        source.getLocation().toString(), format.getElements(), format.getVertexSize(),
+                        PrimitiveTopology.TRIANGLES, 6, 6), frame == 0 ? oldPositions : currentPositions);
+                for (boolean unjitteredReference : new boolean[]{false, true}) {
+                    try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Actual Minecraft source shader")
+                            .withColorAttachment(colorView, Optional.of(new Vector4f()))
+                            .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
+                        pass.setPipeline(source);
+                        pass.setUniform("Projection", (unjitteredReference ? referenceProjection
+                                : frame == 0 ? oldProjection : currentProjection).slice(UNIFORM_OFFSET, 64));
+                        pass.setUniform("DynamicTransforms", (frame == 0 ? oldDynamic : dynamic).slice(UNIFORM_OFFSET, 256));
+                        pass.setUniform("Fog", fog.slice()); pass.bindTexture("Sampler0", sampledView, sampler);
+                        pass.setVertexBuffer(0, (frame == 0 ? oldV : currentV).slice());
+                        pass.setIndexBuffer(index, IndexType.SHORT); pass.drawIndexed(6, 1, 0, 0, 0);
+                        if (!unjitteredReference) {
+                            assertTrue(MetalPreviousVertexReplay.captureSourceTransform(token,
+                                    MetalPreviousVertexReplay.sourceDrawInputs(pass),
+                                    new Matrix4f(baseP).mul(new Matrix4f(frame == 0 ? oldP : newP).invert())));
+                            MetalPreviousVertexHistory.stageSurface(token,
+                                    MetalPreviousVertexReplay.surfaceIdentity(MetalPreviousVertexReplay.sourceState(pass)));
+                        }
+                    }
+                    encoder.submit(); device.waitForSubmittedGpuWork();
+                    if (unjitteredReference) reference[frame] = readback(color);
+                    else actualSource[frame] = readback(color);
+                }
+                if (frame == 0) MetalPreviousVertexHistory.commitSubmittedFrame();
+            }
+            assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(token));
+            var transforms = MetalPreviousVertexReplay.worldTransforms(token); assertNotNull(transforms);
+            var info = new StagedVertexBuffer.ExecuteInfo(currentV, index, IndexType.SHORT, 0, 0, 6, PrimitiveTopology.TRIANGLES);
+            var plan = MetalPreviousVertexReplay.plan(source, info, token); assertNotNull(plan);
+            ByteBuffer overwritten = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()); projection(35).get(0, overwritten);
+            encoder.writeToBuffer(currentProjection.slice(UNIFORM_OFFSET, 64), overwritten);
+            try (var capturedProjection = projectionBuffer(transforms.currentProjection());
+                 var motion = motionBuffer(transforms.currentUnjitteredFromRaster(), transforms.previousFromPosition());
+                 var previous = positionBuffer(plan.previousPositions());
+                 var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Motion from real source draw history")
+                         .withColorAttachment(flowView, Optional.of(new Vector4f()))
+                         .withColorAttachment(validityView, Optional.of(new Vector4f()))
+                         .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
+                pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositions(source));
+                pass.setUniform("Projection", capturedProjection.slice(UNIFORM_OFFSET, 64));
+                pass.setUniform("DynamicTransforms", dynamic.slice(UNIFORM_OFFSET, 256)); pass.setUniform("MetallumMotion", motion.slice());
+                pass.bindTexture("Sampler0", sampledView, sampler); pass.setVertexBuffer(0, plan.currentVertexBuffer());
+                pass.setVertexBuffer(1, previous.slice()); pass.setIndexBuffer(index, IndexType.SHORT);
+                pass.drawIndexed(6, 1, 0, plan.replayBaseVertex(), 0);
+            }
+            encoder.submit(); device.waitForSubmittedGpuWork();
+            byte[] mask = readback(validity), vectors = readback(flow);
+            byte[][] alpha = {new byte[W*H], new byte[W*H]};
+            for (int frame=0; frame<2; frame++) for (int p=0; p<W*H; p++) alpha[frame][p] = reference[frame][p*4+3];
+            double[] before = centroid(alpha[0]), after = centroid(alpha[1]);
+            ByteBuffer values = ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
+            double x=0,y=0; int count=0;
+            for (int p=0; p<W*H; p++) if (Byte.toUnsignedInt(mask[p]) > 127) {
+                x += Float.float16ToFloat(values.getShort(p*4))*W/2; y += Float.float16ToFloat(values.getShort(p*4+2))*H/2; count++;
+            }
+            assertTrue(count > 100 && before[2] > 100 && after[2] > 100);
+            x /= count; y /= count;
+            assertEquals(before[0]-after[0], x, .6, "motion must agree with the actual Minecraft unjittered color shader");
+            assertEquals(before[1]-after[1], y, .6);
+            Path dir = Path.of("build/agent-evidence/motion-producers/world_actual_shader_source"); Files.createDirectories(dir);
+            Files.write(dir.resolve("previous-source.rgba8"), actualSource[0]); Files.write(dir.resolve("current-source.rgba8"), actualSource[1]);
+            Files.write(dir.resolve("previous-reference.rgba8"), reference[0]); Files.write(dir.resolve("current-reference.rgba8"), reference[1]);
+            Files.write(dir.resolve("motion.rg16f"), vectors); Files.write(dir.resolve("current-validity.r8"), mask);
+            Files.writeString(dir.resolve("result.json"), "{\"fixture\":\"world_actual_shader_source\",\"width\":"+W+",\"height\":"+H
+                    +",\"coveredPixels\":"+count+",\"motionPixels\":["+x+","+y+"],\"rasterDisplacementPixels\":["
+                    +(before[0]-after[0])+","+(before[1]-after[1])+"],\"surfaceHistoryMatched\":true}");
+        }
+    }
+
     @AfterEach
     void cleanup() {
         MetalPreviousVertexHistory.discardFrame();

@@ -72,7 +72,7 @@ public final class MetalFxManager {
     // and source hooks cannot independently establish that complete contract.
     private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;
     // Exercises real Minecraft producers on hosted raw Metal even if Temporal is unsupported.
-    // This captures identity/history only; it cannot enable Temporal/FG or prove encoded motion.
+    // This exercises raw motion resources/replays, without enabling unsupported Temporal/FG APIs.
     private static final boolean MOTION_CAPTURE_VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
     // QA escape hatch for that matrix: it enables frame generation without
     // changing what ships, and is the switch the acceptance run flips.
@@ -395,6 +395,14 @@ public final class MetalFxManager {
     private MetalGpuTexture frameDepthTexture;
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
+    @Nullable private RawMotionRequest rawMotionRequest;
+
+    public record RawMotionValidation(String sourceCommit, long frameId, long historyEpoch,
+                                      int width, int height, long worldValidPixels, long handValidPixels,
+                                      long finiteValidPixels, double maxMotionPixels, String scalerMode,
+                                      boolean temporalQualityValidated, boolean frameGenerationQualityValidated) {}
+
+    private record RawMotionRequest(Path output, java.util.concurrent.CompletableFuture<RawMotionValidation> result) {}
 
     private record ObjectMotionReplay(
             MetalPreviousVertexReplay.SourceState prepared,
@@ -722,7 +730,7 @@ public final class MetalFxManager {
         }
         manager.observeBlockEntityInternal(state);
         if (!manager.capturesMotion()
-                || !MetalBlockEntityExactMotion.supports(state)) {
+                || !MetalBlockEntityExactMotion.hasGeometry(state)) {
             return;
         }
         MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.sampleForState(state);
@@ -883,6 +891,16 @@ public final class MetalFxManager {
         if (manager != null) {
             manager.flushEntityMotionReplaysInternal(Minecraft.getInstance().gameRenderer);
         }
+    }
+
+    /** Diagnostic-only raw GPU proof; device support and shipped feature settings are unchanged. */
+    public static java.util.concurrent.CompletableFuture<RawMotionValidation> requestRawMotionValidation(final Path output) {
+        MetalFxManager manager = active;
+        if (!MOTION_CAPTURE_VALIDATION || manager == null || !manager.capturesMotion()
+                || manager.rawMotionRequest != null) throw new IllegalStateException("Raw motion validation is unavailable or already pending");
+        var result = new java.util.concurrent.CompletableFuture<RawMotionValidation>();
+        manager.rawMotionRequest = new RawMotionRequest(output.toAbsolutePath().normalize(), result);
+        return result;
     }
 
     public static void setValidationFrame(
@@ -1646,7 +1664,7 @@ public final class MetalFxManager {
             final BlockEntityRenderState state
     ) {
         if (!capturesMotion()
-                || !MetalBlockEntityExactMotion.supports(state)) {
+                || !MetalBlockEntityExactMotion.hasGeometry(state)) {
             return;
         }
         long generation = blockEntityGenerations.computeIfAbsent(
@@ -1698,6 +1716,7 @@ public final class MetalFxManager {
             return;
         }
         if (MetalBlockEntityExactMotion.supports(state)) {
+            if (!MetalBlockEntityExactMotion.hasGeometry(state)) return;
             observeProducer(
                     FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES, 1
             );
@@ -1831,9 +1850,14 @@ public final class MetalFxManager {
         var prepared = MetalPreviousVertexReplay.sourceState(sourcePass);
         var sourceInputs = MetalPreviousVertexReplay.sourceDrawInputs(sourcePass);
         boolean firstPerson = sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
-        // Prime matrices on first appearance and history-reset frames too, in the same pending
-        // transaction as the posed vertices captured during staging. No source submission, no commit.
-        if (firstPerson && !MetalPreviousVertexReplay.captureHandTransform(previousVertexToken, sourceInputs)) {
+        // Every family uses its actual per-draw model-view/projection, including reset frames.
+        // Spatial validation has no jitter; it seeds diagnostic history without running Temporal.
+        Matrix4f sourceUnjitter = !firstPerson && effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                ? new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection) : new Matrix4f();
+        MetalPreviousVertexHistory.stageSurface(previousVertexToken, MetalPreviousVertexReplay.surfaceIdentity(prepared));
+        boolean capturedTransform = firstPerson ? MetalPreviousVertexReplay.captureHandTransform(previousVertexToken, sourceInputs)
+                : MetalPreviousVertexReplay.captureSourceTransform(previousVertexToken, sourceInputs, sourceUnjitter);
+        if (!capturedTransform) {
             MetalEntityMotionCapture.failExactSample(sample, MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
             MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
             return;
@@ -1919,19 +1943,29 @@ public final class MetalFxManager {
             boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
             boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
             boolean firstPerson = replay.sample().domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
+            if (!MetalPreviousVertexHistory.matchingSurfaceManifest(replay.previousVertexToken())) {
+                MetalEntityMotionCapture.failExactSample(replay.sample(), "source-material-history-unavailable");
+                MetalEntityMotionCapture.recordMotionDrawSkip("source-material-history-unavailable");
+                continue;
+            }
             if (!firstPerson && !MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform");
                 continue;
             }
             MetalPreviousVertexReplay.Plan exactPlan = exactMotionSupported
-                    && (firstPerson || MetalFxMath.isFinite(previousCameraRelativeViewProjection))
                     ? MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
             boolean exactPreviousPositions = exactPlan != null;
-            var handTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken()) : null;
-            if (firstPerson && (handTransforms == null || !exactPreviousPositions || replay.sourceDepth() == null)) {
-                String reason = handTransforms == null ? MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE
+            var drawTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())
+                    : exactPreviousPositions ? MetalPreviousVertexReplay.worldTransforms(replay.previousVertexToken()) : null;
+            if (exactPreviousPositions && drawTransforms == null) {
+                MetalEntityMotionCapture.failExactSample(replay.sample(), MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
+                MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
+                continue;
+            }
+            if (firstPerson && (drawTransforms == null || !exactPreviousPositions || replay.sourceDepth() == null)) {
+                String reason = drawTransforms == null ? MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE
                         : !exactPreviousPositions ? "first-person-previous-vertices-unavailable" : "first-person-depth-unavailable";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
                 MetalEntityMotionCapture.recordMotionDrawSkip(reason);
@@ -1942,12 +1976,10 @@ public final class MetalFxManager {
                 continue;
             }
             Matrix4f previousFromRaster;
-            if (firstPerson) {
-                previousFromRaster = handTransforms.previousFromPosition();
+            if (exactPreviousPositions) {
+                previousFromRaster = drawTransforms.previousFromPosition();
             } else {
-                previousFromRaster = exactPreviousPositions
-                        ? new Matrix4f(previousCameraRelativeViewProjection)
-                        : new Matrix4f(previousViewProjection)
+                previousFromRaster = new Matrix4f(previousViewProjection)
                                 .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
                                 .mul(inverseCurrentViewProjection);
                 MetalMotionContract.minecraftToMetalFxClip(previousFromRaster);
@@ -1982,18 +2014,18 @@ public final class MetalFxManager {
             try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                     .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
                 ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                (firstPerson ? handTransforms.currentUnjitteredFromRaster() : currentUnjitteredFromRaster).get(0, bytes);
+                (exactPreviousPositions ? drawTransforms.currentUnjitteredFromRaster() : currentUnjitteredFromRaster).get(0, bytes);
                 previousFromRaster.get(64, bytes);
                 motionUniform = mapped.slice();
             }
             MetalFxMotionTelemetry.recordGpuUpload(128L);
             GpuBufferSlice replayProjection = replay.projection();
-            if (firstPerson) {
+            if (exactPreviousPositions) {
                 // ProjectionMatrixBuffer can be overwritten by later HUD/effect phases. Replay a
                 // frame-owned copy of the source matrix instead of a mutable global UBO backing.
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                         .allocateGpuMapped(64L, 256L, GpuBuffer.USAGE_UNIFORM)) {
-                    handTransforms.currentProjection().get(0, mapped.data().order(ByteOrder.nativeOrder()));
+                    drawTransforms.currentProjection().get(0, mapped.data().order(ByteOrder.nativeOrder()));
                     replayProjection = mapped.slice();
                 }
                 MetalFxMotionTelemetry.recordGpuUpload(64L);
@@ -2114,7 +2146,7 @@ public final class MetalFxManager {
             }
             recordMotionProducerEncoded(replay.sample());
             MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
-            MetalMotionDrawCoverage.encoded();
+            MetalMotionDrawCoverage.encoded(replay.sample(), prepared.pipeline());
         }
     }
 
@@ -2208,9 +2240,9 @@ public final class MetalFxManager {
                 : 0.0F;
         this.lastSceneFrameStartNanos = sceneFrameStartNanos;
 
-        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
+        if (capturesMotion()) {
             projectionMatrix.set(this.currentProjection);
-            if (usesNativeDirectFrameGeneration()) {
+            if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || usesNativeDirectFrameGeneration()) {
                 this.pixelJitter.zero();
                 this.clipJitter.zero();
             } else {
@@ -2245,7 +2277,7 @@ public final class MetalFxManager {
             clipJitter.zero();
             projectionMatrix.set(this.currentProjection);
         }
-        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && !motionInputsPrepared) {
+        if (capturesMotion() && !motionInputsPrepared) {
             motionInputsPrepared = prepareMotionInputs();
             if (!motionInputsPrepared && config.debug) {
                 Metallum.LOGGER.warn("MetalFX temporal frame will fail closed: motion input initialization failed");
@@ -2256,6 +2288,7 @@ public final class MetalFxManager {
     }
 
     private void beforeGuiInternal(final GameRenderer renderer) {
+        captureRawMotionIfRequested();
         MetalMotionDrawCoverage.endScene();
         this.frameUsesUpscaledTarget = false;
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
@@ -2583,7 +2616,7 @@ public final class MetalFxManager {
     }
 
     private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
-        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
+        if (!capturesMotion()
                 || !sceneFrame || sceneDepthTexture == null) {
             return;
         }
@@ -2679,6 +2712,76 @@ public final class MetalFxManager {
                 bytes
         );
         return new ValidationReadback(name, texture, buffer, bytes);
+    }
+
+    private void captureRawMotionIfRequested() {
+        RawMotionRequest request = rawMotionRequest;
+        if (request == null) return;
+        rawMotionRequest = null;
+        if (!sceneFrame || !objectMotionInputsCleared || sourceFrameStamp == null || sourceFrameStampInvalidated
+                || objectMotionTexture == null || objectValidityTexture == null || handExactValidityTexture == null) {
+            request.result().completeExceptionally(new IllegalStateException("Raw source motion inputs were not completed"));
+            return;
+        }
+        var stamp = sourceFrameStamp;
+        int width = renderWidth, height = renderHeight;
+        String scaler = effectiveMode.name();
+        List<ValidationReadback> readbacks = new ArrayList<>();
+        var released = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) readbacks.forEach(readback -> readback.buffer().close());
+        };
+        try {
+            readbacks.add(validationReadback("object-motion", objectMotionTexture));
+            readbacks.add(validationReadback("object-validity", objectValidityTexture));
+            readbacks.add(validationReadback("hand-exact-validity", handExactValidityTexture));
+            Runnable finish = () -> {
+                if (released.get()) return;
+                try {
+                    List<byte[]> bytes = readbacks.stream().map(MetalFxManager::readbackBytes).toList();
+                    ByteBuffer vectors = ByteBuffer.wrap(bytes.get(0)).order(ByteOrder.nativeOrder());
+                    long world = 0, hand = 0, finite = 0; double max = 0;
+                    for (int pixel = 0; pixel < width * height; pixel++) {
+                        boolean worldValid = Byte.toUnsignedInt(bytes.get(1)[pixel]) > 127;
+                        boolean handValid = Byte.toUnsignedInt(bytes.get(2)[pixel]) > 127;
+                        if (worldValid) world++;
+                        if (handValid) hand++;
+                        if (!worldValid && !handValid) continue;
+                        float x = Float.float16ToFloat(vectors.getShort(pixel * 4));
+                        float y = Float.float16ToFloat(vectors.getShort(pixel * 4 + 2));
+                        if (!Float.isFinite(x) || !Float.isFinite(y) || Math.abs(x) > 32 || Math.abs(y) > 32) {
+                            throw new IllegalStateException("Invalid raw motion at a valid source pixel");
+                        }
+                        finite++;
+                        max = Math.max(max, Math.max(Math.abs(x) * width / 2, Math.abs(y) * height / 2));
+                    }
+                    var result = new RawMotionValidation(System.getProperty("metallum.validation.sourceCommit", "unknown"),
+                            stamp.frameId(), stamp.historyEpoch(), width, height, world, hand, finite, max, scaler, false, false);
+                    Files.createDirectories(request.output());
+                    for (int i = 0; i < readbacks.size(); i++) Files.write(request.output().resolve(readbacks.get(i).name()
+                            + (i == 0 ? ".rg16f" : ".r8")), bytes.get(i));
+                    Files.writeString(request.output().resolve("result.json"), new com.google.gson.GsonBuilder()
+                            .setPrettyPrinting().create().toJson(result) + "\n");
+                    request.result().complete(result);
+                } catch (Exception failure) {
+                    request.result().completeExceptionally(failure);
+                } finally {
+                    release.run();
+                }
+            };
+            for (int i = 0; i < readbacks.size(); i++) {
+                var readback = readbacks.get(i);
+                device.commandEncoder().copyTextureToBuffer(readback.texture(), readback.buffer(), 0,
+                        i == readbacks.size() - 1 ? finish : () -> {}, 0);
+            }
+            device.commandEncoder().onCurrentSubmit(() -> {}, () -> {
+                request.result().completeExceptionally(new IllegalStateException("Raw motion command submission failed"));
+                release.run();
+            });
+        } catch (RuntimeException failure) {
+            request.result().completeExceptionally(failure);
+            release.run();
+        }
     }
 
     private void captureNativeOffReadbackIfRequested(final GameRenderer renderer) {
@@ -4373,7 +4476,7 @@ public final class MetalFxManager {
     }
 
     private boolean ensureAuxiliaryTextures() {
-        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
+        if (!capturesMotion()
                 || renderWidth <= 0 || renderHeight <= 0
                 || (motionTexture != null && motionTexture.getWidth(0) == renderWidth
                 && motionTexture.getHeight(0) == renderHeight
@@ -4404,7 +4507,8 @@ public final class MetalFxManager {
         // The motion reconstruction pass always owns this texture because it
         // writes depth-edge reactivity for alpha-cutout leaves/grass. The
         // Sodium toggle only controls the additional transparent-target mask.
-        int usage = GpuTexture.USAGE_TEXTURE_BINDING | USAGE_SHADER_WRITE;
+        int usage = GpuTexture.USAGE_TEXTURE_BINDING | USAGE_SHADER_WRITE
+                | (MOTION_CAPTURE_VALIDATION ? GpuTexture.USAGE_COPY_SRC : 0);
         motionTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Motion RG16F", usage, GpuFormat.RG16_FLOAT, renderWidth, renderHeight, 1, 1
         );
@@ -4663,6 +4767,10 @@ public final class MetalFxManager {
     }
 
     private void closeInternal() {
+        if (rawMotionRequest != null) {
+            rawMotionRequest.result().completeExceptionally(new IllegalStateException("MetalFX renderer closed before raw motion capture"));
+            rawMotionRequest = null;
+        }
         // Cache-owned MetalFX PSOs are removed from the global residency set by
         // metallum_metalfx_shutdown. The device must be idle before any target,
         // texture, or PSO owner is destroyed so the next residency commit cannot

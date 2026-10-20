@@ -187,6 +187,7 @@ public final class MetalEntityMotionCapture {
     public static void attachState(final Object state, final Sample sample) {
         if (enabled && state != null && sample != null) {
             STATES.put(state, sample);
+            MetalMotionDrawCoverage.attachOwner(state, sample);
             statesAttached++;
         }
     }
@@ -589,6 +590,9 @@ public final class MetalEntityMotionCapture {
         for (var draw : draws) {
             DrawCapture capture = DRAWS.remove(draw);
             if (capture != null) {
+                if (REPLAYED_DRAWS.contains(capture)) {
+                    MetalMotionDrawCoverage.stagedHistory(capture.sample(), capture.previousVertexToken());
+                }
                 retired.add(capture);
                 if (capture.previousVertexToken() != null) tokens.add(capture.previousVertexToken());
             }

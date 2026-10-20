@@ -61,10 +61,15 @@ final class MetalPreviousVertexHistory {
     }
 
     /** CPU copies of the actual source draw's uniforms, before shader translation's clip-Y flip. */
-    record DrawTransform(Matrix4f projection, Matrix4f modelView) {
+    record DrawTransform(Matrix4f projection, Matrix4f modelView, Matrix4f unjitteredProjection) {
         DrawTransform {
             projection = new Matrix4f(projection);
             modelView = new Matrix4f(modelView);
+            unjitteredProjection = new Matrix4f(unjitteredProjection);
+        }
+
+        DrawTransform(final Matrix4f projection, final Matrix4f modelView) {
+            this(projection, modelView, projection);
         }
 
         @Override
@@ -73,23 +78,42 @@ final class MetalPreviousVertexHistory {
         @Override
         public Matrix4f modelView() { return new Matrix4f(modelView); }
 
+        @Override
+        public Matrix4f unjitteredProjection() { return new Matrix4f(unjitteredProjection); }
+
         boolean finite() {
-            return MetalFxMath.isFinite(projection) && MetalFxMath.isFinite(modelView);
+            return MetalFxMath.isFinite(projection) && MetalFxMath.isFinite(modelView) && MetalFxMath.isFinite(unjitteredProjection);
         }
     }
 
-    record Snapshot(Signature signature, float[] positions, @Nullable DrawTransform transform) {
-        Snapshot {
-            positions = positions.clone();
+    private record Positions(float[] values) {
+        Positions {
+            values = values.clone();
         }
-
         @Override
-        public float[] positions() {
-            return positions.clone();
+        public float[] values() {
+            return values.clone();
         }
+    }
 
-        Snapshot copy() {
-            return new Snapshot(signature, positions, transform);
+    record SurfaceIdentity(RenderPipeline pipeline, Map<String, TextureIdentity> textures) {
+        SurfaceIdentity { textures = Map.copyOf(textures); }
+    }
+
+    record TextureIdentity(MetalAllocationIdentity allocation, int baseMip, int mipLevels,
+                           com.mojang.renderpearl.api.textures.AddressMode addressU,
+                           com.mojang.renderpearl.api.textures.AddressMode addressV,
+                           com.mojang.renderpearl.api.textures.FilterMode minFilter,
+                           com.mojang.renderpearl.api.textures.FilterMode magFilter,
+                           int anisotropy, java.util.OptionalDouble maxLod) {}
+
+    private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
+                            @Nullable SurfaceIdentity surface) {
+        Snapshot withTransform(final @Nullable DrawTransform value) {
+            return new Snapshot(signature, positions, value, surface);
+        }
+        Snapshot withSurface(final @Nullable SurfaceIdentity value) {
+            return new Snapshot(signature, positions, transform, value);
         }
     }
 
@@ -192,7 +216,7 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            PENDING.put(token.key(), new Snapshot(signature, positions, null));
+            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null));
         }
     }
 
@@ -200,9 +224,25 @@ final class MetalPreviousVertexHistory {
     static void stageDrawTransform(final @Nullable DrawToken token, final @Nullable DrawTransform transform) {
         Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
         if (snapshot != null) {
-            PENDING.put(token.key(), new Snapshot(snapshot.signature(), snapshot.positions(),
-                    transform != null && transform.finite() ? transform : null));
+            PENDING.put(token.key(), snapshot.withTransform(transform != null && transform.finite() ? transform : null));
         }
+    }
+
+    static void stageSurface(final @Nullable DrawToken token, final @Nullable SurfaceIdentity surface) {
+        Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
+        if (snapshot != null) PENDING.put(token.key(), snapshot.withSurface(surface));
+    }
+
+    /** Visibility resources are checked after the complete source manifest has been staged. */
+    static boolean matchingSurfaceManifest(final @Nullable DrawToken token) {
+        if (token == null || !objectManifestMatches(token.key().object())) return false;
+        ObjectKey object = token.key().object();
+        for (int ordinal = 0; ordinal < CURRENT_DRAW_COUNTS.get(object); ordinal++) {
+            DrawKey key = new DrawKey(object, ordinal);
+            SurfaceIdentity current = PENDING.get(key).surface(), previous = PREVIOUS.get(key).surface();
+            if (current == null || !current.equals(previous)) return false;
+        }
+        return true;
     }
 
     static @Nullable DrawTransform currentDrawTransform(final @Nullable DrawToken token) {
@@ -236,7 +276,7 @@ final class MetalPreviousVertexHistory {
         if (current == null || previous == null || !current.signature().equals(previous.signature())) {
             return null;
         }
-        return previous.positions();
+        return previous.positions().values();
     }
 
     static int matchingManifestDrawCount(final long objectId, final long generation) {
@@ -265,9 +305,9 @@ final class MetalPreviousVertexHistory {
             return;
         }
         PREVIOUS.clear();
-        for (Map.Entry<DrawKey, Snapshot> entry : PENDING.entrySet()) {
-            PREVIOUS.put(entry.getKey(), entry.getValue().copy());
-        }
+        // Snapshots, positions, transforms and resource identities are immutable. Advancing the
+        // transaction transfers references; attaching uniforms must not recopy every posed vertex.
+        PREVIOUS.putAll(PENDING);
         PREVIOUS_DRAW_COUNTS.clear();
         PREVIOUS_DRAW_COUNTS.putAll(CURRENT_DRAW_COUNTS);
         previousCamera = pendingCamera;

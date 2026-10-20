@@ -31,9 +31,9 @@ final class MetalPreviousVertexReplay {
         SourceState { textures = Map.copyOf(textures); }
     }
 
-    record HandTransforms(Matrix4f currentProjection, Matrix4f currentUnjitteredFromRaster,
+    record DrawTransforms(Matrix4f currentProjection, Matrix4f currentUnjitteredFromRaster,
                           Matrix4f previousFromPosition) {
-        HandTransforms {
+        DrawTransforms {
             currentProjection = new Matrix4f(currentProjection);
             currentUnjitteredFromRaster = new Matrix4f(currentUnjitteredFromRaster);
             previousFromPosition = new Matrix4f(previousFromPosition);
@@ -82,12 +82,36 @@ final class MetalPreviousVertexReplay {
     /** Capture even on reset/first appearance: the next accepted frame needs this draw's matrices. */
     static boolean captureHandTransform(final MetalPreviousVertexHistory.DrawToken token,
                                         final @Nullable SourceDrawInputs inputs) {
+        return captureSourceTransform(token, inputs, new Matrix4f());
+    }
+
+    static boolean captureSourceTransform(final MetalPreviousVertexHistory.DrawToken token,
+            final @Nullable SourceDrawInputs inputs, final Matrix4f unjitteredFromRaster) {
         Matrix4f projection = inputs == null ? null : sourceUniformMatrix(inputs.projection());
         Matrix4f modelView = inputs == null ? null : sourceUniformMatrix(inputs.dynamicTransforms());
         var transform = projection == null || modelView == null ? null
-                : new MetalPreviousVertexHistory.DrawTransform(projection, modelView);
+                : new MetalPreviousVertexHistory.DrawTransform(projection, modelView,
+                        new Matrix4f(unjitteredFromRaster).mul(projection));
         MetalPreviousVertexHistory.stageDrawTransform(token, transform);
         return transform != null && MetalPreviousVertexHistory.currentDrawTransform(token) != null;
+    }
+
+    static MetalPreviousVertexHistory.@Nullable SurfaceIdentity surfaceIdentity(final @Nullable SourceState state) {
+        if (state == null) return null;
+        Map<String, MetalPreviousVertexHistory.TextureIdentity> textures = new java.util.TreeMap<>();
+        // OIT's per-frame coefficient/depth targets describe compositing, not material identity.
+        // Track the sampled resources that define visibility of the audited reduced families.
+        for (String name : java.util.List.of("Sampler0", "DissolveMaskSampler", "GlintSampler")) {
+            var pair = state.textures().get(name);
+            if (pair == null) continue;
+            var view = pair.view(); var sampler = pair.sampler();
+            if (!(view.texture() instanceof MetalGpuTexture texture) || texture.isClosed() || view.isClosed()
+                    || sampler.isClosed()) return null;
+            textures.put(name, new MetalPreviousVertexHistory.TextureIdentity(texture.allocationIdentity(),
+                    view.baseMipLevel(), view.mipLevels(), sampler.getAddressModeU(), sampler.getAddressModeV(),
+                    sampler.getMinFilter(), sampler.getMagFilter(), sampler.getMaxAnisotropy(), sampler.getMaxLod()));
+        }
+        return new MetalPreviousVertexHistory.SurfaceIdentity(state.pipeline(), textures);
     }
 
     private static @Nullable Matrix4f sourceUniformMatrix(final @Nullable GpuBufferSlice slice) {
@@ -101,16 +125,28 @@ final class MetalPreviousVertexReplay {
         return buffer.copySourceUniformMatrix(slice);
     }
 
-    static @Nullable HandTransforms handTransforms(final MetalPreviousVertexHistory.DrawToken token) {
+    static @Nullable DrawTransforms handTransforms(final MetalPreviousVertexHistory.DrawToken token) {
         var current = MetalPreviousVertexHistory.currentDrawTransform(token);
         var previous = MetalPreviousVertexHistory.matchedPreviousDrawTransform(token);
         if (current == null || previous == null) return null;
         // HUD rendering is unjittered. World camera motion/jitter must never enter either matrix.
         Matrix4f previousFromPosition = MetalMotionContract.minecraftToMetalFxClip(
-                previous.projection().mul(previous.modelView()));
+                previous.unjitteredProjection().mul(previous.modelView()));
         if (!MetalFxMath.isFinite(previousFromPosition)) return null;
-        return new HandTransforms(current.projection(),
+        return new DrawTransforms(current.projection(),
                 MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()), previousFromPosition);
+    }
+
+    static @Nullable DrawTransforms worldTransforms(final MetalPreviousVertexHistory.DrawToken token) {
+        var current = MetalPreviousVertexHistory.currentDrawTransform(token);
+        var previous = MetalPreviousVertexHistory.matchedPreviousDrawTransform(token);
+        if (current == null || previous == null) return null;
+        Matrix4f correction = MetalMotionContract.minecraftToMetalFxClip(
+                current.unjitteredProjection().mul(current.projection().invert()));
+        Matrix4f previousFromPosition = MetalMotionContract.minecraftToMetalFxClip(
+                previous.unjitteredProjection().mul(previous.modelView()));
+        if (!MetalFxMath.isFinite(correction) || !MetalFxMath.isFinite(previousFromPosition)) return null;
+        return new DrawTransforms(current.projection(), correction, previousFromPosition);
     }
 
     static @Nullable Plan plan(

@@ -18,9 +18,20 @@
 
 ## 云端真实绘制清单
 
-诊断属性 `metallum.metalfx.captureMotionValidation=true` 在 Spatial 回退时也捕获真实 staged 所有者／历史，按成功 source submit 提交。它不创建 Temporal 支持，不运行补帧，不把捕获等同于运动编码。生产默认不启用此诊断。
+诊断属性 `metallum.metalfx.captureMotionValidation=true` 在 Spatial 回退时也捕获真实 staged 所有者／历史，按成功 source submit 提交，并执行公共 Metal 运动回放及纹理读回。它不创建 Temporal 支持，不运行补帧，不把运动回放等同于 MetalFX 时域／插值质量。生产默认不启用此诊断。`574a4a7` 的首轮仅验证捕获；后续读回证据必须来自实现增强后的提交。
 
 客户端导出 `motion-source-draw-coverage.json`：按真实管线列出后端绘制调用与 staged hook 调用，并分别保留三阶段／所有者／排队／编码计数。未覆盖管线保留在清单中，不能记为 NOT_PRESENT。绘制调用数不是 fragment 数；indirect 的调用数也不证明其中每条命令非空。
+
+## 模型、材质和实际回放
+
+- 每个真实颜色 draw 在同一历史事务中保存实际 projection/model-view、去抖动投影及材质资源 allocation/generation。纹理更换、采样语义或管线改变时，不能仅凭顶点数量继续复用。OIT 的每帧系数目标不当作材质身份。
+- 世界逐顶点回放使用前一 draw 的实际 MVP；手部继续使用独立 HUD 历史。所有 exact draw 都复制当前源投影，避免后续全局 UBO 覆写。
+- 不可变顶点快照在附加矩阵、材质和提交时共享数据，保留对外防御性复制，避免每个 draw 重复复制整份姿态顶点。
+- `CustomFeatureRenderer` 必须在取得 vertex builder 前激活所有者。`574a4a7` 的 Sodium 实机客户端清单显示 OIT entity 有 10 次 hook、0 次所有者，暴露了旧 callback 包围位置过晚；后续 CI 必须要求所有者、完整历史和实际运动编码，不能只验 hook 次数。
+- 新审计模型路径为附魔台、讲台书本、饰纹陶罐、潮涌核心的 shell/cage/wind/eye、头颅，以及水晶及其 ENTITY beam、经验球、自身模型与透明覆盖的潜影贝导弹、两种风弹。每个对象仍需完整 manifest，空讲台不算几何，未知状态／管线继续拒绝。
+- 增加实际 Minecraft `core/entity` 颜色着色器的独立光栅参考，检查世界 draw 的不同 model-view、源抖动及源投影覆写。客户端读回 `raw-source-motion/` 明确记录源提交、历史 epoch、有效像素、有限向量和当前 scaler 模式。
+
+后续仍需逐片元对应／前帧 Z、特殊格式／材质、其余实体和方块实体、天气环境、粒子身份重排、Iris／自定义渲染契约及完整清单验收；上述模型扩展不代表这些项目已完成。
 
 ## 后续目标与完成条件
 

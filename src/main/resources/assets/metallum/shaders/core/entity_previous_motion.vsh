@@ -14,9 +14,9 @@ layout(location = 6) in vec3 PreviousPosition;
 
 layout(std140) uniform MetallumMotion {
     mat4 CurrentUnjitteredFromRaster;
-    // Previous source transform for this vertex stream: world draws use the
-    // unjittered camera-relative VP; first-person draws use their independent
-    // HUD projection * per-draw ModelViewMat. Both include the final clip-Y
+    // Previous source transform for this vertex stream: each draw uses its
+    // actual unjittered projection * ModelViewMat; first-person draws retain
+    // their independent HUD projection. Both include the final clip-Y
     // conversion. Posed previous positions need no world-sized translation.
     mat4 PreviousFromRaster;
 };
