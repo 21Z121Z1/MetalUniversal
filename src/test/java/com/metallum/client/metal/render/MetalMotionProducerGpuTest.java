@@ -810,6 +810,83 @@ final class MetalMotionProducerGpuTest {
         return (nextMagnitude-roundedMagnitude)*.5*extent/2;
     }
 
+    static short halfTowardZeroBits(float value) {
+        short nearest=Float.floatToFloat16(value);
+        if(Math.abs(Float.float16ToFloat(nearest))<=Math.abs(value))return nearest;
+        int bits=Short.toUnsignedInt(nearest);
+        return (short)((bits&0x8000)|((bits&0x7fff)-1));
+    }
+
+    static boolean calibratedHalfMatches(float expected,short actual,boolean towardZero) {
+        // A float32 operation immediately before narrowing can lie one float32
+        // ULP on either side of an exactly representable half boundary. This
+        // is an exact bit set, not an enlarged pixel-error tolerance.
+        for(float input:new float[]{expected,Math.nextDown(expected),Math.nextUp(expected)})
+            if(actual==(towardZero ? halfTowardZeroBits(input) : Float.floatToFloat16(input)))return true;
+        return false;
+    }
+
+    /** No motion formula or interpolated attributes participate in this calibration. */
+    private boolean calibrateHalfRenderTarget() throws Exception {
+        float[] bases={.1953125F,-.2421875F,1F/3,-1F/3,.125F,-.125F,.75F,1,10,-10,32,-32};
+        float[] inputs=new float[bases.length*3];
+        for(int i=0;i<bases.length;i++) {
+            inputs[i*3]=bases[i];inputs[i*3+1]=Math.nextDown(bases[i]);inputs[i*3+2]=Math.nextUp(bases[i]);
+        }
+        ByteBuffer data=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
+        for(int p=0;p<W*H;p++)data.putFloat(inputs[p%inputs.length]);data.flip();
+        var vertex=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/half_conversion_vertex");
+        var fragment=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/half_conversion_fragment");
+        var pipeline=RenderPipeline.builder().withLocation("motion_contract/half_target_conversion")
+                .withVertexShader(vertex).withFragmentShader(fragment).withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RG16_FLOAT,ColorTargetState.WRITE_ALL))
+                .withColorTargetState(1,new ColorTargetState(Optional.empty(),GpuFormat.RG32_FLOAT,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("SourceValues",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        device.precompilePipeline(pipeline,MetalShaderSourceAdapters.overlay(java.util.Map.of(vertex,"""
+                #version 450
+                void main(){vec2 p[3]=vec2[](vec2(-1,-1),vec2(3,-1),vec2(-1,3));gl_Position=vec4(p[gl_VertexIndex],0,1);}
+                """,fragment,"""
+                #version 450
+                uniform sampler2D SourceValues;
+                layout(location=0) out vec2 narrowValue;
+                layout(location=1) out vec2 wideValue;
+                void main(){float v=texelFetch(SourceValues,ivec2(gl_FragCoord.xy),0).r;narrowValue=vec2(v);wideValue=vec2(v);}
+                """),device.activeShaderSource()));
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        try(var input=texture("independent FP32 conversion inputs",GpuFormat.R32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var narrow=texture("actual RG16 target conversion",GpuFormat.RG16_FLOAT,copy);
+            var wide=texture("unchanged RG32 target control",GpuFormat.RG32_FLOAT,copy);
+            var iv=device.createTextureView(input);var nv=device.createTextureView(narrow);var wv=device.createTextureView(wide);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.writeToTexture(input,data,0,0,0,0,W,H);
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent half target conversion")
+                    .withColorAttachment(nv,Optional.of(new Vector4f(0))).withColorAttachment(wv,Optional.of(new Vector4f(0)))
+                    .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                pass.setPipeline(pipeline);pass.bindTexture("SourceValues",iv,sampler);pass.draw(3,1,0,0);
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();byte[] halfBytes=readback(narrow),wideBytes=readback(wide);
+            ByteBuffer h=ByteBuffer.wrap(halfBytes).order(ByteOrder.nativeOrder()),f=ByteBuffer.wrap(wideBytes).order(ByteOrder.nativeOrder());
+            int nearestOnly=0,towardZeroOnly=0;
+            for(int p=0;p<W*H;p++)for(int c=0;c<2;c++) {
+                float value=inputs[p%inputs.length];
+                assertEquals(Float.floatToRawIntBits(value),f.getInt(p*8+c*4),"RG32 control must retain the independent input bits");
+                short actual=h.getShort(p*4+c*2),nearest=Float.floatToFloat16(value),zero=halfTowardZeroBits(value);
+                assertTrue(actual==nearest||actual==zero,"Unexpected half conversion at input "+value+": "+Short.toUnsignedInt(actual));
+                if(nearest!=zero) {if(actual==nearest)nearestOnly++;else towardZeroOnly++;}
+            }
+            assertTrue((nearestOnly>0) != (towardZeroOnly>0),"Narrowing mode must be independently identifiable and consistent");
+            boolean towardZero=towardZeroOnly>0;
+            Path dir=Path.of("build/agent-evidence/motion-producers/half-target-conversion");Files.createDirectories(dir);
+            byte[] inputBytes=new byte[data.limit()];data.duplicate().rewind().get(inputBytes);
+            Files.write(dir.resolve("input.r32f"),inputBytes);
+            Files.write(dir.resolve("actual.rg16f"),halfBytes);Files.write(dir.resolve("control.rg32f"),wideBytes);
+            String result="{\"samples\":"+(W*H*2)+",\"nearestOnly\":"+nearestOnly+",\"towardZeroOnly\":"+towardZeroOnly
+                    +",\"mode\":\""+(towardZero ? "toward-zero" : "nearest-even")+"\",\"rg32InputBitsExact\":true}";
+            Files.writeString(dir.resolve("result.json"),result);System.out.println("HALF_TARGET_CALIBRATION "+result);
+            return towardZero;
+        }
+    }
+
     private static Vector4f[] project(Matrix4f matrix,float[][] positions) {
         Vector4f[] out=new Vector4f[3];for(int i=0;i<3;i++)out[i]=matrix.transform(new Vector4f(positions[i][0],positions[i][1],positions[i][2],1));return out;
     }
@@ -1024,6 +1101,7 @@ final class MetalMotionProducerGpuTest {
         boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
         boolean projective=name.contains("projective");
         boolean scaledHistory=name.contains("previous_scaled");
+        boolean halfTowardZero=scaledHistory && calibrateHalfRenderTarget();
         float slopeBias=sloped ? name.contains("negative") ? -2 : 2 : 0;
         float constantBias=biased ? name.contains("negative") ? -10 : 3 : 0;
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
@@ -1216,7 +1294,7 @@ final class MetalMotionProducerGpuTest {
             ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),survived=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
             ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder()),depths=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder());
             int count=0,mismatches=0,wrongAlpha=0,wrongTag=0,wrongMotion=0,wrongDepth=0;
-            int previousDepthComparisons=0,currentSlopeNegativeControls=0;
+            int previousDepthComparisons=0,currentSlopeNegativeControls=0,zeroMotionNegativeControls=0,reverseMotionNegativeControls=0;
             ByteBuffer oldRaster=previousRasterDepth==null ? null : ByteBuffer.wrap(previousRasterDepth).order(ByteOrder.nativeOrder());
             boolean reactive=glint||dissolve||matrix||lightning;
             for(int p=0;p<W*H;p++) {
@@ -1232,9 +1310,11 @@ final class MetalMotionProducerGpuTest {
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
                 if(scaledHistory) {
                     double expectedX=-.5*(2*(p%W+.5)/W-1),expectedY=0;
+                    if(!calibratedHalfMatches((float)expectedX,(short)0,halfTowardZero))zeroMotionNegativeControls++;
+                    if(!calibratedHalfMatches((float)expectedX,Float.floatToFloat16((float)-expectedX),halfTowardZero))reverseMotionNegativeControls++;
                     if(!Float.isFinite(x)||!Float.isFinite(y)
-                            ||Math.abs(x-expectedX)*W/2>halfRoundingBudgetPixels(expectedX,W)+.0001
-                            ||Math.abs(y-expectedY)*H/2>halfRoundingBudgetPixels(expectedY,H)+.0001) {
+                            ||!calibratedHalfMatches((float)expectedX,vectors.getShort(p*4),halfTowardZero)
+                            ||!calibratedHalfMatches((float)expectedY,vectors.getShort(p*4+2),halfTowardZero)) {
                         if(wrongMotion<4)System.out.println("PREVIOUS_RASTER_DIAGNOSTIC pixel="+p
                                 +" actualXY="+x+","+y+" expectedXY="+expectedX+","+expectedY
                                 +" errorPixels="+(Math.abs(x-expectedX)*W/2)+","+(Math.abs(y-expectedY)*H/2)
@@ -1270,7 +1350,9 @@ final class MetalMotionProducerGpuTest {
             Files.writeString(dir.resolve("result.json"),"{\"visibleSourcePixels\":"+count+",\"coverageMismatches\":"+mismatches
                     +",\"reactiveMaterial\":"+reactive+",\"specialVertexLayout\":"+special+",\"wrongAlphaPixels\":"+wrongAlpha
                     +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth
-                    +",\"previousDepthComparisons\":"+previousDepthComparisons+",\"currentSlopeNegativeControls\":"+currentSlopeNegativeControls+"}");
+                    +",\"previousDepthComparisons\":"+previousDepthComparisons+",\"currentSlopeNegativeControls\":"+currentSlopeNegativeControls
+                    +",\"halfMode\":\""+(scaledHistory ? (halfTowardZero ? "toward-zero" : "nearest-even") : "not-calibrated")
+                    +"\",\"zeroMotionNegativeControls\":"+zeroMotionNegativeControls+",\"reverseMotionNegativeControls\":"+reverseMotionNegativeControls+"}");
             if(scaledHistory)System.out.println("PREVIOUS_RASTER_RESULT "+Files.readString(dir.resolve("result.json")));
             assertEquals(0,mismatches,"Motion must follow original fragment survival and the actual alpha blend contribution");
             assertEquals(0,wrongAlpha,"Independent original material alpha");
@@ -1279,6 +1361,8 @@ final class MetalMotionProducerGpuTest {
             assertEquals(0,wrongDepth,"Correspondence must reproduce original raster Z including depth bias");
             if(scaledHistory)assertTrue(previousDepthComparisons>100&&currentSlopeNegativeControls>100,
                     "The preceding source raster must independently distinguish previous slope from current slope");
+            if(scaledHistory)assertTrue(zeroMotionNegativeControls==count&&reverseMotionNegativeControls==count,
+                    "The calibrated bit oracle must reject zero and reversed motion at every covered pixel");
             if(visible)assertTrue(count>100);else assertEquals(0,count);
             if(sloped && !projective && !scaledHistory)assertStationaryBiasedSurfaceHistory(survival,ownership,flow,valid,pair,depth,dir);
         }
@@ -1440,7 +1524,13 @@ final class MetalMotionProducerGpuTest {
             for(int pixel=0;pixel<W*H;pixel++)if(Byte.toUnsignedInt(mask[pixel])>127) {
                 checked++;assertEquals(1,ps.getFloat(pixel*16+12),0);
                 Vector4f surface=new Vector4f(ps.getFloat(pixel*16),ps.getFloat(pixel*16+4),ps.getFloat(pixel*16+8),1);
-                int triangle=surface.x+surface.y<=0 ? 0 : 1;
+                // The original current color carries the primitive ID. Read
+                // that independent raster result rather than classifying the
+                // shared edge from a rounded surface-point equation.
+                boolean red=Byte.toUnsignedInt(colors[1][pixel*4])>127;
+                boolean green=Byte.toUnsignedInt(colors[1][pixel*4+1])>127;
+                assertTrue(red!=green,"Original source must identify exactly one primitive");
+                int triangle=red ? 0 : 1;
                 Vector4f oldPoint=oldMvp.transform(surface);
                 double oldX=(oldPoint.x/oldPoint.w+1)*W/2,oldY=(1-oldPoint.y/oldPoint.w)*H/2;
                 double expected=before[triangle].at(oldX,oldY);

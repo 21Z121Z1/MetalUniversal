@@ -150,6 +150,7 @@ jobs:
               'build/agent-evidence/metalfx-color-transfer/ramp.json')]
           paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/material-visibility').glob('*/result.json'))
           paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/previous-raster-bias').glob('*/result.json'))
+          paths += [pathlib.Path('build/agent-evidence/motion-producers/half-target-conversion/result.json')]
           evidence = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'], 'files': {}, 'junit': []}
           for path in paths:
               if path.is_file():
