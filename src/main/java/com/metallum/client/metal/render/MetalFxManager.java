@@ -420,6 +420,8 @@ public final class MetalFxManager {
 
     private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
     @Nullable private RawMotionRequest rawMotionRequest;
+    private final java.util.concurrent.atomic.AtomicReference<PendingRawMotionEvidence> pendingRawMotionEvidence=
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     public record RawMotionValidation(String sourceCommit, long frameId, long historyEpoch,
                                       int width, int height, long worldValidPixels, long handValidPixels,
@@ -434,6 +436,7 @@ public final class MetalFxManager {
                                       boolean temporalQualityValidated, boolean frameGenerationQualityValidated) {}
 
     private record RawMotionRequest(Path output, java.util.concurrent.CompletableFuture<RawMotionValidation> result) {}
+    private record PendingRawMotionEvidence(RawMotionRequest request,MetalRawMotionEvidence evidence) {}
 
     private record ObjectMotionReplay(
             MetalPreviousVertexReplay.SourceState prepared,
@@ -2855,6 +2858,7 @@ public final class MetalFxManager {
         if(sourceFrameStamp!=null) {
             MetalMotionDrawCoverage.closeSourceObservation(sourceFrameStamp);
         }
+        freezeRawMotionEvidence();
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
             Matrix4f submittedCameraRelativeViewProjection =
@@ -3035,6 +3039,11 @@ public final class MetalFxManager {
             return;
         }
         var stamp = sourceFrameStamp;
+        retirePendingRawMotionEvidence("Raw motion source frame retired before its evidence was frozen");
+        var sourceEvidence=new MetalRawMotionEvidence(
+                System.getProperty("metallum.validation.sourceCommit","unknown"),stamp);
+        var pendingEvidence=new PendingRawMotionEvidence(request,sourceEvidence);
+        pendingRawMotionEvidence.set(pendingEvidence);
         int width = renderWidth, height = renderHeight;
         String scaler = effectiveMode.name();
         boolean handSourceWasMain = handDepthSourceWasMain;
@@ -3060,6 +3069,7 @@ public final class MetalFxManager {
             Runnable finish = () -> {
                 if (released.get()) return;
                 try {
+                    var frozenSource=sourceEvidence.requireSnapshot();
                     List<byte[]> bytes = readbacks.stream().map(MetalFxManager::readbackBytes).toList();
                     ByteBuffer vectors = ByteBuffer.wrap(bytes.get(0)).order(ByteOrder.nativeOrder());
                     ByteBuffer worldDepth = ByteBuffer.wrap(bytes.get(3)).order(ByteOrder.nativeOrder());
@@ -3161,6 +3171,8 @@ public final class MetalFxManager {
                             : i == 5 ? ".rg32f" : i >= 9 && i < 12 ? ".r32f" : ".d32f")), bytes.get(i));
                     Files.writeString(request.output().resolve("result.json"), new com.google.gson.GsonBuilder()
                             .setPrettyPrinting().create().toJson(result) + "\n");
+                    Files.writeString(request.output().resolve("source-frame-evidence.json"),new com.google.gson.GsonBuilder()
+                            .setPrettyPrinting().create().toJson(frozenSource)+"\n");
                     request.result().complete(result);
                 } catch (Exception failure) {
                     request.result().completeExceptionally(failure);
@@ -3178,9 +3190,25 @@ public final class MetalFxManager {
                 release.run();
             });
         } catch (RuntimeException failure) {
+            pendingRawMotionEvidence.compareAndSet(pendingEvidence,null);
             request.result().completeExceptionally(failure);
             release.run();
         }
+    }
+
+    private void freezeRawMotionEvidence() {
+        var pending=pendingRawMotionEvidence.getAndSet(null);
+        if(pending==null)return;
+        try {
+            pending.evidence().freeze(MetalMotionDrawCoverage.census(),MetalCloudMotion.diagnostics());
+        } catch(RuntimeException failure) {
+            pending.request().result().completeExceptionally(failure);
+        }
+    }
+
+    private void retirePendingRawMotionEvidence(String reason) {
+        var pending=pendingRawMotionEvidence.getAndSet(null);
+        if(pending!=null)pending.request().result().completeExceptionally(new IllegalStateException(reason));
     }
 
     private void captureNativeOffReadbackIfRequested(final GameRenderer renderer) {
@@ -5064,6 +5092,7 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        retirePendingRawMotionEvidence("Raw source evidence retired by history reset: "+reason);
         temporalColorTransferStamp = null;
         if (sourceFrameStamp != null) {
             sourceFrameStampInvalidated = true;
@@ -5095,6 +5124,7 @@ public final class MetalFxManager {
         if (runtimeDisabled) {
             return;
         }
+        retirePendingRawMotionEvidence("MetalFX disabled before raw source evidence was frozen: "+reason);
         // MetalFX owns PSOs and intermediate targets that may still be referenced
         // by the current or an in-flight command buffer. Drain the device before
         // releasing either the cache entries or their residency allocations.
@@ -5236,6 +5266,7 @@ public final class MetalFxManager {
     }
 
     private void closeInternal() {
+        retirePendingRawMotionEvidence("MetalFX renderer closed before raw source evidence was frozen");
         if (rawMotionRequest != null) {
             rawMotionRequest.result().completeExceptionally(new IllegalStateException("MetalFX renderer closed before raw motion capture"));
             rawMotionRequest = null;

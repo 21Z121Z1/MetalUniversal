@@ -1051,6 +1051,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     .requestRawMotionValidation(output.resolve("raw-source-motion")));
             context.waitFor(client -> rawCapture.isDone(), 200);
             var raw = rawCapture.join();
+            try {CloudMotionEvidence.sourceFrameEvidence(output.resolve("raw-source-motion"),raw.sourceCommit(),raw.frameId(),raw.historyEpoch());}
+            catch(IOException failure) {throw new IllegalStateException("Cannot inspect frame-bound source census",failure);}
             require(raw.sourceCommit().equals(System.getProperty("metallum.ci.expectedSourceSha"))
                             && raw.frameId() > 0 && raw.historyEpoch() > 0 && raw.worldValidPixels() > 0
                             && raw.finiteValidPixels() >= raw.worldValidPixels() && raw.maxMotionPixels() > 0
@@ -1069,6 +1071,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     .requestRawMotionValidation(output.resolve("raw-source-motion-post-effect")));
             context.waitFor(client -> postEffectCapture.isDone(), 200);
             var postEffect = postEffectCapture.join();
+            try {CloudMotionEvidence.sourceFrameEvidence(output.resolve("raw-source-motion-post-effect"),postEffect.sourceCommit(),postEffect.frameId(),postEffect.historyEpoch());}
+            catch(IOException failure) {throw new IllegalStateException("Cannot inspect frame-bound post-effect source census",failure);}
             require(!postEffect.handDepthSourceWasMain() && postEffect.handDepthPixels() > 0
                             && postEffect.handValidPixels() > 0 && postEffect.worldPixelsOutsideHand() > 0
                             && postEffect.validCorrespondencePixels() > 0
@@ -1130,12 +1134,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     var pending=context.computeOnClient(client->com.metallum.client.metal.render.MetalFxManager.requestRawMotionValidation(dir));
                     context.waitFor(client->pending.isDone(),200);var raw=pending.join();
                     try {
-                        var census=context.computeOnClient(client->com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
-                        var layers=context.computeOnClient(client->com.metallum.client.metal.render.MetalCloudMotion.diagnostics());
+                        var frozen=CloudMotionEvidence.sourceFrameEvidence(dir,raw.sourceCommit(),raw.frameId(),raw.historyEpoch());
                         var report=new JsonObject();var gson=new GsonBuilder().setPrettyPrinting().create();
                         report.addProperty("cloudStatus",status.name());report.addProperty("oit",oit);
-                        report.add("raw",gson.toJsonTree(raw));report.add("sourceCensus",gson.toJsonTree(census));
-                        report.add("cloudLayers",gson.toJsonTree(layers));
+                        report.add("raw",gson.toJsonTree(raw));report.add("sourceCensus",frozen.get("sourceCensus"));
+                        report.add("cloudLayers",frozen.get("cloudLayers"));
+                        report.addProperty("sourceEvidenceFrameId",frozen.get("frameId").getAsLong());
+                        report.addProperty("sourceEvidenceHistoryEpoch",frozen.get("historyEpoch").getAsLong());
+                        report.addProperty("sourceEvidenceSourceCommit",frozen.get("sourceCommit").getAsString());
                         Files.writeString(dir.resolve("cloud-source-census.json"),gson.toJson(report)+"\n");
                     } catch(IOException failure) {throw new IllegalStateException("Cannot retain actual cloud source census",failure);}
                     require(raw.worldValidPixels()>0 && raw.worldSurfacePixelsOutsideHand()>0 && raw.finiteValidPixels()>=raw.worldValidPixels()

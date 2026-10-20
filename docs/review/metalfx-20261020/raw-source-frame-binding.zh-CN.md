@@ -1,0 +1,13 @@
+# 异步运动读回与源帧清单的绑定
+
+代码复核发现，原raw纹理复制在源帧内捕获frame/epoch，而cloud诊断在future完成后再读取全局census和layer状态。客户端可能已推进到后续帧；这是一处由异步生命周期直接造成的关联风险，尚不声称已在旧运行中测得错配。场景像素断言通过不证明两个独立时刻的清单属于同一帧。
+
+本修正为每个raw请求建立独立证据owner，在原有source observation关闭点冻结当前不可变census与cloud层快照；不移动关闭点，不改变颜色/运动编码、深度、容差或功能准入。冻结要求collected、closed以及相同frame/epoch，且只能成功一次。GPU完成回调只消费该owner，不重新读取当前全局状态。结果和`source-frame-evidence.json`全部写完后才完成future。
+
+尚未冻结的请求在历史重置、禁用、关闭或被后续源帧取代时保留明确失败原因；GPU回调仍按原路径释放读回buffer。已经冻结的旧帧数据可以等待真实GPU完成，即使之后客户端进入另一帧或epoch。跨线程发布通过AtomicReference，cloud映射另作不可变拷贝。
+
+真实客户端的普通、后处理手部以及FAST/FANCY×ordinary/OIT四种cloud读回都必须复核文件中的源码SHA、frame与epoch，并用冻结的census/layers写入cloud报告。整数身份不允许字符串、分数或溢出隐式转换；缺失、尚未关闭及错误源码也不能成为证据。局部producer拒绝原因继续保留，不把诊断采集当完整FG准入。
+
+观察点明确为“source motion closed before later GUI”；它没有覆盖随后全部GUI，也没有证明任意UI shader范围、premultiplied、HDR/tone-map或混合投影。`diagnosticOnly=true`必须保留。
+
+本修正需要在包含它的准确SHA执行CPU owner/解析负例及真实FX客户端。正在运行的1bbee646候选不包含它，其绿灯不能替代本修正验收；先保留固定候选的完整运行，再正常追加和验证。

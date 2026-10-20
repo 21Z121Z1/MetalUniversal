@@ -1,5 +1,7 @@
 package com.metallum.e2e;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -10,6 +12,42 @@ import java.nio.file.Path;
 final class CloudMotionEvidence {
     record Pixels(long worldSurfaceOutsideHud,long reactiveWorldOutsideHud,long transparentWorldOutsideHud,
                   long opaqueDepthOutsideHud,long hudCovered) {}
+
+    static JsonObject sourceFrameEvidence(Path root,String source,long frameId,long epoch) throws IOException {
+        var evidence=JsonParser.parseString(Files.readString(root.resolve("source-frame-evidence.json"))).getAsJsonObject();
+        var census=object(evidence,"sourceCensus");
+        var frame=object(census,"sourceFrame");
+        object(evidence,"cloudLayers");
+        var commit=evidence.get("sourceCommit");
+        if(commit==null || !commit.isJsonPrimitive() || !commit.getAsJsonPrimitive().isString()
+                || !commit.getAsString().equals(source)
+                || !flag(evidence,"diagnosticOnly")
+                || number(evidence,"frameId")!=frameId || number(evidence,"historyEpoch")!=epoch
+                || number(frame,"frameId")!=frameId || number(frame,"epoch")!=epoch
+                || !flag(frame,"collected") || !flag(frame,"closed")) {
+            throw new IllegalStateException("Raw source census does not match the captured source SHA/frame/epoch");
+        }
+        return evidence;
+    }
+
+    private static JsonObject object(JsonObject parent,String name) {
+        var value=parent.get(name);
+        if(value==null || !value.isJsonObject())throw new IllegalStateException("Missing raw source evidence object "+name);
+        return value.getAsJsonObject();
+    }
+
+    private static long number(JsonObject object,String name) {
+        var value=object.get(name);
+        if(value==null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
+            throw new IllegalStateException("Missing or mistyped raw source identity "+name);
+        try {return value.getAsBigDecimal().longValueExact();}
+        catch(ArithmeticException invalid) {throw new IllegalStateException("Non-integral raw source identity "+name,invalid);}
+    }
+
+    private static boolean flag(JsonObject object,String name) {
+        var value=object.get(name);
+        return value!=null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isBoolean() && value.getAsBoolean();
+    }
 
     static Pixels inspect(Path root,int width,int height) throws IOException {
         int count=Math.multiplyExact(width,height);
