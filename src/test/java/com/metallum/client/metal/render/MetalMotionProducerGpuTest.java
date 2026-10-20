@@ -1086,6 +1086,17 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer mesh=vertices(f,false);
         for(int i=0;i<6;i++) {
             int base=i*format.getVertexSize();
+            if(scaledHistory) {
+                // Exact integer raster boundaries in both frames isolate the
+                // Jacobian from fixed-point vertex coverage/interpolation.
+                // Arbitrary poses use the independent surface-point oracle.
+                int position=base+format.getElement("Position").offset();
+                float x=Math.copySign(.5F,mesh.getFloat(position)),y=Math.copySign(.5F,mesh.getFloat(position+4));
+                mesh.putFloat(position,x).putFloat(position+4,y);
+                assertEquals(Math.rint((x+1)*W/2),(x+1)*W/2,0);
+                assertEquals(Math.rint((x*.5+1)*W/2),(x*.5+1)*W/2,0);
+                assertEquals(Math.rint((1-y)*H/2),(1-y)*H/2,0);
+            }
             mesh.putInt(base+format.getElement("Color").offset(),0x00FFFFFF|Math.round(vertexAlpha*255)<<24);
             if(format.getElement("UV0")!=null) {int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);}
             if(format.getElement("Normal")!=null)mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
@@ -1097,7 +1108,7 @@ final class MetalMotionProducerGpuTest {
         if(block)for(int i=0;i<oldPositions.length;i+=3) {oldPositions[i]+=offsetX;oldPositions[i+1]+=offsetY;oldPositions[i+2]+=offsetZ;}
         assertTrue(MetalPreviousVertexReplay.writePreviousPositions(oldPositions,old));old.flip();
         Matrix4f modelView=projective ? new Matrix4f().translate(.1F,-.05F,-2).rotateY(.2F).rotateZ(.1F) : new Matrix4f();
-        Matrix4f previousModelView=scaledHistory ? new Matrix4f().scaling(.5F,.75F,1) : new Matrix4f(modelView);
+        Matrix4f previousModelView=scaledHistory ? new Matrix4f().scaling(.5F,1,1) : new Matrix4f(modelView);
         Matrix4f projectionMatrix=projective ? new Matrix4f().perspective((float)Math.toRadians(70),(float)W/H,.1F,100,true) : new Matrix4f();
         ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());modelView.get(0,dynamic);
         new Matrix4f().translation(matrix ? .5F : 0,0,0).get(64,dynamic);
@@ -1209,7 +1220,7 @@ final class MetalMotionProducerGpuTest {
                 if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
                 if(scaledHistory) {
-                    double expectedX=-.5*(2*(p%W+.5)/W-1),expectedY=.25*(1-2*(p/W+.5)/H);
+                    double expectedX=-.5*(2*(p%W+.5)/W-1),expectedY=0;
                     if(!Float.isFinite(x)||!Float.isFinite(y)
                             ||Math.abs(x-expectedX)*W/2>halfRoundingBudgetPixels(expectedX,W)+.0001
                             ||Math.abs(y-expectedY)*H/2>halfRoundingBudgetPixels(expectedY,H)+.0001) {
@@ -1225,7 +1236,7 @@ final class MetalMotionProducerGpuTest {
                 float expectedNow=survived.getFloat(p*4);
                 if(oldRaster!=null) {
                     float oldX=(p%W+.5F-W*.5F)*.5F+W*.5F-.5F;
-                    float oldY=(p/W+.5F-H*.5F)*.75F+H*.5F-.5F;
+                    float oldY=p/W;
                     int x0=(int)Math.floor(oldX),y0=(int)Math.floor(oldY);
                     float a=oldRaster.getFloat((y0*W+x0)*4),b=oldRaster.getFloat((y0*W+x0+1)*4);
                     float c=oldRaster.getFloat(((y0+1)*W+x0)*4),d=oldRaster.getFloat(((y0+1)*W+x0+1)*4);
