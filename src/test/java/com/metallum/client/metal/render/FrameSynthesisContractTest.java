@@ -31,6 +31,13 @@ final class FrameSynthesisContractTest {
         assertFalse(admission.projectionContractProven());
         assertFalse(admission.frameGenerationEligible());
         assertFalse(admission.frameGenerationEligible(true), "color diagnostic cannot waive mixed projection");
+        for(var color:new FrameSynthesisContract.ColorEncodingEvidence[]{admission.colorEncoding(),
+                FrameSynthesisContract.ColorEncodingEvidence.DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW}) {
+            assertThrows(IllegalArgumentException.class,()->new FrameSynthesisContract.FrameGenerationAdmission(
+                    admission.stamp(),coverage,admission.camera(),false,color,
+                    FrameSynthesisContract.ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN),
+                    "Explicit evidence must not contradict the actual producer projection domains");
+        }
         receipts.set(FrameSynthesisContract.ProducerDomain.FIRST_PERSON.ordinal(),
                 new FrameSynthesisContract.ProducerReceipt(FrameSynthesisContract.ProducerDomain.FIRST_PERSON, NOT_PRESENT, 0));
         var worldOnly = new FrameSynthesisContract.FrameGenerationAdmission(

@@ -1952,6 +1952,84 @@ final class MetalMrtBackendIntegrationTest {
         closeTextures(textures);
     }
 
+    @Test
+    void backendSourceManifestSeesUnownedProgramsAndExcludesInternalMotionReplays() {
+        String name="source_manifest_denominator";
+        fragmentShaders.put(name,"#version 450\nlayout(location=0) out vec4 c; void main(){c=vec4(1);}");
+        var source=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL);
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM),"source-manifest");
+        MetalMotionDrawCoverage.beginFrame();
+        MetalMotionDrawCoverage.bindSourceFrame(new FrameSynthesisContract.FrameStamp(991,1));
+        MetalMotionDrawCoverage.beginScene();
+        try {
+            render(source,textures,null);
+            var first=MetalMotionDrawCoverage.sourceFrameManifest();
+            assertEquals(991,first.frameId());assertFalse(first.linkageComplete());
+            String key=MetalMotionProgramIdentity.of(source).key();
+            assertEquals(1,first.programs().get(key).actualCalls());
+            assertTrue(first.rejectedReasons().contains(key+":unlinked-source-draw"));
+            MetalMotionDrawCoverage.beginMotionReplay();
+            try {renderLoad(source,textures);}
+            finally {MetalMotionDrawCoverage.endMotionReplay();}
+            assertEquals(1,MetalMotionDrawCoverage.sourceFrameManifest().programs().get(key).actualCalls());
+        } finally {MetalMotionDrawCoverage.endScene();MetalMotionDrawCoverage.beginFrame();closeTextures(textures);}
+    }
+
+    @Test
+    void separateUiSourceOverMatchesPorterDuffAndRejectsTheSquaredAlphaControl() throws Exception {
+        String name="ui_source_over";
+        fragmentShaders.put(name,"""
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color=vec4(0.2,0.8,0.4,0.5); }
+                """);
+        var correct=new BlendFunction(com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA);
+        var squaredAlpha=new BlendFunction(com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA);
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM),"ui-pma");
+        MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(992,1),textures.getFirst(),true);
+        try {
+            // Independent Porter-Duff recurrence from two straight-alpha source
+            // layers over transparent black: C=.75*(.2,.8,.4), A=.75.
+            var good=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),correct,ColorTargetState.WRITE_ALL);
+            render(good,textures,null);renderLoad(good,textures);
+            var ui=MetalUiDrawCoverage.snapshot();
+            assertEquals(992,ui.frameId());assertEquals(textures.getFirst().allocationId(),ui.allocation());
+            assertEquals(textures.getFirst().allocationIdentity().generation(),ui.allocationGeneration());
+            assertTrue(ui.sceneSeparated());assertFalse(ui.premultipliedProven());
+            assertTrue(ui.programs().values().stream().allMatch(p->p.calls()==2 && p.blend().boundedStraightSourceOver()));
+            var pixel=readback(textures.getFirst());
+            int[] expected={38,153,77,191};
+            for(int p=0;p<WIDTH*HEIGHT;p++)for(int channel=0;channel<4;channel++)
+                assertByteNear(pixel.get(p*4+channel),expected[channel],"PMA UI pixel "+p+" channel "+channel);
+            var bad=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),squaredAlpha,ColorTargetState.WRITE_ALL);
+            render(bad,textures,null);renderLoad(bad,textures);
+            assertEquals(2,MetalUiDrawCoverage.snapshot().programs().size());
+            assertTrue(MetalUiDrawCoverage.snapshot().programs().values().stream()
+                    .anyMatch(p->!p.blend().boundedStraightSourceOver()));
+            var control=readback(textures.getFirst());
+            for(int p=0;p<WIDTH*HEIGHT;p++) {
+                assertByteNear(control.get(p*4+3),96,"squared-alpha negative control "+p);
+                assertTrue(Math.abs(Byte.toUnsignedInt(control.get(p*4+3))-expected[3])>80,
+                        "The wrong alpha blend cannot satisfy the independent composite expectation");
+            }
+            var dir=java.nio.file.Path.of("build/agent-evidence/ui-composition");java.nio.file.Files.createDirectories(dir);
+            byte[] actual=new byte[pixel.remaining()],negative=new byte[control.remaining()];
+            pixel.duplicate().get(actual);control.duplicate().get(negative);
+            java.nio.file.Files.write(dir.resolve("source-over.rgba8"),actual);
+            java.nio.file.Files.write(dir.resolve("squared-alpha-control.rgba8"),negative);
+            java.nio.file.Files.writeString(dir.resolve("result.json"),new com.google.gson.Gson().toJson(java.util.Map.of(
+                    "sourceCommit",System.getProperty("metallum.validation.sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","unknown")),
+                    "pixelsCompared",WIDTH*HEIGHT,"wrongPixels",0,"negativeControlsRejected",WIDTH*HEIGHT,
+                    "uiFrame",MetalUiDrawCoverage.snapshot())));
+        } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
+    }
+
     private void runPerSlotClearLoadStoreBlendAndWriteMask() {
         String clearShaderName = "mrt_per_slot_clear";
         fragmentShaders.put(clearShaderName, """

@@ -294,6 +294,9 @@ final class FrameSynthesisContract {
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
+            if(projectionEncoding==ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN
+                    && ProjectionEncodingEvidence.forCoverage(producerCoverage)!=ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN)
+                throw new IllegalArgumentException("Single-camera evidence contradicts observed first-person projection");
         }
 
         FrameGenerationAdmission(FrameStamp stamp, ProducerCoverageSet producerCoverage, CameraFrameInput camera,

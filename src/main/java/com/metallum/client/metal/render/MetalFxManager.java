@@ -942,7 +942,8 @@ public final class MetalFxManager {
             final net.minecraft.client.renderer.oit.@Nullable OitStage stage, final RenderPass sourcePass) {
         if (!MetalEntityMotionCapture.isEnabled()) return;
         MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.takeExecute(info, stage);
-        if (MOTION_CAPTURE_VALIDATION) MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass), stage, sample);
+        if(MetalMotionDrawCoverage.needsSourceObservation())
+            MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass), stage, sample);
         if (sample == null) return;
         MetalFxManager manager = active;
         if (manager != null) manager.drawEntityMotionInternal(info, sample, sourcePass);
@@ -955,7 +956,8 @@ public final class MetalFxManager {
             final RenderPass sourcePass,final MetalPreviousVertexReplay.DirectPlan sourcePlan) {
         if(!MetalEntityMotionCapture.isEnabled())return;
         MetalMotionDrawCoverage.sourceExecution(stage,sample,false);
-        if(MOTION_CAPTURE_VALIDATION)MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass),stage,sample);
+        if(MetalMotionDrawCoverage.needsSourceObservation())
+            MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass),stage,sample);
         if(stage!=null && stage!=net.minecraft.client.renderer.oit.OitStage.ACCUMULATE)return;
         MetalFxManager manager=active;
         if(manager!=null)manager.queueObjectMotionReplay(info,sample,sourcePass,token,sourcePlan);
@@ -1389,6 +1391,7 @@ public final class MetalFxManager {
     }
 
     private void beginFrameInternal() {
+        MetalMotionDrawCoverage.beginFrame();
         frameCameraPerspective = null;
         temporalColorTransferStamp = null;
         reloadConfigIfRequested();
@@ -2845,6 +2848,8 @@ public final class MetalFxManager {
             // corresponding depth clear to issue here.
         }
         this.frameUsesUpscaledTarget = true;
+        if(sourceFrameStamp!=null && uiTarget.getColorTexture() instanceof MetalGpuTexture uiTexture)
+            MetalUiDrawCoverage.begin(sourceFrameStamp,uiTexture,frameGenerationEnabled && encoded);
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
             Matrix4f submittedCameraRelativeViewProjection =
@@ -5036,6 +5041,7 @@ public final class MetalFxManager {
         }
         sourceFrameStamp = new FrameSynthesisContract.FrameStamp(frameId, historyEpoch);
         frameSynthesisReceipts.beginFrame(sourceFrameStamp);
+        MetalMotionDrawCoverage.bindSourceFrame(sourceFrameStamp);
         if (irisMotionSemanticsUnprovenThisFrame) {
             frameSynthesisReceipts.observeUnsupported(
                     FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
@@ -5392,6 +5398,14 @@ public final class MetalFxManager {
                 );
             }
             frameResetForPresent = true;
+            return null;
+        }
+        if(!MetalMotionDrawCoverage.sourceFrameLinked(sourceStamp)) {
+            var manifest=MetalMotionDrawCoverage.sourceFrameManifest();
+            if(telemetryCandidate)MetalFxMotionTelemetry.recordSourceFrame(frameId,false,0,
+                    "source-draw-manifest-unproven:"+(manifest.rejectedReasons().isEmpty()
+                            ? "source-stamp-mismatch" : manifest.rejectedReasons().getFirst()));
+            frameResetForPresent=true;
             return null;
         }
         if (!MetalEntityMotionCapture.exactCoverageComplete()) {

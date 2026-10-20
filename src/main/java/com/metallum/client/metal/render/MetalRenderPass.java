@@ -856,6 +856,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
     }
 
+    private void observeDraw(int calls) {observeDraw(calls,false);}
+    private void observeDraw(int calls,boolean indirect) {
+        MetalMotionDrawCoverage.actualDraw(compiledPipeline,calls,indirect);
+        MetalUiDrawCoverage.actualDraw(compiledPipeline,colorTextures,calls,indirect);
+    }
+
     @Override
     public void drawIndexed(final int indexCount, final int instanceCount, final int firstIndex, final int vertexOffset, final int firstInstance) {
         if (this.indexBuffer == null) {
@@ -867,7 +873,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
         bindDrawState(enc);
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, indexCount > 0 && instanceCount > 0 ? 1 : 0);
+        observeDraw(indexCount > 0 && instanceCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW_INDEXED, Map.of(
                     "indexCount", Integer.toString(indexCount),
@@ -900,7 +906,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
         MetalSodiumDrawDiagnostics.capture(device, commandEncoder, compiledPipeline, vertexBuffers[0],
                 nativeIndexBuffer, indexType, drawParameters, drawCount, uniforms);
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
+        observeDraw(drawCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -929,7 +935,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(vertexOffsets)),
                 drawCount
         );
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
+        observeDraw(drawCount > 0 ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
         }
@@ -957,7 +963,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             Metallum.LOGGER.warn("[metallum] drawIndexedIndirect command buffer too small: need {} bytes, have {} (drawCount={})", needed, commands.length(), drawCount);
             return;
         }
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
+        observeDraw(drawCount > 0 ? 1 : 0,true);
 
         // Sodium's VKIndirectDrawBatch marks this lexical call as a terrain
         // pass.  The probe ends/reopens only that compatible encoder and keeps
@@ -1059,6 +1065,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
             drawIndexedNative(enc, nativeIndexBuffer, draw.firstIndex(), draw.indexCount(), draw.baseVertex(), 1, drawIndexType, 0);
+            observeDraw(draw.indexCount()>0 ? 1 : 0);
         }
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(draws.size())));
@@ -1078,7 +1085,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             } else {
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
             }
-            MetalMotionDrawCoverage.actualDraw(compiledPipeline, 1);
+            observeDraw(1);
         }
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW, Map.of(
@@ -1115,7 +1122,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, issued ? 1 : 0);
+        observeDraw(issued ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -1147,7 +1154,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, issued ? 1 : 0);
+        observeDraw(issued ? 1 : 0);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.MULTI_DRAW, Map.of(
                     "drawCount", Integer.toString(drawCount),
@@ -1174,7 +1181,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
         );
-        MetalMotionDrawCoverage.actualDraw(compiledPipeline, drawCount > 0 ? 1 : 0);
+        observeDraw(drawCount > 0 ? 1 : 0,true);
         if (contractPassToken >= 0L) {
             recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
         }

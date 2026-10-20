@@ -15,6 +15,7 @@ public final class MetalMotionDrawCoverage {
     private static long source, owned, unowned, depthBounds, transmittance, accumulate, duplicates, queued, encoded;
     private static long ownedInvalid;
     private static final boolean VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
+    private static final MetalMotionFrameManifest FRAME_MANIFEST=new MetalMotionFrameManifest();
     private static boolean scene;
     private static int motionReplayDepth;
     private static final Map<String, long[]> PIPELINES = new TreeMap<>();
@@ -35,12 +36,14 @@ public final class MetalMotionDrawCoverage {
                                 long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws) {}
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
-                         Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture) {}
+                         Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture, MetalMotionFrameManifest.Snapshot sourceFrame,MetalUiDrawCoverage.Snapshot uiFrame) {}
 
     private MetalMotionDrawCoverage() {}
 
     static void beginFrame() {
         scene = false;
+        FRAME_MANIFEST.reset();
+        MetalUiDrawCoverage.reset();
         motionReplayDepth = 0;
         FRAME_OWNER_CLASSES.clear();
         source = owned = unowned = depthBounds = transmittance = accumulate = duplicates = queued = encoded = 0;
@@ -81,26 +84,68 @@ public final class MetalMotionDrawCoverage {
         motionReplayDepth--;
     }
 
+    static MetalMotionProgramIdentity.Identity programIdentity(RenderPipeline pipeline) {
+        if(PROGRAM_IDENTITIES.size()>=1024 && !PROGRAM_IDENTITIES.containsKey(pipeline))PROGRAM_IDENTITIES.clear();
+        return PROGRAM_IDENTITIES.computeIfAbsent(pipeline,MetalMotionProgramIdentity::of);
+    }
+
     private static void countProgram(final RenderPipeline pipeline, final int counter, final long count) {
-        var identity = PROGRAM_IDENTITIES.computeIfAbsent(pipeline, MetalMotionProgramIdentity::of);
+        var identity = programIdentity(pipeline);
         PROGRAM_DESCRIPTIONS.putIfAbsent(identity.key(), identity.source());
         PROGRAMS.computeIfAbsent(identity.key(), ignored -> new long[6])[counter] += count;
     }
 
+    static boolean needsSourceObservation() {return VALIDATION || FRAME_MANIFEST.collecting();}
+
+    static void bindSourceFrame(FrameSynthesisContract.FrameStamp stamp) {
+        FRAME_MANIFEST.begin(stamp.frameId(),stamp.historyEpoch());
+    }
+
+    static boolean sourceFrameLinked(FrameSynthesisContract.FrameStamp stamp) {
+        return FRAME_MANIFEST.snapshot().matches(stamp.frameId(),stamp.historyEpoch());
+    }
+
+    static MetalMotionFrameManifest.Snapshot sourceFrameManifest() {return FRAME_MANIFEST.snapshot();}
+
+    private static void frameEvent(RenderPipeline pipeline,MetalMotionFrameManifest.Event event,long count) {
+        if(!FRAME_MANIFEST.collecting() || pipeline==null)return;
+        var identity=programIdentity(pipeline);
+        boolean writesColor=pipeline.getColorTargetStates().stream().anyMatch(target->target!=null && target.writeMask()!=0);
+        FRAME_MANIFEST.record(identity.key(),writesColor,event,count);
+    }
+
     /** Independent denominator from the production backend, including direct and unowned draws. */
     static void actualDraw(final MetalCompiledRenderPipeline compiled, final int count) {
-        if (VALIDATION && scene && compiled != null && count > 0) {
-            RenderPipeline source = compiled.sourcePipeline();
-            String name = source == null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
-            int counter = motionReplayDepth > 0 ? 4 : 0;
-            PIPELINES.computeIfAbsent(name, ignored -> new long[6])[counter] += count;
-            if (source == null) PROGRAMS.computeIfAbsent(name, ignored -> new long[6])[counter] += count;
-            else countProgram(source, counter, count);
+        actualDraw(compiled,count,false);
+    }
+
+    static void actualDraw(final MetalCompiledRenderPipeline compiled,final int count,final boolean indirect) {
+        if(!scene || compiled==null || count<=0)return;
+        RenderPipeline source=compiled.sourcePipeline();
+        String name=source==null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
+        if(motionReplayDepth==0 && FRAME_MANIFEST.collecting()) {
+            if(source==null)FRAME_MANIFEST.record(name,true,MetalMotionFrameManifest.Event.ACTUAL,count);
+            else frameEvent(source,MetalMotionFrameManifest.Event.ACTUAL,count);
+            if(indirect) {
+                if(source==null)FRAME_MANIFEST.record(name,true,MetalMotionFrameManifest.Event.INDIRECT,count);
+                else frameEvent(source,MetalMotionFrameManifest.Event.INDIRECT,count);
+            }
+        }
+        if(VALIDATION) {
+            int counter=motionReplayDepth>0 ? 4 : 0;
+            PIPELINES.computeIfAbsent(name,ignored->new long[6])[counter]+=count;
+            if(source==null)PROGRAMS.computeIfAbsent(name,ignored->new long[6])[counter]+=count;
+            else countProgram(source,counter,count);
         }
     }
 
     static void hookedDraw(final MetalPreviousVertexReplay.@Nullable SourceState state, final @Nullable OitStage stage,
                            final MetalEntityMotionCapture.@Nullable Sample sample) {
+        if(scene && state!=null && motionReplayDepth==0) {
+            frameEvent(state.pipeline(),MetalMotionFrameManifest.Event.HOOKED,1);
+            if((stage==null || stage==OitStage.ACCUMULATE) && sample!=null)
+                frameEvent(state.pipeline(),MetalMotionFrameManifest.Event.OWNED,1);
+        }
         if (VALIDATION && scene && state != null) {
             long[] counts = PIPELINES.computeIfAbsent(state.pipeline().getLocation().toString(), ignored -> new long[6]);
             counts[1]++;
@@ -122,7 +167,7 @@ public final class MetalMotionDrawCoverage {
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
                 counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
-                snapshot(), MetalEntityMotionCapture.diagnostics());
+                snapshot(), MetalEntityMotionCapture.diagnostics(),FRAME_MANIFEST.snapshot(),MetalUiDrawCoverage.snapshot());
     }
 
     static void sourceExecution(final @Nullable OitStage stage,
@@ -140,6 +185,7 @@ public final class MetalMotionDrawCoverage {
     static void queued() { queued++; }
     static void encoded(final MetalEntityMotionCapture.Sample sample, final RenderPipeline source) {
         encoded++;
+        frameEvent(source,MetalMotionFrameManifest.Event.EXACT,1);
         if (VALIDATION) {
             ownerCounts(sample)[5]++;
             PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[6])[3]++;
@@ -149,6 +195,7 @@ public final class MetalMotionDrawCoverage {
 
     static void ownedInvalidEncoded(final MetalEntityMotionCapture.Sample sample, final RenderPipeline source) {
         ownedInvalid++;
+        frameEvent(source,MetalMotionFrameManifest.Event.DISOCCLUSION_ONLY,1);
         if (VALIDATION) {
             ownerCounts(sample)[6]++;
             PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[6])[5]++;
