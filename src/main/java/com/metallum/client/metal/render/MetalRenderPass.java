@@ -69,6 +69,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private final HashMap<Integer, GpuBufferSlice> storageBuffers = new HashMap<>();
     private final HashMap<String, TextureViewAndSampler> samplers = new HashMap<>();
     private final HashMap<String, GpuTextureView> storageImages = new HashMap<>();
+    private final HashMap<String, MetalGpuTexture> resolvedStorageImages = new HashMap<>();
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
@@ -860,6 +861,11 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private void observeDraw(int calls,boolean indirect) {
         MetalMotionDrawCoverage.actualDraw(compiledPipeline,calls,indirect);
         MetalUiDrawCoverage.actualDraw(compiledPipeline,colorTextures,calls,indirect);
+        if(MetalUiDrawCoverage.observing() && (!storageImages.isEmpty() || !resolvedStorageImages.isEmpty())) {
+            var possibleWrites=new java.util.HashSet<>(resolvedStorageImages.values());
+            for(var view:storageImages.values())if(view!=null && view.texture() instanceof MetalGpuTexture texture)possibleWrites.add(texture);
+            possibleWrites.forEach(MetalUiDrawCoverage::potentialShaderWrite);
+        }
     }
 
     @Override
@@ -1352,6 +1358,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 label == null ? "unlabeled render pass" : label
         );
         nativeEncoder = encoder;
+        if(clearColors!=null)for(int slot=0;slot<colorTextures.length;slot++) {
+            var view=colorTextures[slot];var clear=clearColors[slot];
+            if(view!=null && clear!=null && view.texture() instanceof MetalGpuTexture texture)
+                MetalUiDrawCoverage.clearProof(texture,clear,renderArea.fillsTexture(extent)
+                        && view.baseMipLevel()==0 && texture.getMipLevels()==1);
+        }
         clearColors = null;
         clearDepthEnabled = false;
         long generation = commandEncoder.encoderGeneration();
@@ -1739,6 +1751,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
             commandEncoder.flushPendingClear(texture);
             texture.markContentsDirty();
+            resolvedStorageImages.put(binding.name(),texture);
             enc.setTexture(metalView.nativeHandle(), binding.bindingIndex(), binding.stageMask());
             return;
         }

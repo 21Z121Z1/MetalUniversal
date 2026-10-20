@@ -91,6 +91,23 @@ final class MetalFxColorTransferGpuTest {
         }
     }
 
+    @Test void hdrSourceIsRejectedBeforeAllocationAndItsRadianceIsNotToneMappedAsSdr() throws Exception {
+        try(var hdr=texture("HDR source",GpuFormat.RGBA16_FLOAT,5,3);
+            var transfer=new MetalFxColorTransfer(device)) {
+            encoder.clearColorTexture(hdr,new Vector4f(4,2,.5F,.25F));
+            byte[] before=readback(hdr);
+            assertThrows(IllegalArgumentException.class,()->transfer.decode(encoder,hdr,5,3));
+            assertNull(transfer.output(),"A rejected HDR input must not allocate or publish an SDR transfer target");
+            assertArrayEquals(before,readback(hdr),"Rejection must leave the original radiance and alpha intact");
+            ByteBuffer pixels=ByteBuffer.wrap(before).order(ByteOrder.nativeOrder());
+            for(int p=0;p<15;p++) {
+                assertEquals(4,Float.float16ToFloat(pixels.getShort(p*8)),0);
+                assertEquals(2,Float.float16ToFloat(pixels.getShort(p*8+2)),0);
+                assertEquals(.25F,Float.float16ToFloat(pixels.getShort(p*8+6)),0);
+            }
+        }
+    }
+
     @Test void sdrOvershootClampsAndResizeRejectsStaleOutput() {
         try (var input = texture("source", GpuFormat.RGBA8_UNORM, 5, 3);
              var output = texture("output", GpuFormat.RGBA8_UNORM, 7, 5);

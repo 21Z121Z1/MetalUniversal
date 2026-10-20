@@ -2036,6 +2036,31 @@ final class MetalMrtBackendIntegrationTest {
         } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
     }
 
+    @Test
+    void actualUiClearProofCannotSurviveUploadsOrCopies() throws Exception {
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM,GpuFormat.RGBA8_UNORM),"ui-write-boundary");
+        var ui=textures.getFirst();var encoder=device.commandEncoder();
+        MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(993,2),ui,true);
+        try {
+            encoder.clearColorTexture(ui,new org.joml.Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            // Independent pixel negative: RGB=.8 with alpha=.1 is not PMA.
+            var bytes=java.nio.ByteBuffer.allocateDirect(WIDTH*HEIGHT*4);
+            for(int p=0;p<WIDTH*HEIGHT;p++)bytes.put((byte)204).put((byte)0).put((byte)0).put((byte)26);
+            bytes.flip();encoder.writeToTexture(ui,bytes,0,0,0,0,WIDTH,HEIGHT);
+            var pixels=readback(ui);
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+            encoder.clearColorTexture(ui,new org.joml.Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            encoder.clearColorTexture(textures.get(1),new org.joml.Vector4f(.8F,0,0,.1F));
+            encoder.copyTextureToTexture(textures.get(1),ui,0,0,0,0,0,WIDTH,HEIGHT);readback(ui);
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            assertFalse(MetalUiDrawCoverage.snapshot().completeWriteCoverageProven());
+            assertFalse(MetalUiDrawCoverage.snapshot().premultipliedProven());
+        } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
+    }
+
     private void runPerSlotClearLoadStoreBlendAndWriteMask() {
         String clearShaderName = "mrt_per_slot_clear";
         fragmentShaders.put(clearShaderName, """

@@ -2823,6 +2823,8 @@ public final class MetalFxManager {
             }
         }
 
+        if(sourceFrameStamp!=null && uiTarget.getColorTexture() instanceof MetalGpuTexture uiTexture)
+            MetalUiDrawCoverage.begin(sourceFrameStamp,uiTexture,frameGenerationEnabled && encoded);
         if (frameGenerationEnabled) {
             // The presenter composites this native-resolution premultiplied UI
             // overlay onto both the generated and real scene. Keeping the scene
@@ -2852,8 +2854,6 @@ public final class MetalFxManager {
         this.frameUsesUpscaledTarget = true;
         if(sourceFrameStamp!=null) {
             MetalMotionDrawCoverage.closeSourceObservation(sourceFrameStamp);
-            if(uiTarget.getColorTexture() instanceof MetalGpuTexture uiTexture)
-                MetalUiDrawCoverage.begin(sourceFrameStamp,uiTexture,frameGenerationEnabled && encoded);
         }
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);

@@ -11,14 +11,26 @@ public final class MetalUiDrawCoverage {
                           MetalUiBlendContract.State blend,long calls,boolean indirect) {}
     public record Snapshot(long frameId,long epoch,long allocation,long allocationGeneration,boolean sceneSeparated,
                            boolean overflow,Map<String,Program> programs,boolean shaderOutputRangeProven,
-                           boolean completeWriteCoverageProven,boolean premultipliedProven) {}
+                           boolean completeWriteCoverageProven,boolean premultipliedProven,MetalUiContentProof.Snapshot content) {}
     private static final Map<String,Program> PROGRAMS=new TreeMap<>();
+    private static final MetalUiContentProof CONTENT=new MetalUiContentProof();
     private static FrameSynthesisContract.FrameStamp stamp;
     private static MetalGpuTexture target;
     private static boolean separated,overflow;
-    static void reset() {PROGRAMS.clear();stamp=null;target=null;separated=overflow=false;}
+    static void reset() {PROGRAMS.clear();CONTENT.reset();stamp=null;target=null;separated=overflow=false;}
     static void begin(FrameSynthesisContract.FrameStamp source,MetalGpuTexture texture,boolean sceneSeparated) {
         reset();stamp=source;target=texture;separated=sceneSeparated;
+    }
+    static boolean observing() {return stamp!=null && target!=null;}
+    static void contentInvalidated(MetalGpuTexture texture) {
+        if(texture==target && stamp!=null)CONTENT.invalidate("texture-content-invalidated");
+    }
+    static void clearProof(MetalGpuTexture texture,org.joml.Vector4fc clear,boolean full) {
+        if(texture==target && stamp!=null && clear!=null)CONTENT.clear(clear.x(),clear.y(),clear.z(),clear.w(),full,
+                texture.getFormat()==com.mojang.renderpearl.api.GpuFormat.RGBA8_UNORM);
+    }
+    static void potentialShaderWrite(MetalGpuTexture texture) {
+        if(texture==target && stamp!=null)CONTENT.potentialShaderWrite();
     }
     static void actualDraw(MetalCompiledRenderPipeline compiled,GpuTextureView[] attachments,int calls,boolean indirect) {
         if(target==null || stamp==null || calls<=0 || compiled==null)return;
@@ -29,6 +41,7 @@ public final class MetalUiDrawCoverage {
             if(pipeline==null || slot>=pipeline.getColorTargetStates().size()) {overflow=true;continue;}
             ColorTargetState color=pipeline.getColorTargetStates().get(slot);
             if(color==null || color.writeMask()==0)continue;
+            CONTENT.render(calls);
             var identity=MetalMotionDrawCoverage.programIdentity(pipeline);
             var blend=color.blendFunction().orElse(null);
             var state=new MetalUiBlendContract.State(color.writeMask()==ColorTargetState.WRITE_ALL,
@@ -46,7 +59,7 @@ public final class MetalUiDrawCoverage {
     public static Snapshot snapshot() {
         return new Snapshot(stamp==null ? 0 : stamp.frameId(),stamp==null ? 0 : stamp.historyEpoch(),
                 target==null ? 0 : target.allocationId(),target==null ? 0 : target.allocationIdentity().generation(),
-                separated,overflow,Map.copyOf(PROGRAMS),false,false,false);
+                separated,overflow,Map.copyOf(PROGRAMS),false,false,false,CONTENT.snapshot());
     }
     private MetalUiDrawCoverage() {}
 }

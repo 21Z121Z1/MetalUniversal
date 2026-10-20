@@ -586,6 +586,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
         flushPendingClear(texture);
+        MetalUiDrawCoverage.contentInvalidated(texture);
         blitCommandEncoder().generateMipmaps(texture.nativeHandle());
         if (!RenderContractRuntime.enabled()) {
             return;
@@ -2331,6 +2332,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         if (texture.clearIsRedundant(colorClear, depthClear)) {
+            // Reuse a materialized full-clear invariant, not an unexecuted request.
+            MetalUiDrawCoverage.clearProof(texture,colorClear,true);
             return;
         }
 

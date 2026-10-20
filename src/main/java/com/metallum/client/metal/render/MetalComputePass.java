@@ -38,6 +38,7 @@ final class MetalComputePass implements AutoCloseable {
     private final @Nullable Map<String, String> boundResources;
     private final Map<Integer, BufferBinding> boundBuffers = new HashMap<>();
     private final Map<Integer, MemorySegment> boundTextures = new HashMap<>();
+    private final Map<Integer, MetalGpuTexture> boundTextureResources = new HashMap<>();
     private final Map<Integer, MemorySegment> boundSamplers = new HashMap<>();
     @Nullable
     private MetalComputePipeline pipeline;
@@ -106,6 +107,7 @@ final class MetalComputePass implements AutoCloseable {
     MetalComputePass bindTexture(final int index, final MetalGpuTexture texture) {
         ensureOpen();
         validateBindingIndex(index, 128, "texture");
+        boundTextureResources.put(index,texture);
         if (owner.hasPendingClear(texture)) {
             throw new IllegalStateException(
                     "Texture " + texture.getLabel() + " has an unflushed deferred clear registered after this"
@@ -133,6 +135,7 @@ final class MetalComputePass implements AutoCloseable {
         ensureOpen();
         validateBindingIndex(index, 128, "texture");
         MetalGpuTexture texture = (MetalGpuTexture) view.texture();
+        boundTextureResources.put(index,texture);
         if (owner.hasPendingClear(texture)) {
             throw new IllegalStateException(
                     "Texture " + texture.getLabel() + " has an unflushed deferred clear registered after this"
@@ -186,6 +189,7 @@ final class MetalComputePass implements AutoCloseable {
                 groupsX, groupsY, groupsZ,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
         );
+        observePotentialTextureWrites();
         if (contractPassToken >= 0L) {
             RenderContractRuntime.recordProducer(
                     contractPassToken,
@@ -230,6 +234,7 @@ final class MetalComputePass implements AutoCloseable {
                 offset,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
         );
+        observePotentialTextureWrites();
         if (contractPassToken >= 0L) {
             RenderContractRuntime.recordProducer(
                     contractPassToken,
@@ -241,6 +246,13 @@ final class MetalComputePass implements AutoCloseable {
             );
         }
         return this;
+    }
+
+    private void observePotentialTextureWrites() {
+        if(!MetalUiDrawCoverage.observing())return;
+        // Binding metadata does not certify read-only image access. Observe at
+        // every dispatch, including bindings established before a later clear.
+        boundTextureResources.values().stream().distinct().forEach(MetalUiDrawCoverage::potentialShaderWrite);
     }
 
     static void validateBindingIndex(final int index, final int limit, final String kind) {

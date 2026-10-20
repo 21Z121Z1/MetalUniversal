@@ -192,6 +192,7 @@ final class MetalGpuTexture implements GpuTexture {
         if (depth != null) {
             this.materializedDepthClear = depth;
         }
+        MetalUiDrawCoverage.clearProof(this,color,true);
     }
 
     boolean clearIsRedundant(@Nullable final Vector4fc color, @Nullable final Double depth) {
@@ -200,6 +201,7 @@ final class MetalGpuTexture implements GpuTexture {
     }
 
     void markContentsDirty() {
+        MetalUiDrawCoverage.contentInvalidated(this);
         this.materializedColorClear = null;
         this.materializedDepthClear = null;
     }
@@ -265,6 +267,7 @@ final class MetalGpuTexture implements GpuTexture {
         if (this.closed) {
             return;
         }
+        MetalUiDrawCoverage.contentInvalidated(this);
         this.closed = true;
         this.removeView();
     }
