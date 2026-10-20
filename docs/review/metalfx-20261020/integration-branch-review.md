@@ -13,7 +13,7 @@
 | agent/upstream-26.3-renderpearl | `7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82` | False | 17 / 0 | 旧 26.3 移植／工作台已由 canonical RenderPearl/native ABI 取代；不整支覆盖当前实现，历史由恢复标签保存 |
 | agent/upstream-26.3-workbench-20260923 | `be6f578151ca7a765e67c0d7e7aa216c41774d02` | False | 16 / 0 | 旧 26.3 移植／工作台已由 canonical RenderPearl/native ABI 取代；不整支覆盖当前实现，历史由恢复标签保存 |
 | codex/consolidated-metal-20261020 | `36a9f3b1d7d82be73091ce091a037d7460a6181b` | True | 0 / 0 | 当前工程候选；必须准确 SHA 的整轮 CI／真实客户端通过并经父侧审核后，正常纳入 main |
-| codex/mcopt-semantic-convergence-20261005 | `7b83bc4df3d93bc979a8c34caa551ad818595ce9` | False | 183 / 0 | 排除未验证的私有 Sodium 0.9.3-alpha 变更及失败 palette 验收；183 个独有提交持久可恢复，详见 branch-review.md |
+| codex/mcopt-semantic-convergence-20261005 | `7b83bc4df3d93bc979a8c34caa551ad818595ce9` | False | 183 / 0 | 未晋升的默认关闭实验优化，部分有旧版本运行证据；183为提交数、70新增文件，多模块并非全依赖Sodium；私有适配锁0.9.3-alpha.1，当前0.9.2。整包持久保留、不重做整套实验；palette为保存时编码等价校验失败。详见PR89-decision.zh-CN.md |
 | codex/metal-renderer-research | `a43637d08164a2e95116edaa4e7dda1b4fd2a155` | False | 8 / 6 | 已选择性纳入 weather、lightmap、云冻结源与关闭终态增量；本分支保留更严格 streaming／生命周期／颜色／R32F／粒子／oracle；需原写入者明确停写 |
 | codex/metalfx-official-audit-20261020 | `fe547607b3bdfb2dda9d373fd3bbe8415f19e328` | True | 0 / 0 | 审计历史为整合分支祖先；保留恢复锚点 |
 | codex/p1-framebuffer-determinism | `1548c41d9e0ea65fad932740854d75804ff81d07` | False | 6 / 0 | 选择相机／固定源时间收据；排除忽略 alpha 的弱验收；完整 RGBA 与独立 terrain 8+1 保留 |

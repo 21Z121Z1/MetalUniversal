@@ -83,6 +83,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.storage.ValidationStorageBudgetTest \
   --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
   --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary \
+  --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.inspectPinnedCullRecoveryBoundaryWithoutPromotingTheOldOptimization \
   --tests com.metallum.client.metal.render.MetalCloudGeometryTest \
   --tests com.metallum.client.metal.render.MetalCloudMotionHistoryTest \
   --tests com.metallum.client.metal.render.MetalUiBlendContractTest \
@@ -92,5 +93,17 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.MetalParticleQuadHistoryTest \
   --tests com.metallum.client.metal.render.MetalParticleCrossGroupHistoryTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
+
+python3 - <<'PY_CULL_RECEIPT'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+path=Path('build/test-results/test/TEST-com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.xml')
+suite=ET.parse(path).getroot()
+rows=[line for block in suite.iter('system-out') for line in (block.text or '').splitlines()
+      if line.startswith('SODIUM_CULL_REVIEW_GZIP_BASE64 ')]
+if len(rows)!=1:
+    raise SystemExit('missing or ambiguous pinned Sodium cull review receipt')
+print(rows[0])
+PY_CULL_RECEIPT
 
 echo "Unified evaluation static verification: PASS"

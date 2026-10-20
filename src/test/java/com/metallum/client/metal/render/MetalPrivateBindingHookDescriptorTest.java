@@ -29,6 +29,40 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 final class MetalPrivateBindingHookDescriptorTest {
     @Test
+    void inspectPinnedCullRecoveryBoundaryWithoutPromotingTheOldOptimization() throws Exception {
+        String resource="net/caffeinemc/mods/sodium/client/render/chunk/RenderSectionManager";
+        ClassNode type=load(resource);
+        var methods=new java.util.LinkedHashMap<String,Object>();
+        for(var method:type.methods)if(method.name.equals("prepareRenderTrees") || method.name.equals("consumeCullTaskResults")) {
+            var rows=new java.util.ArrayList<String>();int index=0;
+            var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();
+            for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);
+            for(var instruction:method.instructions) {
+                String row=Integer.toString(instruction.getOpcode());
+                if(instruction instanceof MethodInsnNode call)row+=" call "+call.owner+"."+call.name+call.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.FieldInsnNode field)row+=" field "+field.owner+"."+field.name+":"+field.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.JumpInsnNode jump)row+=" jump L"+labels.get(jump.label);
+                else if(instruction instanceof org.objectweb.asm.tree.LabelNode label)row="L"+labels.get(label);
+                else if(instruction instanceof org.objectweb.asm.tree.VarInsnNode variable)row+=" local "+variable.var;
+                else if(instruction instanceof LdcInsnNode literal)row+=" constant "+literal.cst;
+                rows.add(row);
+            }
+            methods.put(method.name+method.desc,rows);
+        }
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")){bytes=input.readAllBytes();}
+        var report=new java.util.LinkedHashMap<String,Object>();
+        report.put("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local-unrecorded"));
+        report.put("dependencyClassSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
+        report.put("resource",resource);report.put("fields",type.fields.stream().map(field->field.name+":"+field.desc).toList());
+        report.put("methods",methods);report.put("sameCancellationSemanticsProven",false);
+        report.put("promotionAllowed",false);report.put("boundary","Exact pinned dependency bytecode for review. Hook shape alone is not a cancellation-path proof; no old optimization is enabled.");
+        byte[] json=new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var compressed=new java.io.ByteArrayOutputStream();try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(json);}
+        System.out.println("SODIUM_CULL_REVIEW_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
+    }
+
+    @Test
     void sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary() throws Exception {
         String name="net/caffeinemc/mods/sodium/mixin/features/render/world/clouds/CloudRendererMixin";
         ClassNode cloud=load(name);

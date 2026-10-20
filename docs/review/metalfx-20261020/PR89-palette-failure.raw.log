@@ -1,0 +1,25 @@
+2026-10-05T05:06:42.3742880Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3743610Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3744320Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3745030Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3745730Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3746440Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3747220Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3747920Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3748620Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3749320Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3750020Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3750730Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3751420Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3752130Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3752840Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3754970Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:42.3821950Z #@!@# Game crashed! Crash report saved to: #@!@# /Users/runner/work/MetalUniversal/MetalUniversal/.github/ci/minecraft-e2e/build/run/clientGameTest/crash-reports/crash-2026-10-05_05.06.42-client.txt
+2026-10-05T05:06:46.1412330Z Cache is read-only: will not save state for use in subsequent builds.
+2026-10-05T05:06:46.1460370Z <summary>Entries: 6 restored (833Mb), 0 saved (0Mb) - Expand for more details</summary>
+2026-10-05T05:06:46.1471280Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1474990Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1480580Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1483830Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1487170Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1495040Z               (Entry not saved: cache is read-only)

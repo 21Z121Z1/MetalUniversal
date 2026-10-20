@@ -31,7 +31,7 @@ git -C recovery.git rev-parse 'refs/tags/branch-backup/20261020T210011Z/codex/co
 | PR | head | 正常合入main前/后处理 |
 | --- | --- | --- |
 | [#90](https://github.com/21Z121Z1/MetalUniversal/pull/90) | a43637d08164a2e95116edaa4e7dda1b4fd2a155 | 选择性整合有效producer/weather/material/cloud修复，保留更严格关闭/颜色/R32F/oracle；逐项8差异已有原文。先确认写入者停写和未提交/未推送工作保存，最新head再审查/备份。最终main可达后经审核关闭为被整合替代，不能凭interrupted删除。 |
-| [#89](https://github.com/21Z121Z1/MetalUniversal/pull/89) | 7b83bc4df3d93bc979a8c34caa551ad818595ce9 | 不整支纳入：私有Sodium目标0.9.3-alpha与当前0.9.2不同，独立palette verifier失败。183独有提交完整映射/备份；先由父侧审核明确排除范围，再归档/关闭，不宣称这些优化已验收。 |
+| [#89](https://github.com/21Z121Z1/MetalUniversal/pull/89) | 7b83bc4df3d93bc979a8c34caa551ad818595ce9 | 父侧已审核：未晋升的默认关闭实验优化，部分已有旧版本运行证据；183是提交数，另有70新增文件，并非183项功能。启动/模型循环、chunk/POI/light/palette、QoS及buffer预分配并非全依赖Sodium。私有Sodium适配锁0.9.3-alpha.1；最终旧Vanilla/sodium-fast成功，sodium-verify保存时palette编码等价校验失败，不称存档损坏。整包保留恢复tag、暂不晋升，详见[精确取舍](PR89-decision.zh-CN.md)。 |
 | [#87](https://github.com/21Z121Z1/MetalUniversal/pull/87) | cd5f8ddd939d38e05cd6ac56e466dcef69877d3c | 选择camera/raster/source receipts，排除旧CUTOUT失败对照与旧深度历史，以V4和严格负例替代。main包含有效delta且准确验收后关闭为整合替代。 |
 | [#86](https://github.com/21Z121Z1/MetalUniversal/pull/86) | 1548c41d9e0ea65fad932740854d75804ff81d07 | 固定相机和源时间收据已选入；保留完整RGBA和独立8+1，排除忽略alpha的弱验收。物理性能/显示验收仍独立，不把归档PR当性能通过。 |
 | [#85](https://github.com/21Z121Z1/MetalUniversal/pull/85) | 1888d3e28ba0fb0cb6ce043977db658d9c628c62 | 有效参数/源提交/相机契约已选择；旧不完整历史及未证明颜色/UI不带回。准确main验收及父侧审核后关闭为整合替代，仍明确Temporal/FG支持门禁。 |
