@@ -100,6 +100,7 @@ final class MetalMotionProducerGpuTest {
                 .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
                 .withUniform("Projection", UniformType.UNIFORM_BUFFER)
                 .withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                .withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER)
                 .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
         var source = RenderPipeline.builder().withLocation("motion_contract/" + f.name())
                 .withVertexShader(f.source()).withFragmentShader(f.source())
@@ -158,6 +159,7 @@ final class MetalMotionProducerGpuTest {
                 pass.setUniform("MetallumMotion", mo.slice());
                 pass.setUniform("Fog",fo.slice());
                 pass.bindTexture("Sampler0", sampledView, sampler);
+                pass.bindTexture("Sampler2",sampledView,sampler);
                 pass.setVertexBuffer(0, (frame == 0 ? pv : cv).slice());
                 pass.setVertexBuffer(1, pp.slice());
                 pass.draw(6, 1, 0, 0);
@@ -393,6 +395,7 @@ final class MetalMotionProducerGpuTest {
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
                 .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
                         .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER)
                         .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build());
         if(f.alphaCutout()) sourceBuilder.withShaderDefine("ALPHA_CUTOUT",.5F);
         var source=sourceBuilder.build();
@@ -443,6 +446,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
                     pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("MetallumMotion",mo.slice());
                     pass.bindTexture("Sampler0",sampledView,sampler);pass.setVertexBuffer(0,plan.currentVertexBuffer());
+                    pass.bindTexture("Sampler2",sampledView,sampler);
                     pass.setVertexBuffer(1,previous.slice());pass.setIndexBuffer(index,IndexType.SHORT);pass.drawIndexed(6,1,0,plan.replayBaseVertex(),0);
                 }
                 encoder.submit();device.waitForSubmittedGpuWork();
@@ -557,6 +561,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
                     pass.setUniform("Projection",pr.slice()); pass.setUniform("DynamicTransforms",du.slice()); pass.setUniform("MetallumMotion",mo.slice());
                     pass.bindTexture("Sampler0",sv,sampler); pass.setVertexBuffer(0,vb.slice()); pass.setVertexBuffer(1,pb.slice());
+                    pass.bindTexture("Sampler2",sv,sampler);
                     pass.setIndexBuffer(ib,IndexType.SHORT); pass.drawIndexed(18,1,0,0,0);
                 }
                 encoder.submit(); device.waitForSubmittedGpuWork();
@@ -1002,7 +1007,8 @@ final class MetalMotionProducerGpuTest {
                 "block_opaque_zero_alpha", "block_visible_offset_and_alpha",
                 "lightning_visible", "lightning_vertex_zero_alpha", "lightning_modulator_zero",
                 "lightning_fully_fogged", "lightning_fog_partial", "lightning_oit_additive_zero_alpha",
-                "lightning_oit_additive_visible", "entity_oit_additive_zero_alpha", "entity_oit_additive_visible");
+                "lightning_oit_additive_visible", "entity_oit_additive_zero_alpha", "entity_oit_additive_visible",
+                "particle_lightmap_zero_alpha", "particle_lightmap_below_cutout", "particle_lightmap_visible");
     }
 
     @ParameterizedTest(name = "actual material visibility: {0}")
@@ -1010,6 +1016,7 @@ final class MetalMotionProducerGpuTest {
     void materialMotionMatchesActualMinecraftColorAndFragmentSurvival(String name) throws Exception {
         boolean item=name.startsWith("item_"), special=name.contains("special"), glint=name.contains("glint");
         boolean block=name.startsWith("block_"),lightning=name.startsWith("lightning_");
+        boolean particle=name.startsWith("particle_");
         boolean oitAdditive=name.contains("oit_additive");
         boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
         boolean blended=!name.equals("zero_alpha_opaque")&&!name.equals("block_opaque_zero_alpha"), perFace=name.equals("per_face_dissolve");
@@ -1018,6 +1025,7 @@ final class MetalMotionProducerGpuTest {
         float slopeBias=sloped ? name.contains("negative") ? -2 : 2 : 0;
         float constantBias=biased ? name.contains("negative") ? -10 : 3 : 0;
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
+        float lightmapAlpha=1;
         boolean visible=true;
         switch(name) {
             case "entity_glint_zero_base_alpha", "item_glint_zero_base_alpha", "item_special_glint_zero_base_alpha" -> {
@@ -1045,9 +1053,12 @@ final class MetalMotionProducerGpuTest {
             case "lightning_modulator_zero" -> {modAlpha=0;visible=false;}
             case "lightning_fully_fogged" -> {expectedAlpha=0;visible=false;}
             case "lightning_fog_partial" -> expectedAlpha=1-(float)Math.sqrt(.4F*.4F*2+.5F*.5F);
+            case "particle_lightmap_zero_alpha" -> {lightmapAlpha=0;visible=false;}
+            case "particle_lightmap_below_cutout" -> {lightmapAlpha=.05F;visible=false;}
+            case "particle_lightmap_visible" -> {lightmapAlpha=.5F;expectedAlpha=128F/255;}
         }
-        var format=lightning ? DefaultVertexFormat.POSITION_COLOR : block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
-        String shader=lightning ? "core/rendertype_lightning" : block ? "core/block" : item ? "core/item" : "core/entity";
+        var format=particle ? DefaultVertexFormat.PARTICLE : lightning ? DefaultVertexFormat.POSITION_COLOR : block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
+        String shader=particle ? "core/particle" : lightning ? "core/rendertype_lightning" : block ? "core/block" : item ? "core/item" : "core/entity";
         float offsetX=name.equals("block_visible_offset_and_alpha") ? .125F : 0;
         float offsetY=name.equals("block_visible_offset_and_alpha") ? -.05F : 0;
         float offsetZ=name.equals("block_visible_offset_and_alpha") ? -.1F : 0;
@@ -1138,7 +1149,7 @@ final class MetalMotionProducerGpuTest {
             var cv=device.createTextureView(color);var sd=device.createTextureView(survival);var od=device.createTextureView(ownership);
             var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
             var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
-            encoder.clearColorTexture(white,new Vector4f(1));encoder.clearColorTexture(dissolveMask,new Vector4f(1,1,1,maskAlpha));
+            encoder.clearColorTexture(white,new Vector4f(1,1,1,lightmapAlpha));encoder.clearColorTexture(dissolveMask,new Vector4f(1,1,1,maskAlpha));
             encoder.clearColorTexture(bounds,new Vector4f(0,100,0,0));encoder.clearColorTexture(coefficients,new Vector4f(0));
             if(matrix) {
                 ByteBuffer pattern=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
@@ -1269,7 +1280,12 @@ final class MetalMotionProducerGpuTest {
                         .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
                         .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
         ByteBuffer mesh=vertices(new Fixture(name,"core/entity",format,false,false,false,false),false);
-        for(int i=0;i<6;i++)mesh.putFloat(i*format.getVertexSize()+8,.5F+.1F*mesh.getFloat(i*format.getVertexSize()));
+        for(int i=0;i<6;i++) {
+            mesh.putFloat(i*format.getVertexSize()+8,.5F+.1F*mesh.getFloat(i*format.getVertexSize()));
+            // Independent primitive IDs in original color. Raster snapping can make
+            // the two triangles of a geometrically planar quad have distinct Z planes.
+            mesh.putInt(i*format.getVertexSize()+format.getElement("Color").offset(),i<3 ? 0xFF0000FF : 0xFF00FF00);
+        }
         ByteBuffer oldPositions=ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder());
         MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6),oldPositions);oldPositions.flip();
         Matrix4f[] views={new Matrix4f().translation(-.1F,.05F,perspective ? -2 : 0).rotateY(.35F).rotateZ(.55F).scale(.8F,1.2F,1),
@@ -1343,20 +1359,26 @@ final class MetalMotionProducerGpuTest {
                 pass.setVertexBuffer(0,vb.slice());pass.setVertexBuffer(1,pb.slice());pass.draw(6,1,0,0);
             }
             encoder.submit();device.waitForSubmittedGpuWork();
-            var before=fitRasterDepthPlane(colors[0],depths[0],W,H);var now=fitRasterDepthPlane(colors[1],depths[1],W,H);
+            RasterDepthPlane[] before=new RasterDepthPlane[2],now=new RasterDepthPlane[2];
+            for(int triangle=0;triangle<2;triangle++) {
+                before[triangle]=fitRasterDepthPlane(colors[0],depths[0],W,H,triangle);
+                now[triangle]=fitRasterDepthPlane(colors[1],depths[1],W,H,triangle);
+            }
             byte[] mask=readback(valid),z=readback(pair),pointBytes=readback(points);
             ByteBuffer zs=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder()),ps=ByteBuffer.wrap(pointBytes).order(ByteOrder.nativeOrder());
             ByteBuffer currentZ=ByteBuffer.wrap(depths[1]).order(ByteOrder.nativeOrder());
             int checked=0,wrong=0;double maxError=0,wrongCurrentSlopeError=0;
             for(int pixel=0;pixel<W*H;pixel++)if(Byte.toUnsignedInt(mask[pixel])>127) {
                 checked++;assertEquals(1,ps.getFloat(pixel*16+12),0);
-                Vector4f oldPoint=oldMvp.transform(new Vector4f(ps.getFloat(pixel*16),ps.getFloat(pixel*16+4),ps.getFloat(pixel*16+8),1));
+                Vector4f surface=new Vector4f(ps.getFloat(pixel*16),ps.getFloat(pixel*16+4),ps.getFloat(pixel*16+8),1);
+                int triangle=surface.x+surface.y<=0 ? 0 : 1;
+                Vector4f oldPoint=oldMvp.transform(surface);
                 double oldX=(oldPoint.x/oldPoint.w+1)*W/2,oldY=(1-oldPoint.y/oldPoint.w)*H/2;
-                double expected=before.at(oldX,oldY);
+                double expected=before[triangle].at(oldX,oldY);
                 double error=Math.max(Math.abs(zs.getFloat(pixel*8)-expected),Math.abs(zs.getFloat(pixel*8+4)-currentZ.getFloat(pixel*4)));
                 if(!Double.isFinite(error)||error>3e-5)wrong++;maxError=Math.max(maxError,error);
                 double geometric=oldPoint.z/oldPoint.w,unit=Math.scalb(1,Math.getExponent(geometric)-23);
-                double wrongBias=2*Math.max(Math.abs(now.xSlope()),Math.abs(now.ySlope()))+3*unit;
+                double wrongBias=2*Math.max(Math.abs(now[triangle].xSlope()),Math.abs(now[triangle].ySlope()))+3*unit;
                 wrongCurrentSlopeError=Math.max(wrongCurrentSlopeError,Math.abs(geometric+wrongBias-expected));
             }
             Path dir=Path.of("build/agent-evidence/motion-producers/previous-raster-bias/"+name);Files.createDirectories(dir);
@@ -1364,9 +1386,11 @@ final class MetalMotionProducerGpuTest {
             Files.write(dir.resolve("current-original.rgba8"),colors[1]);Files.write(dir.resolve("current-original.d32f"),depths[1]);
             Files.write(dir.resolve("correspondence.rg32f"),z);Files.write(dir.resolve("surface-point.rgba32f"),pointBytes);
             Files.writeString(dir.resolve("result.json"),"{\"checkedPixels\":"+checked+",\"wrongDepthPixels\":"+wrong
-                    +",\"maxDepthError\":"+maxError+",\"maxOldPlaneResidual\":"+before.maxResidual()
+                    +",\"maxDepthError\":"+maxError+",\"maxOldPlaneResidual\":"+Math.max(before[0].maxResidual(),before[1].maxResidual())
+                    +",\"independentPrimitivePlanes\":2"
                     +",\"wrongCurrentSlopeNegativeControlError\":"+wrongCurrentSlopeError+"}");
-            assertTrue(before.maxResidual()<3e-6);assertTrue(checked>40);assertEquals(0,wrong);
+            for(var plane:before)assertTrue(plane.maxResidual()<3e-6);
+            assertTrue(checked>40);assertEquals(0,wrong);
             assertTrue(wrongCurrentSlopeError>3e-4,"The independent old raster must distinguish using the current slope");
         }
     }
@@ -1377,20 +1401,29 @@ final class MetalMotionProducerGpuTest {
 
     /** Least-squares plane fitted only from original GPU color coverage and D32 readback. */
     static RasterDepthPlane fitRasterDepthPlane(byte[] rgba,byte[] d32,int width,int height) {
+        return fitRasterDepthPlane(rgba,d32,width,height,-1);
+    }
+
+    static RasterDepthPlane fitRasterDepthPlane(byte[] rgba,byte[] d32,int width,int height,int primitiveChannel) {
         ByteBuffer z=ByteBuffer.wrap(d32).order(ByteOrder.nativeOrder());
         double mx=0,my=0,mz=0;int n=0;
-        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127) {n++;mx+=p%width+.5;my+=p/width+.5;mz+=z.getFloat(p*4);}
+        for(int p=0;p<width*height;p++)if(planeSample(rgba,p,primitiveChannel)) {n++;mx+=p%width+.5;my+=p/width+.5;mz+=z.getFloat(p*4);}
         if(n<3)throw new IllegalArgumentException("Insufficient original raster samples");mx/=n;my/=n;mz/=n;
         double xx=0,xy=0,yy=0,xz=0,yz=0;
-        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127) {
+        for(int p=0;p<width*height;p++)if(planeSample(rgba,p,primitiveChannel)) {
             double x=p%width+.5-mx,y=p/width+.5-my,depth=z.getFloat(p*4)-mz;
             xx+=x*x;xy+=x*y;yy+=y*y;xz+=x*depth;yz+=y*depth;
         }
         double determinant=xx*yy-xy*xy;if(!(determinant>0))throw new IllegalArgumentException("Degenerate original raster plane");
         double a=(xz*yy-yz*xy)/determinant,b=(yz*xx-xz*xy)/determinant,c=mz-a*mx-b*my,residual=0;
-        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127)
+        for(int p=0;p<width*height;p++)if(planeSample(rgba,p,primitiveChannel))
             residual=Math.max(residual,Math.abs(a*(p%width+.5)+b*(p/width+.5)+c-z.getFloat(p*4)));
         return new RasterDepthPlane(a,b,c,residual);
+    }
+
+    private static boolean planeSample(byte[] rgba,int pixel,int primitiveChannel) {
+        return Byte.toUnsignedInt(rgba[pixel*4+3])>127
+                && (primitiveChannel<0 || Byte.toUnsignedInt(rgba[pixel*4+primitiveChannel])>127);
     }
 
     @Test
