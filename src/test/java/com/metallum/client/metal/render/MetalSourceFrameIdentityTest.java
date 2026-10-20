@@ -20,4 +20,13 @@ final class MetalSourceFrameIdentityTest {
         assertThrows(IllegalArgumentException.class,()->FrameSynthesisContract.nextSourceFrame(-1,23));
         assertThrows(IllegalArgumentException.class,()->FrameSynthesisContract.nextSourceFrame(8,0));
     }
+
+    @Test void presentationUsesTheActualSourceCursorRatherThanAStalledTraceNumber() {
+        var earlier=new FrameSynthesisContract.FrameStamp(9,23);
+        var current=FrameSynthesisContract.nextSourceFrame(earlier.frameId(),earlier.historyEpoch());
+        assertTrue(FrameSynthesisContract.matchesCurrentSourceFrame(current,10,23));
+        assertFalse(FrameSynthesisContract.matchesCurrentSourceFrame(earlier,10,23));
+        assertFalse(FrameSynthesisContract.matchesCurrentSourceFrame(current,10,24));
+        assertFalse(FrameSynthesisContract.matchesCurrentSourceFrame(null,10,23));
+    }
 }

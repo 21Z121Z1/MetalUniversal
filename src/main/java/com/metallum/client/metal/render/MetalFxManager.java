@@ -5388,12 +5388,11 @@ public final class MetalFxManager {
             }
             return null;
         }
-        long runtimeFrameId = RenderContractRuntime.currentFrameId();
-        if (runtimeFrameId > 0L && runtimeFrameId != sourceStamp.frameId()) {
+        if (!FrameSynthesisContract.matchesCurrentSourceFrame(sourceStamp,sourceFrameSequence,historyEpoch)) {
             frameResetForPresent = true;
             if (frameGenerationEnabled && !runtimeDisabled) {
                 MetalFxMotionTelemetry.recordSourceFrame(
-                        runtimeFrameId,
+                        sourceStamp.frameId(),
                         false,
                         0,
                         "sourceFrameIdDiscontinuity"
@@ -5401,9 +5400,8 @@ public final class MetalFxManager {
             }
             return null;
         }
-        // Use the stamp captured after projection/history gates settled.  A
-        // runtime frame id that changed between extraction and presentation is
-        // intentionally rejected by frameSynthesisAdmission below.
+        // Use the live source cursor and epoch. Optional trace numbering can
+        // stop or restart independently and cannot admit/reject presentation.
         final long frameId = sourceStamp.frameId();
         final boolean telemetryCandidate = frameGenerationEnabled && !runtimeDisabled;
         if (!motionEligibility.eligible()) {

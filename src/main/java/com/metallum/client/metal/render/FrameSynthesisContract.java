@@ -41,6 +41,10 @@ final class FrameSynthesisContract {
                 : new FrameStamp(previousFrameId+1,historyEpoch);
     }
 
+    static boolean matchesCurrentSourceFrame(FrameStamp stamp,long sourceFrameId,long historyEpoch) {
+        return stamp!=null && stamp.frameId()==sourceFrameId && stamp.historyEpoch()==historyEpoch;
+    }
+
     enum ProducerCoverage {
         REAL_MOTION,
         REACTIVE_ONLY,
