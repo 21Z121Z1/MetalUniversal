@@ -68,6 +68,7 @@ final class MetalEntityMotionPipeline {
 
     private enum PreviousFamily {
         ENTITY("core/entity_previous_motion", "core/entity_motion", "entity_previous_motion/"),
+        BLOCK("core/block_previous_motion", "core/block_motion", "block_previous_motion/"),
         SHADOW("core/entity_previous_motion", "core/shadow_previous_motion", "shadow_previous_motion/"),
         PARTICLE("core/particle_previous_motion", "core/particle_previous_motion", "particle_previous_motion/"),
         LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
@@ -194,6 +195,7 @@ final class MetalEntityMotionPipeline {
                 && DefaultVertexFormat.ENTITY.equals(format)) {
             return PreviousFamily.SHADOW;
         }
+        if (shader.equals("core/block") && DefaultVertexFormat.BLOCK.equals(format)) return PreviousFamily.BLOCK;
         if (shader.equals("core/particle")
                 && DefaultVertexFormat.PARTICLE.equals(format)) {
             return PreviousFamily.PARTICLE;

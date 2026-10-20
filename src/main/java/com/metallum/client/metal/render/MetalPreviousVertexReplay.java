@@ -206,12 +206,28 @@ final class MetalPreviousVertexReplay {
         if (!MetalEntityMotionPipeline.supportsPreviousPositions(source) || executeInfo == null) {
             return null;
         }
-        float[] previousPositions = MetalPreviousVertexHistory.matchedPreviousPositions(token);
+        float[] previousPositions = previousPositionsForSource(source,token);
         if (previousPositions == null || previousPositions.length < 3 || previousPositions.length % 3 != 0) {
             return null;
         }
 
         return planPositions(source, executeInfo, previousPositions);
+    }
+
+    static float @Nullable [] previousPositionsForSource(final RenderPipeline source,
+            final MetalPreviousVertexHistory.DrawToken token) {
+        float[] positions=MetalPreviousVertexHistory.matchedPreviousPositions(token);
+        if(positions==null)return null;
+        if(source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/block")) {
+            var previous=MetalPreviousVertexHistory.matchedPreviousSourceUniforms(token);
+            if(previous==null)return null;
+            var offset=previous.modelOffset();
+            for(int i=0;i<positions.length;i+=3) {
+                positions[i]+=offset.x;positions[i+1]+=offset.y;positions[i+2]+=offset.z;
+                if(!Float.isFinite(positions[i])||!Float.isFinite(positions[i+1])||!Float.isFinite(positions[i+2]))return null;
+            }
+        }
+        return positions;
     }
 
     private static @Nullable Plan planPositions(final RenderPipeline source,

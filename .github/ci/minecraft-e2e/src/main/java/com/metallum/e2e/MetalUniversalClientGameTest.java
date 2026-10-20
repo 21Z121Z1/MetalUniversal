@@ -790,6 +790,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 zombie.setPos(160.5,126,165);zombie.setNoAi(true);zombie.setNoGravity(true);
                 zombie.setCustomName(net.minecraft.network.chat.Component.literal("Motion depth overlay"));zombie.setCustomNameVisible(true);
                 server.overworld().addFreshEntity(zombie);
+                var falling=net.minecraft.world.entity.item.FallingBlockEntity.fall(server.overworld(),new BlockPos(160,128,166),
+                        net.minecraft.world.level.block.Blocks.STONE.defaultBlockState());
+                falling.setNoGravity(true);falling.setDeltaMovement(.03,0,0);
             });
             singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
             singleplayer.getServer().runCommand("summon minecraft:end_crystal 163 128 169 {beam_target:[I;160,131,171],ShowBottom:0b}");
@@ -898,7 +901,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 && counts.matchingTransformDraws() > 0 && counts.matchingSurfaceDraws() > 0 && counts.encodedMotionDraws() > 0,
                         "Block entity never proved its real source draw and complete previous history: " + state + " " + counts);
             }
-            for (String state : new String[]{"EndCrystalRenderState", "ExperienceOrbRenderState", "ShulkerBulletRenderState",
+            for (String state : new String[]{"EndCrystalRenderState", "ExperienceOrbRenderState", "ShulkerBulletRenderState", "FallingBlockRenderState",
                     "EntityRenderState[minecraft:wind_charge]", "EntityRenderState[minecraft:breeze_wind_charge]"}) {
                 var counts = census.owners().get("net.minecraft.client.renderer.entity.state." + state);
                 require(counts != null && counts.sourceColorDraws() > 0 && counts.matchingGeometryDraws() > 0

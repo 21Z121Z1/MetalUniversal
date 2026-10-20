@@ -33,7 +33,7 @@ final class MetalMotionShaderCompilationTest {
             paths = files.filter(path -> path.getFileName().toString().contains("motion."))
                     .sorted().toList();
         }
-        assertEquals(16, paths.size(), "Review the shader matrix when adding/removing a motion shader");
+        assertEquals(17, paths.size(), "Review the shader matrix when adding/removing a motion shader");
         for (Path path : paths) {
             String name = path.getFileName().toString();
             List<List<String>> variants = List.of(List.of());
