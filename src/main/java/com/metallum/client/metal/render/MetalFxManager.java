@@ -205,7 +205,7 @@ public final class MetalFxManager {
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     @Nullable private MetalFxColorTransfer temporalColorTransfer;
-    @Nullable private FrameSynthesisContract.FrameStamp temporalColorTransferStamp;
+    private FrameSynthesisContract.@Nullable FrameStamp temporalColorTransferStamp;
     private boolean uiTargetShaderWrite;
     private boolean objectMotionInputsCleared;
     private boolean frameGenerationEnabled;
@@ -270,7 +270,7 @@ public final class MetalFxManager {
     private boolean frameResetForPresent = true;
     private float frameFieldOfView = 70.0F;
     private float frameFarPlane = 1000.0F;
-    @Nullable private FrameSynthesisContract.Perspective frameCameraPerspective;
+    private FrameSynthesisContract.@Nullable Perspective frameCameraPerspective;
     // Frame interpolation wants the interval between the two source frames it
     // interpolates between, anchored on the render timeline. Scene-frame start
     // is a far more stable anchor than the native encode-enqueue wall clock.
