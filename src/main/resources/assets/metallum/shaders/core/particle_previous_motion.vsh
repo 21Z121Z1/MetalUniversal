@@ -17,6 +17,10 @@ layout(location = 4) in vec3 PreviousPosition;
 #ifdef METALLUM_PREVIOUS_VALIDITY
 layout(location = 5) in float PreviousValidity;
 #endif
+#ifdef METALLUM_PREVIOUS_COVERAGE
+layout(location = 6) in vec2 PreviousCoverage;
+layout(location = 6) out vec2 metallumPreviousCoverage;
+#endif
 
 layout(std140) uniform MetallumMotion {
     mat4 CurrentUnjitteredFromRaster;
@@ -36,4 +40,7 @@ void main() {
     metallumVertexAlpha = Color.a * sample_lightmap(Sampler2, UV2).a;
 
     metallumSetClipHistory(currentClip, previousClip);
+#ifdef METALLUM_PREVIOUS_COVERAGE
+    metallumPreviousCoverage = PreviousCoverage;
+#endif
 }

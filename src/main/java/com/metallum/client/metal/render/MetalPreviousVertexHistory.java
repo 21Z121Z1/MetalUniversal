@@ -231,10 +231,19 @@ final class MetalPreviousVertexHistory {
 
     /** Exactly four vertices and six indices per actual SingleQuadParticle emission. */
     static void stageParticleIdentities(final @Nullable DrawToken token, final List<Long> ids) {
+        stageQuadIdentities(token,ids,true);
+    }
+
+    /** Weather column coordinates use the full signed 64-bit key space, including the origin. */
+    static void stageQuadIdentities(final @Nullable DrawToken token,final List<Long> ids) {
+        stageQuadIdentities(token,ids,false);
+    }
+
+    private static void stageQuadIdentities(final @Nullable DrawToken token,final List<Long> ids,final boolean positiveOnly) {
         Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
         if (snapshot == null) return;
         Signature s = snapshot.signature();
-        if (ids == null || ids.isEmpty() || ids.stream().anyMatch(id -> id == null || id <= 0)
+        if (ids == null || ids.isEmpty() || ids.stream().anyMatch(id -> id == null || (positiveOnly && id <= 0))
                 || s.topology() != PrimitiveTopology.QUADS
                 || !s.elements().equals(com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getElements())
                 || s.vertexSize() != com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getVertexSize()

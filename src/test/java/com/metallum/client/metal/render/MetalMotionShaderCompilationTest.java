@@ -76,6 +76,11 @@ final class MetalMotionShaderCompilationTest {
                 List<String> biasDefines=new ArrayList<>(depthDefines);
                 biasDefines.add("METALLUM_PREVIOUS_DEPTH_BIAS");
                 cases.add(Arguments.of(name,biasDefines));
+                if(name.startsWith("particle_")) {
+                    List<String> coverageDefines=new ArrayList<>(biasDefines);
+                    coverageDefines.add("METALLUM_PREVIOUS_COVERAGE");
+                    cases.add(Arguments.of(name,coverageDefines));
+                }
             }
         }
         return cases.stream();

@@ -4,6 +4,9 @@
 layout(location = 0) in vec4 metallumCurrentClip;
 layout(location = 1) in vec4 metallumPreviousClip;
 layout(location = 5) noperspective in float metallumHistoryValidity;
+#ifdef METALLUM_PREVIOUS_COVERAGE
+layout(location = 6) in vec2 metallumPreviousCoverage;
+#endif
 
 #ifdef METALLUM_MOTION_DEPTH
 // Same visible surface as XY/validity. Background clears to (-1,-1), while
@@ -77,6 +80,11 @@ MetallumMotionSample metallumMotionSample() {
     bool biasValid = all(greaterThan(metallumPreviousRaster.xy, vec2(0.0)))
             && abs(metallumPreviousRaster.w) <= 16.0 && abs(determinant) > 1.0e-12
             && !isnan(oldBias) && !isinf(oldBias);
+#endif
+#ifdef METALLUM_PREVIOUS_COVERAGE
+    if (any(isnan(metallumPreviousCoverage)) || any(isinf(metallumPreviousCoverage))
+            || any(lessThan(metallumPreviousCoverage, vec2(0.0)))
+            || any(greaterThan(metallumPreviousCoverage, vec2(1.0)))) return result;
 #endif
     if (!(metallumHistoryValidity > 0.99999)
             || !(metallumCurrentClip.w > 1.0e-6) || !(metallumPreviousClip.w > 1.0e-6)
