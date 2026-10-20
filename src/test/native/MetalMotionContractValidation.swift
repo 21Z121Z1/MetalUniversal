@@ -281,6 +281,8 @@ private final class Harness {
                         e.setDepthStencilState(device.makeDepthStencilState(descriptor:state))
                     }
                     e.setFragmentTexture(depth,index:0);e.setFragmentTexture(motion,index:1)
+                    var extent = SIMD2<UInt32>(UInt32(w),UInt32(h))
+                    e.setFragmentBytes(&extent,length:MemoryLayout<SIMD2<UInt32>>.stride,index:0)
                     e.setViewport(MTLViewport(originX:0,originY:0,width:Double(w),height:Double(h),znear:0,zfar:1))
                     e.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:3);e.endEncoding()
                 }

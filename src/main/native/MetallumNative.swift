@@ -2875,6 +2875,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         if destinationDepth.pixelFormat != .r32Float { encoder.setDepthStencilState(depthResampleState) }
         encoder.setFragmentTexture(sourceDepth, index: 0)
         encoder.setFragmentTexture(sourceMotion, index: 1)
+        var destinationSize = SIMD2<UInt32>(UInt32(destinationMotion.width), UInt32(destinationMotion.height))
+        encoder.setFragmentBytes(&destinationSize, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 0)
         encoder.setViewport(MTLViewport(
             originX: 0.0,
             originY: 0.0,
@@ -2913,6 +2915,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         pass.renderTargetWidth = destinationMotion.width
         pass.renderTargetHeight = destinationMotion.height
+        let destinationSize = SIMD2<UInt32>(UInt32(destinationMotion.width), UInt32(destinationMotion.height))
+        guard let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(destinationSize, at: lease.slotIndex) else {
+            return false
+        }
         guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
@@ -2923,6 +2929,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             visibilityOptions: .device
         )
         let tables = lease.owner.argumentTables(at: lease.slotIndex)
+        tables.1.setAddress(uniformBuffer.gpuAddress + UInt64(uniformOffset), index: 0)
         tables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
         tables.1.setTexture(sourceMotion.gpuResourceID, index: 1)
         encoder.setArgumentTable(tables.1, stages: .fragment)
@@ -4514,11 +4521,15 @@ private func fullscreenMslSource(flipY: Bool, depthAsColor: Bool = false) -> Str
     fragment MotionDepthResampleOut metallum_motion_depth_resample_fs(
       PresentVertexOut in [[stage_in]],
       \(depthAsColor ? "texture2d<float, access::read>" : "depth2d<float, access::read>") sourceDepth [[texture(0)]],
-      texture2d<float, access::read> sourceMotion [[texture(1)]]
+      texture2d<float, access::read> sourceMotion [[texture(1)]],
+      constant uint2& destinationSize [[buffer(0)]]
     ) {
       uint2 size = uint2(sourceDepth.get_width(), sourceDepth.get_height());
-      float2 sourcePosition = in.uv * float2(size) - 0.5;
-      uint2 base = uint2(clamp(floor(sourcePosition), float2(0.0), float2(size - 1)));
+      // Integer pixel-center mapping avoids interpolated-UV rounding across an
+      // exact source-texel boundary at odd/nonsquare destination dimensions.
+      uint2 destinationPixel = uint2(in.position.xy);
+      int2 numerator = int2((destinationPixel * 2 + 1) * size) - int2(destinationSize);
+      uint2 base = uint2(clamp(numerator / int2(destinationSize * 2), int2(0), int2(size - 1)));
       uint2 next = min(base + 1, size - 1);
       uint2 candidates[4] = {
         base,

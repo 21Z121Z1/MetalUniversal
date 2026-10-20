@@ -1086,7 +1086,7 @@ final class MetalMotionProducerGpuTest {
             var white=texture("actual lightmap overlay glint",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
             var dissolveMask=texture("actual dissolve mask",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
             var color=texture("actual source color",GpuFormat.RGBA32_FLOAT,copy);
-            var survival=texture("source fragment survival",GpuFormat.D32_FLOAT,copy);
+            var survival=texture("source fragment survival",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
             var ownership=texture("private motion depth",GpuFormat.D32_FLOAT,copy);
             var flow=texture("material XY",GpuFormat.RG16_FLOAT,copy);
             var valid=texture("material ownership",GpuFormat.R8_UNORM,copy);
@@ -1264,7 +1264,12 @@ final class MetalMotionProducerGpuTest {
                 if(!red&&!green)continue;
                 covered++;float x=Float.float16ToFloat(vectors.getShort(p*4)),y=Float.float16ToFloat(vectors.getShort(p*4+2));
                 float z=green ? normalZ : overlayZ;
-                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x-(green ? .25F : -.125F))>1e-5||Math.abs(y)>1e-5)wrongMotion++;
+                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x-(green ? .25F : -.125F))>1e-5||Math.abs(y)>1e-5) {
+                    if(wrongMotion<3)System.out.println("SOURCE_DEPTH_POLICY_DIAGNOSTIC "+name+" pixel="+p
+                            +" actualXY="+x+","+y+" green="+green+" tag="+Byte.toUnsignedInt(mask[p])
+                            +" z="+pairs.getFloat(p*8)+","+pairs.getFloat(p*8+4));
+                    wrongMotion++;
+                }
                 if(Math.abs(pairs.getFloat(p*8)-z)>1e-6||Math.abs(pairs.getFloat(p*8+4)-z)>1e-6)wrongDepth++;
             }
             Path dir=Path.of("build/agent-evidence/motion-producers/source-depth-policy/"+name);Files.createDirectories(dir);
