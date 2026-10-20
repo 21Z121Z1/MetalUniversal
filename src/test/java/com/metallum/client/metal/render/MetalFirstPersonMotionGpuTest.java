@@ -475,23 +475,30 @@ final class MetalFirstPersonMotionGpuTest {
                 .putFloat(UNIFORM_OFFSET+28,.125F).putFloat(UNIFORM_OFFSET+32,W).putFloat(UNIFORM_OFFSET+36,H);
         MetalSourceUniforms captured;
         try(var dynamic=dynamicBuffer(new Matrix4f().translation(.3F,.2F,-1));
-            var globals=device.createBuffer(()->"actual mutable Globals UBO",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_COPY_DST,bytes)) {
+            var globals=device.createBuffer(()->"actual mutable Globals UBO",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_COPY_DST,bytes);
+            var fog=device.createBuffer(()->"actual mutable Fog UBO",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_COPY_DST,hudSourceFog())) {
             var globalsSlice=globals.slice(UNIFORM_OFFSET,48);
-            captured=MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globalsSlice);
-            assertNotNull(captured);assertTrue(captured.hasGlobals());
+            var fogSlice=fog.slice(0,MetalSourceUniforms.FOG_BYTES);
+            captured=MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globalsSlice,fogSlice);
+            assertNotNull(captured);assertTrue(captured.hasGlobals());assertTrue(captured.hasFog());
             ByteBuffer replacement=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
             replacement.putFloat(12,.1F).putFloat(28,.9F);
             encoder.writeToBuffer(globals.slice(UNIFORM_OFFSET,48),replacement);
+            ByteBuffer changedFog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());
+            changedFog.putFloat(16,.1F).putFloat(20,.2F);encoder.writeToBuffer(fogSlice,changedFog);
             overwriteDynamic(dynamic);
             var changed=MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globals.slice(UNIFORM_OFFSET,48));
             assertNotNull(changed);assertEquals(.1F,changed.glintAlpha(),0);assertEquals(.9F,changed.gameTime(),0);
             assertEquals(.625F,captured.glintAlpha(),0);assertEquals(.125F,captured.gameTime(),0);
             assertEquals(.3F,captured.modelView().m30(),0);assertEquals(0,captured.modelOffset().x,0);
             globals.close();assertNull(MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globalsSlice));
+            fog.close();assertNull(MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),null,fogSlice));
         }
         ByteBuffer written=ByteBuffer.allocate(48).order(ByteOrder.nativeOrder());captured.writeGlobals(written);
         assertEquals(0x7FC00000,written.getInt(0));assertEquals(.625F,written.getFloat(12),0);
         assertEquals(.125F,captured.gameTime(),0,"history owns bytes after native resources retire");
+        ByteBuffer frozenFog=ByteBuffer.allocate(40).order(ByteOrder.nativeOrder());captured.writeFog(frozenFog);
+        assertEquals(1000,frozenFog.getFloat(16),0);assertEquals(2000,frozenFog.getFloat(20),0);
     }
 
     @Test

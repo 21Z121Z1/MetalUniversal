@@ -830,6 +830,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             singleplayer.getServer().runCommand("summon minecraft:shulker_bullet 159 130 166 {NoGravity:1b}");
             singleplayer.getServer().runCommand("summon minecraft:wind_charge 157 130 167 {NoGravity:1b}");
             singleplayer.getServer().runCommand("summon minecraft:breeze_wind_charge 162 130 166 {NoGravity:1b}");
+            singleplayer.getServer().runCommand("summon minecraft:ender_dragon 170 130 178 {NoAI:1b,NoGravity:1b,Silent:1b}");
             singleplayer.getServer().runCommand("setblock 156 128 165 minecraft:enchanting_table");
             singleplayer.getServer().runCommand("setblock 158 128 165 minecraft:lectern[facing=north,has_book=true]{Book:{id:\"minecraft:writable_book\",count:1}}");
             singleplayer.getServer().runCommand("setblock 160 128 168 minecraft:conduit");
@@ -837,7 +838,15 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             singleplayer.getServer().runCommand("setblock 164 128 165 minecraft:skeleton_skull");
             for (boolean oit : new boolean[]{false, true}) {
                 context.runOnClient(client -> client.options.improvedTransparency().set(oit));
+                singleplayer.getServer().runOnServer(server -> {
+                    for(int i=0;i<3;i++) {
+                        var bolt=new net.minecraft.world.entity.LightningBolt(net.minecraft.world.entity.EntityTypes.LIGHTNING_BOLT,server.overworld());
+                        bolt.setPos(159+i*2,128,168);bolt.setVisualOnly(true);bolt.setSilent(true);
+                        server.overworld().addFreshEntity(bolt);
+                    }
+                });
                 if (oit) {
+                    singleplayer.getServer().runCommand("data merge entity @e[type=minecraft:ender_dragon,limit=1] {Health:0.0f}");
                     // A visible vertical 16-block frame exercises the active cage/wind/eye path,
                     // after the ordinary phase has exercised the inactive shell.
                     singleplayer.getServer().runCommand("fill 159 127 167 161 129 169 minecraft:water");
@@ -926,6 +935,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             var beam = census.pipelines().get("minecraft:pipeline/end_crystal_beam");
             require(beam != null && beam.ownedColorExecutions() > 0 && beam.encodedMotionDraws() > 0,
                     "Crystal model alone cannot prove its optional custom beam: " + beam);
+            var rays=census.pipelines().entrySet().stream().filter(row->row.getKey().contains("dragon_rays"))
+                    .map(java.util.Map.Entry::getValue).toList();
+            require(!rays.isEmpty() && rays.stream().mapToLong(row->row.ownedColorExecutions()).sum()>0
+                            && rays.stream().mapToLong(row->row.encodedMotionDraws()+row.encodedDisocclusionDraws()).sum()>0,
+                    "Dragon model admission must also reach its death-ray custom geometry: "+rays);
             for (String state : new String[]{"EnchantTableRenderState", "LecternRenderState", "DecoratedPotRenderState", "ConduitRenderState", "SkullBlockRenderState"}) {
                 var counts = census.owners().get("net.minecraft.client.renderer.blockentity.state." + state);
                 require(counts != null && counts.sourceColorDraws() > 0 && counts.matchingGeometryDraws() > 0
@@ -933,6 +947,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         "Block entity never proved its real source draw and complete previous history: " + state + " " + counts);
             }
             for (String state : new String[]{"EndCrystalRenderState", "ExperienceOrbRenderState", "ShulkerBulletRenderState", "FallingBlockRenderState",
+                    "LightningBoltRenderState", "EnderDragonRenderState",
                     "EntityRenderState[minecraft:wind_charge]", "EntityRenderState[minecraft:breeze_wind_charge]"}) {
                 var counts = census.owners().get("net.minecraft.client.renderer.entity.state." + state);
                 require(counts != null && counts.sourceColorDraws() > 0 && counts.matchingGeometryDraws() > 0

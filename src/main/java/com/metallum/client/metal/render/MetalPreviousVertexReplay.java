@@ -25,7 +25,11 @@ import java.nio.ByteOrder;
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexReplay {
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
-                            @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals) {
+                            @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals,@Nullable GpuBufferSlice fog) {
+        SourceDrawInputs(GpuBufferSlice projection,GpuBufferSlice dynamicTransforms,@Nullable GpuTextureView depth,
+                         @Nullable GpuBufferSlice globals) {
+            this(projection,dynamicTransforms,depth,globals,null);
+        }
         SourceDrawInputs(GpuBufferSlice projection,GpuBufferSlice dynamicTransforms,@Nullable GpuTextureView depth) {
             this(projection,dynamicTransforms,depth,null);
         }
@@ -139,7 +143,7 @@ final class MetalPreviousVertexReplay {
     static boolean captureSourceTransform(final MetalPreviousVertexHistory.DrawToken token,
             final @Nullable SourceDrawInputs inputs, final Matrix4f unjitteredFromRaster) {
         Matrix4f projection = inputs == null ? null : sourceUniformMatrix(inputs.projection());
-        MetalSourceUniforms uniforms = inputs == null ? null : MetalSourceUniforms.capture(inputs.dynamicTransforms(),inputs.globals());
+        MetalSourceUniforms uniforms = inputs == null ? null : MetalSourceUniforms.capture(inputs.dynamicTransforms(),inputs.globals(),inputs.fog());
         Matrix4f modelView = uniforms == null ? null : uniforms.modelView();
         var transform = projection == null || modelView == null ? null
                 : new MetalPreviousVertexHistory.DrawTransform(projection, modelView,

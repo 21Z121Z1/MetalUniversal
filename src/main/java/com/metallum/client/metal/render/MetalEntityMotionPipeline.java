@@ -74,6 +74,7 @@ final class MetalEntityMotionPipeline {
         LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
         TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
         TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/"),
+        LIGHTNING("core/lightning_previous_motion", "core/lightning_previous_motion", "lightning_previous_motion/"),
         WATER_MASK("core/position_previous_motion", "core/position_previous_motion", "position_previous_motion/");
 
         private final Identifier vertexShader;
@@ -117,6 +118,10 @@ final class MetalEntityMotionPipeline {
         var depth=source.getDepthStencilState();
         return depthAttachmentPresent && depth!=null
                 && (depth.depthBiasScaleFactor()!=0 || depth.depthBiasConstant()!=0);
+    }
+
+    static boolean requiresFogSnapshot(final RenderPipeline source) {
+        return previousFamilyOf(source)==PreviousFamily.LIGHTNING;
     }
 
     private static boolean auditedShaders(final RenderPipeline source) {
@@ -204,6 +209,9 @@ final class MetalEntityMotionPipeline {
             return PreviousFamily.SHADOW;
         }
         if (shader.equals("core/block") && DefaultVertexFormat.BLOCK.equals(format)) return PreviousFamily.BLOCK;
+        if (shader.equals("core/rendertype_lightning") && DefaultVertexFormat.POSITION_COLOR.equals(format)) {
+            return PreviousFamily.LIGHTNING;
+        }
         if (shader.equals("core/particle")
                 && DefaultVertexFormat.PARTICLE.equals(format)) {
             return PreviousFamily.PARTICLE;
@@ -411,14 +419,15 @@ final class MetalEntityMotionPipeline {
             }
             if(overridesPrivateDepth(source,depthAttachmentPresent))builder.withShaderDefine("METALLUM_MOTION_OVERLAY");
             if (source.getShaderDefines().flags().stream().anyMatch(flag -> flag.equals("GLINT")
-                    || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))) {
+                    || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))
+                    || previousFamily==PreviousFamily.LIGHTNING) {
                 builder.withShaderDefine("METALLUM_REACTIVE_MATERIAL");
             }
         }
         boolean alphaComposite = source.getColorTargetStates().stream().filter(java.util.Objects::nonNull)
                 .anyMatch(target -> target.blendFunction().map(blend -> blend.color().sourceFactor() == BlendFactor.SRC_ALPHA).orElse(false))
-                || (source.getShaderDefines().flags().contains("OIT_ACCUMULATE")
-                && !source.getShaderDefines().flags().contains("OIT_ADDITIVE"));
+                // Vanilla's additive OIT also premultiplies RGB by source alpha.
+                || source.getShaderDefines().flags().contains("OIT_ACCUMULATE");
         if (alphaComposite) builder.withShaderDefine("METALLUM_ALPHA_COMPOSITE");
 
         DepthStencilState sourceDepth = source.getDepthStencilState();

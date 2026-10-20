@@ -24,6 +24,8 @@ import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
 import net.minecraft.client.renderer.entity.state.EndCrystalRenderState;
 import net.minecraft.client.renderer.entity.state.ExperienceOrbRenderState;
 import net.minecraft.client.renderer.entity.state.ShulkerBulletRenderState;
+import net.minecraft.client.renderer.entity.state.LightningBoltRenderState;
+import net.minecraft.client.renderer.entity.state.EnderDragonRenderState;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypeIds;
@@ -165,9 +167,16 @@ final class MetalFxMotionEligibility {
     private static boolean isAuditedAdditionalEntity(final EntityRenderState state) {
         // End crystal: model plus optional ENTITY-format custom beam. Experience orb: camera-
         // facing ENTITY custom quad. Shulker bullet: model plus translucent model overlay.
-        // Each remains whole-object exact: optional layers and material/transform history must match.
+        // Lightning branches reset on seed changes. Dragon includes model/eyes/dissolve, beam and
+        // fixed-seed death rays. Every optional layer and complete draw manifest must still match.
         return state instanceof EndCrystalRenderState || state instanceof ExperienceOrbRenderState
-                || state instanceof ShulkerBulletRenderState;
+                || state instanceof ShulkerBulletRenderState || state instanceof LightningBoltRenderState
+                || state instanceof EnderDragonRenderState;
+    }
+
+    /** A new random bolt is a newly appearing surface, even when its draw sizes match. */
+    static long geometryDiscontinuity(final EntityRenderState state) {
+        return state instanceof LightningBoltRenderState bolt ? bolt.seed : 0;
     }
 
     private static boolean isExactGenericEntityType(final EntityRenderState state) {

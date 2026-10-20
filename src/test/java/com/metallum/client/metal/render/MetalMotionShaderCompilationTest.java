@@ -33,7 +33,7 @@ final class MetalMotionShaderCompilationTest {
             paths = files.filter(path -> path.getFileName().toString().contains("motion."))
                     .sorted().toList();
         }
-        assertEquals(17, paths.size(), "Review the shader matrix when adding/removing a motion shader");
+        assertEquals(19, paths.size(), "Review the shader matrix when adding/removing a motion shader");
         for (Path path : paths) {
             String name = path.getFileName().toString();
             List<List<String>> variants = List.of(List.of());
@@ -48,6 +48,9 @@ final class MetalMotionShaderCompilationTest {
                 }
             } else if (name.startsWith("text_background")) {
                 variants = List.of(List.of(), List.of("IS_SEE_THROUGH"));
+            } else if (name.startsWith("lightning_")) {
+                variants=List.of(List.of(),List.of("METALLUM_ALPHA_COMPOSITE"),
+                        List.of("METALLUM_ALPHA_COMPOSITE","OIT_ACCUMULATE","OIT_ADDITIVE"));
             } else if (name.startsWith("entity_")) {
                 variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
                         List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"),
