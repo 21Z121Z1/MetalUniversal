@@ -110,6 +110,10 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 原版 additive OIT 的 sampleColorForAccumulation 也以 alpha 预乘 RGB，所以所有 OIT_ACCUMULATE 的零 alpha 均不应覆盖运动。新增原版 OIT shader／真实零 absorbance 纹理对照，用实际 RGB 贡献判断 additive 可见性（其输出 alpha 固定为 0），验证实体与 POSITION_COLOR 的正、零贡献。真实客户端加入视觉闪电、普通／死亡龙及死亡 rays，继续要求实际 source、owner、匹配历史和编码证据；新增路径仍待对应 Actions 验收。
 
+天气路径复用 core/particle；审计该原版着色器时发现 reduced particle VS 曾假定 lightmap alpha=1。运动 VS 现在读取真实 UV2／Sampler2 的 alpha，并按原版与顶点 alpha 一起插值，fragment 再乘纹理与 ColorModulator 后执行 0.1 裁剪。Sampler2 的实际分配／采样身份加入粒子 surface history。新增三项 GPU 对照直接渲染原版 particle shader，覆盖光照纹理 alpha=0、低于 cutout 和可见；旧粒子输入／重排／首帧回放测试也显式绑定真实采样资源。新增行为仍待对应 Actions，不能据此宣称天气入口已接通。
+
+`924dd31` macOS 15 为 120/121。新增雾、实际 additive OIT 正／零贡献、Fog 重写／关闭快照和透视换姿态均通过。唯一失败是正交换姿态参考的整四边形单平面自检：GPU 光栅取整使两个源三角形不再共用同一 D32 平面，拟合残差 6.61e-6；运动 Z 对照最大误差 3.60e-6，原有 3e-5 预算内且错误像素为零。参考现在给原版两三角形分别写独立颜色标记，以各自实际 D32 拟合平面，继续要求每个平面残差 <3e-6，保持运动 Z 与负例阈值。新增 CPU 反例证明合并两个不同的 primitive 平面不能通过该自检；修正仍待新 Actions，不提高任何旧容差。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
