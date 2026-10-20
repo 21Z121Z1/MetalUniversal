@@ -108,12 +108,16 @@ final class MetalPreviousVertexHistory {
                            int anisotropy, java.util.OptionalDouble maxLod) {}
 
     private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
-                            @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds) {
+                            @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds,
+                            @Nullable MetalSourceUniforms sourceUniforms) {
         Snapshot withTransform(final @Nullable DrawTransform value) {
-            return new Snapshot(signature, positions, value, surface, particleIds);
+            return new Snapshot(signature, positions, value, surface, particleIds,sourceUniforms);
         }
         Snapshot withSurface(final @Nullable SurfaceIdentity value) {
-            return new Snapshot(signature, positions, transform, value, particleIds);
+            return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms);
+        }
+        Snapshot withSourceUniforms(final @Nullable MetalSourceUniforms value) {
+            return new Snapshot(signature,positions,transform,surface,particleIds,value);
         }
     }
 
@@ -216,7 +220,7 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null, null));
+            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null, null,null));
         }
     }
 
@@ -233,7 +237,7 @@ final class MetalPreviousVertexHistory {
             PENDING.remove(token.key());
             return;
         }
-        PENDING.put(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(), List.copyOf(ids)));
+        PENDING.put(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(), List.copyOf(ids),snapshot.sourceUniforms()));
     }
 
     /** Attaches uniforms to the same pending draw/geometry transaction, never a separate history. */
@@ -247,6 +251,27 @@ final class MetalPreviousVertexHistory {
     static void stageSurface(final @Nullable DrawToken token, final @Nullable SurfaceIdentity surface) {
         Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
         if (snapshot != null) PENDING.put(token.key(), snapshot.withSurface(surface));
+    }
+
+    static void stageSourceUniforms(final @Nullable DrawToken token, final @Nullable MetalSourceUniforms uniforms) {
+        Snapshot snapshot=frameOpen && token!=null ? PENDING.get(token.key()) : null;
+        if(snapshot!=null)PENDING.put(token.key(),snapshot.withSourceUniforms(uniforms));
+    }
+
+    static @Nullable MetalSourceUniforms currentSourceUniforms(final @Nullable DrawToken token) {
+        Snapshot snapshot=frameOpen && token!=null ? PENDING.get(token.key()) : null;
+        return snapshot==null || snapshot.transform()==null ? null : snapshot.sourceUniforms();
+    }
+
+    static @Nullable MetalSourceUniforms matchedPreviousSourceUniforms(final @Nullable DrawToken token) {
+        if(token==null || !objectManifestMatches(token.key().object()))return null;
+        ObjectKey object=token.key().object();
+        for(int ordinal=0;ordinal<CURRENT_DRAW_COUNTS.get(object);ordinal++) {
+            DrawKey key=new DrawKey(object,ordinal);
+            if(PENDING.get(key).sourceUniforms()==null || PREVIOUS.get(key).sourceUniforms()==null
+                    || PENDING.get(key).transform()==null || PREVIOUS.get(key).transform()==null)return null;
+        }
+        return PREVIOUS.get(token.key()).sourceUniforms();
     }
 
     /** Visibility resources are checked after the complete source manifest has been staged. */

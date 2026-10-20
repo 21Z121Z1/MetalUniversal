@@ -426,8 +426,7 @@ public final class MetalFxManager {
     private record ObjectMotionReplay(
             MetalPreviousVertexReplay.SourceState prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
-            GpuBufferSlice dynamicTransforms,
-            GpuBufferSlice projection,
+            MetalSourceUniforms uniforms,
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             MetalPreviousVertexHistory.DrawToken previousVertexToken
@@ -439,6 +438,7 @@ public final class MetalFxManager {
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
             GpuBufferSlice projection,
+            @Nullable GpuBufferSlice globals,
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
@@ -1942,9 +1942,9 @@ public final class MetalFxManager {
             return;
         }
 
-        GpuBufferSlice projection = sourceInputs == null ? null : sourceInputs.projection();
-        if (projection == null) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("source-projection-unavailable");
+        MetalSourceUniforms uniforms = MetalPreviousVertexHistory.currentSourceUniforms(previousVertexToken);
+        if (uniforms == null) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("source-uniform-snapshot-unavailable");
             return;
         }
         // Exact previous-position selection is intentionally deferred until flush. At that point all
@@ -1952,8 +1952,7 @@ public final class MetalFxManager {
         objectMotionReplays.add(new ObjectMotionReplay(
                 prepared,
                 executeInfo,
-                sourceInputs.dynamicTransforms(),
-                projection,
+                uniforms,
                 sourceInputs.depth(),
                 sample,
                 previousVertexToken
@@ -2075,22 +2074,36 @@ public final class MetalFxManager {
                 motionUniform = mapped.slice();
             }
             MetalFxMotionTelemetry.recordGpuUpload(128L);
-            GpuBufferSlice replayProjection = replay.projection();
-            if (drawTransforms != null) {
-                // ProjectionMatrixBuffer can be overwritten by later HUD/effect phases. Replay a
-                // frame-owned copy of the source matrix instead of a mutable global UBO backing.
-                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
-                        .allocateGpuMapped(64L, 256L, GpuBuffer.USAGE_UNIFORM)) {
-                    drawTransforms.currentProjection().get(0, mapped.data().order(ByteOrder.nativeOrder()));
-                    replayProjection = mapped.slice();
-                }
-                MetalFxMotionTelemetry.recordGpuUpload(64L);
+            // Every source binding is immutable at replay time, including root/invalid paths.
+            // The source buffer object may already have been rewritten or orphaned since its draw.
+            GpuBufferSlice replayProjection, replayDynamic, replayGlobals = null;
+            var currentTransform = MetalPreviousVertexHistory.currentDrawTransform(replay.previousVertexToken());
+            if (currentTransform == null) continue;
+            try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                    .allocateGpuMapped(64L,256L,GpuBuffer.USAGE_UNIFORM)) {
+                currentTransform.projection().get(0,mapped.data().order(ByteOrder.nativeOrder()));
+                replayProjection=mapped.slice();
             }
+            try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                    .allocateGpuMapped(MetalSourceUniforms.DYNAMIC_BYTES,256L,GpuBuffer.USAGE_UNIFORM)) {
+                replay.uniforms().writeDynamic(mapped.data());
+                replayDynamic=mapped.slice();
+            }
+            if (replay.uniforms().hasGlobals()) {
+                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                        .allocateGpuMapped(MetalSourceUniforms.GLOBAL_BYTES,256L,GpuBuffer.USAGE_UNIFORM)) {
+                    replay.uniforms().writeGlobals(mapped.data());
+                    replayGlobals=mapped.slice();
+                }
+            }
+            MetalFxMotionTelemetry.recordGpuUpload(64L+MetalSourceUniforms.DYNAMIC_BYTES
+                    +(replayGlobals == null ? 0 : MetalSourceUniforms.GLOBAL_BYTES));
             preparedReplays.add(new PreparedObjectMotionReplay(
                     prepared,
                     executeInfo,
-                    replay.dynamicTransforms(),
+                    replayDynamic,
                     replayProjection,
+                    replayGlobals,
                     replay.sourceDepth(),
                     replay.sample(),
                     motionUniform,
@@ -2184,6 +2197,7 @@ public final class MetalFxManager {
                 // projection. Replay the actual source draw's same-frame slice.
                 pass.setUniform("Projection", replay.projection());
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+                if (replay.globals() != null) pass.setUniform("Globals", replay.globals());
                 pass.setUniform("MetallumMotion", replay.motionUniform());
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());
                 if (exactPreviousPositions) {

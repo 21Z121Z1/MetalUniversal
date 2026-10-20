@@ -25,7 +25,11 @@ import java.nio.ByteOrder;
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexReplay {
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
-                            @Nullable GpuTextureView depth) {}
+                            @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals) {
+        SourceDrawInputs(GpuBufferSlice projection,GpuBufferSlice dynamicTransforms,@Nullable GpuTextureView depth) {
+            this(projection,dynamicTransforms,depth,null);
+        }
+    }
 
     /** Immutable bindings of the draw that actually executed, including OIT's selected pipeline. */
     record SourceState(RenderPipeline pipeline, Map<String, TextureViewAndSampler> textures,
@@ -106,11 +110,13 @@ final class MetalPreviousVertexReplay {
     static boolean captureSourceTransform(final MetalPreviousVertexHistory.DrawToken token,
             final @Nullable SourceDrawInputs inputs, final Matrix4f unjitteredFromRaster) {
         Matrix4f projection = inputs == null ? null : sourceUniformMatrix(inputs.projection());
-        Matrix4f modelView = inputs == null ? null : sourceUniformMatrix(inputs.dynamicTransforms());
+        MetalSourceUniforms uniforms = inputs == null ? null : MetalSourceUniforms.capture(inputs.dynamicTransforms(),inputs.globals());
+        Matrix4f modelView = uniforms == null ? null : uniforms.modelView();
         var transform = projection == null || modelView == null ? null
                 : new MetalPreviousVertexHistory.DrawTransform(projection, modelView,
                         new Matrix4f(unjitteredFromRaster).mul(projection));
         MetalPreviousVertexHistory.stageDrawTransform(token, transform);
+        MetalPreviousVertexHistory.stageSourceUniforms(token,transform == null ? null : uniforms);
         return transform != null && MetalPreviousVertexHistory.currentDrawTransform(token) != null;
     }
 

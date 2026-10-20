@@ -252,7 +252,10 @@ final class MetalFirstPersonMotionGpuTest {
             var plan = MetalPreviousVertexReplay.plan(source, info, token); assertNotNull(plan);
             ByteBuffer overwritten = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()); projection(35).get(0, overwritten);
             encoder.writeToBuffer(currentProjection.slice(UNIFORM_OFFSET, 64), overwritten);
+            var frozen = MetalPreviousVertexHistory.currentSourceUniforms(token); assertNotNull(frozen);
+            overwriteDynamic(dynamic);
             try (var capturedProjection = projectionBuffer(transforms.currentProjection());
+                 var capturedDynamic = frozenDynamicBuffer(frozen);
                  var motion = motionBuffer(transforms.currentUnjitteredFromRaster(), transforms.previousFromPosition());
                  var previous = positionBuffer(plan.previousPositions());
                  var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Motion from real source draw history")
@@ -261,7 +264,7 @@ final class MetalFirstPersonMotionGpuTest {
                          .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
                 pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositions(source));
                 pass.setUniform("Projection", capturedProjection.slice(UNIFORM_OFFSET, 64));
-                pass.setUniform("DynamicTransforms", dynamic.slice(UNIFORM_OFFSET, 256)); pass.setUniform("MetallumMotion", motion.slice());
+                pass.setUniform("DynamicTransforms", capturedDynamic.slice()); pass.setUniform("MetallumMotion", motion.slice());
                 pass.bindTexture("Sampler0", sampledView, sampler); pass.setVertexBuffer(0, plan.currentVertexBuffer());
                 pass.setVertexBuffer(1, previous.slice()); pass.setIndexBuffer(index, IndexType.SHORT);
                 pass.drawIndexed(6, 1, 0, plan.replayBaseVertex(), 0);
@@ -404,7 +407,10 @@ final class MetalFirstPersonMotionGpuTest {
             ByteBuffer replacement = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
             projection(35).get(0, replacement);
             encoder.writeToBuffer(pr.slice(UNIFORM_OFFSET, 64), replacement);
+            var frozen = MetalPreviousVertexHistory.currentSourceUniforms(token); assertNotNull(frozen);
+            overwriteDynamic(dynamic);
             try (GpuBuffer replayPr = projectionBuffer(hand.currentProjection());
+                 GpuBuffer replayDynamic = frozenDynamicBuffer(frozen);
                  GpuBuffer replayMotion = motionBuffer(hand.currentUnjitteredFromRaster(), hand.previousFromPosition());
                  GpuBuffer replayPositions = positionBuffer(replay.previousPositions());
                  MetalRenderPass pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Exact hand replay from history")
@@ -414,7 +420,7 @@ final class MetalFirstPersonMotionGpuTest {
                          .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
                 pass.setPipeline(pipeline);
                 pass.setUniform("Projection", replayPr.slice(UNIFORM_OFFSET, 64));
-                pass.setUniform("DynamicTransforms", dynamic.slice(UNIFORM_OFFSET, 256));
+                pass.setUniform("DynamicTransforms", replayDynamic.slice());
                 pass.setUniform("MetallumMotion", replayMotion.slice());
                 pass.bindTexture("Sampler0", sampledView, sampler);
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());
@@ -463,10 +469,37 @@ final class MetalFirstPersonMotionGpuTest {
     }
 
     @Test
+    void capturedGlobalsAndDynamicBytesSurviveRewriteAndResourceClose() {
+        ByteBuffer bytes=ByteBuffer.allocateDirect(512).order(ByteOrder.nativeOrder());
+        bytes.putInt(UNIFORM_OFFSET,0x7FC00000).putFloat(UNIFORM_OFFSET+12,.625F)
+                .putFloat(UNIFORM_OFFSET+28,.125F).putFloat(UNIFORM_OFFSET+32,W).putFloat(UNIFORM_OFFSET+36,H);
+        MetalSourceUniforms captured;
+        try(var dynamic=dynamicBuffer(new Matrix4f().translation(.3F,.2F,-1));
+            var globals=device.createBuffer(()->"actual mutable Globals UBO",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_COPY_DST,bytes)) {
+            var globalsSlice=globals.slice(UNIFORM_OFFSET,48);
+            captured=MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globalsSlice);
+            assertNotNull(captured);assertTrue(captured.hasGlobals());
+            ByteBuffer replacement=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
+            replacement.putFloat(12,.1F).putFloat(28,.9F);
+            encoder.writeToBuffer(globals.slice(UNIFORM_OFFSET,48),replacement);
+            overwriteDynamic(dynamic);
+            var changed=MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globals.slice(UNIFORM_OFFSET,48));
+            assertNotNull(changed);assertEquals(.1F,changed.glintAlpha(),0);assertEquals(.9F,changed.gameTime(),0);
+            assertEquals(.625F,captured.glintAlpha(),0);assertEquals(.125F,captured.gameTime(),0);
+            assertEquals(.3F,captured.modelView().m30(),0);assertEquals(0,captured.modelOffset().x,0);
+            globals.close();assertNull(MetalSourceUniforms.capture(dynamic.slice(UNIFORM_OFFSET,160),globalsSlice));
+        }
+        ByteBuffer written=ByteBuffer.allocate(48).order(ByteOrder.nativeOrder());captured.writeGlobals(written);
+        assertEquals(0x7FC00000,written.getInt(0));assertEquals(.625F,written.getFloat(12),0);
+        assertEquals(.125F,captured.gameTime(),0,"history owns bytes after native resources retire");
+    }
+
+    @Test
     void sourceUniformCaptureRejectsPrivateClosedMalformedAndNonFiniteBackings() {
         try (GpuBuffer valid = projectionBuffer(projection(75));
+             GpuBuffer dynamic = dynamicBuffer(new Matrix4f());
              GpuBuffer privateBuffer = device.createBuffer(() -> "GPU-only uniform", GpuBuffer.USAGE_UNIFORM, 64)) {
-            var good = new MetalPreviousVertexReplay.SourceDrawInputs(valid.slice(UNIFORM_OFFSET, 64), valid.slice(UNIFORM_OFFSET, 64), null);
+            var good = new MetalPreviousVertexReplay.SourceDrawInputs(valid.slice(UNIFORM_OFFSET, 64), dynamic.slice(UNIFORM_OFFSET, 256), null);
             var source = RenderPipeline.builder().withLocation("hand_contract/admission").withVertexShader("core/entity")
                     .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY)
                     .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).build();
@@ -482,6 +515,13 @@ final class MetalFirstPersonMotionGpuTest {
                 assertFalse(MetalPreviousVertexReplay.captureHandTransform(token,
                         new MetalPreviousVertexReplay.SourceDrawInputs(bad, good.dynamicTransforms(), null)));
                 assertNull(MetalPreviousVertexHistory.currentDrawTransform(token));
+                assertNull(MetalPreviousVertexHistory.currentSourceUniforms(token));
+            }
+            for (GpuBufferSlice bad : List.of(privateBuffer.slice(),dynamic.slice(UNIFORM_OFFSET,159),dynamic.slice(0,160),
+                    new GpuBufferSlice(dynamic,Long.MAX_VALUE,160),new GpuBufferSlice(dynamic,-1,160))) {
+                assertFalse(MetalPreviousVertexReplay.captureHandTransform(token,
+                        new MetalPreviousVertexReplay.SourceDrawInputs(good.projection(),bad,null)));
+                assertNull(MetalPreviousVertexHistory.currentSourceUniforms(token));
             }
             valid.close();
             assertFalse(MetalPreviousVertexReplay.captureHandTransform(token, good));
@@ -500,8 +540,27 @@ final class MetalFirstPersonMotionGpuTest {
         try (var mapped = buffer.slice(UNIFORM_OFFSET, 256).map(false, true)) {
             ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder()); matrix.get(0, bytes);
             new Matrix4f().get(64, bytes); for (int i = 0; i < 4; i++) bytes.putFloat(128+i*4, 1);
+            bytes.putFloat(144,0).putFloat(148,0).putFloat(152,0);
+        }
+        try (var mapped = buffer.slice(0,256).map(false,true)) {
+            new Matrix4f().m00(Float.NaN).get(0,mapped.data().order(ByteOrder.nativeOrder()));
         }
         return buffer;
+    }
+
+    private void overwriteDynamic(GpuBuffer buffer) {
+        try(var mapped=buffer.slice(UNIFORM_OFFSET,256).map(false,true)) {
+            ByteBuffer bytes=mapped.data().order(ByteOrder.nativeOrder());
+            new Matrix4f().translate(20,30,-40).get(0,bytes);
+            new Matrix4f().scaling(.1F).get(64,bytes);
+            bytes.putFloat(140,0).putFloat(144,200);
+        }
+    }
+
+    private GpuBuffer frozenDynamicBuffer(MetalSourceUniforms source) {
+        ByteBuffer bytes=ByteBuffer.allocateDirect(MetalSourceUniforms.DYNAMIC_BYTES).order(ByteOrder.nativeOrder());
+        source.writeDynamic(bytes);bytes.flip();
+        return device.createBuffer(()->"immutable actual source DynamicTransforms",GpuBuffer.USAGE_UNIFORM,bytes);
     }
 
     private GpuBuffer positionBuffer(float[] positions) {

@@ -96,7 +96,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         GpuBufferSlice projection = this.uniforms.get("Projection");
         GpuBufferSlice transforms = this.uniforms.get("DynamicTransforms");
         return projection == null || transforms == null ? null
-                : new MetalPreviousVertexReplay.SourceDrawInputs(projection, transforms, this.depthTexture);
+                : new MetalPreviousVertexReplay.SourceDrawInputs(projection, transforms, this.depthTexture,this.uniforms.get("Globals"));
     }
 
     MetalPreviousVertexReplay.@Nullable SourceState motionSourceState() {

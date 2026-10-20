@@ -26,6 +26,7 @@
 
 - 每个真实颜色 draw 在同一历史事务中保存实际 projection/model-view、去抖动投影及材质资源 allocation/generation。纹理更换、采样语义或管线改变时，不能仅凭顶点数量继续复用。OIT 的每帧系数目标不当作材质身份。
 - 世界逐顶点回放使用前一 draw 的实际 MVP；手部继续使用独立 HUD 历史。所有 exact draw 都复制当前源投影，避免后续全局 UBO 覆写。
+- 每笔 source draw 在同一 Snapshot 中冻结原版 std140 DynamicTransforms 的 160 字节和实际绑定 Globals 的 48 字节。保留 TextureMat、ColorModulator、ModelOffset、GlintAlpha/GameTime 和原始整数位；回放将冻结值上传到帧内资源，刚体及无效历史路径也不再引用可变源缓冲。前帧参数随接受的几何事务一起提交／丢弃，供后续材质和 ModelOffset 适配读取，不等同于这些适配已经完成。
 - 不可变顶点快照在附加矩阵、材质和提交时共享数据，保留对外防御性复制，避免每个 draw 重复复制整份姿态顶点。
 - `CustomFeatureRenderer` 必须在取得 vertex builder 前激活所有者。`574a4a7` 的 Sodium 实机客户端清单显示 OIT entity 有 10 次 hook、0 次所有者，暴露了旧 callback 包围位置过晚；后续 CI 必须要求所有者、完整历史和实际运动编码，不能只验 hook 次数。
 - 新审计模型路径为附魔台、讲台书本、饰纹陶罐、潮涌核心的 shell/cage/wind/eye、头颅，以及水晶及其 ENTITY beam、经验球、自身模型与透明覆盖的潜影贝导弹、两种风弹。每个对象仍需完整 manifest，空讲台不算几何，未知状态／管线继续拒绝。
@@ -66,6 +67,8 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 已知所有者、当前几何和源矩阵完整时，reset、首次出现、几何／材质 manifest 改变不再直接跳过整笔运动覆盖。当前可见表面继续使用真实颜色可见性回放，写 current Z、previous Z=-1 和 R8≈0.25；前帧位置上传有限零坐标与有效性 0，刚体路径使用明确的零 previous clip W。没有捕获到当前几何／矩阵、未知管线或所有者的绘制仍拒绝准入。
 
 该回放不伪造完整历史：清单的 `encodedDisocclusionDraws` 与 `encodedMotionDraws` 分开，receipt 维持 reactive-only，完整补帧门禁不因此解除。新增 GPU 场景检查实体、alpha discard、粒子和绳索的初次覆盖／深度；CPU 契约检查当前投影、有限性以及 discard 后不保留已退役的当前数据。下一轮客户端同时要求实际出现无效历史绘制记录。
+
+`dd8eee8` 的 macOS 15/26 均通过 51/51 GPU，8 个客户端全部成功。真实 Vanilla/Sodium 清单分别记录 190/174 笔独立的无效历史覆盖绘制，并通过持物、OIT、粒子及 V4 合成读回；这部分已按对应制品身份验收。新增 source-uniform 回归进一步刻意覆写原始 Projection/DynamicTransforms 后使用冻结参数重放，并检查 Globals 改写／资源关闭、整数位模式、截断和非有限字段；这些增强用例还需要后续提交的 GPU 验收。
 
 粒子层进一步使用与原版 `IdentityHashMap` 一致的实际 Layer 身份，分别拥有 object ID、generation 和源提交历史。添加／删除无关层、改变 feature group 顺序不会重置仍存在的层。appendDraw 钩子按该层的 DrawPlan 绑定所有者，结束后立即清除；空 Storage 不创建所有者。同值但不同实例的 Layer 不互用历史，提交失败不推进，提交过一次缺席的层重新出现时重新建历史。未知／损坏 group 使其参与层失效，其他层继续保持。相同层的多个 group 仍由完整 draw manifest 保守约束；跨 group 分区变化还需要进一步按粒子 ID 对应并验证前帧变换一致性。
 
