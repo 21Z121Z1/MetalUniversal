@@ -232,7 +232,8 @@ final class MetalFirstPersonMotionGpuTest {
              GpuBuffer privateBuffer = device.createBuffer(() -> "GPU-only uniform", GpuBuffer.USAGE_UNIFORM, 64)) {
             var good = new MetalPreviousVertexReplay.SourceDrawInputs(valid.slice(UNIFORM_OFFSET, 64), valid.slice(UNIFORM_OFFSET, 64), null);
             var source = RenderPipeline.builder().withLocation("hand_contract/admission").withVertexShader("core/entity")
-                    .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY).build();
+                    .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY)
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).build();
             MetalPreviousVertexHistory.beginFrame();
             var sample = new MetalEntityMotionCapture.Sample(101, -1, new Matrix4f(), new Matrix4f());
             var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
