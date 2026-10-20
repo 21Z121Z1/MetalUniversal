@@ -94,6 +94,22 @@ public final class MetalNativeBridge {
             metalfxSupportsTemporal = downcall(lookup, "metallum_metalfx_supports_temporal", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsFrameGeneration = downcall(lookup, "metallum_metalfx_supports_frame_generation", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsMotionV2 = optionalDowncall(lookup, "metallum_metalfx_supports_motion_v2", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
+            surfaceMotionV4Supports = optionalDowncallWithoutCritical(lookup, "metallum_metalfx_supports_surface_motion_v4",
+                    FunctionDescriptor.of(INT,ValueLayout.ADDRESS));
+            preparedTemporalEncode = optionalDowncallWithoutCritical(lookup, "metallum_metalfx_encode_prepared_v4",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            FLOAT, FLOAT, INT, INT, INT, INT));
+            surfaceMotionV4Resolve = optionalDowncallWithoutCritical(lookup, "metallum_metalfx_resolve_motion_v4",FunctionDescriptor.of(
+                    INT,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,ValueLayout.ADDRESS,
+                    FLOAT,FLOAT,FLOAT,FLOAT,FLOAT,INT,INT,INT,INT,INT,INT));
             metalfxClearMotionInputs = optionalDowncall(lookup, "metallum_metalfx_clear_motion_inputs", FunctionDescriptor.of(
                     INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, INT, ValueLayout.ADDRESS
             ));
@@ -1201,6 +1217,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxSupportsFrameGeneration;
     @Nullable
     private static final MethodHandle metalfxSupportsMotionV2;
+    private static final MethodHandle surfaceMotionV4Supports;
+    private static final MethodHandle surfaceMotionV4Resolve;
+    private static final MethodHandle preparedTemporalEncode;
     @Nullable
     private static final MethodHandle metalfxClearMotionInputs;
     @Nullable
@@ -1478,6 +1497,57 @@ public final class MetalNativeBridge {
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_supports_motion_v2", throwable);
         }
+    }
+
+    public static boolean supportsSurfaceMotionV4(final MemorySegment device) {
+        if (surfaceMotionV4Supports == null || surfaceMotionV4Resolve == null || preparedTemporalEncode == null) return false;
+        try {
+            return (int)surfaceMotionV4Supports.invokeExact(segment(device)) != 0;
+        } catch (Throwable failure) { throw bridgeFailure("metallum_metalfx_supports_surface_motion_v4",failure); }
+    }
+
+    public static boolean resolveSurfaceMotionV4(
+            final MemorySegment commandBuffer, final MemorySegment device,
+            final MemorySegment sceneDepth, final MemorySegment worldOwnershipDepth, final @Nullable MemorySegment hudDepth,
+            final MemorySegment sourceMotion, final MemorySegment worldValidity, final MemorySegment hudValidity,
+            final MemorySegment correspondence, final MemorySegment previousWorldDepth, final MemorySegment previousHudDepth,
+            final MemorySegment mergedMotion, final MemorySegment reactive, final MemorySegment cameraDiagnostic,
+            final MemorySegment disocclusionDiagnostic, final MemorySegment nextWorldDepth,
+            final MemorySegment presentationDepth, final MemorySegment nextHudDepth,
+            final float[] currentMatrix, final float[] inverseMatrix, final float[] previousMatrix,
+            final MemorySegment fence, final float jitterX, final float jitterY,
+            final float previousJitterX, final float previousJitterY, final float handReactiveBoost,
+            final int width, final int height, final boolean historyValid, final boolean depthReversed,
+            final boolean preserveReactive, final boolean diagnostics) {
+        if (surfaceMotionV4Resolve == null) return false;
+        try {
+            MetalFxMatrixScratch scratch = METALFX_MATRIX_SCRATCH.get();
+            MemorySegment current = scratch.copy(currentMatrix,scratch.current);
+            MemorySegment inverse = scratch.copy(inverseMatrix,scratch.inverse);
+            MemorySegment previous = scratch.copy(previousMatrix,scratch.previous);
+            return (int)surfaceMotionV4Resolve.invokeExact(segment(commandBuffer),segment(device),
+                    segment(sceneDepth),segment(worldOwnershipDepth),segment(hudDepth),
+                    segment(sourceMotion),segment(worldValidity),segment(hudValidity),
+                    segment(correspondence),segment(previousWorldDepth),segment(previousHudDepth),
+                    segment(mergedMotion),segment(reactive),segment(cameraDiagnostic),
+                    segment(disocclusionDiagnostic),segment(nextWorldDepth),segment(presentationDepth),segment(nextHudDepth),
+                    current,inverse,previous,segment(fence),jitterX,jitterY,previousJitterX,previousJitterY,handReactiveBoost,
+                    width,height,historyValid ? 1 : 0,depthReversed ? 1 : 0,preserveReactive ? 1 : 0,diagnostics ? 1 : 0) != 0;
+        } catch (Throwable failure) { throw bridgeFailure("metallum_metalfx_resolve_motion_v4",failure); }
+    }
+
+    public static boolean encodePreparedTemporal(
+            final MemorySegment commandBuffer, final MemorySegment device,
+            final MemorySegment color, final MemorySegment depth, final MemorySegment motion,
+            final MemorySegment reactive, final MemorySegment output, final MemorySegment fence,
+            final float jitterX, final float jitterY, final int width, final int height,
+            final boolean reset, final boolean depthReversed) {
+        if (preparedTemporalEncode == null) return false;
+        try {
+            return (int) preparedTemporalEncode.invokeExact(segment(commandBuffer), segment(device),
+                    segment(color), segment(depth), segment(motion), segment(reactive), segment(output),
+                    segment(fence), jitterX, jitterY, width, height, reset ? 1 : 0, depthReversed ? 1 : 0) != 0;
+        } catch (Throwable failure) { throw bridgeFailure("metallum_metalfx_encode_prepared_v4", failure); }
     }
 
     public static boolean metallum_metalfx_clear_motion_inputs(

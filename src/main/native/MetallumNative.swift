@@ -384,6 +384,7 @@ private enum NativeState {
     static var motionMergePipeline: MTLComputePipelineState?
     static var motionFusedPipeline: MTLComputePipelineState?
     static var motionClearPipeline: MTLComputePipelineState?
+    static var surfaceMotionV4Pipeline: MTLComputePipelineState?
     // QA-only A/B escape hatch. Production uses the fused motion path; setting
     // this before launch restores the two-dispatch camera/merge implementation.
     static let legacyMotionPasses = ProcessInfo.processInfo.environment[
@@ -5913,6 +5914,272 @@ func motionFusedV2MslSource() -> String {
     """
 }
 
+// Java advances these depth histories with the same accepted-source transaction as vertices.
+// The raw resolver also runs on Spatial QA devices, without a supported Temporal scaler.
+struct MetalSurfaceMotionUniforms {
+    var currentViewProjection: simd_float4x4
+    var inverseCurrentViewProjection: simd_float4x4
+    var previousViewProjection: simd_float4x4
+    var viewport: SIMD4<Float>
+    var flags: SIMD4<UInt32>   // preserve reactive, sky motion, history valid, reversed depth
+    var options: SIMD4<UInt32> // depth dilation, diagnostics, HUD bound, reserved
+    var params: SIMD4<Float>  // depth edge cap, disocclusion cap, hand reactive boost, reserved
+    var jitter: SIMD4<Float>  // current XY, previous XY in raw-texture pixels
+}
+
+func motionSurfaceResolveV4MslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct SurfaceUniforms {
+      float4x4 currentViewProjection;
+      float4x4 inverseCurrentViewProjection;
+      float4x4 previousViewProjection;
+      float4 viewport;
+      uint4 flags;
+      uint4 options;
+      float4 params;
+      float4 jitter;
+    };
+    inline bool surfaceDepth(float z) { return isfinite(z) && z >= 0.0 && z <= 1.0; }
+    inline bool surfaceHud(float z, bool reversed) {
+      return surfaceDepth(z) && (reversed ? z > 0.0000001 : z < 0.9999999);
+    }
+    inline float surfaceTolerance(float z, bool reversed) {
+      return max(0.000003, abs(reversed ? z : 1.0-z)*0.01);
+    }
+    inline bool closerSurface(float z, float expected, bool reversed) {
+      float tolerance = surfaceTolerance(expected,reversed);
+      return reversed ? z > expected+tolerance : z < expected-tolerance;
+    }
+    kernel void metallum_motion_surface_resolve_v4(
+      texture2d<float, access::read> sceneDepth [[texture(0)]],
+      texture2d<half, access::read> sourceMotion [[texture(1)]],
+      texture2d<float, access::read> worldValidity [[texture(2)]],
+      texture2d<float, access::read> previousWorldDepth [[texture(3)]],
+      texture2d<half, access::write> mergedMotion [[texture(4)]],
+      texture2d<half, access::read_write> reactiveTexture [[texture(5)]],
+      texture2d<half, access::write> cameraDiagnostic [[texture(6)]],
+      texture2d<half, access::write> disocclusionDiagnostic [[texture(7)]],
+      texture2d<float, access::read> hudDepth [[texture(8)]],
+      texture2d<float, access::read> hudValidity [[texture(9)]],
+      texture2d<float, access::read> correspondence [[texture(10)]],
+      texture2d<float, access::read> previousHudDepth [[texture(11)]],
+      texture2d<float, access::read> worldOwnershipDepth [[texture(12)]],
+      texture2d<float, access::write> nextWorldDepth [[texture(13)]],
+      texture2d<float, access::write> presentationDepth [[texture(14)]],
+      texture2d<float, access::write> nextHudDepth [[texture(15)]],
+      constant SurfaceUniforms& u [[buffer(0)]], uint2 pixel [[thread_position_in_grid]]) {
+      uint2 extent = uint2(u.viewport.xy);
+      if (any(pixel >= extent)) return;
+      bool reversed = u.flags.w != 0u;
+      float sceneZ = sceneDepth.read(pixel).r, ownershipZ = worldOwnershipDepth.read(pixel).r;
+      bool worldDepthValid = surfaceDepth(sceneZ) && surfaceDepth(ownershipZ);
+      float worldZ = worldDepthValid ? (reversed ? max(sceneZ,ownershipZ) : min(sceneZ,ownershipZ)) : (reversed ? 0.0 : 1.0);
+      float farZ = reversed ? 0.0 : 1.0;
+      float handZ = u.options.z != 0u ? hudDepth.read(pixel).r : farZ;
+      bool handCovered = surfaceHud(handZ,reversed);
+      nextWorldDepth.write(float4(worldZ,0.0,0.0,0.0),pixel);
+      nextHudDepth.write(float4(handCovered ? handZ : farZ,0.0,0.0,0.0),pixel);
+      presentationDepth.write(float4(handCovered ? handZ : worldZ,0.0,0.0,0.0),pixel);
+      float base = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
+      float reactive = isfinite(base) ? clamp(base,0.0,1.0) : 1.0;
+      if (u.params.x > 0.0 && !handCovered) {
+        float gradient=0.0;
+        bool boundary=false;
+        bool centerForeground=reversed ? worldZ > 0.00001 : worldZ < 0.99999;
+        for (int dy=-1;dy<=1;++dy) for (int dx=-1;dx<=1;++dx) {
+          int2 probe=int2(pixel)+int2(dx,dy);
+          if (any(probe < int2(0)) || any(probe >= int2(extent))) continue;
+          float a=sceneDepth.read(uint2(probe)).r,b=worldOwnershipDepth.read(uint2(probe)).r;
+          bool finite=surfaceDepth(a) && surfaceDepth(b);
+          float z=finite ? (reversed ? max(a,b) : min(a,b)) : (reversed ? 0.0 : 1.0);
+          bool foreground=finite && (reversed ? z > 0.00001 : z < 0.99999);
+          boundary=boundary || (centerForeground != foreground);
+          if (foreground && centerForeground) gradient=max(gradient,abs(z-worldZ));
+        }
+        reactive=max(reactive,boundary ? u.params.x : min(u.params.x,clamp(gradient*4.0,0.0,1.0)));
+      }
+      float worldMask = worldValidity.read(pixel).r;
+      float mask = handCovered ? hudValidity.read(pixel).r : worldMask;
+      bool owned = handCovered || (isfinite(worldMask) && worldMask > 0.125);
+      bool validOwned = owned && isfinite(mask) && mask > 0.5;
+      float2 pair = correspondence.read(pixel).rg;
+      float2 selected = float2(0.0), cameraMotion = float2(0.0);
+      float expectedZ = -1.0, disocclusion = 0.0;
+      bool skyCurrent = !owned && u.flags.y != 0u && reversed && surfaceDepth(sceneZ) && sceneZ <= 0.00001;
+      float reconstructionZ = skyCurrent ? 0.00002 : sceneZ;
+      float2 uv = (float2(pixel)+0.5)/float2(extent);
+      bool cameraValid = worldDepthValid && surfaceDepth(reconstructionZ);
+      if (cameraValid) {
+        float4 world = u.inverseCurrentViewProjection * float4(uv.x*2.0-1.0,1.0-uv.y*2.0,reconstructionZ,1.0);
+        cameraValid = all(isfinite(world)) && abs(world.w) > 0.000001;
+        if (cameraValid) {
+          world /= world.w;
+          float4 now = u.currentViewProjection*world, before = u.previousViewProjection*world;
+          cameraValid = all(isfinite(now)) && all(isfinite(before)) && now.w > 0.000001 && before.w > 0.000001;
+          if (cameraValid) {
+            now /= now.w; before /= before.w;
+            cameraMotion = float2(before.x-now.x,now.y-before.y);
+            cameraValid = all(abs(before.xy) <= float2(1.0)) && surfaceDepth(before.z)
+                && all(isfinite(cameraMotion)) && all(abs(cameraMotion) <= float2(32.0));
+            if (!owned && cameraValid) expectedZ = before.z;
+          }
+        }
+      }
+      if (!cameraValid) cameraMotion = float2(0.0);
+      if (owned) {
+        selected = float2(sourceMotion.read(pixel).rg);
+        float visibleZ = handCovered ? handZ : worldZ;
+        validOwned = validOwned && (handCovered || worldDepthValid) && surfaceDepth(pair.x) && surfaceDepth(pair.y)
+            && all(isfinite(selected)) && all(abs(selected) <= float2(32.0)) && !closerSurface(visibleZ,pair.y,reversed);
+        if (validOwned) expectedZ = pair.x;
+        else { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
+        if (handCovered) reactive=max(reactive,u.params.z);
+      } else {
+        selected=float2(half2(cameraMotion));
+        if (!cameraValid) { reactive=1.0; disocclusion=1.0; }
+      }
+      // Both depth histories retain their real raster. HUD has its own unjittered projection.
+      float2 jitterDelta = handCovered ? float2(0.0) : u.jitter.zw-u.jitter.xy;
+      float2 previousPixel = float2(pixel)+0.5+selected*float2(extent)*0.5+jitterDelta;
+      if (u.flags.z == 0u || !surfaceDepth(expectedZ) || !all(isfinite(previousPixel))
+          || any(previousPixel < float2(0.0)) || any(previousPixel >= float2(extent))) {
+        disocclusion=1.0;
+      } else if (disocclusion < 0.5) {
+        uint2 center = uint2(previousPixel);
+        float oldHud = previousHudDepth.read(center).r;
+        float oldZ = handCovered ? oldHud : previousWorldDepth.read(center).r;
+        bool oldHand = surfaceHud(oldHud,reversed);
+        bool centerSky = !handCovered && u.flags.y != 0u && reversed && surfaceDepth(oldZ) && oldZ <= 0.00001;
+        if (centerSky && skyCurrent) oldZ=0.00002;
+        if ((handCovered != oldHand) || !surfaceDepth(oldZ) || (centerSky && !skyCurrent) || closerSurface(oldZ,expectedZ,reversed)) {
+          disocclusion=1.0;
+        } else {
+          // Dilation cannot override a closer center occluder or previous HUD coverage.
+          int radius = u.options.x != 0u ? 1 : 0;
+          float bestDelta = abs(oldZ-expectedZ);
+          for (int dy=-radius;dy<=radius;++dy) for (int dx=-radius;dx<=radius;++dx) {
+            int2 probe=int2(center)+int2(dx,dy);
+            if (any(probe < int2(0)) || any(probe >= int2(extent))) continue;
+            float h=previousHudDepth.read(uint2(probe)).r;
+            bool probeHand=surfaceHud(h,reversed);
+            if (handCovered != probeHand) continue;
+            float z=handCovered ? h : previousWorldDepth.read(uint2(probe)).r;
+            if (skyCurrent && u.flags.y != 0u && surfaceDepth(z) && z <= 0.00001) z=0.00002;
+            if (surfaceDepth(z)) bestDelta=min(bestDelta,abs(z-expectedZ));
+          }
+          if (bestDelta > surfaceTolerance(expectedZ,reversed)) disocclusion=1.0;
+        }
+      }
+      if (disocclusion > 0.5) reactive=max(reactive,u.params.y);
+      if (!all(isfinite(selected))) { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
+      mergedMotion.write(half4(half2(selected),half(0.0),half(0.0)),pixel);
+      reactiveTexture.write(half4(half(clamp(reactive,0.0,1.0)),half(0.0),half(0.0),half(0.0)),pixel);
+      if (u.options.y != 0u) {
+        cameraDiagnostic.write(half4(half2(cameraMotion),half(0.0),half(0.0)),pixel);
+        disocclusionDiagnostic.write(half4(half(disocclusion),half(0.0),half(0.0),half(0.0)),pixel);
+      }
+    }
+    """
+}
+
+private func ensureSurfaceMotionV4Pipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    #if os(macOS) && canImport(MetalFX)
+    return NativeState.onCompilerThread {
+        if let pipeline = NativeState.surfaceMotionV4Pipeline { return pipeline }
+        do {
+            let options = MTLCompileOptions()
+            options.fastMathEnabled = false // finite/invalid ownership checks are part of this ABI.
+            let library = try device.makeLibrary(source: motionSurfaceResolveV4MslSource(), options: options)
+            guard let function = library.makeFunction(name: "metallum_motion_surface_resolve_v4") else { return nil }
+            let pipeline = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(pipeline)
+            NativeState.surfaceMotionV4Pipeline = pipeline
+            return pipeline
+        } catch {
+            NSLog("[Metallum] Failed to compile surface motion v4: %@", String(describing: error))
+            return nil
+        }
+    }
+    #else
+    return nil
+    #endif
+}
+
+@_cdecl("metallum_metalfx_supports_surface_motion_v4")
+public func metallumMetalFxSupportsSurfaceMotionV4(_ device: MTLDevice) -> Int32 {
+    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 1
+}
+
+@_cdecl("metallum_metalfx_resolve_motion_v4")
+public func metallumMetalFxResolveMotionV4(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ sceneDepth: MTLTexture, _ worldOwnershipDepth: MTLTexture, _ hudDepth: MTLTexture?,
+    _ sourceMotion: MTLTexture, _ worldValidity: MTLTexture, _ hudValidity: MTLTexture,
+    _ correspondence: MTLTexture, _ previousWorldDepth: MTLTexture, _ previousHudDepth: MTLTexture,
+    _ mergedMotion: MTLTexture, _ reactive: MTLTexture, _ cameraDiagnostic: MTLTexture,
+    _ disocclusionDiagnostic: MTLTexture, _ nextWorldDepth: MTLTexture,
+    _ presentationDepth: MTLTexture, _ nextHudDepth: MTLTexture,
+    _ currentMatrix: UnsafePointer<Float>?, _ inverseMatrix: UnsafePointer<Float>?,
+    _ previousMatrix: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ previousJitterX: Float, _ previousJitterY: Float,
+    _ handReactiveBoost: Float, _ width: Int32, _ height: Int32,
+    _ historyValid: Int32, _ depthReversed: Int32, _ preserveReactive: Int32, _ diagnostics: Int32
+) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    let textures: [(Int, MTLTexture?)] = [
+        (0,sceneDepth),(1,sourceMotion),(2,worldValidity),(3,previousWorldDepth),
+        (4,mergedMotion),(5,reactive),(6,cameraDiagnostic),(7,disocclusionDiagnostic),
+        (8,hudDepth ?? sceneDepth),(9,hudValidity),(10,correspondence),(11,previousHudDepth),
+        (12,worldOwnershipDepth),(13,nextWorldDepth),(14,presentationDepth),(15,nextHudDepth)
+    ]
+    guard width > 0, height > 0,
+          textures.allSatisfy({ $0.1?.width == Int(width) && $0.1?.height == Int(height) }),
+          sceneDepth.pixelFormat == .depth32Float, worldOwnershipDepth.pixelFormat == .depth32Float,
+          hudDepth == nil || hudDepth?.pixelFormat == .depth32Float,
+          sourceMotion.pixelFormat == .rg16Float, mergedMotion.pixelFormat == .rg16Float,
+          worldValidity.pixelFormat == .r8Unorm, hudValidity.pixelFormat == .r8Unorm,
+          reactive.pixelFormat == .r8Unorm, correspondence.pixelFormat == .rg32Float,
+          cameraDiagnostic.pixelFormat == .rg16Float, disocclusionDiagnostic.pixelFormat == .r8Unorm,
+          [previousWorldDepth,previousHudDepth,nextWorldDepth,presentationDepth,nextHudDepth]
+            .allSatisfy({ $0.pixelFormat == .r32Float }),
+          jitterX.isFinite, jitterY.isFinite, previousJitterX.isFinite, previousJitterY.isFinite,
+          handReactiveBoost.isFinite,
+          let currentMatrix, let inverseMatrix, let previousMatrix,
+          let pipeline = ensureSurfaceMotionV4Pipeline(device) else { return 0 }
+    var uniforms = MetalSurfaceMotionUniforms(
+        currentViewProjection: makeMatrix(currentMatrix), inverseCurrentViewProjection: makeMatrix(inverseMatrix),
+        previousViewProjection: makeMatrix(previousMatrix), viewport: SIMD4(Float(width),Float(height),0,0),
+        flags: SIMD4(preserveReactive != 0 ? 1 : 0, NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                     historyValid != 0 ? 1 : 0, depthReversed != 0 ? 1 : 0),
+        options: SIMD4(NativeState.mergeDepthDilation > 0.5 ? 1 : 0,diagnostics != 0 ? 1 : 0,hudDepth != nil ? 1 : 0,0),
+        params: SIMD4(NativeState.reactiveTuning.z,NativeState.disocclusionReactiveCap,min(1,max(0,handReactiveBoost)),0),
+        jitter: SIMD4(jitterX,jitterY,previousJitterX,previousJitterY))
+    if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+        return encodeMetal4Compute(lease: lease,label: "Surface motion and depth v4 (Metal 4)",
+            pipeline: pipeline,uniforms: uniforms,textures: textures,width: Int(width),height: Int(height),
+            producerBarrierBeforeStages: [.vertex,.fragment,.dispatch,.blit]) ? 1 : 0
+    }
+    let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return 0 }
+    encoder.label = "Surface motion and depth v4 (Metal 3)"
+    if let fence { encoder.waitForFence(fence) }
+    encoder.setComputePipelineState(pipeline)
+    for (slot, texture) in textures { encoder.setTexture(texture,index: slot) }
+    encoder.setBytes(&uniforms,length: MemoryLayout<MetalSurfaceMotionUniforms>.size,index: 0)
+    let threadWidth = max(1,min(pipeline.threadExecutionWidth,64))
+    let threadHeight = max(1,min(8,pipeline.maxTotalThreadsPerThreadgroup/threadWidth))
+    encoder.dispatchThreads(MTLSize(width: Int(width),height: Int(height),depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadWidth,height: threadHeight,depth: 1))
+    if let fence { encoder.updateFence(fence) }
+    encoder.endEncoding()
+    return 1
+    #else
+    return 0
+    #endif
+}
+
 private func motionClearV2MslSource() -> String {
     """
     #include <metal_stdlib>
@@ -6867,6 +7134,110 @@ public func metallumMetalFxEncodeEntry(
         previousViewProjection, fence, jitterX, jitterY, inputWidth, inputHeight,
         reset, depthReversed, preserveReactiveMask
     )
+}
+
+// This entry consumes the already resolved surface motion and presentation depth.
+// It deliberately has no camera/object merge or independent depth-history owner.
+@_cdecl("metallum_metalfx_encode_prepared_v4")
+public func metallumMetalFxEncodePreparedV4(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ color: MTLTexture, _ depth: MTLTexture, _ motion: MTLTexture,
+    _ reactive: MTLTexture, _ output: MTLTexture, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ width: Int32, _ height: Int32,
+    _ reset: Int32, _ depthReversed: Int32
+) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    if #available(macOS 13.0, *) {
+        guard width > 0, height > 0, jitterX.isFinite, jitterY.isFinite,
+              [color,depth,motion,reactive].allSatisfy({ $0.width == Int(width) && $0.height == Int(height) }),
+              depth.pixelFormat == .r32Float, motion.pixelFormat == .rg16Float,
+              reactive.pixelFormat == .r8Unorm, output.width > 0, output.height > 0 else { return 0 }
+        let descriptor = MTLFXTemporalScalerDescriptor()
+        descriptor.colorTextureFormat = color.pixelFormat
+        descriptor.depthTextureFormat = depth.pixelFormat
+        descriptor.motionTextureFormat = motion.pixelFormat
+        descriptor.outputTextureFormat = output.pixelFormat
+        descriptor.inputWidth = Int(width)
+        descriptor.inputHeight = Int(height)
+        descriptor.outputWidth = output.width
+        descriptor.outputHeight = output.height
+        descriptor.isAutoExposureEnabled = true
+        descriptor.requiresSynchronousInitialization = true
+        if #available(macOS 14.4, *) {
+            descriptor.isReactiveMaskTextureEnabled = true
+            descriptor.reactiveMaskTextureFormat = reactive.pixelFormat
+        }
+        if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+            guard MTLFXTemporalScalerDescriptor.supportsMetal4FX(device),
+                  let compiler = NativeState.metal4Compiler(device) else { return 0 }
+            let key = metalFxScalerKey(device,backend: .metal4,kind: .temporal,
+                color: color,output: output,depth: depth,motion: motion,reactive: reactive)
+            let scaler: any MTL4FXTemporalScaler
+            if let cached = NativeState.metalFxScalers[key] as? any MTL4FXTemporalScaler {
+                scaler = cached
+            } else {
+                guard let created = descriptor.makeTemporalScaler(device: device,compiler: compiler) else { return 0 }
+                scaler = created
+                NativeState.metalFxScalers[key] = created as AnyObject
+            }
+            NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
+            scaler.colorTexture = color
+            scaler.depthTexture = depth
+            scaler.motionTexture = motion
+            scaler.reactiveMaskTexture = reactive
+            scaler.outputTexture = output
+            scaler.inputContentWidth = Int(width)
+            scaler.inputContentHeight = Int(height)
+            scaler.jitterOffsetX = jitterX
+            scaler.jitterOffsetY = jitterY
+            scaler.motionVectorScaleX = Float(width)*0.5
+            scaler.motionVectorScaleY = Float(height)*0.5
+            scaler.reset = reset != 0
+            scaler.isDepthReversed = depthReversed != 0
+            scaler.fence = fence
+            // The surface resolver publishes dispatch writes before this consumer.
+            lease.commandBuffer.pushDebugGroup("MetalFX Temporal Prepared Surface V4 (Metal 4)")
+            scaler.encode(commandBuffer: lease.commandBuffer)
+            lease.commandBuffer.popDebugGroup()
+            NativeState.metal4TemporalEncodeCount &+= 1
+        } else {
+            guard MTLFXTemporalScalerDescriptor.supportsDevice(device) else { return 0 }
+            let key = metalFxScalerKey(device,backend: .metal3,kind: .temporal,
+                color: color,output: output,depth: depth,motion: motion,reactive: reactive)
+            let scaler: any MTLFXTemporalScaler
+            if let cached = NativeState.metalFxScalers[key] as? any MTLFXTemporalScaler {
+                scaler = cached
+            } else {
+                guard let created = descriptor.makeTemporalScaler(device: device) else { return 0 }
+                scaler = created
+                NativeState.metalFxScalers[key] = created as AnyObject
+            }
+            NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
+            scaler.colorTexture = color
+            scaler.depthTexture = depth
+            scaler.motionTexture = motion
+            scaler.outputTexture = output
+            scaler.inputContentWidth = Int(width)
+            scaler.inputContentHeight = Int(height)
+            scaler.jitterOffsetX = jitterX
+            scaler.jitterOffsetY = jitterY
+            scaler.motionVectorScaleX = Float(width)*0.5
+            scaler.motionVectorScaleY = Float(height)*0.5
+            scaler.reset = reset != 0
+            scaler.isDepthReversed = depthReversed != 0
+            if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactive }
+            scaler.fence = fence
+            let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+            commandBuffer.pushDebugGroup("MetalFX Temporal Prepared Surface V4 (Metal 3)")
+            scaler.encode(commandBuffer: commandBuffer)
+            commandBuffer.popDebugGroup()
+        }
+        MetalFxNativeHudMetrics.updateScaling(mode: "Temporal",inputWidth: Int(width),inputHeight: Int(height),
+            targetWidth: output.width,targetHeight: output.height,exposure: 1.0)
+        return 1
+    }
+    #endif
+    return 0
 }
 
 /// Versioned temporal entry point. It keeps the legacy camera-only symbol
@@ -8041,6 +8412,7 @@ public func metallum_metalfx_shutdown() {
     residencyTrackReleased(NativeState.motionMergePipeline)
     residencyTrackReleased(NativeState.motionFusedPipeline)
     residencyTrackReleased(NativeState.motionClearPipeline)
+    residencyTrackReleased(NativeState.surfaceMotionV4Pipeline)
     residencyTrackReleased(NativeState.transparencyMaskPipeline)
     residencyTrackReleased(NativeState.cutoutReactivePipeline)
     residencyTrackReleased(NativeState.handOverlayPipeline)
@@ -8049,6 +8421,7 @@ public func metallum_metalfx_shutdown() {
     NativeState.motionMergePipeline = nil
     NativeState.motionFusedPipeline = nil
     NativeState.motionClearPipeline = nil
+    NativeState.surfaceMotionV4Pipeline = nil
     NativeState.transparencyMaskPipeline = nil
     NativeState.cutoutReactivePipeline = nil
     NativeState.frameGenerationLogged = false

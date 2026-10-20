@@ -1376,6 +1376,67 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
+    boolean resolveSurfaceMotionV4(
+            final MetalGpuTexture sceneDepth, final MetalGpuTexture worldOwnershipDepth,
+            @Nullable final MetalGpuTexture hudDepth, final MetalGpuTexture sourceMotion,
+            final MetalGpuTexture worldValidity, final MetalGpuTexture hudValidity,
+            final MetalGpuTexture correspondence, final MetalGpuTexture previousWorldDepth,
+            final MetalGpuTexture previousHudDepth, final MetalGpuTexture mergedMotion,
+            final MetalGpuTexture reactive, final MetalGpuTexture cameraDiagnostic,
+            final MetalGpuTexture disocclusionDiagnostic, final MetalGpuTexture nextWorldDepth,
+            final MetalGpuTexture presentationDepth, final MetalGpuTexture nextHudDepth,
+            final org.joml.Matrix4f current, final org.joml.Matrix4f inverse,
+            final org.joml.Matrix4f previous, final org.joml.Vector2f jitter,
+            final org.joml.Vector2f previousJitter, final float handReactiveBoost,
+            final int width, final int height, final boolean historyValid,
+            final boolean depthReversed, final boolean preserveReactive, final boolean diagnostics
+    ) {
+        for (MetalGpuTexture texture : new MetalGpuTexture[]{sceneDepth, worldOwnershipDepth, hudDepth,
+                sourceMotion, worldValidity, hudValidity, correspondence, previousWorldDepth, previousHudDepth,
+                mergedMotion, reactive, cameraDiagnostic, disocclusionDiagnostic, nextWorldDepth,
+                presentationDepth, nextHudDepth}) {
+            if (texture != null) flushPendingClear(texture);
+        }
+        submitRenderPass();
+        endEncoder();
+        for (MetalGpuTexture texture : new MetalGpuTexture[]{mergedMotion, reactive, nextWorldDepth,
+                presentationDepth, nextHudDepth}) texture.markContentsDirty();
+        if (diagnostics) {
+            cameraDiagnostic.markContentsDirty();
+            disocclusionDiagnostic.markContentsDirty();
+        }
+        return MetalNativeBridge.resolveSurfaceMotionV4(commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                sceneDepth.nativeHandle(), worldOwnershipDepth.nativeHandle(),
+                hudDepth == null ? MemorySegment.NULL : hudDepth.nativeHandle(), sourceMotion.nativeHandle(),
+                worldValidity.nativeHandle(), hudValidity.nativeHandle(), correspondence.nativeHandle(),
+                previousWorldDepth.nativeHandle(), previousHudDepth.nativeHandle(), mergedMotion.nativeHandle(),
+                reactive.nativeHandle(), cameraDiagnostic.nativeHandle(), disocclusionDiagnostic.nativeHandle(),
+                nextWorldDepth.nativeHandle(), presentationDepth.nativeHandle(), nextHudDepth.nativeHandle(),
+                MetalMotionContract.cameraMatrix(current, currentViewProjectionBuffer, false),
+                MetalMotionContract.cameraMatrix(inverse, inverseViewProjectionBuffer, true),
+                MetalMotionContract.cameraMatrix(previous, previousViewProjectionBuffer, false), fence,
+                jitter.x, jitter.y, previousJitter.x, previousJitter.y, handReactiveBoost,
+                width, height, historyValid, depthReversed, preserveReactive, diagnostics);
+    }
+
+    boolean encodePreparedTemporal(
+            final MetalGpuTexture color, final MetalGpuTexture depth, final MetalGpuTexture motion,
+            final MetalGpuTexture reactive, final MetalGpuTexture output,
+            final org.joml.Vector2f jitter, final int width, final int height,
+            final boolean reset, final boolean depthReversed
+    ) {
+        flushPendingClear(color);
+        flushPendingClear(depth);
+        flushPendingClear(motion);
+        flushPendingClear(reactive);
+        submitRenderPass();
+        endEncoder();
+        output.markContentsDirty();
+        return MetalNativeBridge.encodePreparedTemporal(commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                color.nativeHandle(), depth.nativeHandle(), motion.nativeHandle(), reactive.nativeHandle(),
+                output.nativeHandle(), fence, jitter.x, jitter.y, width, height, reset, depthReversed);
+    }
+
     boolean encodeMetalFxV2(
             final MetalGpuTexture color,
             final MetalGpuTexture depth,

@@ -890,6 +890,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                             && raw.worldDepthPixels() > 0 && raw.handDepthPixels() > 0 && raw.handValidPixels() > 0
                             && raw.worldPixelsOutsideHand() > 0
                             && raw.validCorrespondencePixels() > 0
+                            && raw.motionContractVersion() == 4 && raw.mergedFinitePixels() == (long)raw.width()*raw.height()
+                            && raw.presentationHandPixels() == raw.handDepthPixels()
                             && !raw.temporalQualityValidated() && !raw.frameGenerationQualityValidated(),
                     "Real producer GPU motion readback failed or claimed unsupported quality: " + raw);
             var invert = net.minecraft.resources.Identifier.withDefaultNamespace("invert");
@@ -902,7 +904,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             var postEffect = postEffectCapture.join();
             require(!postEffect.handDepthSourceWasMain() && postEffect.handDepthPixels() > 0
                             && postEffect.handValidPixels() > 0 && postEffect.worldPixelsOutsideHand() > 0
-                            && postEffect.validCorrespondencePixels() > 0,
+                            && postEffect.validCorrespondencePixels() > 0
+                            && postEffect.motionContractVersion() == 4
+                            && postEffect.mergedFinitePixels() == (long)postEffect.width()*postEffect.height()
+                            && postEffect.presentationHandPixels() == postEffect.handDepthPixels(),
                     "Post effects did not retain isolated actual HUD depth and exact hand history: "+postEffect);
             report.addProperty("verified", true);
             report.addProperty("activeConduitExercised", true);
