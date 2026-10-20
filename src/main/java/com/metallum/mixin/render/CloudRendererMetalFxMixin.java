@@ -3,11 +3,11 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.MetalCloudMotion;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.renderer.CloudRenderer;
 import net.minecraft.client.renderer.MappableRingBuffer;
-import net.minecraft.core.Direction;
 import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,7 +16,6 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 
 /** Reads actual procedural face bytes; ordinary and OIT share the real draw boundary. */
@@ -27,7 +26,7 @@ public abstract class CloudRendererMetalFxMixin {
     @Shadow private @Nullable MappableRingBuffer utb;
     @Shadow private int prevCellX;
     @Shadow private int prevCellZ;
-    @Unique private @Nullable ByteArrayOutputStream metallum$faces;
+    @Unique private boolean metallum$capturingMesh;
 
     @Inject(method="prepare(ILnet/minecraft/client/CloudStatus;FILnet/minecraft/world/phys/Vec3;JF)V",at=@At("HEAD"))
     private void metallum$captureOnEnable(CallbackInfo ci) {
@@ -43,20 +42,15 @@ public abstract class CloudRendererMetalFxMixin {
     @Inject(method="buildMesh",at=@At("HEAD"))
     private void metallum$beginMesh(CallbackInfo ci) {
         MetalCloudMotion.beginMesh(this);
-        metallum$faces=MetalCloudMotion.collecting() ? new ByteArrayOutputStream() : null;
-    }
-
-    @Inject(method="encodeFace",at=@At("RETURN"))
-    private void metallum$encodedFace(ByteBuffer bytes,int x,int z,Direction direction,int flags,CallbackInfo ci) {
-        if(metallum$faces!=null) {
-            int end=bytes.position();
-            metallum$faces.write(bytes.get(end-3));metallum$faces.write(bytes.get(end-2));metallum$faces.write(bytes.get(end-1));
-        }
+        metallum$capturingMesh=MetalCloudMotion.collecting();
     }
 
     @Inject(method="buildMesh",at=@At("RETURN"))
-    private void metallum$endMesh(CallbackInfo ci) {
-        if(metallum$faces!=null) {MetalCloudMotion.faces(this,metallum$faces.toByteArray(),utb==null ? null : utb.currentBuffer());metallum$faces=null;}
+    private void metallum$endMesh(CallbackInfo ci,@Local(argsOnly=true) ByteBuffer bytes) {
+        if(metallum$capturingMesh) {
+            MetalCloudMotion.facesFromMesh(this,bytes,utb==null ? null : utb.currentBuffer());
+            metallum$capturingMesh=false;
+        }
     }
 
     @WrapOperation(method="render(Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)V",
@@ -67,8 +61,8 @@ public abstract class CloudRendererMetalFxMixin {
     }
 
     @Inject(method="apply(Ljava/util/Optional;Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;)V",at=@At("HEAD"))
-    private void metallum$reloaded(CallbackInfo ci) {MetalCloudMotion.reloaded(this);metallum$faces=null;}
+    private void metallum$reloaded(CallbackInfo ci) {MetalCloudMotion.reloaded(this);metallum$capturingMesh=false;}
 
     @Inject(method="close",at=@At("RETURN"))
-    private void metallum$close(CallbackInfo ci) {MetalCloudMotion.closeRenderer(this);metallum$faces=null;}
+    private void metallum$close(CallbackInfo ci) {MetalCloudMotion.closeRenderer(this);metallum$capturingMesh=false;}
 }

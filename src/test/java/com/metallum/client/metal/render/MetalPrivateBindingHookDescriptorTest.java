@@ -28,6 +28,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * must fail here instead of pairing an old token with a new compatibility key.</p>
  */
 final class MetalPrivateBindingHookDescriptorTest {
+    @Test
+    void sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary() throws Exception {
+        String name="net/caffeinemc/mods/sodium/mixin/features/render/world/clouds/CloudRendererMixin";
+        ClassNode cloud=load(name);
+        MethodNode build=cloud.methods.stream().filter(method->method.name.equals("buildMesh")
+                && method.desc.contains("Ljava/nio/ByteBuffer;")).findFirst().orElseThrow();
+        boolean directByteWrites=false;
+        int ordinaryFaceCalls=0;
+        var pending=new java.util.ArrayDeque<MethodNode>();pending.add(build);
+        var seen=new java.util.HashSet<String>();
+        while(!pending.isEmpty()) {
+            MethodNode method=pending.remove();if(!seen.add(method.name+method.desc))continue;
+            for(var instruction:method.instructions)if(instruction instanceof MethodInsnNode invoke) {
+                if((invoke.owner.endsWith("/MemoryIntrinsics") && invoke.name.equals("putByte"))
+                        || (invoke.owner.equals("org/lwjgl/system/MemoryUtil") && invoke.name.equals("memPutByte")))directByteWrites=true;
+                if(invoke.name.equals("encodeFace"))ordinaryFaceCalls++;
+                if(invoke.owner.equals(cloud.name))cloud.methods.stream()
+                        .filter(candidate->candidate.name.equals(invoke.name) && candidate.desc.equals(invoke.desc)).forEach(pending::add);
+            }
+        }
+        assertTrue(directByteWrites,"Review the exact pinned Sodium producer if its bulk cloud emission changes");
+        assertTrue(java.util.stream.StreamSupport.stream(build.instructions.spliterator(),false)
+                .filter(instruction->instruction instanceof MethodInsnNode).map(instruction->(MethodInsnNode)instruction)
+                .anyMatch(invoke->invoke.owner.equals("java/nio/ByteBuffer") && invoke.name.equals("position") && invoke.desc.startsWith("(I)")),
+                "The common capture relies on the actual completed buffer extent");
+        try(InputStream input=getClass().getClassLoader().getResourceAsStream(name+".class")) {
+            String digest=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(input.readAllBytes()));
+            System.out.println("SODIUM_CLOUD_MESH_CONTRACT classSha256="+digest+" bulkWrites=true ordinaryFaceCalls="+ordinaryFaceCalls
+                    +" buildMesh="+build.desc);
+        }
+    }
+
     private static final String RENDER_PASS = "com/mojang/renderpearl/api/commands/RenderPass";
     private static final String METAL_RENDER_PASS = "com/metallum/client/metal/render/MetalRenderPass";
     private static final String SET_UNIFORM_SLICE =

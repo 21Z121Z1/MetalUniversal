@@ -20,6 +20,14 @@ final class MetalCloudGeometry {
     }
     private MetalCloudGeometry() {}
 
+    /** Captures the actual uploaded range, including producers using direct pointer writes. */
+    static byte @Nullable [] snapshotFaces(ByteBuffer source) {
+        int size=source.position();
+        if(size<=0 || size%3!=0)return null;
+        ByteBuffer bytes=source.asReadOnlyBuffer();bytes.position(0);bytes.limit(size);
+        byte[] result=new byte[size];bytes.get(result);return result;
+    }
+
     /** Full-time cell identity survives both texture torus wrapping and mesh rebuilds. */
     static @Nullable Origin origin(double cameraX,double cameraZ,long time,float partial,int textureWidth,int textureHeight,
             int sourceCellX,int sourceCellZ) {

@@ -7,6 +7,24 @@ import static org.junit.jupiter.api.Assertions.*;
 
 final class MetalCloudGeometryTest {
     @Test
+    void finalMeshSnapshotCoversBulkPointerAndPerFaceProducersWithoutReadingSpareCapacity() {
+        byte[] expected={0,0,0,1,-1,5,127,-128,16};
+        ByteBuffer ordinary=ByteBuffer.allocate(24),bulk=ByteBuffer.allocateDirect(24);
+        for(byte value:expected)ordinary.put(value);
+        // Models Sodium's absolute native writes and one final position update;
+        // there are deliberately no encodeFace callbacks to observe.
+        for(int i=0;i<expected.length;i++)bulk.put(i,expected[i]);
+        bulk.put(20,(byte)99);bulk.position(expected.length);
+        assertArrayEquals(expected,MetalCloudGeometry.snapshotFaces(ordinary));
+        byte[] captured=MetalCloudGeometry.snapshotFaces(bulk);
+        assertArrayEquals(expected,captured);assertEquals(expected.length,bulk.position());assertEquals(24,bulk.limit());
+        bulk.put(0,(byte)99);assertArrayEquals(expected,captured);
+        assertArrayEquals(expected,MetalCloudGeometry.snapshotFaces(ordinary.asReadOnlyBuffer()));
+        assertNull(MetalCloudGeometry.snapshotFaces(ByteBuffer.allocate(24)));
+        assertNull(MetalCloudGeometry.snapshotFaces(ByteBuffer.allocate(24).position(2)));
+    }
+
+    @Test
     void packedSignedCoordinatesParityAndInsideWindingReproduceTheDocumentedSourceFaces() {
         // Explicit independent corner table from core/clouds.vsh's documented cube faces.
         float[][][] corners={{{1,0,0},{1,0,1},{0,0,1},{0,0,0}},{{0,1,0},{0,1,1},{1,1,1},{1,1,0}},

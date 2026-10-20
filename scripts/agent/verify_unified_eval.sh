@@ -78,11 +78,15 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.contract.RenderContractRuntimeTest \
   --tests com.metallum.client.validation.contract.RenderTraceRecorderStreamingTest \
+  --tests com.metallum.client.validation.contract.RenderTraceRecorderCompressionTest \
+  --tests com.metallum.client.validation.report.RenderContractCompressedEvidenceTest \
   --tests com.metallum.client.validation.storage.ValidationStorageBudgetTest \
   --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
+  --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary \
   --tests com.metallum.client.metal.render.MetalCloudGeometryTest \
   --tests com.metallum.client.metal.render.MetalCloudMotionHistoryTest \
   --tests com.metallum.client.metal.render.MetalUiBlendContractTest \
+  --tests com.metallum.client.metal.render.MetalMotionPixelCoverageTest \
   --tests com.metallum.client.metal.render.MetalMotionFrameManifestTest \
   --tests com.metallum.client.metal.render.MetalParticleQuadHistoryTest \
   --tests com.metallum.client.metal.render.MetalParticleCrossGroupHistoryTest \

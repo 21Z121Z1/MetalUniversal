@@ -165,6 +165,11 @@ public final class ValidationStorageBudget {
         void write(Writer writer) throws IOException;
     }
 
+    @FunctionalInterface
+    public interface BinaryContent {
+        void write(OutputStream output) throws IOException;
+    }
+
     /**
      * Streams a complete UTF-8 document with bounded buffering and atomic publication.
      * Oversized output is counted to completion without retaining/writing the excess,
@@ -172,6 +177,15 @@ public final class ValidationStorageBudget {
      */
     public synchronized long writeAtomicUtf8(final Path path, final long maxFileBytes,
                                               final Utf8Content content) throws IOException {
+        Objects.requireNonNull(content, "content");
+        return writeAtomicOutput(path,maxFileBytes,output->{
+            try(Writer writer=new OutputStreamWriter(output,StandardCharsets.UTF_8)) {content.write(writer);}
+        });
+    }
+
+    /** Streams a binary representation under the same physical byte and publication limits. */
+    public synchronized long writeAtomicOutput(final Path path,final long maxFileBytes,
+                                               final BinaryContent content) throws IOException {
         if (maxFileBytes <= 0L) throw new IllegalArgumentException("File byte limit must be positive");
         Objects.requireNonNull(content, "content");
         Path normalized = checkedPath(path);
@@ -188,9 +202,15 @@ public final class ValidationStorageBudget {
                     java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)) {
                 owned = true;
                 var bounded = new CountingOutput(file, Math.min(maxFileBytes, available));
-                try (Writer writer = new OutputStreamWriter(bounded, StandardCharsets.UTF_8)) {
-                    content.write(writer);
-                }
+                // Codecs may close their borrowed stream to finish a trailer;
+                // the publication owner retains the file until that succeeds.
+                content.write(new OutputStream() {
+                    @Override public void write(int value) throws IOException {bounded.write(value);}
+                    @Override public void write(byte[] data,int offset,int length) throws IOException {bounded.write(data,offset,length);}
+                    @Override public void flush() throws IOException {bounded.flush();}
+                    @Override public void close() throws IOException {flush();}
+                });
+                bounded.flush();
                 required = bounded.count;
             }
             if (required > maxFileBytes) throw new FileByteLimitExceededException(required, maxFileBytes);

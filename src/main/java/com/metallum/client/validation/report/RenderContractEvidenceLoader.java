@@ -32,6 +32,7 @@ public final class RenderContractEvidenceLoader {
     public static LoadedEvidence load(final Path root) throws IOException {
         Path normalized = root.toAbsolutePath().normalize();
         JsonObject manifest = readObject(normalized.resolve("pass-manifest.json"));
+        manifest=RenderContractCompressedEvidence.read(normalized,manifest);
         JsonObject results = readObject(normalized.resolve("results.json"));
         validateEnvelope(manifest, "pass-manifest.json");
         validateEnvelope(results, "results.json");
@@ -62,7 +63,7 @@ public final class RenderContractEvidenceLoader {
             throw new IOException("Missing render-contract evidence file: " + path);
         }
         try {
-            return JsonParser.parseString(Files.readString(path)).getAsJsonObject();
+            try(var reader=Files.newBufferedReader(path)) {return JsonParser.parseReader(reader).getAsJsonObject();}
         } catch (RuntimeException exception) {
             throw new IOException("Invalid render-contract evidence JSON: " + path, exception);
         }

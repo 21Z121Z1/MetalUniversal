@@ -150,4 +150,4 @@ lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 
 
 Temporal 默认 OFF、FG 默认 false、完整 producer 总门禁保持 false，直到上述证据完整。原有六项 CPU 优化、Metal 3 回退和可选 Metal 4 路径不改变。
 
-整合分支进一步在 buildMesh 写入前失效旧 CPU faces/backing/origin；捕获停用或同帧重复替换退役 generation，失败重建不能借用原地复写前的数据。云客户端 reactive 检查只接受世界标签 191，HUD 标签 159 不再代替云。主捕获和独立 terrain 控制都读取关闭后的快照及磁盘终态；终态头以流式 reader 跳过大 producer payload，保留完整失败计数诊断。仍需准确整合 head 的 GPU／客户端验收。
+整合分支进一步在 buildMesh 写入前失效旧 CPU faces/backing/origin；捕获停用或同帧重复替换退役 generation，失败重建不能借用原地复写前的数据。云世界／HUD 由独立 ownership 通道判别，159／191 分别是 overlay／普通 reactive 标签，不能把 159 当成 HUD 身份。OIT 云不必写原版世界 D32，云准入按世界有效表面与 reactive 像素排除全部 HUD 覆盖，并独立读取原始通道核对；不透明世界／手部深度检查保留。主捕获和独立 terrain 控制都读取关闭后的快照及磁盘终态；终态头以流式 reader 跳过大 producer payload，保留完整失败计数诊断。仍需准确整合 head 的 GPU／客户端验收。

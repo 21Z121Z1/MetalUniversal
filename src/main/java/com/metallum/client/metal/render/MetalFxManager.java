@@ -426,6 +426,8 @@ public final class MetalFxManager {
                                       long finiteValidPixels, double maxMotionPixels, String scalerMode,
                                       boolean handDepthSourceWasMain, long worldDepthPixels,
                                       long handDepthPixels, long worldPixelsOutsideHand,
+                                      long worldSurfacePixelsOutsideHand,long worldReactivePixelsOutsideHand,
+                                      long transparentWorldSurfacePixelsOutsideHand,
                                       long validCorrespondencePixels, long invalidOwnedPixels,
                                       int motionContractVersion, long mergedFinitePixels,
                                       long disoccludedPixels, long presentationHandPixels,
@@ -3070,6 +3072,7 @@ public final class MetalFxManager {
                     ByteBuffer worldOwnership = ByteBuffer.wrap(bytes.get(12)).order(ByteOrder.nativeOrder());
                     long world = 0, hand = 0, finite = 0; double max = 0;
                     long worldDepthPixels = 0, handDepthPixels = 0, worldOutsideHand = 0;
+                    long worldSurfaceOutsideHand=0,worldReactiveOutsideHand=0,transparentWorldOutsideHand=0;
                     long validCorrespondence = 0, invalidOwned = 0;
                     long mergedFinite = 0, disoccluded = 0, presentationHand = 0;
                     for (int pixel = 0; pixel < width * height; pixel++) {
@@ -3103,6 +3106,11 @@ public final class MetalFxManager {
                             throw new IllegalStateException("Owned HUD surface has no current depth");
                         }
                         boolean handCovered = hd > 0.0000001F || handOwned;
+                        if(MetalMotionPixelCoverage.exactWorldOutsideHud(worldMask,handMask,hd)) {
+                            worldSurfaceOutsideHand++;
+                            if(wd==0)transparentWorldOutsideHand++;
+                        }
+                        if(MetalMotionPixelCoverage.reactiveWorldOutsideHud(worldMask,handMask,hd))worldReactiveOutsideHand++;
                         float expectedHandZ = handOwned ? (hd > 0.0000001F ? Math.max(hd, handSurfaceZ) : handSurfaceZ)
                                 : hd > 0.0000001F ? hd : 0;
                         if (!Float.isFinite(presentedZ) || !Float.isFinite(worldZ) || !Float.isFinite(hudZ)
@@ -3145,6 +3153,7 @@ public final class MetalFxManager {
                     var result = new RawMotionValidation(System.getProperty("metallum.validation.sourceCommit", "unknown"),
                             stamp.frameId(), stamp.historyEpoch(), width, height, world, hand, finite, max, scaler,
                             handSourceWasMain, worldDepthPixels, handDepthPixels, worldOutsideHand,
+                            worldSurfaceOutsideHand,worldReactiveOutsideHand,transparentWorldOutsideHand,
                             validCorrespondence, invalidOwned, 4, mergedFinite, disoccluded, presentationHand, false, false);
                     Files.createDirectories(request.output());
                     for (int i = 0; i < readbacks.size(); i++) Files.write(request.output().resolve(readbacks.get(i).name()

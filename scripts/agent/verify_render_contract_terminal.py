@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gzip
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -89,11 +91,83 @@ def check(manifest: dict, results: dict, source: str, captures: int) -> dict:
 
 
 def verify(root: Path, source: str, captures: int) -> dict:
-    if (root / "pass-manifest.json.partial").exists():
+    if any(root.glob("pass-manifest*.partial")):
         raise ValueError("unpublished manifest checkpoint remains")
-    manifest = json.loads((root / "pass-manifest.json").read_text(encoding="utf-8"))
+    index_path = root / "pass-manifest.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if not isinstance(index, dict):
+        raise ValueError("manifest must be an object")
+    manifest = index
+    representation = index.get("schemaVersion")
+    if representation == 2:
+        if index.get("payloadEncoding") != "gzip-json-v1" or index.get("tracePayloadOmitted") is not False:
+            raise ValueError("compressed trace encoding is missing or incomplete")
+        payload = index.get("payload")
+        if not isinstance(payload, dict) or payload.get("path") != "pass-manifest.payload.json.gz":
+            raise ValueError("unsafe or missing compressed trace path")
+        path = root / payload["path"]
+        if path.is_symlink() or path.resolve().parent != root.resolve():
+            raise ValueError("compressed trace escapes its root")
+        limits = index.get("limits", {})
+        if not isinstance(limits, dict):
+            raise ValueError("compressed trace limits are missing")
+        physical = limits.get("maxManifestBytes")
+        raw_limit = limits.get("maxUncompressedManifestBytes")
+        size, raw_size = payload.get("bytes"), payload.get("uncompressedBytes")
+        if not all(integer(value) and value > 0 for value in (physical, raw_limit, size, raw_size)):
+            raise ValueError("compressed trace byte proof is invalid")
+        if raw_limit > 1024 * 1024 * 1024 or raw_size > raw_limit:
+            raise ValueError("compressed trace decoding limit is exceeded")
+        if path.stat().st_size != size or index_path.stat().st_size + size > physical:
+            raise ValueError("index and compressed payload exceed their unchanged manifest byte budget")
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if payload.get("sha256") != digest:
+            raise ValueError("compressed trace digest mismatch")
+        # Bound inflation before JSON parsing; retain neither the compressed
+        # file nor a second document-sized byte buffer in memory.
+        with tempfile.TemporaryFile(mode="w+b") as decoded:
+            total = 0
+            with gzip.open(path, "rb") as stream:
+                while chunk := stream.read(64 * 1024):
+                    total += len(chunk)
+                    if total > raw_size:
+                        raise ValueError("compressed trace expands beyond its declared bound")
+                    decoded.write(chunk)
+            if total != raw_size:
+                raise ValueError("compressed trace byte count mismatch")
+            decoded.seek(0)
+            manifest = json.load(decoded)
+        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1:
+            raise ValueError("compressed trace payload schema is unsupported")
+        for key in ("runId", "gitCommit", "status", "manifestComplete", "frameCount", "passCount", "resourceCount",
+                    "producerCount", "droppedEvents", "forcedClosedPassCount", "invalidPassReferenceCount",
+                    "producerBudgetExceeded"):
+            if type(manifest.get(key)) is not type(index.get(key)) or manifest.get(key) != index.get(key):
+                raise ValueError(f"compressed trace header mismatch: {key}")
+        for key in ("maxFrames", "maxPasses", "maxProducers", "maxManifestBytes"):
+            if manifest.get("limits", {}).get(key) != limits.get(key):
+                raise ValueError(f"compressed trace limit mismatch: {key}")
+        if not isinstance(index.get("storageBudget"), dict) or index["storageBudget"].get("exceeded") is not False:
+            raise ValueError("compressed trace storage budget is missing or failed")
+        # The payload snapshot precedes codec publication. Check both storage
+        # proofs; the index contains the later physical accounting snapshot.
+        original_storage = manifest.get("storageBudget", {})
+        if not isinstance(original_storage, dict) or original_storage.get("exceeded") is not False:
+            raise ValueError("payload storage budget is missing or failed")
+        if not integer(original_storage.get("artifactBytes")) or not integer(original_storage.get("maxBytes")) \
+                or original_storage["artifactBytes"] > original_storage["maxBytes"]:
+            raise ValueError("payload storage counters are invalid")
+        manifest["storageBudget"] = index["storageBudget"]
+    elif representation != 1:
+        raise ValueError("unsupported trace representation")
     results = json.loads((root / "results.json").read_text(encoding="utf-8"))
-    return check(manifest, results, source, captures)
+    verdict = check(manifest, results, source, captures)
+    verdict["sourceSchemaVersion"] = representation
+    if representation == 2:
+        verdict.update(payloadSha256=payload["sha256"], payloadBytes=size,
+                       uncompressedBytes=raw_size, manifestBytes=size + index_path.stat().st_size)
+    return verdict
 
 
 def self_test() -> None:
@@ -139,7 +213,65 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("unpublished checkpoint accepted")
-    print("render-contract terminal self-test: PASS (positive and 22 negative controls)")
+    compressed_negatives = 0
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        payload_manifest = copy.deepcopy(manifest)
+        payload_manifest["limits"].update(maxFrames=16, maxPasses=32, maxManifestBytes=8192)
+        encoded = json.dumps(payload_manifest).encode()
+        compressed = gzip.compress(encoded)
+        index = {key: copy.deepcopy(value) for key, value in payload_manifest.items()
+                 if key not in ("frames", "passes", "resources", "openPasses")}
+        index.update(schemaVersion=2, payloadEncoding="gzip-json-v1", tracePayloadOmitted=False,
+                     payload={"path": "pass-manifest.payload.json.gz", "sha256": hashlib.sha256(compressed).hexdigest(),
+                              "bytes": len(compressed), "uncompressedBytes": len(encoded)})
+        index["limits"]["maxUncompressedManifestBytes"] = 1024 * 1024
+        def publish(candidate, data=compressed):
+            (root / "pass-manifest.json").write_text(json.dumps(candidate), encoding="utf-8")
+            (root / "pass-manifest.payload.json.gz").write_bytes(data)
+            (root / "results.json").write_text(json.dumps(results), encoding="utf-8")
+        publish(index)
+        assert verify(root, source, 1)["sourceSchemaVersion"] == 2
+        changes = [("payload", "path", "../outside.gz"), ("payload", "sha256", "0" * 64),
+                   ("payload", "bytes", len(compressed) + 1), ("payload", "uncompressedBytes", len(encoded) - 1),
+                   ("payload", "uncompressedBytes", len(encoded) + 1),
+                   ("limits", "maxManifestBytes", len(compressed)), ("limits", "maxUncompressedManifestBytes", len(encoded) - 1),
+                   ("limits", "maxUncompressedManifestBytes", 2 * 1024 * 1024 * 1024),
+                   ("storageBudget", "exceeded", True), (None, "producerCount", 4),
+                   (None, "passCount", True), (None, "gitCommit", "b" * 40),
+                   (None, "payloadEncoding", "unknown"), (None, "tracePayloadOmitted", True)]
+        for section, key, value in changes:
+            bad = copy.deepcopy(index)
+            (bad if section is None else bad[section])[key] = value
+            publish(bad)
+            try:
+                verify(root, source, 1)
+            except (OSError, ValueError, EOFError):
+                compressed_negatives += 1
+            else:
+                raise AssertionError(f"invalid compressed trace accepted: {section}/{key}")
+        for data, declared_raw in ((compressed[:-4], len(encoded)), (compressed[:-8] + bytes(8), len(encoded)),
+                                   (gzip.compress(encoded[:-1]), len(encoded) - 1),
+                                   (gzip.compress(encoded + b" {}"), len(encoded) + 3)):
+            bad = copy.deepcopy(index)
+            bad["payload"].update(bytes=len(data), uncompressedBytes=declared_raw, sha256=hashlib.sha256(data).hexdigest())
+            publish(bad, data)
+            try:
+                verify(root, source, 1)
+            except (OSError, ValueError, EOFError):
+                compressed_negatives += 1
+            else:
+                raise AssertionError("damaged compressed trace accepted")
+        publish(index)
+        (root / "pass-manifest.payload.json.gz").unlink()
+        try:
+            verify(root, source, 1)
+        except OSError:
+            compressed_negatives += 1
+        else:
+            raise AssertionError("missing compressed trace accepted")
+    print(f"render-contract terminal self-test: PASS (legacy positive/22 negatives; compressed positive/{compressed_negatives} negatives)")
+
 
 
 def main() -> int:
@@ -156,7 +288,7 @@ def main() -> int:
         parser.error("--root, --source and --captures are required")
     try:
         result = verify(args.root, args.source, args.captures)
-    except (OSError, ValueError) as failure:
+    except (OSError, ValueError, EOFError) as failure:
         print(json.dumps({"status": "failed", "reason": str(failure)}))
         return 1
     print("verified terminal render contract: " + json.dumps(result, sort_keys=True))

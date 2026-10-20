@@ -110,4 +110,15 @@ final class MetalCloudMotionHistoryTest {
     }
 
     private static void prepare(Object renderer) {MetalCloudMotion.faces(renderer,new byte[3],null);MetalCloudMotion.prepared(renderer,0,0,0,0,256,256,0,0);}
+
+    @Test
+    void bulkMeshSnapshotCannotRetainAnEmptyOrFailedEmitterAsAValidCapturedMesh() {
+        Object renderer=new Object();prepare(renderer);assertTrue(MetalCloudMotion.hasFaces(renderer));
+        MetalCloudMotion.beginMesh(renderer);
+        var bytes=java.nio.ByteBuffer.allocateDirect(9);bytes.put(0,(byte)1).put(1,(byte)2).put(2,(byte)0);bytes.position(3);
+        MetalCloudMotion.facesFromMesh(renderer,bytes,null);
+        assertTrue(MetalCloudMotion.hasFaces(renderer));
+        MetalCloudMotion.beginMesh(renderer);bytes.position(0);MetalCloudMotion.facesFromMesh(renderer,bytes,null);
+        assertFalse(MetalCloudMotion.hasFaces(renderer));assertNull(MetalCloudMotion.sample(renderer));
+    }
 }

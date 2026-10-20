@@ -32,11 +32,26 @@ public final class MetalCloudMotion {
         MetalCloudGeometry.@Nullable Origin origin;
         Map<MetalCloudGeometry.FaceKey,Long> previousIds=Map.of(),pendingIds=Map.of();
         boolean previousSubmitted,submitted;
+        String lastRejection="not-observed";
     }
     private MetalCloudMotion() {}
     private static Layer layer(Object renderer) {return LAYERS.computeIfAbsent(renderer,ignored->new Layer());}
+    public record LayerDiagnostics(long generation,int faceBytes,boolean prepared,
+                                   boolean previousSubmitted,boolean submitted,String lastRejection) {}
+    public static Map<String,LayerDiagnostics> diagnostics() {
+        var result=new java.util.TreeMap<String,LayerDiagnostics>();
+        for(var layer:LAYERS.values())result.put(Long.toUnsignedString(layer.objectId),
+                new LayerDiagnostics(layer.generation,layer.faces==null ? 0 : layer.faces.length,
+                        layer.origin!=null,layer.previousSubmitted,layer.submitted,layer.lastRejection));
+        return Map.copyOf(result);
+    }
     public static boolean collecting() {return MetalEntityMotionCapture.isEnabled();}
-    public static boolean hasFaces(Object renderer) {var layer=LAYERS.get(renderer);return layer!=null && layer.faces!=null;}
+    public static boolean hasFaces(Object renderer) {var layer=LAYERS.get(renderer);return layer!=null && layer.faces!=null && layer.faces.length>0;}
+    public static void facesFromMesh(Object renderer,java.nio.ByteBuffer bytes,@Nullable GpuBuffer backing) {
+        var snapshot=MetalCloudGeometry.snapshotFaces(bytes);
+        if(snapshot!=null)faces(renderer,snapshot,backing);
+        else {var layer=LAYERS.get(renderer);if(layer!=null){layer.faces=null;layer.faceBacking=null;layer.origin=null;layer.lastRejection="invalid-mesh-extent";}}
+    }
     /** In-place mesh writes must retire the CPU description before they can fail. */
     public static void beginMesh(Object renderer) {
         var layer=LAYERS.get(renderer);
@@ -48,9 +63,11 @@ public final class MetalCloudMotion {
             return;
         }
         layer.faces=null;layer.faceBacking=null;layer.origin=null;
+        layer.lastRejection="mesh-rebuild-incomplete";
     }
     public static void faces(Object renderer,byte[] bytes,@Nullable GpuBuffer backing) {
         var layer=layer(renderer);layer.faces=bytes.clone();layer.faceBacking=backing;
+        layer.lastRejection="mesh-captured-awaiting-source";
     }
     public static void prepared(Object renderer,double cameraX,double cameraZ,long time,float partial,int textureWidth,int textureHeight,
             int sourceCellX,int sourceCellZ) {
@@ -60,6 +77,7 @@ public final class MetalCloudMotion {
         var layer=LAYERS.get(renderer);if(layer==null)return;
         layer.generation=--nextGeneration;layer.faces=null;layer.faceBacking=null;layer.origin=null;
         layer.previousIds=Map.of();layer.pendingIds=Map.of();layer.previousSubmitted=false;layer.submitted=false;
+        layer.lastRejection="reloaded";
     }
     public static void closeRenderer(Object renderer) {LAYERS.remove(renderer);}
     static void beginFrame() {for(var layer:LAYERS.values()){layer.submitted=false;layer.pendingIds=Map.of();}DRAWS.clear();frameOpen=true;}
@@ -80,7 +98,9 @@ public final class MetalCloudMotion {
 
     public static void afterDraw(Object renderer,RenderPass pass,int count,int instances,int first,int base,int instance) {
         if(!collecting() || count<=0 || instances<=0)return;
-        var geometry=MetalPreviousVertexReplay.sourceGeometry(pass);if(geometry==null)return;
+        var layer=layer(renderer);
+        var geometry=MetalPreviousVertexReplay.sourceGeometry(pass);
+        if(geometry==null){layer.lastRejection="source-geometry-unavailable";return;}
         var source=MetalPreviousVertexReplay.sourceState(pass);
         var flags=source==null ? java.util.Set.<String>of() : source.pipeline().getShaderDefines().flags();
         OitStage stage=flags.contains("OIT_DEPTH_BOUNDS") ? OitStage.DEPTH_BOUNDS
@@ -89,29 +109,33 @@ public final class MetalCloudMotion {
         if(stage!=null && stage!=OitStage.ACCUMULATE) {
             MetalMotionDrawCoverage.sourceExecution(stage,null,false);MetalMotionDrawCoverage.hookedDraw(source,stage,null);return;
         }
-        var layer=layer(renderer);
         var info=MetalPreviousVertexReplay.sourceUniform(pass,"CloudInfo");
         var faces=MetalPreviousVertexReplay.sourceUniform(pass,"CloudFaces");
         byte[] bytes=info!=null && info.buffer() instanceof MetalGpuBuffer buffer
                 ? buffer.copySourceUniformBytes(info,MetalCloudGeometry.INFO_BYTES) : null;
-        if(!frameOpen || layer.submitted || layer.faces==null || layer.origin==null || bytes==null || source==null
-                || faces==null || faces.buffer()!=layer.faceBacking || faces.offset()!=0 || faces.length()<layer.faces.length
-                || !MetalEntityMotionPipeline.supportsPreviousPositions(source.pipeline())
-                || !source.pipeline().getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/clouds")
-                || count!=(long)layer.faces.length/3*6 || geometry.vertices()!=null
-                || instances!=1 || first!=0 || base!=0 || instance!=0
-                || geometry.indices()!=RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer()) {unsupported(source,stage);return;}
+        String rejection=!frameOpen ? "source-frame-closed" : layer.submitted ? "duplicate-color-source"
+                : layer.faces==null ? "mesh-faces-unavailable" : layer.origin==null ? "source-origin-unavailable"
+                : bytes==null ? "cloud-info-unavailable" : source==null ? "source-state-unavailable"
+                : faces==null ? "cloud-faces-binding-unavailable" : faces.buffer()!=layer.faceBacking ? "cloud-faces-backing-changed"
+                : faces.offset()!=0 || faces.length()<layer.faces.length ? "cloud-faces-binding-extent"
+                : !MetalEntityMotionPipeline.supportsPreviousPositions(source.pipeline()) ? "unsupported-source-pipeline"
+                : !source.pipeline().getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/clouds") ? "source-shader-mismatch"
+                : count!=(long)layer.faces.length/3*6 ? "source-index-count-mismatch" : geometry.vertices()!=null ? "unexpected-source-vertices"
+                : instances!=1 || first!=0 || base!=0 || instance!=0 ? "unsupported-draw-range"
+                : geometry.indices()!=RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer() ? "source-index-buffer-mismatch" : null;
+        if(rejection!=null) {layer.lastRejection=rejection;unsupported(source,stage);return;}
         var mesh=MetalCloudGeometry.decode(layer.faces,bytes,layer.origin);
-        if(mesh==null) {unsupported(source,stage);return;}
-        var sample=sample(renderer);if(sample==null){unsupported(source,stage);return;}
+        if(mesh==null) {layer.lastRejection="source-mesh-decode-rejected";unsupported(source,stage);return;}
+        var sample=sample(renderer);if(sample==null){layer.lastRejection="source-sample-unavailable";unsupported(source,stage);return;}
         MetalEntityMotionCapture.attachState(layer.owner,sample);MetalEntityMotionCapture.requireExactState(layer.owner);
         MetalFxManager.observeParticlesWeather(1);if(sample.hasPrevious())MetalFxManager.markExactParticleProducerCandidate(sample);
         var token=MetalPreviousVertexHistory.reserveDraw(sample,source.pipeline());
-        if(token==null){unsupported(source,stage);return;}
+        if(token==null){layer.lastRejection="source-history-reservation-rejected";unsupported(source,stage);return;}
         var frozen=MetalFxManager.freezeMotionVertices(mesh.vertices());
         var frozenInfo=MetalFxManager.freezeMotionSourceBuffer(bytes,GpuBuffer.USAGE_UNIFORM);
         var frozenFaces=MetalFxManager.freezeMotionSourceBuffer(layer.faces,GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE);
         if(frozen==null || frozenInfo==null || frozenFaces==null) {
+            layer.lastRejection="source-snapshot-unavailable";
             MetalEntityMotionCapture.failExactSample(sample,"cloud-source-snapshot-unavailable");unsupported(source,stage);return;
         }
         var ids=identities(renderer,mesh.faceKeys());
@@ -120,6 +144,7 @@ public final class MetalCloudMotion {
                 format.getVertexSize(),PrimitiveTopology.QUADS,mesh.faceKeys().size()*4,count),mesh.positions());
         MetalPreviousVertexHistory.stageQuadIdentities(token,new ArrayList<>(ids.values()));
         DRAWS.put(token,new CloudReplay(frozen,Map.of("CloudInfo",frozenInfo,"CloudFaces",frozenFaces)));sourceSubmitted(renderer,ids);
+        layer.lastRejection="none";
         var draw=new StagedVertexBuffer.ExecuteInfo(frozen.buffer(),geometry.indices(),geometry.indexType(),0,0,count,PrimitiveTopology.QUADS);
         MetalFxManager.drawDirectMotion(draw,sample,token,stage,pass,MetalCloudMotion::plan);
         MetalPreviousVertexReplay.flushAfterSourcePass(pass);

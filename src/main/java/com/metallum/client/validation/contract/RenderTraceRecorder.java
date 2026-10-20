@@ -37,6 +37,9 @@ public final class RenderTraceRecorder implements AutoCloseable {
     private final int maxPasses;
     private final int maxProducers;
     private final long maxManifestBytes;
+    private final boolean compressManifest;
+    private static final long MAX_UNCOMPRESSED_MANIFEST_BYTES=1024L*1024*1024;
+    private final long maxUncompressedManifestBytes;
     private final int manifestFlushFrameInterval;
     private final boolean captureProducerDetails;
     private final ProducerCapturePolicy producerCapturePolicy;
@@ -103,6 +106,10 @@ public final class RenderTraceRecorder implements AutoCloseable {
         this.maxManifestBytes = longProperty(
                 "metallum.renderContract.maxManifestBytes", 64L * 1024L * 1024L
         );
+        this.compressManifest=Boolean.getBoolean("metallum.renderContract.compressManifest");
+        this.maxUncompressedManifestBytes=longProperty("metallum.renderContract.maxUncompressedManifestBytes",MAX_UNCOMPRESSED_MANIFEST_BYTES);
+        if(maxUncompressedManifestBytes<=0 || maxUncompressedManifestBytes>MAX_UNCOMPRESSED_MANIFEST_BYTES)
+            throw new IllegalArgumentException("Invalid bounded uncompressed manifest limit");
         this.storageBudget = storageBudget == null
                 ? ValidationStorageBudget.shared(this.outputDirectory)
                 : storageBudget;
@@ -685,8 +692,14 @@ public final class RenderTraceRecorder implements AutoCloseable {
             return;
         }
         try {
-            storageBudget.writeAtomicUtf8(manifestPath, maxManifestBytes, this::writeManifestDocument);
+            if(compressManifest)writeCompressedManifest();
+            else storageBudget.writeAtomicUtf8(manifestPath, maxManifestBytes, this::writeManifestDocument);
             manifestFinalized = true;
+        } catch (UncompressedManifestLimitException exception) {
+            manifestBudgetExceeded=true;status="failed";droppedEvents++;
+            manifestRequiredBytes=exception.requiredBytes;
+            manifestFailureReason="render contract uncompressed manifest byte limit exceeded";
+            writeManifestFailureSummary(manifestRequiredBytes,manifestFailureReason);
         } catch (ValidationStorageBudget.FileByteLimitExceededException exception) {
             manifestBudgetExceeded = true;
             status = "failed";
@@ -704,6 +717,71 @@ public final class RenderTraceRecorder implements AutoCloseable {
                     storageBudget.artifactBytes() + manifestRequiredBytes);
             writeManifestFailureSummary(manifestRequiredBytes, manifestFailureReason);
         }
+    }
+
+    private record CompressedPayload(String path,String sha256,long bytes,long uncompressedBytes) {}
+
+    /** The index plus compressed payload share the unchanged manifest byte budget. */
+    private void writeCompressedManifest() throws IOException {
+        Path payloadPath=outputDirectory.resolve("pass-manifest.payload.json.gz");
+        java.security.MessageDigest digest;
+        try {digest=java.security.MessageDigest.getInstance("SHA-256");}
+        catch(java.security.NoSuchAlgorithmException impossible) {throw new IllegalStateException(impossible);}
+        long[] raw={0};
+        long bytes=storageBudget.writeAtomicOutput(payloadPath,maxManifestBytes,output->{
+            try(var gzip=new java.util.zip.GZIPOutputStream(new java.security.DigestOutputStream(output,digest),8192)) {
+                var counted=new java.io.OutputStream() {
+                    @Override public void write(int value) throws IOException {write(new byte[]{(byte)value},0,1);}
+                    @Override public void write(byte[] data,int offset,int length) throws IOException {
+                        long next=Math.addExact(raw[0],length);
+                        if(next>maxUncompressedManifestBytes)throw new UncompressedManifestLimitException(next);
+                        gzip.write(data,offset,length);raw[0]=next;
+                    }
+                    @Override public void flush() throws IOException {gzip.flush();}
+                };
+                try(var writer=new java.io.OutputStreamWriter(counted,StandardCharsets.UTF_8)) {
+                    try {writeManifestDocument(writer);}
+                    catch(com.google.gson.JsonIOException failure) {
+                        // Gson wraps Writer failures while serializing a record.
+                        // Restore the bounded-I/O cause before publication cleanup.
+                        if(failure.getCause() instanceof IOException io)throw io;
+                        throw failure;
+                    }
+                }
+            }
+        });
+        var payload=new CompressedPayload(payloadPath.getFileName().toString(),java.util.HexFormat.of().formatHex(digest.digest()),bytes,raw[0]);
+        var snapshot=storageBudget.snapshot();
+        long[] indexBytes={0};
+        try(var writer=new java.io.OutputStreamWriter(new java.io.OutputStream() {
+            @Override public void write(int value) {indexBytes[0]++;}
+            @Override public void write(byte[] data,int offset,int length) {indexBytes[0]=Math.addExact(indexBytes[0],length);}
+        },StandardCharsets.UTF_8)) {writeManifestIndex(writer,payload,snapshot);}
+        long combined=Math.addExact(bytes,indexBytes[0]);
+        if(combined>maxManifestBytes)throw new ValidationStorageBudget.FileByteLimitExceededException(combined,maxManifestBytes);
+        storageBudget.writeAtomicUtf8(manifestPath,maxManifestBytes-bytes,writer->writeManifestIndex(writer,payload,snapshot));
+    }
+
+    private void writeManifestIndex(java.io.Writer writer,CompressedPayload payload,ValidationStorageBudget.Snapshot snapshot) throws IOException {
+        var json=GSON.newJsonWriter(writer);json.beginObject();
+        json.name("schemaVersion").value(2);json.name("runId").value(runId);json.name("gitCommit").value(gitCommit);
+        json.name("status").value(status);json.name("manifestComplete").value(manifestComplete());
+        json.name("frameCount").value(frameIds.size());json.name("passCount").value(completedPasses.size()+openPasses.size());
+        json.name("resourceCount").value(resourceHistory.size());json.name("producerCount").value(producerCount);
+        json.name("droppedEvents").value(droppedEvents);json.name("forcedClosedPassCount").value(forcedClosedPassCount);
+        json.name("invalidPassReferenceCount").value(invalidPassReferenceCount);
+        json.name("producerBudgetExceeded").value(producerBudgetExceeded);json.name("tracePayloadOmitted").value(false);
+        json.name("limits").beginObject();json.name("maxFrames").value(maxFrames);json.name("maxPasses").value(maxPasses);
+        json.name("maxProducers").value(maxProducers);json.name("maxManifestBytes").value(maxManifestBytes);
+        json.name("maxUncompressedManifestBytes").value(maxUncompressedManifestBytes);json.endObject();
+        json.name("storageBudget");GSON.toJson(snapshot,ValidationStorageBudget.Snapshot.class,json);
+        json.name("payloadEncoding").value("gzip-json-v1");json.name("payload");GSON.toJson(payload,CompressedPayload.class,json);
+        json.endObject();json.flush();writer.write("\n");
+    }
+
+    private static final class UncompressedManifestLimitException extends IOException {
+        private final long requiredBytes;
+        private UncompressedManifestLimitException(long requiredBytes) {super("Uncompressed trace exceeds its bounded decoding limit");this.requiredBytes=requiredBytes;}
     }
 
     /** No document-sized JsonElement tree, StringBuilder, String or UTF-8 byte array. */

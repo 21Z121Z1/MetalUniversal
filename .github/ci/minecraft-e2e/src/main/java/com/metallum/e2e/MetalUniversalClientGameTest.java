@@ -534,6 +534,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         try {
             Files.createDirectories(output);
             System.setProperty("metallum.renderContract.enabled", "true");
+            // Preserve every normal source record within the same physical
+            // manifest/root budgets, independently decoded by the CI oracle.
+            System.setProperty("metallum.renderContract.compressManifest","true");
             System.setProperty("metallum.renderContract.maxCaptures", Integer.toString(METAL_CAPTURE_SAMPLES + 4));
             Class<?> runtime = Class.forName(RENDER_CONTRACT_RUNTIME);
             Method start = runtime.getMethod("start", Path.class, String.class);
@@ -1126,14 +1129,26 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     Path dir=output.resolve("cloud-motion-"+status.name().toLowerCase(java.util.Locale.ROOT)+(oit ? "-oit" : "-ordinary"));
                     var pending=context.computeOnClient(client->com.metallum.client.metal.render.MetalFxManager.requestRawMotionValidation(dir));
                     context.waitFor(client->pending.isDone(),200);var raw=pending.join();
-                    require(raw.worldValidPixels()>0 && raw.worldPixelsOutsideHand()>0 && raw.finiteValidPixels()>=raw.worldValidPixels()
+                    try {
+                        var census=context.computeOnClient(client->com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
+                        var layers=context.computeOnClient(client->com.metallum.client.metal.render.MetalCloudMotion.diagnostics());
+                        var report=new JsonObject();var gson=new GsonBuilder().setPrettyPrinting().create();
+                        report.addProperty("cloudStatus",status.name());report.addProperty("oit",oit);
+                        report.add("raw",gson.toJsonTree(raw));report.add("sourceCensus",gson.toJsonTree(census));
+                        report.add("cloudLayers",gson.toJsonTree(layers));
+                        Files.writeString(dir.resolve("cloud-source-census.json"),gson.toJson(report)+"\n");
+                    } catch(IOException failure) {throw new IllegalStateException("Cannot retain actual cloud source census",failure);}
+                    require(raw.worldValidPixels()>0 && raw.worldSurfacePixelsOutsideHand()>0 && raw.finiteValidPixels()>=raw.worldValidPixels()
                                     && raw.validCorrespondencePixels()>0 && raw.mergedFinitePixels()==(long)raw.width()*raw.height(),
                             "Actual cloud view has no finite owned surface correspondence: "+status+" oit="+oit+" "+raw);
                     try {
-                        long reactive=0;for(byte pixel:Files.readAllBytes(dir.resolve("object-validity.r8"))) {
-                            int tag=Byte.toUnsignedInt(pixel);if(tag==191)reactive++;
-                        }
-                        require(reactive>0,"Cloud-only sky view never exported reactive exact world ownership");
+                        var pixels=CloudMotionEvidence.inspect(dir,raw.width(),raw.height());
+                        Files.writeString(dir.resolve("cloud-ownership-proof.json"),new GsonBuilder().setPrettyPrinting().create().toJson(pixels));
+                        require(pixels.worldSurfaceOutsideHud()>0 && pixels.reactiveWorldOutsideHud()>0
+                                        && pixels.worldSurfaceOutsideHud()==raw.worldSurfacePixelsOutsideHand()
+                                        && pixels.reactiveWorldOutsideHud()==raw.worldReactivePixelsOutsideHand()
+                                        && pixels.transparentWorldOutsideHud()==raw.transparentWorldSurfacePixelsOutsideHand(),
+                                "Cloud ownership did not independently survive HUD exclusion: "+pixels+"; "+raw);
                     } catch(IOException failure) {throw new IllegalStateException("Cannot inspect actual cloud source pixels",failure);}
                 }
             }
