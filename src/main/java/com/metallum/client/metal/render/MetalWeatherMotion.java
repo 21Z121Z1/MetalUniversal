@@ -188,7 +188,7 @@ public final class MetalWeatherMotion {
         if(replayBase>Integer.MAX_VALUE) {MetalEntityMotionCapture.failExactSample(sample,"weather-vertex-base-overflow");return;}
         var info=new StagedVertexBuffer.ExecuteInfo(geometry.vertices().buffer(),geometry.indices(),geometry.indexType(),
                 (int)replayBase,0,indexCount,PrimitiveTopology.QUADS);
-        MetalFxManager.drawDirectMotion(info,sample,token,stage,pass);
+        MetalFxManager.drawDirectMotion(info,sample,token,stage,pass,MetalWeatherMotion::plan);
         // Resolve against world depth before the hand pass can clear/rewrite its source attachment.
         MetalPreviousVertexReplay.flushAfterSourcePass(pass);
     }

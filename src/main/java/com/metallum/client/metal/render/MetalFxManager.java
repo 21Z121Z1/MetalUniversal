@@ -437,7 +437,7 @@ public final class MetalFxManager {
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             MetalPreviousVertexHistory.DrawToken previousVertexToken,
-            boolean directSource
+            MetalPreviousVertexReplay.@Nullable DirectPlan directSource
     ) {
     }
 
@@ -948,13 +948,13 @@ public final class MetalFxManager {
     /** Direct renderer draws supply an explicit token instead of a staged sidecar lifetime. */
     static void drawDirectMotion(final StagedVertexBuffer.ExecuteInfo info,final MetalEntityMotionCapture.Sample sample,
             final MetalPreviousVertexHistory.DrawToken token,final net.minecraft.client.renderer.oit.@Nullable OitStage stage,
-            final RenderPass sourcePass) {
+            final RenderPass sourcePass,final MetalPreviousVertexReplay.DirectPlan sourcePlan) {
         if(!MetalEntityMotionCapture.isEnabled())return;
         MetalMotionDrawCoverage.sourceExecution(stage,sample,false);
         if(MOTION_CAPTURE_VALIDATION)MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass),stage,sample);
         if(stage!=null && stage!=net.minecraft.client.renderer.oit.OitStage.ACCUMULATE)return;
         MetalFxManager manager=active;
-        if(manager!=null)manager.queueObjectMotionReplay(info,sample,sourcePass,token,true);
+        if(manager!=null)manager.queueObjectMotionReplay(info,sample,sourcePass,token,sourcePlan);
     }
 
     static @Nullable GpuBufferSlice freezeMotionVertices(final byte[] vertices) {
@@ -1940,12 +1940,13 @@ public final class MetalFxManager {
         // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
         MetalPreviousVertexHistory.DrawToken previousVertexToken =
                 MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
-        queueObjectMotionReplay(executeInfo,sample,sourcePass,previousVertexToken,false);
+        queueObjectMotionReplay(executeInfo,sample,sourcePass,previousVertexToken,null);
     }
 
     private void queueObjectMotionReplay(final StagedVertexBuffer.ExecuteInfo executeInfo,
             final MetalEntityMotionCapture.Sample sample,final RenderPass sourcePass,
-            final MetalPreviousVertexHistory.@Nullable DrawToken previousVertexToken,final boolean directSource) {
+            final MetalPreviousVertexHistory.@Nullable DrawToken previousVertexToken,
+            final MetalPreviousVertexReplay.@Nullable DirectPlan directSource) {
         var prepared = MetalPreviousVertexReplay.sourceState(sourcePass);
         var sourceInputs = MetalPreviousVertexReplay.sourceDrawInputs(sourcePass);
         boolean firstPerson = sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
@@ -2059,7 +2060,7 @@ public final class MetalFxManager {
                 continue;
             }
             MetalPreviousVertexReplay.Plan exactPlan = !ownedInvalid && exactMotionSupported
-                    ? replay.directSource() ? MetalWeatherMotion.plan(replay.previousVertexToken(),true) : MetalPreviousVertexReplay.plan(
+                    ? replay.directSource()!=null ? replay.directSource().resolve(replay.previousVertexToken(),true) : MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
             var drawTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())
@@ -2076,7 +2077,7 @@ public final class MetalFxManager {
                         : !surfaceMatches ? "source-material-history-unavailable"
                         : "source-history-unavailable-current-ownership-only";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
-                exactPlan = exactMotionSupported ? replay.directSource() ? MetalWeatherMotion.plan(replay.previousVertexToken(),false) : MetalPreviousVertexReplay.currentOnlyPlan(
+                exactPlan = exactMotionSupported ? replay.directSource()!=null ? replay.directSource().resolve(replay.previousVertexToken(),false) : MetalPreviousVertexReplay.currentOnlyPlan(
                         prepared.pipeline(), executeInfo, replay.previousVertexToken()) : null;
                 drawTransforms = MetalPreviousVertexReplay.currentOnlyTransforms(replay.previousVertexToken(), firstPerson);
                 if (drawTransforms == null || (exactMotionSupported && exactPlan == null)) {
@@ -2085,7 +2086,7 @@ public final class MetalFxManager {
                 }
             }
             boolean exactPreviousPositions = exactPlan != null;
-            if(replay.directSource() && exactPreviousPositions) {
+            if(replay.directSource()!=null && exactPreviousPositions) {
                 // The global sequential index buffer may have grown since the source draw.
                 var indices=RenderSystem.getSequentialBuffer(executeInfo.topology());
                 indices.requestIndexCount(executeInfo.indexCount());
@@ -2200,7 +2201,7 @@ public final class MetalFxManager {
                     currentVertexBuffer,
                     previousPositionBuffer,
                     boundedPreviousCoverage,
-                    replay.directSource(),
+                    replay.directSource()!=null,
                     exactPreviousPositions && !ownedInvalid ? replay.previousVertexToken() : null,
                     ownedInvalid,
                     replayBaseVertex
@@ -5185,6 +5186,7 @@ public final class MetalFxManager {
         device.waitForSubmittedGpuWork();
         motionStateStore.reset();
         MetalWeatherMotion.reset();
+        MetalCloudMotion.reset();
         frameSynthesisReceipts.reset();
         sourceFrameStamp = null;
         sourceFrameStampInvalidated = false;

@@ -110,6 +110,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     }
 
     void flushMotionReplayAfterClose() {motionReplayFlushOnClose=true;}
+    @Nullable GpuBufferSlice motionUniform(final String name) {return uniforms.get(name);}
 
     MetalPreviousVertexReplay.@Nullable SourceState motionSourceState() {
         RenderPipeline source = compiledPipeline == null ? null : compiledPipeline.sourcePipeline();

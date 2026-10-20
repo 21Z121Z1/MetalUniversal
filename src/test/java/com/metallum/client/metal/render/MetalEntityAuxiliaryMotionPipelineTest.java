@@ -139,6 +139,25 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void proceduralCloudsRequireDecodedFaceGeometryAndOwnFogRatherThanRigidFallback() {
+        for(var source:java.util.List.of(net.minecraft.client.renderer.RenderPipelines.CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.FLAT_CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.OIT_CLOUDS.accumulatePipeline())) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            assertFalse(MetalEntityMotionPipeline.supports(source));
+            assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
+            var replay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+            assertEquals(DefaultVertexFormat.POSITION_COLOR,replay.getVertexFormatBinding(0));
+            assertEquals("core/cloud_previous_motion",replay.getShaders().get(ShaderType.VERTEX).getPath());
+            assertTrue(replay.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler0"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler2"));
+        }
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(pipeline("core/clouds",DefaultVertexFormat.POSITION_COLOR)),
+                "Custom attribute-based clouds cannot masquerade as the audited procedural source ABI");
+    }
+
+    @Test
     void sourceAttachmentPresenceSelectsIndependentDepthPolicies() {
         var source=net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT;
         var tested=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);

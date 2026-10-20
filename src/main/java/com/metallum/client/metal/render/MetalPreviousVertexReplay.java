@@ -26,6 +26,10 @@ import java.nio.ByteOrder;
  */
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexReplay {
+    @FunctionalInterface
+    interface DirectPlan {
+        @Nullable Plan resolve(MetalPreviousVertexHistory.DrawToken token,boolean previous);
+    }
     record SourceGeometry(@Nullable GpuBufferSlice vertices,GpuBuffer indices,IndexType indexType) {}
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
                             @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals,@Nullable GpuBufferSlice fog) {
@@ -160,6 +164,13 @@ final class MetalPreviousVertexReplay {
         return null;
     }
 
+    static @Nullable GpuBufferSlice sourceUniform(final RenderPass pass,final String name) {
+        if(pass instanceof MetalRenderPass metal)return metal.motionUniform(name);
+        if(pass instanceof RenderPearlBackendAccess access
+                && access.metallum$getBackend() instanceof MetalRenderPass metal)return metal.motionUniform(name);
+        return null;
+    }
+
     static void flushAfterSourcePass(final RenderPass pass) {
         if(pass instanceof MetalRenderPass metal)metal.flushMotionReplayAfterClose();
         else if(pass instanceof RenderPearlBackendAccess access
@@ -197,9 +208,8 @@ final class MetalPreviousVertexReplay {
         Map<String, MetalPreviousVertexHistory.TextureIdentity> textures = new java.util.TreeMap<>();
         // OIT's per-frame coefficient/depth targets describe compositing, not material identity.
         // Track the sampled resources that define visibility of the audited reduced families.
-        boolean lightmap=MetalEntityMotionPipeline.usesVisibilityLightmap(state.pipeline());
         for (String name : java.util.List.of("Sampler0","DissolveMaskSampler","GlintSampler","Sampler2")) {
-            if(name.equals("Sampler2") && !lightmap)continue;
+            if(!MetalEntityMotionPipeline.usesSurfaceTexture(state.pipeline(),name))continue;
             var pair = state.textures().get(name);
             if (pair == null) continue;
             var view = pair.view(); var sampler = pair.sampler();
