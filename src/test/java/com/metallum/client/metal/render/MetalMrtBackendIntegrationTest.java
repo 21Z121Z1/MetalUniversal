@@ -1583,6 +1583,55 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void colorOnlyDrawDisablesDepthAndRestoresRealDepthAcrossPasses() {
+        String name = "depth_attachment_transition";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1, 0.5, 0.25, 1); }
+                """);
+        RenderPipeline rejectingDepth = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/mrt_vertex")
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .withDepthStencilState(new DepthStencilState(CompareOp.NEVER_PASS, false)).build();
+        RenderPipeline noDepth = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                    name + "-color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                    name + "-depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView colorView = new MetalGpuTextureView(color, 0, 1);
+             MetalGpuTextureView depthView = new MetalGpuTextureView(depth, 0, 1)) {
+            // Reuse the same compiled source pipeline and alternate attachment
+            // signatures. The real attachment must restore NEVER_PASS, while
+            // both kinds of color-only pipeline must still rasterize.
+            for (int phase = 0; phase < 6; phase++) {
+                boolean attached = phase % 3 == 1;
+                RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> name)
+                        .withColorAttachment(colorView, Optional.of(new Vector4f(0)))
+                        .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+                if (attached) descriptor.withDepthAttachment(depthView, java.util.OptionalDouble.of(0.75));
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
+                pass.setPipeline(phase % 3 == 2 ? noDepth : rejectingDepth);
+                pass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+                ByteBuffer pixels = readback(color);
+                for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                    assertByteNear(pixels.get(pixel * 4), attached ? 0 : 255, "red phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 1), attached ? 0 : 128, "green phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 2), attached ? 0 : 64, "blue phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 3), attached ? 0 : 255, "alpha phase " + phase);
+                }
+            }
+        }
+    }
+
+    @Test
     void depthPlusMrtWritesColorAndDepth() {
         String shaderName = "mrt_depth_combo";
         vertexShaders.put("mrt_depth_vertex", """

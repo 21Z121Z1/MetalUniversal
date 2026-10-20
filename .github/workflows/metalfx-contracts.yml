@@ -74,7 +74,7 @@ jobs:
           cp -R "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
           python3 - <<'PY'
           from pathlib import Path
-          for path in sorted(Path('build/agent-evidence/metalfx/sdk-headers').glob('*FrameInterpolator*.h')):
+          for path in sorted(Path('build/agent-evidence/metalfx/sdk-headers').rglob('*.h')):
               lines = path.read_text().splitlines()
               for index, line in enumerate(lines):
                   if any(name in line for name in ('motionVectorScaleX', 'jitterOffsetX', 'deltaTime', 'fieldOfView')):
