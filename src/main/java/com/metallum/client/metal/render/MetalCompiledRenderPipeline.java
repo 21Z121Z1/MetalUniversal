@@ -96,10 +96,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     // info is a backend-only layout reconstructed from SPIR-V. Its attribute
     // names are synthetic and shader defines are absent; it cannot own motion semantics.
     @Nullable private volatile RenderPipeline sourcePipeline;
-    @Nullable private volatile MetalShaderInputCapture.Snapshot shaderInputs;
+    private volatile MetalShaderInputCapture.@Nullable Snapshot shaderInputs;
 
-    @Nullable MetalShaderInputCapture.Snapshot shaderInputs() {return shaderInputs;}
-    void captureShaderInputs(@Nullable MetalShaderInputCapture.Snapshot inputs) {
+    MetalShaderInputCapture.@Nullable Snapshot shaderInputs() {return shaderInputs;}
+    void captureShaderInputs(MetalShaderInputCapture.@Nullable Snapshot inputs) {
         if(inputs==null)return;
         if(shaderInputs!=null && !shaderInputs.equals(inputs))
             throw new IllegalStateException("A compiled pipeline cannot change shader input identity: "+info.getLocation());
