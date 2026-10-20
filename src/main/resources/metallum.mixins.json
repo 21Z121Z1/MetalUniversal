@@ -12,6 +12,7 @@
     "render.BackendFrameComparisonServerMixin",
     "render.BackendFrameComparisonDeltaTrackerMixin",
     "render.GameRendererMetalFxMixin",
+    "render.ShaderManagerMetalSourceMixin",
     "render.GameRenderStateMetalFxMixin",
     "render.EntityRenderDispatcherMetalFxMixin",
     "render.BlockEntityRenderDispatcherMetalFxMixin",

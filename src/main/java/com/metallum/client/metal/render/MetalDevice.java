@@ -680,7 +680,8 @@ final class MetalDevice implements GpuDeviceBackend {
             if (existing != null && !existing.isClosed()) {
                 return existing;
             }
-            this.activeShaderSource = effectiveSource;
+            // The renderer library is owned by captureShaderSource/resource reload. A one-pipeline
+            // generated overlay (Iris, validation, etc.) must not replace that global library.
             CompiledRenderPipeline frontend;
             try {
                 if (rasterStorage) {

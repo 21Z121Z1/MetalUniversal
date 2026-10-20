@@ -81,6 +81,9 @@ final class MetalFirstPersonMotionGpuTest {
                 .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
                         .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
                         .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        ShaderSource liveLibrary = device.activeShaderSource();
+        device.precompilePipeline(source, MetalShaderSourceAdapters.overlay(java.util.Map.of(), liveLibrary));
+        assertSame(liveLibrary, device.activeShaderSource(), "a per-pipeline overlay must not poison the live renderer shader library");
         Fixture geometry = new Fixture("world_source", "core/entity", 75, 75, false, true, false, false, .1F);
         Matrix4f baseP = projection(75), oldP = new Matrix4f(baseP).m20(.011F).m21(-.007F);
         Matrix4f newP = new Matrix4f(baseP).m20(-.009F).m21(.005F);
