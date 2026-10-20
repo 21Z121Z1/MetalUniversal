@@ -122,6 +122,10 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 对应点按当前纹理图案在旧四边形 UV 基中的位置重建，包含雨水下落、雪花横向／纵向漂移、实际 sampler repeat 和时间包装。额外 24 字节 previous-position／validity／old-local-UV 流在片元逐像素检查旧柱面边界；超出旧源范围继续写当前 Z 和无效历史标签。源当前顶点冻结到 GPU 帧内内存，并在源 pass 关闭后、手部改写世界深度前回放，雪的原始非零 firstIndex 也重基到独立快照。原版 camera-cell 的 0/0 方向只替换为有限的零宽四边形，保持空覆盖。新增五项原版颜色 GPU 对照及普通／OIT 混合雨雪真实客户端清单；本地完整 1175 项、零失败／错误、43 项条件跳过，另有畸形新上传的针对性回归。新增天气行为仍待对应 Actions 验收，完整 producer 门禁保持关闭。
 
+`f4afd59` 的 Vanilla FX 原始客户端附件确认天气清单 `verified=true`：普通 weather 为 118 次 draw／118 次 hook，116 次完整运动与 2 次无历史覆盖；OIT accumulate 为 164／164，162 次完整运动与 2 次无历史覆盖；雨／雪所有者各 139 次完整历史编码。两个原始运动读回均为 184,184 个有限合成像素、41,808 个手部像素，普通与后处理 HUD 深度隔离通过。任务随后在 GameTest 线程关闭 recorder 与渲染线程更新资源身份竞争时失败，不能把该任务标为成功。采集器关闭改为在实际渲染线程执行，原清单／图像断言保留；需后续完整任务重验。
+
+lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 VS 中先乘顶点 alpha 再插值并参与 cutout；ENTITY 独立插值 lightmap alpha，在纹理 cutout、DISSOLVE 替换及 GLINT alpha floor 之后相乘。EMISSIVE 实体不采样，ITEM 包括 GLINT_SPECIAL 始终采样，UV2 仍是原版物理属性 4；阴影不错误继承实体光照语义。Sampler2 资源／采样身份也纳入这些实际依赖光照可见性的表面历史。新增十项原版颜色 GPU 对照涵盖顺序负例、零 lightmap、cutout 前后区别及 emissive 特例，手部 ITEM 与 BLOCK 回放对照补齐真实绑定。本地完整 1273 项、零失败／错误、43 项条件跳过；新增材质行为仍需对应 Actions 验收。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。

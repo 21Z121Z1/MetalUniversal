@@ -128,6 +128,19 @@ final class MetalEntityMotionPipeline {
         return previousFamilyOf(source)==PreviousFamily.LIGHTNING;
     }
 
+    static boolean usesEntityLightmap(final RenderPipeline source) {
+        return previousFamilyOf(source)==PreviousFamily.ENTITY
+                && (source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/item")
+                    || !source.getShaderDefines().flags().contains("EMISSIVE"));
+    }
+
+    static boolean usesVisibilityLightmap(final RenderPipeline source) {
+        var family=previousFamilyOf(source);
+        return usesEntityLightmap(source) || family==PreviousFamily.BLOCK || family==PreviousFamily.PARTICLE
+                || ((family==PreviousFamily.TEXT || family==PreviousFamily.TEXT_BACKGROUND)
+                    && !source.getShaderDefines().flags().contains("IS_SEE_THROUGH"));
+    }
+
     private static boolean auditedShaders(final RenderPipeline source) {
         if (source == null) return false;
         var vertex = source.getShaders().get(ShaderType.VERTEX);
@@ -411,6 +424,7 @@ final class MetalEntityMotionPipeline {
         if (source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/item")) {
             builder.withShaderDefine("METALLUM_ITEM_SOURCE");
         }
+        if (usesEntityLightmap(source)) builder.withShaderDefine("METALLUM_ENTITY_LIGHTMAP");
         source.getShaderDefines().flags().forEach(builder::withShaderDefine);
         source.getShaderDefines().values().forEach((name, value) -> {
             try {

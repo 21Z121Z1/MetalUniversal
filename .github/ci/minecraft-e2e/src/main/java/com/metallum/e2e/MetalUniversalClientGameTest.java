@@ -336,7 +336,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             }
 
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
-            closeRenderContract();
+            // Resource identity events are emitted by the render owner. Retire its
+            // recorder there too, before any subsequent frame can orphan a buffer.
+            context.runOnClient(client -> closeRenderContract());
 
             Path windowScreenshot = context.takeScreenshot(SCREENSHOT_NAME);
             require(Files.isRegularFile(windowScreenshot),
@@ -377,7 +379,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             requestServerOwnedHalt(singleplayer);
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
-            closeRenderContractQuietly();
+            context.runOnClient(client -> closeRenderContractQuietly());
         }
     }
 
