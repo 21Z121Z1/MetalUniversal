@@ -5,6 +5,7 @@ import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import org.joml.Vector4f;
 import org.junit.jupiter.api.*;
