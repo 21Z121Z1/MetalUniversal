@@ -1503,7 +1503,7 @@ public final class MetalNativeBridge {
         if (surfaceMotionV4Supports == null || surfaceMotionV4Resolve == null || preparedTemporalEncode == null) return false;
         try {
             int capabilities = (int)surfaceMotionV4Supports.invokeExact(segment(device));
-            return (capabilities & 7) == 7;
+            return (capabilities & 15) == 15;
         } catch (Throwable failure) { throw bridgeFailure("metallum_metalfx_supports_surface_motion_v4",failure); }
     }
 

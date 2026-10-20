@@ -17,6 +17,34 @@ struct MetallumMotionSample {
     float validity;
 };
 
+#ifdef METALLUM_TEST_SOURCE_DEPTH
+uniform sampler2D MetallumSourceDepth;
+
+void metallumCheckSourceDepth() {
+    // Private ownership Z may have been replaced by a depth-test-free overlay.
+    // Ordinary source draws still obey their independent source attachment.
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    if (any(lessThan(pixel, ivec2(0))) || any(greaterThanEqual(pixel, textureSize(MetallumSourceDepth, 0)))) discard;
+    float z = gl_FragCoord.z, source = texelFetch(MetallumSourceDepth, pixel, 0).r;
+    if (isnan(source) || isinf(source) || source < 0.0 || source > 1.0) discard;
+    bool passes = false;
+#if defined(METALLUM_SOURCE_DEPTH_GREATER_THAN_OR_EQUAL)
+    passes = z >= source;
+#elif defined(METALLUM_SOURCE_DEPTH_GREATER_THAN)
+    passes = z > source;
+#elif defined(METALLUM_SOURCE_DEPTH_LESS_THAN_OR_EQUAL)
+    passes = z <= source;
+#elif defined(METALLUM_SOURCE_DEPTH_LESS_THAN)
+    passes = z < source;
+#elif defined(METALLUM_SOURCE_DEPTH_EQUAL)
+    passes = z == source;
+#elif defined(METALLUM_SOURCE_DEPTH_NOT_EQUAL)
+    passes = z != source;
+#endif
+    if (!passes) discard;
+}
+#endif
+
 MetallumMotionSample metallumMotionSample() {
     MetallumMotionSample result;
     result.motion = vec2(0.0);
@@ -47,14 +75,27 @@ MetallumMotionSample metallumMotionSample() {
 
 float metallumExportValidity(MetallumMotionSample motion) {
 #ifdef METALLUM_MOTION_DEPTH
+#ifdef METALLUM_TEST_SOURCE_DEPTH
+    metallumCheckSourceDepth();
+#endif
     metallumDepthTarget = vec2(motion.validity > 0.5 ? motion.previousDepth : -1.0, gl_FragCoord.z);
-    // Distinguish owned-but-invalid history from untouched background.
-    if (motion.validity <= 0.5) return 0.25;
+    // Explicit R8 wire tags: 0 background; 64 invalid; 191 reactive; 255 exact.
+    // Overlays use 96/159/223 respectively and select private ownership Z.
+#ifdef METALLUM_MOTION_OVERLAY
+    if (motion.validity <= 0.5) return 96.0 / 255.0;
+#ifdef METALLUM_REACTIVE_MATERIAL
+    return 159.0 / 255.0;
+#else
+    return 223.0 / 255.0;
+#endif
+#else
+    if (motion.validity <= 0.5) return 64.0 / 255.0;
 #ifdef METALLUM_REACTIVE_MATERIAL
     // Geometry remains exact while color changes independently of its surface.
     return 0.75;
 #else
     return 1.0;
+#endif
 #endif
 #else
     return motion.validity;

@@ -33,7 +33,10 @@ final class MetalPreviousVertexReplay {
 
     /** Immutable bindings of the draw that actually executed, including OIT's selected pipeline. */
     record SourceState(RenderPipeline pipeline, Map<String, TextureViewAndSampler> textures,
-                       RenderPass.@Nullable RenderArea scissor) {
+                       RenderPass.@Nullable RenderArea scissor, boolean depthAttachmentPresent) {
+        SourceState(RenderPipeline pipeline,Map<String,TextureViewAndSampler> textures,RenderPass.@Nullable RenderArea scissor) {
+            this(pipeline,textures,scissor,true);
+        }
         SourceState { textures = Map.copyOf(textures); }
     }
 
@@ -135,7 +138,7 @@ final class MetalPreviousVertexReplay {
                     view.baseMipLevel(), view.mipLevels(), sampler.getAddressModeU(), sampler.getAddressModeV(),
                     sampler.getMinFilter(), sampler.getMagFilter(), sampler.getMaxAnisotropy(), sampler.getMaxLod()));
         }
-        return new MetalPreviousVertexHistory.SurfaceIdentity(state.pipeline(), textures);
+        return new MetalPreviousVertexHistory.SurfaceIdentity(state.pipeline(), textures,state.depthAttachmentPresent());
     }
 
     private static @Nullable Matrix4f sourceUniformMatrix(final @Nullable GpuBufferSlice slice) {

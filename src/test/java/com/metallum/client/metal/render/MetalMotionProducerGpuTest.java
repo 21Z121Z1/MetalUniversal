@@ -202,7 +202,10 @@ final class MetalMotionProducerGpuTest {
                 "invalid_camera_keeps_object", "preserved_reactive", "compatible_depth_neighbor",
                 "nearest_transparent_surface", "reactive_material_keeps_correspondence",
                 "hand_without_source_depth", "invalid_hand_without_source_depth",
-                "standard_z_hand_without_source_depth", "actual_hand_occludes_transparent_hand");
+                "standard_z_hand_without_source_depth", "actual_hand_occludes_transparent_hand",
+                "overlay_behind_scene", "invalid_overlay_behind_scene", "reactive_overlay_behind_scene",
+                "standard_z_overlay_behind_scene", "overlay_world_behind_hand", "unknown_wire_tag",
+                "overlay_ignores_nonfinite_unused_scene_depth");
     }
 
     @ParameterizedTest(name = "surface resolve: {0}")
@@ -218,6 +221,7 @@ final class MetalMotionProducerGpuTest {
         boolean history=true, reversed=true, reject=false, invalid=false, preserve=false;
         boolean hasHand=false, reactiveMaterial=false;
         Float expectedHandOverride=null;
+        Float expectedWorldOverride=null;
         boolean oldCenterOccluder=false, oldNeighborMatch=false, jitterProbe=false;
         Matrix4f current=new Matrix4f(), inverse=new Matrix4f(), previous=new Matrix4f();
         Vector2f jitter=new Vector2f(), oldJitter=new Vector2f();
@@ -268,6 +272,22 @@ final class MetalMotionProducerGpuTest {
                 handZ=.95F; currentZ=.85F; handMask=1; previousHand=beforeZ; hasHand=true;
                 reject=invalid=true;
             }
+            case "overlay_behind_scene", "invalid_overlay_behind_scene", "reactive_overlay_behind_scene",
+                 "overlay_ignores_nonfinite_unused_scene_depth" -> {
+                sceneZ=.8F;worldMask=223F/255;expectedWorldOverride=.2F;
+                if(name.startsWith("invalid_")) {worldMask=96F/255;beforeZ=-1;reject=invalid=true;}
+                if(name.startsWith("reactive_")) {worldMask=159F/255;reactiveMaterial=true;}
+                if(name.contains("nonfinite"))sceneZ=Float.NaN;
+            }
+            case "standard_z_overlay_behind_scene" -> {
+                reversed=false;handZ=previousHand=1;sceneZ=.2F;ownershipZ=currentZ=.8F;
+                worldMask=223F/255;expectedWorldOverride=.8F;
+            }
+            case "overlay_world_behind_hand" -> {
+                handZ=currentZ=.85F;handMask=1;previousHand=beforeZ;hasHand=true;
+                sceneZ=.7F;ownershipZ=.1F;worldMask=223F/255;expectedWorldOverride=.1F;
+            }
+            case "unknown_wire_tag" -> {worldMask=128F/255;reject=invalid=true;}
         }
         if (invalid) { expectedX=expectedY=0; }
         if (jitterProbe) MetalNativeBridge.metallum_metalfx_set_reactive_tuning(0, 0, 0, 0, 0, 1, 0);
@@ -324,7 +344,8 @@ final class MetalMotionProducerGpuTest {
             assertEquals(reject ? 255 : 0,Byte.toUnsignedInt(d[probe]),"Only the matching previous surface can supply history");
             float expectedReactive=reject || reactiveMaterial ? 1 : hasHand ? .8F : preserve ? baseReactive : 0;
             assertEquals(expectedReactive*255,Byte.toUnsignedInt(r[probe]),1);
-            float expectedWorld=reversed ? Math.max(sceneZ,ownershipZ) : Math.min(sceneZ,ownershipZ);
+            float expectedWorld=expectedWorldOverride!=null ? expectedWorldOverride
+                    : reversed ? Math.max(sceneZ,ownershipZ) : Math.min(sceneZ,ownershipZ);
             ByteBuffer worldValues=ByteBuffer.wrap(world).order(ByteOrder.nativeOrder());
             ByteBuffer handValues=ByteBuffer.wrap(hand).order(ByteOrder.nativeOrder());
             ByteBuffer compositeValues=ByteBuffer.wrap(composite).order(ByteOrder.nativeOrder());
@@ -396,6 +417,8 @@ final class MetalMotionProducerGpuTest {
             var flow=texture("current source XY",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
             var valid=texture("current source ownership",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
             var pair=texture("current source depth",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var privateDepth=texture("current ownership raster Z",GpuFormat.D32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var privateDepthView=device.createTextureView(privateDepth);
             var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty());
             var sampledView=device.createTextureView(sampled);var flowView=device.createTextureView(flow);
             var validView=device.createTextureView(valid);var pairView=device.createTextureView(pair)) {
@@ -406,6 +429,7 @@ final class MetalMotionProducerGpuTest {
             try(var previous=device.createBuffer(()->"finite invalid vertex history",GpuBuffer.USAGE_VERTEX,history)) {
                 encoder.clearColorTexture(sampled,new Vector4f(1,1,1,f.alphaHole()?0:1));
                 try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Owned current surface without history")
+                        .withDepthAttachment(privateDepthView,java.util.OptionalDouble.of(0))
                         .withColorAttachment(flowView,Optional.of(new Vector4f(0)))
                         .withColorAttachment(validView,Optional.of(new Vector4f(0)))
                         .withColorAttachment(pairView,Optional.of(new Vector4f(-1)))
@@ -421,7 +445,7 @@ final class MetalMotionProducerGpuTest {
                 ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder());int covered=0;
                 for(int p=0;p<W*H;p++) {
                     int value=Byte.toUnsignedInt(mask[p]);
-                    if(value>0) {covered++;assertEquals(64,value,1);assertEquals(-1,pairs.getFloat(p*8),0);assertEquals(.5F,pairs.getFloat(p*8+4),1e-6);}
+                    if(value>0) {covered++;assertEquals(96,value,1);assertEquals(-1,pairs.getFloat(p*8),0);assertEquals(.5F,pairs.getFloat(p*8+4),1e-6);}
                     else {assertEquals(-1,pairs.getFloat(p*8),0);assertEquals(-1,pairs.getFloat(p*8+4),0);}
                     assertEquals(0,Float.float16ToFloat(vectors.getShort(p*4)),0);assertEquals(0,Float.float16ToFloat(vectors.getShort(p*4+2)),0);
                 }
@@ -506,6 +530,8 @@ final class MetalMotionProducerGpuTest {
                  var flow = texture("particle correspondence",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
                  var valid = texture("particle correspondence validity",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
                  var correspondence = texture("particle surface correspondence",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+                 var privateDepth = texture("particle ownership raster Z",GpuFormat.D32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+                 var privateDepthView = device.createTextureView(privateDepth);
                  var sampled = texture("particle sprite and lightmap",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
                  var cv = device.createTextureView(color); var fv = device.createTextureView(flow);
                  var vv = device.createTextureView(valid); var sv = device.createTextureView(sampled); var zv = device.createTextureView(correspondence);
@@ -519,6 +545,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setVertexBuffer(0,vb.slice()); pass.setIndexBuffer(ib,IndexType.SHORT); pass.drawIndexed(18,1,0,0,0);
                 }
                 try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "ID-remapped particle motion")
+                        .withDepthAttachment(privateDepthView,java.util.OptionalDouble.of(0))
                         .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
                         .withColorAttachment(zv,Optional.of(new Vector4f(-1))).build())) {
                     pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
@@ -538,7 +565,7 @@ final class MetalMotionProducerGpuTest {
                     if (Byte.toUnsignedInt(pixels[p*4+3]) < 128) continue;
                     int group = p%W < W/3 ? 0 : p%W >= W*2/3 ? 2 : 1;
                     counts[group]++;
-                    assertEquals(group == 1 ? 64 : 255, Byte.toUnsignedInt(mask[p]));
+                    assertEquals(group == 1 ? 96 : 223, Byte.toUnsignedInt(mask[p]));
                     assertEquals(group == 0 ? .1F : group == 2 ? -.15F : 0, x, .001);
                     assertEquals(0,y,.001);
                 }
@@ -624,6 +651,8 @@ final class MetalMotionProducerGpuTest {
              var flow=texture("projective motion",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
              var valid=texture("projective validity",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
              var correspondence=texture("previous and current surface Z",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+             var privateDepth=texture("projective ownership raster Z",GpuFormat.D32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+             var privateDepthView=device.createTextureView(privateDepth);
              var points=texture("independent current surface point",GpuFormat.RGBA32_FLOAT,GpuTexture.USAGE_COPY_SRC);
              var sampled=texture("projective texture",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
              var cv=device.createTextureView(color);var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);
@@ -640,6 +669,7 @@ final class MetalMotionProducerGpuTest {
                 pass.setPipeline(oracle);pass.setUniform("OracleRaster",op.slice());pass.setVertexBuffer(0,vb.slice());pass.draw(3,1,0,0);
             }
             try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Projective motion contract")
+                    .withDepthAttachment(privateDepthView,java.util.OptionalDouble.of(0))
                     .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
                     .withColorAttachment(zv,Optional.of(new Vector4f(-1))).build())) {
                 pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));pass.setUniform("Projection",pr.slice());
@@ -671,7 +701,7 @@ final class MetalMotionProducerGpuTest {
                         && Math.abs(b[0]/b[3])<=1 && Math.abs(b[1]/b[3])<=1 && b[2]/b[3]>=0 && b[2]/b[3]<=1;
                 boolean actual=Byte.toUnsignedInt(mask[p])>127;
                 if(expected!=actual)wrongValidity++;
-                if (Byte.toUnsignedInt(mask[p]) != (expected ? 255 : 64)) wrongOwnership++;
+                if (Byte.toUnsignedInt(mask[p]) != (expected ? 223 : 96)) wrongOwnership++;
                 double analyticDepthError = Math.max(Math.abs(zs.getFloat(p*8)-(expected ? b[2]/b[3] : -1)),
                         Math.abs(zs.getFloat(p*8+4)-c[2]/c[3]));
                 maxAnalyticDepthError = Math.max(maxAnalyticDepthError,analyticDepthError);
@@ -917,6 +947,8 @@ final class MetalMotionProducerGpuTest {
             var flow=texture("shadow XY",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
             var valid=texture("shadow ownership",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
             var pair=texture("shadow surface depth",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var privateDepth=texture("shadow ownership raster Z",GpuFormat.D32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var privateDepthView=device.createTextureView(privateDepth);
             var sv=device.createTextureView(sampled);var cv=device.createTextureView(color);
             var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
             var sampler=device.createSampler(AddressMode.REPEAT,AddressMode.REPEAT,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
@@ -927,6 +959,7 @@ final class MetalMotionProducerGpuTest {
                 pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.draw(6,1,0,0);
             }
             try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Exact shadow visibility replay")
+                    .withDepthAttachment(privateDepthView,java.util.OptionalDouble.of(0))
                     .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
                     .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
                 pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
@@ -957,7 +990,7 @@ final class MetalMotionProducerGpuTest {
                 "dissolve_replaces_alpha", "dissolve_hidden", "dissolve_before_modulator", "dissolve_cutout_first",
                 "entity_additive_cutout", "item_additive_flag_does_not_clamp", "zero_alpha_blended", "zero_alpha_opaque",
                 "entity_texture_matrix_visibility", "item_ignores_entity_texture_matrix", "per_face_dissolve",
-                "entity_glint_zero_modulator");
+                "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth");
     }
 
     @ParameterizedTest(name = "actual material visibility: {0}")
@@ -966,6 +999,8 @@ final class MetalMotionProducerGpuTest {
         boolean item=name.startsWith("item_"), special=name.contains("special"), glint=name.contains("glint");
         boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
         boolean blended=!name.equals("zero_alpha_opaque"), perFace=name.equals("per_face_dissolve");
+        boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
+        boolean projective=name.equals("entity_projective_self_depth");
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
         boolean visible=true;
         switch(name) {
@@ -997,7 +1032,7 @@ final class MetalMotionProducerGpuTest {
                 .withVertexShader(shader).withFragmentShader(shader).withVertexBinding(0,format).withBindGroupLayout(resources)
                 .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").withShaderDefine("NO_CARDINAL_LIGHTING")
                 .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true))
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true,sloped ? 2 : 0,biased ? 3 : 0))
                 .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
         if(glint)builder.withShaderDefine("GLINT");
         if(special)builder.withShaderDefine("GLINT_SPECIAL");
@@ -1010,7 +1045,7 @@ final class MetalMotionProducerGpuTest {
         // The motion variant separately receives the intended color blend semantics.
         var original=builder.build();
         var intended=builder.withLocation("motion_contract/material_motion/"+name)
-                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,false))
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,biased,sloped ? 2 : 0,biased ? 3 : 0))
                 .withColorTargetState(0,new ColorTargetState(blended ? Optional.of(BlendFunction.TRANSLUCENT) : Optional.empty(),
                         GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL)).build();
         var f=new Fixture(name,shader,format,false,false,false,false);
@@ -1020,20 +1055,24 @@ final class MetalMotionProducerGpuTest {
             mesh.putInt(base+format.getElement("Color").offset(),0x00FFFFFF|Math.round(vertexAlpha*255)<<24);
             int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);
             mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
+            if(sloped)mesh.putFloat(base+8,.5F+.1F*mesh.getFloat(base));
             if(special) {int extra=base+format.getElement("UV3").offset();mesh.putFloat(extra,.5F).putFloat(extra+4,.5F);}
         }
         ByteBuffer old=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
         assertTrue(MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6),old));old.flip();
-        ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());new Matrix4f().get(0,dynamic);
+        Matrix4f modelView=projective ? new Matrix4f().translate(.1F,-.05F,-2).rotateY(.2F).rotateZ(.1F) : new Matrix4f();
+        Matrix4f projectionMatrix=projective ? new Matrix4f().perspective((float)Math.toRadians(70),(float)W/H,.1F,100,true) : new Matrix4f();
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());modelView.get(0,dynamic);
         new Matrix4f().translation(matrix ? .5F : 0,0,0).get(64,dynamic);
         for(int i=0;i<4;i++)dynamic.putFloat(128+i*4,i==3 ? modAlpha : 1);
-        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());projectionMatrix.get(0,projection);
         ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
         ByteBuffer lighting=ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());lighting.putFloat(8,1).putFloat(24,1);
         ByteBuffer globals=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());globals.putFloat(12,.6F).putFloat(32,W).putFloat(36,H);
         ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
-        new Matrix4f().scaling(1,-1,1).get(0,motion);new Matrix4f().scaling(1,-1,1).get(64,motion);
+        new Matrix4f().scaling(1,-1,1).get(0,motion);
+        new Matrix4f().scaling(1,-1,1).mul(projectionMatrix).mul(modelView).get(64,motion);
         int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
         try(var vb=device.createBuffer(()->"actual material mesh",GpuBuffer.USAGE_VERTEX,mesh);
             var pb=device.createBuffer(()->"previous material positions",GpuBuffer.USAGE_VERTEX,old);
@@ -1077,6 +1116,7 @@ final class MetalMotionProducerGpuTest {
                     pass.bindTexture("GlintSampler",wv,sampler);pass.bindTexture("DissolveMaskSampler",dv,sampler);
                     pass.setVertexBuffer(0,vb.slice());
                     if(phase==1) {pass.setUniform("MetallumMotion",mo.slice());pass.setVertexBuffer(1,pb.slice());}
+                    if(phase==1)pass.bindTexture("MetallumSourceDepth",sd,sampler);
                     pass.draw(6,1,0,0);
                 }
             }
@@ -1096,7 +1136,9 @@ final class MetalMotionProducerGpuTest {
                 if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
                 if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
-                if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-.5F)>3e-6||Math.abs(now-.5F)>3e-6)wrongDepth++;
+                float expectedBefore=projective ? survived.getFloat(p*4) : sloped ? .5F+.1F*(2F*(p%W+.5F)/W-1) : .5F;
+                float expectedNow=survived.getFloat(p*4);
+                if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-expectedBefore)>3e-6||Math.abs(now-expectedNow)>3e-6)wrongDepth++;
             }
             Path dir=Path.of("build/agent-evidence/motion-producers/material-visibility/"+name);Files.createDirectories(dir);
             Files.write(dir.resolve("actual-source.rgba32f"),rgba);Files.write(dir.resolve("actual-fragment-survival.d32f"),depth);
@@ -1110,6 +1152,128 @@ final class MetalMotionProducerGpuTest {
             assertEquals(0,wrongMotion,"An unchanged exact surface must retain zero XY");
             assertEquals(0,wrongDepth,"The extra special-glint attribute must not alias previous XYZ/validity");
             if(visible)assertTrue(count>100);else assertEquals(0,count);
+        }
+    }
+
+    static Stream<String> sourceDepthPolicyFixtures() {
+        return Stream.of("no_depth_state", "missing_depth_attachment", "always_pass", "later_visible_normal",
+                "standard_z_hidden_normal", "overlay_after_normal", "strict_hidden_equal", "different_source_attachment");
+    }
+
+    @ParameterizedTest(name = "actual source depth policy: {0}")
+    @MethodSource("sourceDepthPolicyFixtures")
+    void overlayAndLaterGeometryFollowActualSourceDepthAndDrawOrder(String name) throws Exception {
+        boolean standard=name.startsWith("standard_"), missing=name.equals("missing_depth_attachment");
+        boolean lastOverlay=name.equals("overlay_after_normal");
+        float sceneZ=standard ? .2F : name.equals("different_source_attachment") ? .9F : .8F;
+        float initialOwnership=standard ? .2F : .8F, overlayZ=standard ? .8F : .2F;
+        float normalZ=name.equals("later_visible_normal")||lastOverlay ? .9F
+                : name.equals("strict_hidden_equal") ? .8F : name.equals("different_source_attachment") ? .85F : .5F;
+        CompareOp comparison=standard ? CompareOp.LESS_THAN_OR_EQUAL
+                : name.equals("strict_hidden_equal") ? CompareOp.GREATER_THAN : CompareOp.GREATER_THAN_OR_EQUAL;
+        var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build();
+        var builder=RenderPipeline.builder().withLocation("motion_contract/source_policy/"+name+"/overlay")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY).withBindGroupLayout(resources)
+                .withShaderDefine("EMISSIVE").withShaderDefine("NO_OVERLAY").withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
+        if(missing)builder.withDepthStencilState(new DepthStencilState(comparison,false));
+        if(name.equals("always_pass"))builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,false));
+        var overlayPipeline=builder.build();
+        var normalPipeline=builder.withLocation("motion_contract/source_policy/"+name+"/normal")
+                .withDepthStencilState(new DepthStencilState(comparison,false)).build();
+        ByteBuffer[] mesh=new ByteBuffer[2],old=new ByteBuffer[2],dynamic=new ByteBuffer[2];
+        for(int layer=0;layer<2;layer++) {
+            mesh[layer]=vertices(new Fixture(name,"core/entity",DefaultVertexFormat.ENTITY,false,false,false,false),false);
+            float z=layer==0 ? overlayZ : normalZ;
+            for(int i=0;i<6;i++)mesh[layer].putFloat(i*DefaultVertexFormat.ENTITY.getVertexSize()+8,z);
+            float[] previous=MetalPreviousVertexHistory.extractPositions(DefaultVertexFormat.ENTITY,java.util.List.of(mesh[layer]),6);
+            for(int i=0;i<6;i++)previous[i*3]+=layer==0 ? -.125F : .25F;
+            old[layer]=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
+            assertTrue(MetalPreviousVertexReplay.writePreviousPositions(previous,old[layer]));old[layer].flip();
+            dynamic[layer]=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());
+            new Matrix4f().get(0,dynamic[layer]);new Matrix4f().get(64,dynamic[layer]);
+            dynamic[layer].putFloat(128,layer==0 ? 1 : 0).putFloat(132,layer==1 ? 1 : 0).putFloat(140,1);
+        }
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        new Matrix4f().scaling(1,-1,1).get(0,motion);new Matrix4f().scaling(1,-1,1).get(64,motion);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        try(var v0=device.createBuffer(()->"overlay vertices",GpuBuffer.USAGE_VERTEX,mesh[0]);
+            var v1=device.createBuffer(()->"normal vertices",GpuBuffer.USAGE_VERTEX,mesh[1]);
+            var p0=device.createBuffer(()->"previous overlay",GpuBuffer.USAGE_VERTEX,old[0]);
+            var p1=device.createBuffer(()->"previous normal",GpuBuffer.USAGE_VERTEX,old[1]);
+            var d0=device.createBuffer(()->"red overlay",GpuBuffer.USAGE_UNIFORM,dynamic[0]);
+            var d1=device.createBuffer(()->"green ordinary source",GpuBuffer.USAGE_UNIFORM,dynamic[1]);
+            var pr=device.createBuffer(()->"source policy projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var fo=device.createBuffer(()->"source policy fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var mo=device.createBuffer(()->"source policy motion",GpuBuffer.USAGE_UNIFORM,motion);
+            var sampled=texture("source policy material",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var color=texture("actual original source ordering",GpuFormat.RGBA32_FLOAT,copy);
+            var scene=texture("actual source depth attachment",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var referenceDepth=texture("immutable source depth reference",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var ownership=texture("private selected depth",GpuFormat.D32_FLOAT,copy);
+            var flow=texture("source policy XY",GpuFormat.RG16_FLOAT,copy);var valid=texture("source policy tag",GpuFormat.R8_UNORM,copy);
+            var pair=texture("source policy Z",GpuFormat.RG32_FLOAT,copy);
+            var sv=device.createTextureView(sampled);var cv=device.createTextureView(color);var sd=device.createTextureView(scene);
+            var rd=device.createTextureView(referenceDepth);var od=device.createTextureView(ownership);
+            var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled,new Vector4f(1));encoder.clearDepthTexture(scene,sceneZ);
+            encoder.clearDepthTexture(ownership,initialOwnership);
+            for(int draw=0;draw<2;draw++) {
+                int layer=lastOverlay ? 1-draw : draw;
+                var descriptor=RenderPassDescriptor.builder(()->"Actual original source depth policy")
+                        .withColorAttachment(cv,draw==0 ? Optional.of(new Vector4f(0,0,1,1)) : Optional.empty())
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H));
+                if(layer==1 || !missing)descriptor.withDepthAttachment(sd);
+                try(var pass=encoder.createRenderPass(descriptor.build())) {
+                    pass.setPipeline(layer==0 ? overlayPipeline : normalPipeline);pass.setUniform("Projection",pr.slice());
+                    pass.setUniform("DynamicTransforms",(layer==0 ? d0 : d1).slice());pass.setUniform("Fog",fo.slice());
+                    pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,(layer==0 ? v0 : v1).slice());pass.draw(6,1,0,0);
+                }
+            }
+            encoder.copyTextureToTexture(scene,referenceDepth,0,0,0,0,0,W,H);
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Replay preserves original source semantics")
+                    .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                    .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withDepthAttachment(od)
+                    .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                for(int draw=0;draw<2;draw++) {
+                    int layer=lastOverlay ? 1-draw : draw;
+                    pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(layer==0 ? overlayPipeline : normalPipeline,layer==1||!missing));
+                    pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",(layer==0 ? d0 : d1).slice());
+                    pass.setUniform("MetallumMotion",mo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("MetallumSourceDepth",rd,sampler);
+                    pass.setVertexBuffer(0,(layer==0 ? v0 : v1).slice());pass.setVertexBuffer(1,(layer==0 ? p0 : p1).slice());pass.draw(6,1,0,0);
+                }
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] rgba=readback(color),mask=readback(valid),xy=readback(flow),depth=readback(pair),sceneBytes=readback(scene);
+            ByteBuffer colors=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder());
+            ByteBuffer pairs=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder()),sceneAfter=ByteBuffer.wrap(sceneBytes).order(ByteOrder.nativeOrder());
+            int covered=0,wrongSurface=0,wrongMotion=0,wrongDepth=0;
+            for(int p=0;p<W*H;p++) {
+                boolean green=colors.getFloat(p*16+4)>.5F,red=colors.getFloat(p*16)>.5F;
+                int expectedTag=green ? 255 : red ? 223 : 0;
+                if(Byte.toUnsignedInt(mask[p])!=expectedTag)wrongSurface++;
+                if(sceneAfter.getFloat(p*4)!=sceneZ)wrongDepth++;
+                if(!red&&!green)continue;
+                covered++;float x=Float.float16ToFloat(vectors.getShort(p*4)),y=Float.float16ToFloat(vectors.getShort(p*4+2));
+                float z=green ? normalZ : overlayZ;
+                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x-(green ? .25F : -.125F))>1e-5||Math.abs(y)>1e-5)wrongMotion++;
+                if(Math.abs(pairs.getFloat(p*8)-z)>1e-6||Math.abs(pairs.getFloat(p*8+4)-z)>1e-6)wrongDepth++;
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/source-depth-policy/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("original.rgba32f"),rgba);Files.write(dir.resolve("ownership.r8"),mask);Files.write(dir.resolve("motion.rg16f"),xy);
+            Files.write(dir.resolve("correspondence.rg32f"),depth);Files.write(dir.resolve("source-depth.d32f"),sceneBytes);
+            Files.writeString(dir.resolve("result.json"),"{\"coveredPixels\":"+covered+",\"wrongSurfacePixels\":"+wrongSurface
+                    +",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth+"}");
+            assertTrue(covered>100);assertEquals(0,wrongSurface,"Private depth changes must not admit a source-hidden later draw");
+            assertEquals(0,wrongMotion);assertEquals(0,wrongDepth,"Overlay/normal replay must preserve the game's original depth");
         }
     }
 

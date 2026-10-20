@@ -77,6 +77,21 @@ final class MetalPreviousVertexHistoryTest {
     }
 
     @Test
+    void changingSourceDepthAttachmentParticipationInvalidatesSurfaceHistory() {
+        var source=pipeline("source_attachment_history");var format=source.getVertexFormatBinding(0);
+        var sample=new MetalEntityMotionCapture.Sample(81,9,new Matrix4f(),new Matrix4f());
+        for(int frame=0;frame<2;frame++) {
+            MetalPreviousVertexHistory.beginFrame();
+            var token=MetalPreviousVertexHistory.reserveDraw(sample,source);
+            MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                    format.getElements(),format.getVertexSize(),PrimitiveTopology.TRIANGLES,1,3),new float[]{0,0,.5F});
+            MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(source,java.util.Map.of(),frame==0));
+            if(frame==0)MetalPreviousVertexHistory.commitSubmittedFrame();
+            else assertFalse(MetalPreviousVertexHistory.matchingSurfaceManifest(token));
+        }
+    }
+
+    @Test
     void historyAdvancesOnlyOnSuccessfulCommit() {
         RenderPipeline pipeline = pipeline("previous_vertex_transaction");
         MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(
