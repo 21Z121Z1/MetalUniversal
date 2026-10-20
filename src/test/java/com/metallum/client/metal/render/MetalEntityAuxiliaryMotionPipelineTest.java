@@ -169,6 +169,26 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void materialLightmapAdmissionFollowsActualSourceFamiliesIncludingSpecialItems() {
+        for(var source:java.util.List.of(pipeline("core/entity",DefaultVertexFormat.ENTITY),
+                pipeline("core/item",DefaultVertexFormat.ENTITY,"EMISSIVE"),
+                net.minecraft.client.renderer.RenderPipelines.ITEM_TRANSLUCENT_GLINT_SPECIAL)) {
+            assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(source));
+            assertTrue(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source).getShaderDefines().flags()
+                    .contains("METALLUM_ENTITY_LIGHTMAP"));
+        }
+        for(var source:java.util.List.of(pipeline("core/entity",DefaultVertexFormat.ENTITY,"EMISSIVE"),
+                pipeline("core/rendertype_entity_shadow",DefaultVertexFormat.ENTITY))) {
+            assertFalse(MetalEntityMotionPipeline.usesVisibilityLightmap(source));
+            assertFalse(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source).getShaderDefines().flags()
+                    .contains("METALLUM_ENTITY_LIGHTMAP"));
+        }
+        assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/block",DefaultVertexFormat.BLOCK)));
+        assertTrue(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/text",DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR)));
+        assertFalse(MetalEntityMotionPipeline.usesVisibilityLightmap(pipeline("core/text",DefaultVertexFormat.POSITION_TEX_COLOR,"IS_SEE_THROUGH")));
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
         RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
                 .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))

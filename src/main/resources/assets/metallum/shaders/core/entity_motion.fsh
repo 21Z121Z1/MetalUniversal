@@ -14,6 +14,9 @@ uniform sampler2D DissolveMaskSampler;
 layout(location = 2) in vec2 metallumTexCoord;
 layout(location = 3) flat in float metallumVertexColorGuard;
 layout(location = 4) in float metallumVertexAlpha;
+#ifdef METALLUM_ENTITY_LIGHTMAP
+layout(location = 6) in float metallumLightmapAlpha;
+#endif
 
 layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
@@ -45,6 +48,11 @@ void main() {
     alpha *= vertexAlpha * ColorModulator.a;
 #ifdef GLINT
     alpha = max(alpha, GlintAlpha);
+#endif
+#ifdef METALLUM_ENTITY_LIGHTMAP
+    // ENTITY/ITEM sample independently in VS, then multiply after cutout,
+    // dissolve replacement and GLINT's alpha floor in calculateFinalColor.
+    alpha *= metallumLightmapAlpha;
 #endif
 #ifdef METALLUM_ALPHA_COMPOSITE
     // Alpha-blended and non-additive OIT surfaces with zero contribution must not

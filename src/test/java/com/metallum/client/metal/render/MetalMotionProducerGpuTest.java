@@ -1024,7 +1024,8 @@ final class MetalMotionProducerGpuTest {
     @Test
     void transparentOwnershipIsOrderIndependentAndLeavesSceneDepthUntouched() throws Exception {
         var resources = BindGroupLayout.builder().withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
-                .withUniform("Projection", UniformType.UNIFORM_BUFFER).withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
+                .withUniform("Projection", UniformType.UNIFORM_BUFFER).withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER).build();
         var source = RenderPipeline.builder().withLocation("motion_contract/oit_ownership")
                 .withVertexShader("core/entity").withFragmentShader("core/entity")
                 .withVertexBinding(0, DefaultVertexFormat.ENTITY).withBindGroupLayout(resources)
@@ -1079,6 +1080,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setPipeline(pipeline); pass.setUniform("Projection", pr.slice());
                     pass.setUniform("DynamicTransforms", du.slice()); pass.setUniform("MetallumMotion", mo.slice());
                     pass.bindTexture("Sampler0", sv, sampler);
+                    pass.bindTexture("Sampler2",sv,sampler);
                     for (boolean drawNear : new boolean[]{reversed, !reversed}) {
                         pass.setVertexBuffer(0, (drawNear ? n : f).slice());
                         pass.setVertexBuffer(1, (drawNear ? np : fp).slice());
@@ -1207,7 +1209,11 @@ final class MetalMotionProducerGpuTest {
                 "lightning_visible", "lightning_vertex_zero_alpha", "lightning_modulator_zero",
                 "lightning_fully_fogged", "lightning_fog_partial", "lightning_oit_additive_zero_alpha",
                 "lightning_oit_additive_visible", "entity_oit_additive_zero_alpha", "entity_oit_additive_visible",
-                "particle_lightmap_zero_alpha", "particle_lightmap_below_cutout", "particle_lightmap_visible");
+                "particle_lightmap_zero_alpha", "particle_lightmap_below_cutout", "particle_lightmap_visible",
+                "block_lightmap_cutout", "block_lightmap_visible", "entity_lightmap_below_cutout",
+                "entity_lightmap_zero_alpha", "entity_lightmap_glint_zero_alpha", "entity_lightmap_dissolve_order",
+                "item_lightmap_zero_alpha", "item_special_glint_lightmap_zero_alpha", "item_lightmap_below_cutout",
+                "entity_emissive_lightmap_zero_alpha");
     }
 
     @ParameterizedTest(name = "actual material visibility: {0}")
@@ -1257,6 +1263,13 @@ final class MetalMotionProducerGpuTest {
             case "particle_lightmap_zero_alpha" -> {lightmapAlpha=0;visible=false;}
             case "particle_lightmap_below_cutout" -> {lightmapAlpha=.05F;visible=false;}
             case "particle_lightmap_visible" -> {lightmapAlpha=.5F;expectedAlpha=128F/255;}
+            case "block_lightmap_cutout" -> {lightmapAlpha=.05F;cutout=.1F;visible=false;}
+            case "block_lightmap_visible" -> {lightmapAlpha=.5F;expectedAlpha=128F/255;}
+            case "entity_lightmap_below_cutout", "item_lightmap_below_cutout" -> {lightmapAlpha=.05F;cutout=.1F;expectedAlpha=13F/255;}
+            case "entity_lightmap_zero_alpha", "item_lightmap_zero_alpha" -> {lightmapAlpha=0;visible=false;}
+            case "entity_lightmap_glint_zero_alpha", "item_special_glint_lightmap_zero_alpha" -> {lightmapAlpha=0;texAlpha=0;visible=false;}
+            case "entity_lightmap_dissolve_order" -> {lightmapAlpha=.4F;vertexAlpha=.6F;modAlpha=.1F;expectedAlpha=.04F;}
+            case "entity_emissive_lightmap_zero_alpha" -> lightmapAlpha=0;
         }
         var format=particle ? DefaultVertexFormat.PARTICLE : lightning ? DefaultVertexFormat.POSITION_COLOR : block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
         String shader=particle ? "core/particle" : lightning ? "core/rendertype_lightning" : block ? "core/block" : item ? "core/item" : "core/entity";
@@ -1272,10 +1285,11 @@ final class MetalMotionProducerGpuTest {
                 .withUniform("DissolveMaskSampler",UniformType.COMBINED_IMAGE_SAMPLER).build();
         var builder=RenderPipeline.builder().withLocation("motion_contract/material_source/"+name)
                 .withVertexShader(shader).withFragmentShader(shader).withVertexBinding(0,format).withBindGroupLayout(resources)
-                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("NO_CARDINAL_LIGHTING")
                 .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true,slopeBias,constantBias))
                 .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
+        if(!name.startsWith("entity_lightmap_"))builder.withShaderDefine("EMISSIVE");
         if(glint)builder.withShaderDefine("GLINT");
         if(special)builder.withShaderDefine("GLINT_SPECIAL");
         if(dissolve)builder.withShaderDefine("DISSOLVE");
@@ -1784,6 +1798,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));pass.setUniform("Projection",pr.slice());
                     pass.setUniform("DynamicTransforms",d1.slice());pass.setUniform("MetallumMotion",mo.slice());
                     pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("MetallumSourceDepth",sd,sampler);
+                    pass.bindTexture("Sampler2",sv,sampler);
                     pass.setVertexBuffer(0,v1.slice());pass.setVertexBuffer(1,previous.slice());pass.draw(6,1,0,0);
                 }
                 encoder.submit();device.waitForSubmittedGpuWork();

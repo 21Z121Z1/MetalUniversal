@@ -63,6 +63,13 @@ final class MetalMotionShaderCompilationTest {
                 variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
                         List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"));
             }
+            if(name.startsWith("entity_")) {
+                var withLightmap=new ArrayList<List<String>>(variants);
+                for(var original:variants) {
+                    var lit=new ArrayList<String>(original);lit.add("METALLUM_ENTITY_LIGHTMAP");withLightmap.add(lit);
+                }
+                variants=withLightmap;
+            }
             for (List<String> defines : variants) {
                 cases.add(Arguments.of(name, defines));
                 List<String> depthDefines = new ArrayList<>(defines);

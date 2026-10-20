@@ -3,17 +3,17 @@
 
 #include <minecraft:dynamictransforms.glsl>
 #include <minecraft:projection.glsl>
+#include <minecraft:sample_lightmap.glsl>
 
 // Match the packed block vertex format even though this reduced shader does not
 // consume Color at location 1. Without explicit locations SPIR-V assigns UV0 to
 // attribute 1, sampling vertex colors as texture coordinates and causing the
-// alpha-test replay to discard every fragment. DefaultVertexFormat.BLOCK also
-// carries an ivec2 UV2 at location 3; it is left undeclared because this shader
-// never reads the lightmap, and an undeclared trailing attribute is simply
-// unused by the vertex binding the source pipeline supplies.
+// alpha-test replay to discard every fragment.
 layout(location = 0) in vec3 Position;
 layout(location = 1) in vec4 Color;
 layout(location = 2) in vec2 UV0;
+layout(location = 3) in ivec2 UV2;
+uniform sampler2D Sampler2;
 
 layout(std140) uniform MetallumMotion {
     mat4 CurrentUnjitteredFromRaster;
@@ -41,5 +41,6 @@ void main() {
     metallumSetClipHistory(currentClip, previousClip);
     metallumTexCoord = UV0;
     metallumVertexColorGuard = Color.a;
-    metallumVertexAlpha = Color.a;
+    // BLOCK multiplies lightmap before interpolation and before fragment cutout.
+    metallumVertexAlpha = Color.a * sample_lightmap(Sampler2, UV2).a;
 }

@@ -3,6 +3,13 @@
 
 #include <minecraft:dynamictransforms.glsl>
 #include <minecraft:projection.glsl>
+#ifdef METALLUM_ENTITY_LIGHTMAP
+#include <minecraft:sample_lightmap.glsl>
+// ENTITY and ITEM, including GLINT_SPECIAL, both keep UV2 at physical location 4.
+layout(location = 4) in ivec2 UV2;
+uniform sampler2D Sampler2;
+layout(location = 6) out float metallumLightmapAlpha;
+#endif
 
 // Binding 0 is the exact Minecraft ENTITY stream. Binding 1 is a compact
 // float3 stream captured from the previous successfully submitted source
@@ -50,4 +57,7 @@ void main() {
 #endif
     metallumVertexColorGuard = Color.a;
     metallumVertexAlpha = Color.a;
+#ifdef METALLUM_ENTITY_LIGHTMAP
+    metallumLightmapAlpha = sample_lightmap(Sampler2, UV2).a;
+#endif
 }

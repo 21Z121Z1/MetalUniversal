@@ -424,6 +424,7 @@ final class MetalFirstPersonMotionGpuTest {
                 pass.setUniform("MetallumMotion", replayMotion.slice());
                 pass.bindTexture("Sampler0", sampledView, sampler);
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                pass.bindTexture("Sampler2",sampledView,sampler);
                 pass.setVertexBuffer(1, replayPositions.slice());
                 pass.setIndexBuffer(index, IndexType.SHORT);
                 pass.drawIndexed(6, 1, 0, replay.replayBaseVertex(), 0);

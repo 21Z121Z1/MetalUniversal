@@ -3,6 +3,12 @@
 
 #include <minecraft:dynamictransforms.glsl>
 #include <minecraft:projection.glsl>
+#ifdef METALLUM_ENTITY_LIGHTMAP
+#include <minecraft:sample_lightmap.glsl>
+layout(location = 4) in ivec2 UV2;
+uniform sampler2D Sampler2;
+layout(location = 6) out float metallumLightmapAlpha;
+#endif
 
 // Match the packed entity vertex format even though this reduced shader does
 // not consume Color at location 1. Without explicit locations SPIR-V assigns
@@ -40,4 +46,7 @@ void main() {
 #endif
     metallumVertexColorGuard = Color.a;
     metallumVertexAlpha = Color.a;
+#ifdef METALLUM_ENTITY_LIGHTMAP
+    metallumLightmapAlpha = sample_lightmap(Sampler2, UV2).a;
+#endif
 }

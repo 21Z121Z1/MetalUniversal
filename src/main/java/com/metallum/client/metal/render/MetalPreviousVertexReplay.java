@@ -197,10 +197,9 @@ final class MetalPreviousVertexReplay {
         Map<String, MetalPreviousVertexHistory.TextureIdentity> textures = new java.util.TreeMap<>();
         // OIT's per-frame coefficient/depth targets describe compositing, not material identity.
         // Track the sampled resources that define visibility of the audited reduced families.
-        var vertex=state.pipeline().getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX);
-        boolean particle=vertex!=null && vertex.getPath().equals("core/particle");
+        boolean lightmap=MetalEntityMotionPipeline.usesVisibilityLightmap(state.pipeline());
         for (String name : java.util.List.of("Sampler0","DissolveMaskSampler","GlintSampler","Sampler2")) {
-            if(name.equals("Sampler2") && !particle)continue;
+            if(name.equals("Sampler2") && !lightmap)continue;
             var pair = state.textures().get(name);
             if (pair == null) continue;
             var view = pair.view(); var sampler = pair.sampler();
