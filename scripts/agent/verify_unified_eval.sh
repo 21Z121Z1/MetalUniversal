@@ -96,6 +96,10 @@ bash -n scripts/agent/verify.sh
 
 python3 - <<'PY_CULL_RECEIPT'
 from pathlib import Path
+import base64
+import gzip
+import json
+import os
 import xml.etree.ElementTree as ET
 path=Path('build/test-results/test/TEST-com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.xml')
 suite=ET.parse(path).getroot()
@@ -103,6 +107,12 @@ rows=[line for block in suite.iter('system-out') for line in (block.text or '').
       if line.startswith('SODIUM_CULL_REVIEW_GZIP_BASE64 ')]
 if len(rows)!=1:
     raise SystemExit('missing or ambiguous pinned Sodium cull review receipt')
+report=json.loads(gzip.decompress(base64.b64decode(rows[0].split(' ',1)[1])))
+expected=os.environ.get('METALLUM_SOURCE_SHA')
+if expected and report.get('sourceCommit')!=expected:
+    raise SystemExit('pinned cull review receipt belongs to a different source SHA')
+if report.get('sameCancellationSemanticsProven') is not False or report.get('promotionAllowed') is not False:
+    raise SystemExit('diagnostic hook shape must not silently promote an experimental optimization')
 print(rows[0])
 PY_CULL_RECEIPT
 
