@@ -11,12 +11,13 @@
 - [Temporal API](https://developer.apple.com/documentation/metalfx/mtlfxtemporalscalerbase)、[Frame Interpolator API](https://developer.apple.com/documentation/metalfx/mtlfxframeinterpolatorbase)：以 descriptor 的设备查询、实际 SDK 与纹理 usage 为准，不以 OS 名称推断能力。
 - [FG motion scale](https://developer.apple.com/documentation/metalfx/mtlfxframeinterpolatorbase/motionvectorscalex)：实际 SDK `MTLFXFrameInterpolator.h` 将位移换算为 `prevColorTexture` 像素；不能沿用低分辨率 depth/motion 纹理尺寸。SDK 注释还明确 FOV 用角度、deltaTime 用秒；CI 保存头文件 SHA 与相关片段，空收据会失败。
 - [CPU/GPU 同步官方样例](https://developer.apple.com/documentation/metal/synchronizing-cpu-and-gpu-work)：资源复用受 GPU 完成约束。
+- [Metal Shading Language 规范](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)：窄化浮点转换与纹理写入具有舍入规则，不能直接假定 GPU RG16F 与 CPU nearest-even 相同。严格控制先用已知 R32F 输入同时输出 RG32F／RG16F，逐位识别实际转换模式；未识别或模式不一致即失败。
 
 ## 逐项对照
 
 | 项目 | 实现与检查入口 | 工程边界／待验 |
 | --- | --- | --- |
-| 运动方向、单位、坐标 | `MetalMotionContract`、`MetalFxMath`、`motion_fragment.glsl`、`MetalFxFrameMotionContract`；Java／原生独立数值对照 | current→previous；NDC XY，Y 翻转；Temporal scale=输入颜色宽高/2，FG scale=前帧颜色宽高/2，depth/motion 降采样不改变 FG 位移单位；奇数／非方形、透视与半精度预算按独立数值预期 |
+| 运动方向、单位、坐标 | `MetalMotionContract`、`MetalFxMath`、`motion_fragment.glsl`、`MetalFxFrameMotionContract`；Java／原生独立数值对照 | current→previous；NDC XY，Y 翻转；Temporal scale=输入颜色宽高/2，FG scale=前帧颜色宽高/2，depth/motion 降采样不改变 FG 位移单位；严格像素对齐控制按独立实测窄化模式及相邻 float32 输入的精确 half 位集合检查，逐像素零／反向负例；既有透视预算另保留 |
 | jitter | `prepareSceneProjectionInternal`、源 draw 冻结 projection、V4 surface resolver | 当前反矩阵使用 raster jitter；对应向量不含 jitter；世界历史查找补偿前后 jitter，HUD 独立 |
 | 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史、接受的 raster 状态 | 不用当前深度冒充动态表面 previous Z；前帧 bias 从旧屏幕 Jacobian 还原，D32 常量受限；像素对齐严格控制、独立 GPU 表面点／旧帧 D32 平面及错误当前坡度负例分别检查解析精度与任意姿态。无历史、未知 viewport、更大常量及退化映射保持无效所有权 |
 | 动态分辨率 | `ensureTargets`、scaler key、历史 reset | 当前策略重新分配并 reset；尚未采用保留最大分配、逐帧 content size 改变的优化，不宣称无 reset 的动态历史 |
@@ -30,7 +31,7 @@
 | 手部 | 独立 HUD 覆盖、透明手部 current Z、前帧手部表面 | 无源深度的透明手部也不归入世界；缺历史明确反遮挡；真实客户端摆动质量仍需支持硬件 |
 | 线性颜色 | `MetalFxColorTransfer`：RGBA8 SDR→RGBA16F linear→Temporal→RGBA8 SDR | 显式 sRGB transfer 保留 alpha；独立 ramp 与 overshoot GPU 读回。未恢复 HDR 辐射、未迁移 tone map，不解除相应颜色门禁 |
 | scaler／FG 关联 | `compatibleLinkedTemporalScaler` | 线性 RGBA16F scaler 输出与 SDR RGBA8 FG 输入不兼容时使用已有 standalone 路径；不能伪报 linked |
-| 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放 |
+| 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring；`RenderContractRuntime` 诊断 owner | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放；opt-in 记录操作与 start／close 共享锁，避免断开世界时 buffer 换 backing 访问已关闭记录器 |
 | GPU 同步 | 公共 render pass、encoder fence、Metal4 barrier；present worker completion | 转换 pass 与 native scaler 处于同一公共编码事务；实际 Metal3/4 执行需按对应路径收据区分 |
 | 插帧节奏与相机 | `MetalFrameGenerationLifecycle`、`MetalFramePacing`、`Perspective.fromProjection`、present worker | 从实际对称有限 reversed-Z 投影提取 FOV／near／far／aspect，拒绝猜测相机参数；保留真实源帧 deltaTime 秒、源提交身份、generated/real 顺序、丢帧／迟到回退；真实显示节拍和延迟需要物理显示器 |
 | UI 合成 | `uiTarget` 与 scene 分离、`isUITextureComposited=false` | 完整 GUI 混合集合尚未证明 premultiplied；保持颜色／生产者准入失败关闭 |
