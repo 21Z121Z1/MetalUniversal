@@ -28,11 +28,11 @@ final class FrameGenerationColorContractTest {
                 evidence.admissionEvidence(true)
         );
         assertTrue(evidence.missingProofs().containsAll(List.of(
-                "temporal-input-linearization",
                 "post-temporal-tone-map",
-                "frame-interpolation-transfer",
                 "ui-premultiplied-alpha"
         )));
+        assertFalse(evidence.missingProofs().contains("temporal-input-linearization"));
+        assertFalse(evidence.missingProofs().contains("frame-interpolation-transfer"));
         assertEquals(
                 FrameGenerationColorContract.DrawableEncoding.EXPLICIT_SRGB,
                 evidence.drawableEncoding()

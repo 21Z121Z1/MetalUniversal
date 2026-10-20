@@ -87,6 +87,20 @@ final class MetalMotionShaderCompilationTest {
     }
 
     @Test
+    void colorTransferShadersCompileFromPackagedResources() throws IOException {
+        for (String suffix : List.of("vsh", "fsh")) for (List<String> defines : List.of(
+                List.<String>of(), List.of("METALLUM_SRGB_DECODE"))) {
+            String name = "metalfx_color_transfer." + suffix;
+            String resource = "assets/metallum/shaders/core/" + name;
+            assertEquals(Files.readString(SHADERS.resolve(name)), readResource(resource));
+            Compilation result = compile(expandIncludes(resource, new HashSet<>()),
+                    suffix.equals("vsh") ? Shaderc.shaderc_vertex_shader : Shaderc.shaderc_fragment_shader,
+                    name, defines);
+            assertEquals(Shaderc.shaderc_compilation_status_success, result.status(), result.message());
+        }
+    }
+
+    @Test
     void independentSurfacePositionOracleCompilesWithoutMotionShaderDependencies() {
         Compilation vertex = compile(MetalMotionProducerGpuTest.surfacePointVertexSource(),
                 Shaderc.shaderc_vertex_shader,"independent-surface-point-vertex",List.of());

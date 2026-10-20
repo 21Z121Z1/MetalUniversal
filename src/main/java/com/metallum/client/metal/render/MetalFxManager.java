@@ -204,6 +204,7 @@ public final class MetalFxManager {
     private int frameGenerationInputHeight;
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
+    @Nullable private MetalFxColorTransfer temporalColorTransfer;
     private boolean uiTargetShaderWrite;
     private boolean objectMotionInputsCleared;
     private boolean frameGenerationEnabled;
@@ -1631,6 +1632,7 @@ public final class MetalFxManager {
     }
 
     private void closeRenderTargetsForReload() {
+        closeTemporalColorTransfer();
         if (uiTarget != null) {
             uiTarget.destroyBuffers();
             uiTarget = null;
@@ -2502,6 +2504,13 @@ public final class MetalFxManager {
                     ? (MetalGpuTexture) nativeSceneTarget.getColorTexture()
                     : (MetalGpuTexture) uiTarget.getColorTexture();
             this.frameResetForPresent = historyReset;
+            MetalGpuTexture temporalColor = color;
+            MetalGpuTexture temporalOutput = output;
+            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && !usesNativeDirectFrameGeneration()) {
+                if (temporalColorTransfer == null) temporalColorTransfer = new MetalFxColorTransfer(device);
+                temporalColor = temporalColorTransfer.decode(encoder, color, output.getWidth(0), output.getHeight(0));
+                temporalOutput = temporalColorTransfer.output();
+            }
             if (usesNativeDirectFrameGeneration() && surfaceMotionPrepared) {
                 // The presenter snapshots this texture into its own ring buffer
                 // before the command buffer is committed. Avoid an otherwise
@@ -2511,7 +2520,7 @@ public final class MetalFxManager {
                 encoded = true;
             } else if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && surfaceMotionV4Available) {
                 encoded = surfaceMotionPrepared && encoder.encodePreparedTemporal(
-                        color, presentationDepthTexture, motionTexture, reactiveTexture, output,
+                        temporalColor, presentationDepthTexture, motionTexture, reactiveTexture, temporalOutput,
                         pixelJitter, renderWidth, renderHeight, historyReset, true);
                 scalerEncodedThisFrame = encoded;
             } else if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && depth != null && motionInputsPrepared
@@ -2520,7 +2529,7 @@ public final class MetalFxManager {
                     && disocclusionTexture != null
                     && motionTexture != null && reactiveTexture != null) {
                 encoded = encoder.encodeMetalFxV2(
-                        color,
+                        temporalColor,
                         depth,
                         handDepth,
                         handExactValidityTexture,
@@ -2531,7 +2540,7 @@ public final class MetalFxManager {
                         disocclusionTexture,
                         motionTexture,
                         reactiveTexture,
-                        output,
+                        temporalOutput,
                         currentViewProjection,
                         inverseCurrentViewProjection,
                         previousViewProjection,
@@ -2564,6 +2573,9 @@ public final class MetalFxManager {
                         false
                 );
                 scalerEncodedThisFrame = encoded;
+            }
+            if (scalerEncodedThisFrame && effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
+                temporalColorTransfer.encode(encoder, output);
             }
             if (encoded && usesFrameGenerationWorkResolution()
                     && !usesNativeDirectFrameGeneration() && output != uiTarget.getColorTexture()) {
@@ -4938,7 +4950,13 @@ public final class MetalFxManager {
         }
     }
 
+    private void closeTemporalColorTransfer() {
+        if (temporalColorTransfer != null) temporalColorTransfer.close();
+        temporalColorTransfer = null;
+    }
+
     private void closeAuxiliaryTextures() {
+        closeTemporalColorTransfer();
         if (previousWorldDepthTexture != null) previousWorldDepthTexture.close();
         if (nextWorldDepthTexture != null) nextWorldDepthTexture.close();
         if (previousHandDepthTexture != null) previousHandDepthTexture.close();

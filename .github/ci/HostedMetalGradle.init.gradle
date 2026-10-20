@@ -171,7 +171,8 @@ gradle.projectsEvaluated {
     configureHostedTest(
         "hostedMetalMotionProducerTest",
         "Runs actual packaged previous-position shaders and verifies raster-space displacement.",
-        ["com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+        ["com.metallum.client.metal.render.MetalFxColorTransferGpuTest",
+         "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
          "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
     )
 

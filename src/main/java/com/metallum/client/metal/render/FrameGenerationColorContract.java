@@ -171,9 +171,10 @@ final class FrameGenerationColorContract {
      *
      * <p>The Temporal API has a documented linear semantic, but the current Minecraft scene
      * target is a plain non-sRGB UNORM texture carrying already tone-mapped/display-referred
-     * values. There is no explicit display-referred -> linear conversion before Temporal, nor an
-     * explicit post-Temporal tone-map/transfer pass before {@code sceneOutputTarget} is copied into
-     * the Frame Interpolator ring. The native-direct path likewise has no machine-verifiable
+     * values. MetalFxColorTransfer now decodes that SDR scene to RGBA16_FLOAT before Temporal
+     * and encodes its linear output to display-referred sRGB before UI/Frame Interpolation.
+     * This transfer does not recover pre-tone-map HDR radiance or move the renderer's tone map
+     * after Temporal, so tone-map placement remains unproven. The native-direct path has no machine-verifiable
      * transfer attestation. The UI target is RGBA8_UNORM, but the complete set of GUI/overlay blend modes
      * has not yet been proven to preserve a premultiplied-alpha invariant. The CAMetalLayer
      * keeps BGRA8Unorm storage but explicitly tags its display-referred contents as sRGB, avoiding
@@ -185,12 +186,13 @@ final class FrameGenerationColorContract {
                 sourcePath,
                 GpuFormat.RGBA8_UNORM,
                 GpuFormat.RGBA8_UNORM,
-                SceneEncoding.DISPLAY_REFERRED_SRGB,
+                sourcePath == SourcePath.TEMPORAL_OUTPUT ? SceneEncoding.LINEAR : SceneEncoding.DISPLAY_REFERRED_SRGB,
                 sourcePath == SourcePath.TEMPORAL_OUTPUT
                         ? TemporalEncoding.LINEAR
                         : TemporalEncoding.NOT_APPLICABLE,
                 ToneMapPlacement.UNPROVEN,
-                FrameInterpolationEncoding.UNPROVEN,
+                sourcePath == SourcePath.TEMPORAL_OUTPUT
+                        ? FrameInterpolationEncoding.DISPLAY_REFERRED_SRGB : FrameInterpolationEncoding.UNPROVEN,
                 UiAlphaEncoding.UNPROVEN,
                 DrawableEncoding.EXPLICIT_SRGB
         );

@@ -2,6 +2,10 @@ name: MetalFX motion and capability contracts
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/metalfx-official-audit-20261020
+      - codex/consolidated-metal-20261020
   pull_request:
     branches: [main]
     paths:
@@ -121,6 +125,7 @@ jobs:
             build/metal-validation/motion-current/
             build/metal-validation/offscreen-current/
             build/agent-evidence/motion-producers/
+            build/agent-evidence/metalfx-color-transfer/
             build/test-results/hostedMetalMotionProducerTest/
             build/hosted-metal-msl-cache/
           if-no-files-found: error

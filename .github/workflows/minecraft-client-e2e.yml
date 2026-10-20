@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - codex/metalfx-official-audit-20261020
+      - codex/consolidated-metal-20261020
   pull_request:
     branches:
       - main
