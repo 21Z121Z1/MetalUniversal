@@ -186,15 +186,23 @@ final class FrameGenerationColorContract {
                 sourcePath,
                 GpuFormat.RGBA8_UNORM,
                 GpuFormat.RGBA8_UNORM,
-                sourcePath == SourcePath.TEMPORAL_OUTPUT ? SceneEncoding.LINEAR : SceneEncoding.DISPLAY_REFERRED_SRGB,
+                SceneEncoding.DISPLAY_REFERRED_SRGB,
                 sourcePath == SourcePath.TEMPORAL_OUTPUT
                         ? TemporalEncoding.LINEAR
                         : TemporalEncoding.NOT_APPLICABLE,
                 ToneMapPlacement.UNPROVEN,
-                sourcePath == SourcePath.TEMPORAL_OUTPUT
-                        ? FrameInterpolationEncoding.DISPLAY_REFERRED_SRGB : FrameInterpolationEncoding.UNPROVEN,
+                FrameInterpolationEncoding.UNPROVEN,
                 UiAlphaEncoding.UNPROVEN,
                 DrawableEncoding.EXPLICIT_SRGB
         );
+    }
+
+    /** Issued only for this source stamp after decode, Temporal and output transfer encode. */
+    static Evidence withSdrTransferReceipt(SourcePath path, boolean sameSourceReceipt) {
+        if (path != SourcePath.TEMPORAL_OUTPUT || !sameSourceReceipt) return currentRenderer(path);
+        return new Evidence(path, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM,
+                SceneEncoding.LINEAR, TemporalEncoding.LINEAR, ToneMapPlacement.UNPROVEN,
+                FrameInterpolationEncoding.DISPLAY_REFERRED_SRGB, UiAlphaEncoding.UNPROVEN,
+                DrawableEncoding.EXPLICIT_SRGB);
     }
 }

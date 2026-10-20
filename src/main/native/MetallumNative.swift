@@ -3478,7 +3478,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 // enqueue spacing below is only a proxy that inherits CPU
                 // scheduling jitter from the encode path.
                 if frame.sourceDelta.isFinite && frame.sourceDelta > 0.0 {
-                    return min(max(frame.sourceDelta, 1.0 / 240.0), 0.25)
+                    return frame.sourceDelta
                 }
                 guard let previousTimestamp = lastPresentedTimestamp else {
                     return 1.0 / 60.0
@@ -3487,7 +3487,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 guard delta.isFinite, delta > 0.0 else {
                     return 1.0 / 60.0
                 }
-                return Float(min(max(delta, 1.0 / 240.0), 0.25))
+                return Float(delta)
             }()
             currentLifecycle = lifecycle
         }

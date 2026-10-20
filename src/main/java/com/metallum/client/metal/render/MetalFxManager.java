@@ -205,6 +205,7 @@ public final class MetalFxManager {
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     @Nullable private MetalFxColorTransfer temporalColorTransfer;
+    @Nullable private FrameSynthesisContract.FrameStamp temporalColorTransferStamp;
     private boolean uiTargetShaderWrite;
     private boolean objectMotionInputsCleared;
     private boolean frameGenerationEnabled;
@@ -269,6 +270,7 @@ public final class MetalFxManager {
     private boolean frameResetForPresent = true;
     private float frameFieldOfView = 70.0F;
     private float frameFarPlane = 1000.0F;
+    @Nullable private FrameSynthesisContract.Perspective frameCameraPerspective;
     // Frame interpolation wants the interval between the two source frames it
     // interpolates between, anchored on the render timeline. Scene-frame start
     // is a far more stable anchor than the native encode-enqueue wall clock.
@@ -1352,6 +1354,8 @@ public final class MetalFxManager {
     }
 
     private void beginFrameInternal() {
+        frameCameraPerspective = null;
+        temporalColorTransferStamp = null;
         reloadConfigIfRequested();
         // A receipt transaction belongs to one source frame only.  A frame that
         // never reached a successful temporal submission must not leak its
@@ -2321,6 +2325,17 @@ public final class MetalFxManager {
         this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix, 70.0F);
         this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
                 ? cameraState.depthFar : 1000.0F;
+        this.frameCameraPerspective = null;
+        try {
+            Matrix4f baseProjection = new Matrix4f(cameraState.projectionMatrix);
+            MetalFxMath.adjustPerspectiveAspect(baseProjection, displayAspect, renderAspect);
+            FrameSynthesisContract.Perspective perspective = FrameSynthesisContract.Perspective.fromProjection(baseProjection);
+            Matrix4f effect = new Matrix4f(cameraState.projectionMatrix).invert().mul(projectionMatrix);
+            if (MetalFxMath.isRigidViewTransform(effect)) this.frameCameraPerspective = perspective;
+        } catch (IllegalArgumentException ignored) {
+            // Temporal has full matrices. Scalar FG camera fields cannot represent
+            // an unknown frustum or non-rigid portal distortion; never guess them.
+        }
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
         MetalFxMath.viewProjection(
                 this.currentCameraRelativeViewProjection,
@@ -2626,6 +2641,7 @@ public final class MetalFxManager {
             }
             if (scalerEncodedThisFrame && effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
                 temporalColorTransfer.encode(encoder, output);
+                temporalColorTransferStamp = sourceFrameStamp;
             }
             if (encoded && usesFrameGenerationWorkResolution()
                     && !usesNativeDirectFrameGeneration() && output != uiTarget.getColorTexture()) {
@@ -2655,6 +2671,7 @@ public final class MetalFxManager {
         }
         boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
+            temporalColorTransferStamp = null;
             this.motionStateStore.discardFrame();
             this.frameSynthesisReceipts.discardFrame();
             if (frameGenerationEnabled) {
@@ -2808,9 +2825,7 @@ public final class MetalFxManager {
         }
         GpuTexture sourceTexture = renderer.mainRenderTarget().getDepthTexture();
         if (!(sourceTexture instanceof MetalGpuTexture source)
-                || source.getFormat() != sceneDepthTexture.getFormat()
-                || source.getWidth(0) != renderWidth
-                || source.getHeight(0) != renderHeight) {
+                || !FrameSynthesisContract.sourceDepthMatches(source, renderWidth, renderHeight)) {
             this.frameDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
             return;
@@ -4937,6 +4952,7 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        temporalColorTransferStamp = null;
         if (sourceFrameStamp != null) {
             sourceFrameStampInvalidated = true;
             frameSynthesisReceipts.invalidateForHistoryDiscontinuity();
@@ -5185,24 +5201,19 @@ public final class MetalFxManager {
         FrameSynthesisContract.ProducerCoverageSet coverage =
                 new FrameSynthesisContract.ProducerCoverageSet(receipts);
         try {
+            if (frameCameraPerspective == null) return null;
             FrameSynthesisContract.CameraFrameInput camera =
-                    new FrameSynthesisContract.CameraFrameInput(
-                            frameFieldOfView,
-                            0.05F,
-                            frameFarPlane,
-                            displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                            sceneFrameDeltaSeconds > 0.0F && Float.isFinite(sceneFrameDeltaSeconds)
-                                    ? sceneFrameDeltaSeconds : 1.0F / 60.0F
-                    );
+                    frameCameraPerspective.atSourceInterval(sceneFrameDeltaSeconds);
             return new FrameSynthesisContract.FrameGenerationAdmission(
                     stamp,
                     coverage,
                     camera,
                     frameResetForPresent,
-                    FrameGenerationColorContract.currentRenderer(
+                    FrameGenerationColorContract.withSdrTransferReceipt(
                             usesNativeDirectFrameGeneration()
                                     ? FrameGenerationColorContract.SourcePath.NATIVE_DIRECT
-                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT
+                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT,
+                            stamp.equals(temporalColorTransferStamp)
                     ).admissionEvidence(COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION)
             );
         } catch (IllegalArgumentException ignored) {
@@ -5373,11 +5384,11 @@ public final class MetalFxManager {
                 frameGenerationInputHeight,
                 pixelJitter.x,
                 pixelJitter.y,
-                frameFieldOfView,
-                0.05F,
-                frameFarPlane,
-                displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
-                sceneFrameDeltaSeconds,
+                admission.camera().fieldOfViewDegrees(),
+                admission.camera().nearPlane(),
+                admission.camera().farPlane(),
+                admission.camera().aspectRatio(),
+                admission.camera().deltaSeconds(),
                 frameResetForPresent,
                 frameId,
                 admission
