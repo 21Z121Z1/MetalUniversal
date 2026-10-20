@@ -1,0 +1,7 @@
+# 同名核心shader的语义证明边界
+
+当前`MetalEntityMotionPipeline.auditedShaders`只检查vertex/fragment使用相同Identifier且namespace为minecraft。它能排除不同ID的Iris合成程序，不能证明资源包没有在同一ID下修改顶点变形、clip或discard，也不能证明include内容仍与被审计的26.3源一致。程序描述hash区分ID、defines、layout和状态，尚不是实际源码内容hash。
+
+后续需要把实际编译读取的shader与include内容证明绑定到它自己的异步pending compile和资源reload generation，未知或不一致的内容继续拒绝精确运动；不能用namespace或单一源码ID替代。核实还必须覆盖同名替换、include替换、异步逆序完成和reload后的旧证明失效。不能直接猜测缓存include对象的getter、所有权或可关闭时机。
+
+本轮先从准确pinned依赖记录`ShaderSource.CachedIncludeSource`的class SHA、字段和方法签名，确认可实施的类型化接口。它只是接口证据，`sourceAdmissionGranted=false`，尚未实现或验收完整source/include语义准入。现有Temporal/FG、UI、颜色及完整producer门禁不由这份诊断解除。

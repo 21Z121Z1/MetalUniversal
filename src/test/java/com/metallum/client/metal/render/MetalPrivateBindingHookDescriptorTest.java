@@ -29,6 +29,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 final class MetalPrivateBindingHookDescriptorTest {
     @Test
+    void inspectPinnedShaderIncludeApi() throws Exception {
+        String resource="com/mojang/renderpearl/api/pipeline/ShaderSource$CachedIncludeSource";
+        ClassNode type=load(resource);
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")){bytes=input.readAllBytes();}
+        var report=new java.util.LinkedHashMap<String,Object>();
+        report.put("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local-unrecorded"));
+        report.put("resource",resource);
+        report.put("classSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
+        report.put("fields",type.fields.stream().map(field->field.name+":"+field.desc).toList());
+        report.put("methods",type.methods.stream().map(method->method.name+method.desc).toList());
+        report.put("sourceAdmissionGranted",false);
+        report.put("boundary","Pinned include API signatures only; shader identifiers and namespace do not prove source semantics.");
+        var compressed=new java.io.ByteArrayOutputStream();
+        try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
+        System.out.println("METAL_SHADER_SOURCE_API_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
+    }
+
+    @Test
     void inspectPinnedCullRecoveryBoundaryWithoutPromotingTheOldOptimization() throws Exception {
         String resource="net/caffeinemc/mods/sodium/client/render/chunk/RenderSectionManager";
         ClassNode type=load(resource);

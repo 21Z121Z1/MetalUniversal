@@ -84,6 +84,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
   --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary \
   --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.inspectPinnedCullRecoveryBoundaryWithoutPromotingTheOldOptimization \
+  --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.inspectPinnedShaderIncludeApi \
   --tests com.metallum.client.metal.render.MetalCloudGeometryTest \
   --tests com.metallum.client.metal.render.MetalCloudMotionHistoryTest \
   --tests com.metallum.client.metal.render.MetalUiBlendContractTest \
@@ -115,6 +116,16 @@ if expected and report.get('sourceCommit')!=expected:
 if report.get('sameCancellationSemanticsProven') is not False or report.get('promotionAllowed') is not False:
     raise SystemExit('diagnostic hook shape must not silently promote an experimental optimization')
 print(rows[0])
+api_rows=[line for block in suite.iter('system-out') for line in (block.text or '').splitlines()
+          if line.startswith('METAL_SHADER_SOURCE_API_GZIP_BASE64 ')]
+if len(api_rows)!=1:
+    raise SystemExit('missing or ambiguous pinned shader include API receipt')
+api=json.loads(gzip.decompress(base64.b64decode(api_rows[0].split(' ',1)[1])))
+if expected and api.get('sourceCommit')!=expected:
+    raise SystemExit('shader include API receipt belongs to a different source SHA')
+if api.get('sourceAdmissionGranted') is not False:
+    raise SystemExit('API signatures must not silently promote unknown shader semantics')
+print(api_rows[0])
 PY_CULL_RECEIPT
 
 echo "Unified evaluation static verification: PASS"

@@ -3171,8 +3171,10 @@ public final class MetalFxManager {
                             : i == 5 ? ".rg32f" : i >= 9 && i < 12 ? ".r32f" : ".d32f")), bytes.get(i));
                     Files.writeString(request.output().resolve("result.json"), new com.google.gson.GsonBuilder()
                             .setPrettyPrinting().create().toJson(result) + "\n");
-                    Files.writeString(request.output().resolve("source-frame-evidence.json"),new com.google.gson.GsonBuilder()
-                            .setPrettyPrinting().create().toJson(frozenSource)+"\n");
+                    try(var writer=Files.newBufferedWriter(request.output().resolve("source-frame-evidence.json"))) {
+                        new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(frozenSource,writer);
+                        writer.write('\n');
+                    }
                     request.result().complete(result);
                 } catch (Exception failure) {
                     request.result().completeExceptionally(failure);
