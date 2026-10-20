@@ -2856,9 +2856,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.colorAttachments[0].texture = destinationMotion
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        pass.depthAttachment.texture = destinationDepth
-        pass.depthAttachment.loadAction = .dontCare
-        pass.depthAttachment.storeAction = .store
+        if destinationDepth.pixelFormat == .r32Float {
+            pass.colorAttachments[1].texture = destinationDepth
+            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].storeAction = .store
+        } else {
+            pass.depthAttachment.texture = destinationDepth
+            pass.depthAttachment.loadAction = .dontCare
+            pass.depthAttachment.storeAction = .store
+        }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
@@ -2866,7 +2872,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
         // The MRT fragment writes depth(any); bind the write-enabled state
         // explicitly because the encoder's default is not a contract.
-        encoder.setDepthStencilState(depthResampleState)
+        if destinationDepth.pixelFormat != .r32Float { encoder.setDepthStencilState(depthResampleState) }
         encoder.setFragmentTexture(sourceDepth, index: 0)
         encoder.setFragmentTexture(sourceMotion, index: 1)
         encoder.setViewport(MTLViewport(
@@ -2896,9 +2902,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.colorAttachments[0].texture = destinationMotion
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        pass.depthAttachment.texture = destinationDepth
-        pass.depthAttachment.loadAction = .dontCare
-        pass.depthAttachment.storeAction = .store
+        if destinationDepth.pixelFormat == .r32Float {
+            pass.colorAttachments[1].texture = destinationDepth
+            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].storeAction = .store
+        } else {
+            pass.depthAttachment.texture = destinationDepth
+            pass.depthAttachment.loadAction = .dontCare
+            pass.depthAttachment.storeAction = .store
+        }
         pass.renderTargetWidth = destinationMotion.width
         pass.renderTargetHeight = destinationMotion.height
         guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
@@ -2916,7 +2928,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         encoder.setArgumentTable(tables.1, stages: .fragment)
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
         // Keep Metal 4's depth(any) attachment contract identical to Metal 3.
-        encoder.setDepthStencilState(depthResampleState)
+        if destinationDepth.pixelFormat != .r32Float { encoder.setDepthStencilState(depthResampleState) }
         encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
             width: Double(destinationMotion.width), height: Double(destinationMotion.height),
@@ -4455,7 +4467,7 @@ private func stringFromOptionalCString(_ pointer: UnsafePointer<CChar>?) -> Stri
     return value.isEmpty ? nil : value
 }
 
-private func fullscreenMslSource(flipY: Bool) -> String {
+private func fullscreenMslSource(flipY: Bool, depthAsColor: Bool = false) -> String {
     let topY = flipY ? "1.0" : "0.0"
     let bottomY = flipY ? "-1.0" : "2.0"
     return """
@@ -4496,12 +4508,12 @@ private func fullscreenMslSource(flipY: Bool) -> String {
 
     struct MotionDepthResampleOut {
       float4 motion [[color(0)]];
-      float depth [[depth(any)]];
+      float depth [[\(depthAsColor ? "color(1)" : "depth(any)")]];
     };
 
     fragment MotionDepthResampleOut metallum_motion_depth_resample_fs(
       PresentVertexOut in [[stage_in]],
-      depth2d<float, access::read> sourceDepth [[texture(0)]],
+      \(depthAsColor ? "texture2d<float, access::read>" : "depth2d<float, access::read>") sourceDepth [[texture(0)]],
       texture2d<float, access::read> sourceMotion [[texture(1)]]
     ) {
       uint2 size = uint2(sourceDepth.get_width(), sourceDepth.get_height());
@@ -4515,10 +4527,10 @@ private func fullscreenMslSource(flipY: Bool) -> String {
         next
       };
       // Strictly greater preserves the stable base->x->y->diagonal tie order.
-      float selectedDepth = sourceDepth.read(candidates[0]);
+      float selectedDepth = sourceDepth.read(candidates[0])\(depthAsColor ? ".r" : "");
       uint selectedIndex = 0;
       for (uint index = 1; index < 4; index++) {
-        float candidateDepth = sourceDepth.read(candidates[index]);
+        float candidateDepth = sourceDepth.read(candidates[index])\(depthAsColor ? ".r" : "");
         if (isfinite(candidateDepth)
             && (!isfinite(selectedDepth) || candidateDepth > selectedDepth)) {
           selectedDepth = candidateDepth;
@@ -4567,11 +4579,11 @@ func presentMslSource() -> String {
     return fullscreenMslSource(flipY: true)
 }
 
-func copyMslSource() -> String {
+func copyMslSource(depthAsColor: Bool = false) -> String {
     // Texture-to-texture copies stay within the same Metal coordinate space;
     // applying the drawable flip here would make the later present double
     // flip MetalFX output and the GUI seed texture.
-    return fullscreenMslSource(flipY: false)
+    return fullscreenMslSource(flipY: false, depthAsColor: depthAsColor)
 }
 
 private struct MetallumClearUniforms {
@@ -4756,16 +4768,17 @@ private func buildPresentPipeline(
     }
 }
 
-private func buildMotionDepthResamplePipeline(
+func buildMotionDepthResamplePipeline(
     device: MTLDevice,
     motionFormat: MTLPixelFormat,
     depthFormat: MTLPixelFormat
 ) -> MTLRenderPipelineState? {
+    guard depthFormat == .r32Float || depthFormat == .depth32Float else { return nil }
     do {
         // This is texture-to-texture resampling, not drawable presentation.
         // Keep depth/motion in the renderer's native Metal orientation; the
         // final CAMetalLayer present is the only stage that applies the Y flip.
-        let library = try device.makeLibrary(source: copyMslSource(), options: nil)
+        let library = try device.makeLibrary(source: copyMslSource(depthAsColor: depthFormat == .r32Float), options: nil)
         guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
               let fragmentFunction = library.makeFunction(name: "metallum_motion_depth_resample_fs") else {
             return nil
@@ -4775,7 +4788,11 @@ private func buildMotionDepthResamplePipeline(
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = motionFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
-        descriptor.depthAttachmentPixelFormat = depthFormat
+        if depthFormat == .r32Float {
+            descriptor.colorAttachments[1].pixelFormat = .r32Float
+        } else {
+            descriptor.depthAttachmentPixelFormat = depthFormat
+        }
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create depth/motion resample pipeline: %@", String(describing: error))

@@ -206,6 +206,119 @@ private final class Harness {
         return results
     }
 
+    // Runs on raw Metal even when both MetalFX supportsDevice queries are false.
+    // Construct the same format-bound PSO the presenter creates unconditionally,
+    // then exercise its copied and bounded input paths with independent texel IDs.
+    func frameGenerationDepthInputs(root: URL) throws -> [[String: Any]] {
+        let width = 13, height = 9
+        var results = [[String: Any]]()
+        for format in [MTLPixelFormat.r32Float, .depth32Float] {
+            guard let pipeline = buildMotionDepthResamplePipeline(device: device, motionFormat: .rg16Float,
+                                                                   depthFormat: format) else {
+                throw ContractError("Presenter resampler rejected depth format \(format)")
+            }
+            func make(_ f: MTLPixelFormat, _ w: Int, _ h: Int) throws -> MTLTexture {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:f,width:w,height:h,mipmapped:false)
+                // Depth32Float cannot be a shared texture. Use private textures
+                // and staging blits for both formats so the oracle is identical.
+                d.storageMode = .private; d.usage = [.shaderRead,.renderTarget]
+                guard let t = device.makeTexture(descriptor:d) else { throw ContractError("Resample allocation") }
+                return t
+            }
+            let depth = try make(format,width,height), motion = try make(.rg16Float,width,height)
+            var z = [Float](repeating:0,count:width*height), xy = [UInt16](repeating:0,count:width*height*2)
+            for p in 0..<z.count {
+                z[p] = Float((p*17)%97)/100
+                xy[p*2] = Float16(Float(p)/128).bitPattern
+                xy[p*2+1] = Float16(-Float(p)/256).bitPattern
+            }
+            // Stable ties must take motion from the same winning depth texel.
+            z[1] = z[0]
+            let rowBytes = 256
+            guard let depthUpload = device.makeBuffer(length:rowBytes*height),
+                  let motionUpload = device.makeBuffer(length:rowBytes*height),
+                  let upload = queue.makeCommandBuffer(), let blit = upload.makeBlitCommandEncoder() else {
+                throw ContractError("Resample upload")
+            }
+            for y in 0..<height { for x in 0..<width {
+                depthUpload.contents().storeBytes(of:z[y*width+x],toByteOffset:y*rowBytes+x*4,as:Float.self)
+                for c in 0..<2 { motionUpload.contents().storeBytes(of:xy[(y*width+x)*2+c],
+                    toByteOffset:y*rowBytes+x*4+c*2,as:UInt16.self) }
+            }}
+            for (buffer,texture) in [(depthUpload,depth),(motionUpload,motion)] {
+                blit.copy(from:buffer,sourceOffset:0,sourceBytesPerRow:rowBytes,sourceBytesPerImage:rowBytes*height,
+                    sourceSize:MTLSize(width:width,height:height,depth:1),to:texture,destinationSlice:0,
+                    destinationLevel:0,destinationOrigin:MTLOrigin(x:0,y:0,z:0))
+            }
+            blit.endEncoding();upload.commit();upload.waitUntilCompleted()
+            guard upload.status == .completed else { throw ContractError("Resample upload GPU error") }
+            for (w,h) in [(width,height),(7,5)] {
+                let name = "fg_depth_\(format == .r32Float ? "r32f" : "d32f")_\(w)x\(h)"
+                let outZ = try make(format,w,h), outXY = try make(.rg16Float,w,h)
+                guard let cb = queue.makeCommandBuffer() else { throw ContractError("Resample command") }
+                if w == width && h == height {
+                    guard let copy = cb.makeBlitCommandEncoder() else { throw ContractError("Resample copy") }
+                    for (source,dest) in [(depth,outZ),(motion,outXY)] {
+                        copy.copy(from:source,sourceSlice:0,sourceLevel:0,to:dest,destinationSlice:0,
+                            destinationLevel:0,sliceCount:1,levelCount:1)
+                    }
+                    copy.endEncoding()
+                } else {
+                    let pass = MTLRenderPassDescriptor()
+                    pass.colorAttachments[0].texture = outXY
+                    pass.colorAttachments[0].loadAction = .dontCare;pass.colorAttachments[0].storeAction = .store
+                    if format == .r32Float {
+                        pass.colorAttachments[1].texture = outZ
+                        pass.colorAttachments[1].loadAction = .dontCare;pass.colorAttachments[1].storeAction = .store
+                    } else {
+                        pass.depthAttachment.texture = outZ
+                        pass.depthAttachment.loadAction = .dontCare;pass.depthAttachment.storeAction = .store
+                    }
+                    guard let e = cb.makeRenderCommandEncoder(descriptor:pass) else { throw ContractError("Resample render encoder") }
+                    e.setRenderPipelineState(pipeline)
+                    if format == .depth32Float {
+                        let state = MTLDepthStencilDescriptor();state.depthCompareFunction = .always;state.isDepthWriteEnabled = true
+                        e.setDepthStencilState(device.makeDepthStencilState(descriptor:state))
+                    }
+                    e.setFragmentTexture(depth,index:0);e.setFragmentTexture(motion,index:1)
+                    e.setViewport(MTLViewport(originX:0,originY:0,width:Double(w),height:Double(h),znear:0,zfar:1))
+                    e.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:3);e.endEncoding()
+                }
+                guard let zRead = device.makeBuffer(length:rowBytes*h), let xyRead = device.makeBuffer(length:rowBytes*h),
+                      let copy = cb.makeBlitCommandEncoder() else { throw ContractError("Resample readback") }
+                for (texture,buffer) in [(outZ,zRead),(outXY,xyRead)] {
+                    copy.copy(from:texture,sourceSlice:0,sourceLevel:0,sourceOrigin:MTLOrigin(x:0,y:0,z:0),
+                        sourceSize:MTLSize(width:w,height:h,depth:1),to:buffer,destinationOffset:0,
+                        destinationBytesPerRow:rowBytes,destinationBytesPerImage:rowBytes*h)
+                }
+                copy.endEncoding();cb.commit();cb.waitUntilCompleted()
+                guard cb.status == .completed else { throw ContractError("Resample GPU error: \(String(describing:cb.error))") }
+                var violations = 0
+                for y in 0..<h { for x in 0..<w {
+                    var selected = y*width+x
+                    if w != width || h != height {
+                        let bx = max(0,min(width-1,Int(floor((Double(x)+0.5)*Double(width)/Double(w)-0.5))))
+                        let by = max(0,min(height-1,Int(floor((Double(y)+0.5)*Double(height)/Double(h)-0.5))))
+                        let nx = min(bx+1,width-1), ny = min(by+1,height-1)
+                        let candidates = [by*width+bx,by*width+nx,ny*width+bx,ny*width+nx]
+                        selected = candidates[0]
+                        for p in candidates.dropFirst() where z[p] > z[selected] { selected = p }
+                    }
+                    let actual = zRead.contents().load(fromByteOffset:y*rowBytes+x*4,as:Float.self)
+                    if abs(actual-z[selected]) > 0.000001 { violations += 1 }
+                    for c in 0..<2 {
+                        let value = xyRead.contents().load(fromByteOffset:y*rowBytes+x*4+c*2,as:UInt16.self)
+                        if value != xy[selected*2+c] { violations += 1 }
+                    }
+                }}
+                results.append(["name":name,"passed":violations == 0,"violations":violations,"width":w,"height":h,
+                    "metalfxRequired":false,"scope":"shipping presenter PSO and depth/motion texel pairing; not presentation"])
+                print("FG_DEPTH_INPUT \(violations == 0 ? "PASS" : "FAIL") \(name) violations=\(violations)")
+            }
+        }
+        return results
+    }
+
     func texture(_ format: MTLPixelFormat, _ width: Int, _ height: Int,
                  _ value: SIMD2<Float>) throws -> MTLTexture {
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: width,
@@ -383,12 +496,15 @@ private enum MetalMotionContractValidation {
                 }
             }
             let orientation = try h.presentationOrientation(root: root)
+            let fgDepthInputs = try h.frameGenerationDepthInputs(root: root)
             let failed = results.filter { ($0["passed"] as? Bool) != true }.count
                 + orientation.filter { ($0["passed"] as? Bool) != true }.count
+                + fgDepthInputs.filter { ($0["passed"] as? Bool) != true }.count
             let result: [String: Any] = ["sourceCommit":ProcessInfo.processInfo.environment["METALLUM_SOURCE_SHA"] ?? "unknown",
                                        "device":h.device.name,"passed":failed == 0,"cases":results,"failedCases":failed,
                                        "kernel":"shipping fused, camera, merge and hand kernels","metalfxQualityValidated":false,
                                        "presentationShaderOrientation":orientation,
+                                       "frameGenerationDepthInputs":fgDepthInputs,
                                        "presentationValidated":false]
             try JSONSerialization.data(withJSONObject: result, options:[.prettyPrinted,.sortedKeys])
                 .write(to:root.appendingPathComponent("summary.json"),options:.atomic)

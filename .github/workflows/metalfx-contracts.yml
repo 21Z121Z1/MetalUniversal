@@ -116,6 +116,31 @@ jobs:
         run: |
           ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
             hostedMetalMotionProducerTest -x buildIOSNative -x buildIOSSpvc
+      - name: Record inspectable contract artifact manifest
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, xml.etree.ElementTree as ET
+          paths = [pathlib.Path(p) for p in (
+              'build/agent-evidence/metalfx/capabilities.json',
+              'build/metal-validation/motion-current/summary.json',
+              'build/metal-validation/offscreen-current/summary.json',
+              'build/agent-evidence/metalfx-color-transfer/ramp.json')]
+          evidence = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'], 'files': {}, 'junit': []}
+          for path in paths:
+              if path.is_file():
+                  data = path.read_bytes()
+                  evidence['files'][str(path)] = {'sha256': hashlib.sha256(data).hexdigest(),
+                      'bytes': len(data), 'content': json.loads(data)}
+          for path in sorted(pathlib.Path('build/test-results/hostedMetalMotionProducerTest').glob('TEST-*.xml')):
+              suite = ET.parse(path).getroot()
+              evidence['junit'].append(dict(suite.attrib))
+          out = pathlib.Path('build/agent-evidence/metalfx/contract-evidence-log.json')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          data = json.dumps(evidence, sort_keys=True).encode()
+          out.write_bytes(data)
+          print('METALFX_EVIDENCE_GZIP_BASE64 ' + base64.b64encode(gzip.compress(data)).decode())
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
