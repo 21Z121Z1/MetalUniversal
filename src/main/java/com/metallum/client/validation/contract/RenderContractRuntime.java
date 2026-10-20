@@ -510,17 +510,44 @@ public final class RenderContractRuntime {
         if (service == null && current == null) {
             return;
         }
-        if (service != null) {
-            service.close();
-        }
-        if (current != null) {
-            current.close();
-        }
-        lastSnapshot = snapshotOf(current, service, false);
+        // A terminal manifest/results write can throw after its owner has set
+        // closed=true. Unpublish both owners before disposal so that neither a
+        // later buffer swap nor reentrant cleanup can borrow a closed owner.
         captureService = null;
         recorder = null;
-        storageBudget = null;
         requestedFinalDrawableFrame = -1L;
+        Throwable failure = null;
+        try {
+            if (service != null) service.close();
+        } catch (RuntimeException | Error exception) {
+            failure = exception;
+        }
+        try {
+            if (current != null) current.close();
+        } catch (RuntimeException | Error exception) {
+            if (failure == null) failure = exception;
+            else failure.addSuppressed(exception);
+        }
+        try {
+            lastSnapshot = snapshotOf(current, service, false);
+        } catch (RuntimeException | Error exception) {
+            if (failure == null) failure = exception;
+            else failure.addSuppressed(exception);
+        } finally {
+            storageBudget = null;
+        }
+        if (failure != null) {
+            // Disabled is a passing opt-out state. A requested capture whose
+            // teardown failed must retain a failing gate after detachment.
+            Snapshot previous = lastSnapshot;
+            lastSnapshot = new Snapshot(true, "failed", false,
+                    previous.requestedCaptures(), previous.completedCaptures(), previous.failedCaptures(),
+                    previous.pendingCaptures(), previous.droppedCaptures(), previous.frameCount(),
+                    previous.passCount(), previous.droppedEvents(), false, previous.artifactBytes(),
+                    previous.maxArtifactBytes(), previous.storageBudgetExceeded(), previous.storageFailureReason());
+            if (failure instanceof RuntimeException exception) throw exception;
+            throw (Error) failure;
+        }
     }
 
     private static Snapshot snapshotOf(

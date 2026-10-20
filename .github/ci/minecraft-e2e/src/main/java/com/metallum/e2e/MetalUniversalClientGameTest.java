@@ -128,6 +128,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         // Fabric's consistent-settings default is superflat. Exercise the real Overworld here.
         try (TestSingleplayerContext singleplayer = openGameplayWorld(context, evidenceDir)) {
+            Throwable primaryFailure = null;
+            try {
             boolean p1FramebufferScenario = Boolean.getBoolean("metallum.ci.p1StationaryFramebufferCapture");
             int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
@@ -386,7 +388,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                     && control.droppedCaptures() == 0,
                             "The isolated terrain control did not complete exactly one capture: " + control);
                 } finally {
-                    closeRenderContract();
+                    context.runOnClient(client -> closeRenderContract());
                 }
             }
 
@@ -427,9 +429,25 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             // stationary lane. Halt on the server owner before Fabric closes
             // the client, without bypassing its disconnect/wait or later tests.
             requestServerOwnedHalt(singleplayer);
+            } catch (RuntimeException | Error failure) {
+                primaryFailure = failure;
+                System.err.println("Primary Minecraft client contract failure before world disconnect:");
+                failure.printStackTrace(System.err);
+                throw failure;
+            } finally {
+                // This scope ends before TestSingleplayerContext.close() renders
+                // its disconnect frame, including when a producer assertion fails.
+                try {
+                    context.runOnClient(client -> closeRenderContract());
+                } catch (RuntimeException | Error cleanupFailure) {
+                    if (primaryFailure == null) throw cleanupFailure;
+                    primaryFailure.addSuppressed(cleanupFailure);
+                    System.err.println("Render-contract cleanup also failed:");
+                    cleanupFailure.printStackTrace(System.err);
+                }
+            }
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
-            context.runOnClient(client -> closeRenderContractQuietly());
         }
     }
 
@@ -704,15 +722,6 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
                  | InvocationTargetException exception) {
             throw new IllegalStateException("Could not close Metal render-contract capture", exception);
-        }
-    }
-
-    private static void closeRenderContractQuietly() {
-        try {
-            Class<?> runtime = Class.forName(RENDER_CONTRACT_RUNTIME);
-            runtime.getMethod("close").invoke(null);
-        } catch (ReflectiveOperationException ignored) {
-            // Best-effort cleanup after the test has already produced its primary failure.
         }
     }
 

@@ -285,6 +285,24 @@ jobs:
           environment and emit valid Metal readback evidence.
           It does not prove attended visual parity, stable performance, thermals, or release readiness.
           BOUNDARY
+      - name: Retain client failure causes in the job log
+        if: failure()
+        run: |
+          python3 - <<'PY_DIAGNOSTIC'
+          import json
+          import pathlib
+          import xml.etree.ElementTree as ET
+          root = pathlib.Path('.github/ci/minecraft-e2e/build')
+          for path in sorted(root.glob('**/TEST-*.xml')):
+              try:
+                  suite = ET.parse(path).getroot()
+                  for case in suite.iter('testcase'):
+                      for failure in list(case.findall('failure')) + list(case.findall('error')):
+                          print(json.dumps({'file': str(path), 'test': case.get('name'),
+                                            'failure': (failure.text or '')[:24000]}))
+              except (OSError, ET.ParseError) as error:
+                  print(json.dumps({'file': str(path), 'diagnosticReadFailure': str(error)}))
+          PY_DIAGNOSTIC
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
@@ -295,5 +313,6 @@ jobs:
             .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
             .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/
             .github/ci/minecraft-e2e/build/reports/
+            .github/ci/minecraft-e2e/build/test-results/
           if-no-files-found: warn
           retention-days: 14

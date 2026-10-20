@@ -19,6 +19,69 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class RenderContractRuntimeTest {
     @Test
+    void failedTerminalWritesDetachOwnersBeforeLaterBufferSwaps() throws Exception {
+        String previousEnabled = System.getProperty("metallum.renderContract.enabled");
+        try {
+            System.setProperty("metallum.renderContract.enabled", "true");
+            for (boolean failResultsToo : new boolean[]{false, true}) {
+                Path output = Files.createTempDirectory("render-contract-close-write-failure-");
+                RenderContractRuntime.start(output, "close-write-failure");
+                var recorderField = RenderContractRuntime.class.getDeclaredField("recorder");
+                recorderField.setAccessible(true);
+                var recorder = (RenderTraceRecorder) recorderField.get(null);
+                Path manifest = output.resolve("render-contract/pass-manifest.json");
+                Path results = output.resolve("render-contract/results.json");
+                // A directory at a file destination reliably fails on both
+                // hosted macOS and Linux, including a privileged test process.
+                Files.delete(manifest);
+                Files.createDirectory(manifest);
+                if (failResultsToo) {
+                    Files.delete(results);
+                    Files.createDirectory(results);
+                }
+                try {
+                    IllegalStateException failure = null;
+                    try {
+                        RenderContractRuntime.close();
+                    } catch (IllegalStateException exception) {
+                        failure = exception;
+                    }
+                    assertTrue(failure != null, "A failed terminal write must be reported");
+                    assertTrue(failure.getMessage().equals(failResultsToo
+                            ? "Could not write capture results" : "Could not write render contract manifest"));
+                    assertTrue(failure.getSuppressed().length == (failResultsToo ? 1 : 0),
+                            "Attempt both disposals and retain the secondary failure");
+                    assertTrue(recorder.isClosed(), "A results failure must not skip recorder disposal");
+                    // Exact entry point reached by MetalGpuBuffer.swapBacking
+                    // during the real client's disconnect frame.
+                    RenderContractRuntime.invalidateResourceAllocations(1, "metal-buffer-1");
+                    assertFalse(RenderContractRuntime.enabled(), "A throwing close must detach its owners");
+                    RenderContractRuntime.beginFrame(1);
+                    assertTrue(RenderContractRuntime.identifyResource("late", 2, "texture-2",
+                            "RGBA8_UNORM", 1, 1, 1, 0, 1, 3) == null);
+                    assertFalse(RenderContractRuntime.completionGatePassed(),
+                            "Detachment must not turn a failed requested run into passing opt-out");
+                    assertTrue("failed".equals(RenderContractRuntime.snapshot().status()));
+                    RenderContractRuntime.close();
+                    assertFalse(RenderContractRuntime.completionGatePassed());
+                    // Keep the recorder's own closed-owner negative strict.
+                    boolean rejected = false;
+                    try { recorder.invalidateResourceAllocations(1, "metal-buffer-1"); }
+                    catch (IllegalStateException expected) { rejected = true; }
+                    assertTrue(rejected, "Direct use of a disposed recorder must still fail");
+                } finally {
+                    Files.deleteIfExists(manifest);
+                    if (failResultsToo) Files.deleteIfExists(results);
+                    RenderContractRuntime.close();
+                }
+            }
+        } finally {
+            RenderContractRuntime.close();
+            restoreProperty("metallum.renderContract.enabled", previousEnabled);
+        }
+    }
+
+    @Test
     void concurrentTeardownCannotLeaveAClosedRecorderVisibleToBufferRetirement() throws Exception {
         String previousEnabled=System.getProperty("metallum.renderContract.enabled");
         var workers=Executors.newFixedThreadPool(3);
