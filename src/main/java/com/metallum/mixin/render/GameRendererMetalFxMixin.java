@@ -9,6 +9,8 @@ import com.llamalad7.mixinextras.sugar.Share;
 import com.llamalad7.mixinextras.sugar.ref.LocalRef;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.pipeline.TextureTarget;
+import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.textures.GpuTexture;
@@ -41,6 +43,13 @@ public abstract class GameRendererMetalFxMixin {
     )
     private MainTarget metallum$createSceneTarget(final int width, final int height) {
         return new MainTarget(MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height));
+    }
+
+    @Redirect(method = "<init>", at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/TextureTarget"))
+    private TextureTarget metallum$createHudDepthTarget(final String label, final int width, final int height,
+            final GpuFormat color, final GpuFormat depth) {
+        // 26.3 constructs exactly one TextureTarget here: the independent 3D HUD depth.
+        return new TextureTarget(label, MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height), color, depth);
     }
 
     @Redirect(

@@ -78,6 +78,16 @@ final class MetalMotionShaderCompilationTest {
     }
 
     @Test
+    void independentSurfacePositionOracleCompilesWithoutMotionShaderDependencies() {
+        Compilation vertex = compile(MetalMotionProducerGpuTest.surfacePointVertexSource(),
+                Shaderc.shaderc_vertex_shader,"independent-surface-point-vertex",List.of());
+        Compilation fragment = compile(MetalMotionProducerGpuTest.surfacePointFragmentSource(),
+                Shaderc.shaderc_fragment_shader,"independent-surface-point-fragment",List.of());
+        assertEquals(Shaderc.shaderc_compilation_status_success,vertex.status(),vertex.message());
+        assertEquals(Shaderc.shaderc_compilation_status_success,fragment.status(),fragment.message());
+    }
+
+    @Test
     void independentCompilerRejectsExplicitStageLocationsWithoutRequiredExtension() {
         String source = """
                 #version 330

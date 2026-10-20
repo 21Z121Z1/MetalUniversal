@@ -344,6 +344,17 @@ final class MetalMotionProducerGpuTest {
         Matrix4f currentMvp = new Matrix4f(flip).mul(baseP).mul(view);
         Matrix4f previousMvp = new Matrix4f(flip).mul(baseP).mul(previousView);
         Matrix4f rasterMvp = new Matrix4f(flip).mul(rasterP).mul(view);
+        var oracleVertex = net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum", "oracle/surface_point_vertex");
+        var oracleFragment = net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum", "oracle/surface_point_fragment");
+        var oracle = RenderPipeline.builder().withLocation("motion_contract/independent_surface_point")
+                .withVertexShader(oracleVertex).withFragmentShader(oracleFragment)
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("OracleRaster",UniformType.UNIFORM_BUFFER).build()).build();
+        device.precompilePipeline(oracle,MetalShaderSourceAdapters.overlay(java.util.Map.of(
+                oracleVertex,surfacePointVertexSource(),oracleFragment,surfacePointFragmentSource()),device.activeShaderSource()));
+        ByteBuffer oracleProjection = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        new Matrix4f(rasterP).mul(view).get(0,oracleProjection);
         ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         new Matrix4f(flip).mul(baseP).mul(new Matrix4f(rasterP).invert()).get(0,motion); previousMvp.get(64,motion);
         try (var vb=device.createBuffer(() -> "projective source",GpuBuffer.USAGE_VERTEX,mesh);
@@ -352,19 +363,25 @@ final class MetalMotionProducerGpuTest {
              var pr=device.createBuffer(() -> "projective projection",GpuBuffer.USAGE_UNIFORM,projection);
              var fo=device.createBuffer(() -> "projective fog",GpuBuffer.USAGE_UNIFORM,fog);
              var mo=device.createBuffer(() -> "projective motion",GpuBuffer.USAGE_UNIFORM,motion);
+             var op=device.createBuffer(() -> "independent point projection",GpuBuffer.USAGE_UNIFORM,oracleProjection);
              var color=texture("actual projective source",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_COPY_SRC);
              var flow=texture("projective motion",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
              var valid=texture("projective validity",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
              var correspondence=texture("previous and current surface Z",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+             var points=texture("independent current surface point",GpuFormat.RGBA32_FLOAT,GpuTexture.USAGE_COPY_SRC);
              var sampled=texture("projective texture",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
              var cv=device.createTextureView(color);var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);
-             var zv=device.createTextureView(correspondence);var sv=device.createTextureView(sampled);
+             var zv=device.createTextureView(correspondence);var sv=device.createTextureView(sampled);var ov=device.createTextureView(points);
              var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
             encoder.clearColorTexture(sampled,new Vector4f(1));
             try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Actual projective Minecraft color")
                     .withColorAttachment(cv,Optional.of(new Vector4f(0))).build())) {
                 pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());
                 pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.draw(3,1,0,0);
+            }
+            try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Independent surface position oracle")
+                    .withColorAttachment(ov,Optional.of(new Vector4f(0))).build())) {
+                pass.setPipeline(oracle);pass.setUniform("OracleRaster",op.slice());pass.setVertexBuffer(0,vb.slice());pass.draw(3,1,0,0);
             }
             try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Projective motion contract")
                     .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
@@ -375,11 +392,13 @@ final class MetalMotionProducerGpuTest {
             }
             encoder.submit();device.waitForSubmittedGpuWork();
             byte[] pixels=readback(color),mask=readback(valid),vectors=readback(flow),depthPairs=readback(correspondence);
+            byte[] surfacePoints=readback(points);
             ByteBuffer values=ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
             ByteBuffer zs=ByteBuffer.wrap(depthPairs).order(ByteOrder.nativeOrder());
+            ByteBuffer ps=ByteBuffer.wrap(surfacePoints).order(ByteOrder.nativeOrder());
             Vector4f[] rasterClip=project(rasterMvp,current),currentClip=project(currentMvp,current),previousClip=project(previousMvp,previous);
             int covered=0,expectedValid=0,invalid=0,wrongValidity=0,wrongDepth=0,wrongOwnership=0;
-            double maxError=0,maxLinearError=0,maxPrecisionExcess=0,maxDepthError=0;
+            double maxError=0,maxLinearError=0,maxPrecisionExcess=0,maxDepthError=0,maxAnalyticDepthError=0,maxOraclePixelError=0;
             for (int p=0;p<W*H;p++) {
                 if (Byte.toUnsignedInt(pixels[p*4+3])<128) {
                     if (Byte.toUnsignedInt(mask[p]) != 0 || zs.getFloat(p*8) != -1 || zs.getFloat(p*8+4) != -1) wrongOwnership++;
@@ -397,7 +416,21 @@ final class MetalMotionProducerGpuTest {
                 boolean actual=Byte.toUnsignedInt(mask[p])>127;
                 if(expected!=actual)wrongValidity++;
                 if (Byte.toUnsignedInt(mask[p]) != (expected ? 255 : 64)) wrongOwnership++;
-                double depthError = Math.max(Math.abs(zs.getFloat(p*8)-(expected ? b[2]/b[3] : -1)),
+                double analyticDepthError = Math.max(Math.abs(zs.getFloat(p*8)-(expected ? b[2]/b[3] : -1)),
+                        Math.abs(zs.getFloat(p*8+4)-c[2]/c[3]));
+                maxAnalyticDepthError = Math.max(maxAnalyticDepthError,analyticDepthError);
+                // The GPU rasterizer quantizes coverage/interpolation. Recover its
+                // actual surface point with an independent position-only color pass;
+                // map that point through the CPU deformation and previous MVP for Z.
+                Vector4f surface = new Vector4f(ps.getFloat(p*16),ps.getFloat(p*16+4),ps.getFloat(p*16+8),1);
+                assertEquals(1,ps.getFloat(p*16+12),0,"the independent point pass must cover every source pixel");
+                double[] oracleWeights = surfaceWeights(surface,current);
+                double[] oldAtSurface = interpolate(previousClip,oracleWeights);
+                Vector4f sourceAtSurface = rasterMvp.transform(new Vector4f(surface));
+                maxOraclePixelError = Math.max(maxOraclePixelError,Math.max(
+                        Math.abs((sourceAtSurface.x/sourceAtSurface.w+1)*W/2-(p%W+.5)),
+                        Math.abs((1-sourceAtSurface.y/sourceAtSurface.w)*H/2-(p/W+.5))));
+                double depthError = Math.max(Math.abs(zs.getFloat(p*8)-(expected ? oldAtSurface[2]/oldAtSurface[3] : -1)),
                         Math.abs(zs.getFloat(p*8+4)-c[2]/c[3]));
                 if (!Double.isFinite(depthError) || depthError > 3e-5) wrongDepth++;
                 maxDepthError = Math.max(maxDepthError, depthError);
@@ -420,10 +453,12 @@ final class MetalMotionProducerGpuTest {
             Path dir=Path.of("build/agent-evidence/motion-producers/"+fixture.name());Files.createDirectories(dir);
             Files.write(dir.resolve("source.rgba8"),pixels);Files.write(dir.resolve("validity.r8"),mask);Files.write(dir.resolve("motion.rg16f"),vectors);
             Files.write(dir.resolve("surface-depth.rg32f"),depthPairs);
+            Files.write(dir.resolve("independent-surface-point.rgba32f"),surfacePoints);
             Files.writeString(dir.resolve("result.json"),"{\"fixture\":\""+fixture.name()+"\",\"width\":"+W+",\"height\":"+H
                     +",\"sourcePixels\":"+covered+",\"expectedValidPixels\":"+expectedValid+",\"expectedInvalidPixels\":"+invalid
                     +",\"wrongValidityPixels\":"+wrongValidity+",\"wrongOwnershipPixels\":"+wrongOwnership
-                    +",\"wrongDepthPixels\":"+wrongDepth+",\"maxDepthError\":"+maxDepthError+",\"maxErrorPixels\":"+maxError
+                    +",\"wrongDepthPixels\":"+wrongDepth+",\"maxDepthError\":"+maxDepthError
+                    +",\"maxAnalyticDepthError\":"+maxAnalyticDepthError+",\"maxOraclePixelError\":"+maxOraclePixelError+",\"maxErrorPixels\":"+maxError
                     +",\"maxErrorBeyondHalfPrecisionPixels\":"+maxPrecisionExcess+",\"oldLinearErrorPixels\":"+maxLinearError+"}");
             assertTrue(covered>100&&expectedValid>50);
             if(fixture.previousBehind())assertTrue(invalid>10,"the fixture must cross previous camera w=0");
@@ -431,9 +466,42 @@ final class MetalMotionProducerGpuTest {
             assertEquals(0,wrongValidity,"validity is evaluated per fragment, not from a provoking vertex");
             assertEquals(0,wrongOwnership,"invalid owned history and untouched background must remain distinct");
             assertEquals(0,wrongDepth,"previous Z belongs to this deformed surface point, and current Z to its source raster");
+            assertTrue(maxOraclePixelError<.02,"the independent surface point must project to the actual source pixel");
             assertTrue(maxPrecisionExcess<.02,
                     "each pixel must match the independent surface point within RG16F rounding + .02 pixel: "+maxPrecisionExcess);
         }
+    }
+
+    static String surfacePointVertexSource() {
+        return """
+                #version 330
+                #extension GL_ARB_separate_shader_objects : require
+                layout(location=0) in vec3 Position;
+                layout(std140) uniform OracleRaster { mat4 RasterMvp; };
+                layout(location=0) out vec3 surfacePoint;
+                void main() { gl_Position = RasterMvp * vec4(Position,1.0); surfacePoint = Position; }
+                """;
+    }
+
+    static String surfacePointFragmentSource() {
+        return """
+                #version 330
+                #extension GL_ARB_separate_shader_objects : require
+                layout(location=0) in vec3 surfacePoint;
+                layout(location=0) out vec4 point;
+                void main() { point = vec4(surfacePoint,1.0); }
+                """;
+    }
+
+    private static double[] surfaceWeights(Vector4f point,float[][] triangle) {
+        double[] edgeA=new double[3],edgeB=new double[3],offset=new double[]{point.x,point.y,point.z};
+        double aa=0,ab=0,bb=0,pa=0,pb=0;
+        for(int i=0;i<3;i++) {
+            edgeA[i]=triangle[1][i]-triangle[0][i]; edgeB[i]=triangle[2][i]-triangle[0][i]; offset[i]-=triangle[0][i];
+            aa+=edgeA[i]*edgeA[i]; ab+=edgeA[i]*edgeB[i]; bb+=edgeB[i]*edgeB[i]; pa+=offset[i]*edgeA[i]; pb+=offset[i]*edgeB[i];
+        }
+        double denominator=aa*bb-ab*ab,a=(bb*pa-ab*pb)/denominator,b=(aa*pb-ab*pa)/denominator;
+        return new double[]{1-a-b,a,b};
     }
 
     private static double halfRoundingBudgetPixels(double value, int extent) {

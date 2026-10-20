@@ -762,8 +762,27 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             TestSingleplayerContext singleplayer, Path output) {
         boolean previous = context.computeOnClient(client -> client.options.improvedTransparency().get());
         var previousCamera = context.computeOnClient(client -> client.options.getCameraType());
+        var previousGameMode = context.computeOnClient(client -> client.gameMode.getPlayerMode());
+        boolean previousHudHidden = context.computeOnClient(client -> client.gui.hud.isHidden());
+        boolean previousFlying = context.computeOnClient(client -> client.player.getAbilities().flying);
+        var previousMainHand = context.computeOnClient(client -> client.player.getMainHandItem().copy());
+        var previousOffHand = context.computeOnClient(client -> client.player.getOffhandItem().copy());
+        var previousPostEffects = context.computeOnClient(client -> java.util.List.copyOf(client.player.getActivePostEffects()));
         try {
-            context.runOnClient(client -> client.options.setCameraType(net.minecraft.client.CameraType.FIRST_PERSON));
+            singleplayer.getServer().runCommand("gamemode creative @a");
+            singleplayer.getServer().runOnServer(server -> server.getPlayerList().getPlayers().forEach(player -> {
+                player.getAbilities().flying = true;
+                player.onUpdateAbilities();
+            }));
+            singleplayer.getServer().runCommand("item replace entity @a weapon.mainhand with minecraft:diamond_sword");
+            singleplayer.getServer().runCommand("item replace entity @a weapon.offhand with minecraft:shield");
+            context.runOnClient(client -> {
+                client.options.setCameraType(net.minecraft.client.CameraType.FIRST_PERSON);
+                if (client.gui.hud.isHidden()) client.gui.hud.toggle();
+            });
+            context.waitFor(client -> client.gameMode.getPlayerMode() == net.minecraft.world.level.GameType.CREATIVE
+                    && client.player.getAbilities().flying && !client.player.getMainHandItem().isEmpty()
+                    && !client.player.getOffhandItem().isEmpty());
             singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
             singleplayer.getServer().runCommand("difficulty normal");
             singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
@@ -868,13 +887,28 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(raw.sourceCommit().equals(System.getProperty("metallum.ci.expectedSourceSha"))
                             && raw.frameId() > 0 && raw.historyEpoch() > 0 && raw.worldValidPixels() > 0
                             && raw.finiteValidPixels() >= raw.worldValidPixels() && raw.maxMotionPixels() > 0
-                            && raw.worldDepthPixels() > 0 && raw.handDepthPixels() > 0 && raw.worldPixelsOutsideHand() > 0
+                            && raw.worldDepthPixels() > 0 && raw.handDepthPixels() > 0 && raw.handValidPixels() > 0
+                            && raw.worldPixelsOutsideHand() > 0
                             && raw.validCorrespondencePixels() > 0
                             && !raw.temporalQualityValidated() && !raw.frameGenerationQualityValidated(),
                     "Real producer GPU motion readback failed or claimed unsupported quality: " + raw);
+            var invert = net.minecraft.resources.Identifier.withDefaultNamespace("invert");
+            context.runOnClient(client -> client.player.setActivePostEffects(java.util.List.of(invert)));
+            context.waitFor(client -> client.gameRenderer.getAppliedPostEffects().contains(invert), 200);
+            context.waitTicks(5);
+            var postEffectCapture = context.computeOnClient(client -> com.metallum.client.metal.render.MetalFxManager
+                    .requestRawMotionValidation(output.resolve("raw-source-motion-post-effect")));
+            context.waitFor(client -> postEffectCapture.isDone(), 200);
+            var postEffect = postEffectCapture.join();
+            require(!postEffect.handDepthSourceWasMain() && postEffect.handDepthPixels() > 0
+                            && postEffect.handValidPixels() > 0 && postEffect.worldPixelsOutsideHand() > 0
+                            && postEffect.validCorrespondencePixels() > 0,
+                    "Post effects did not retain isolated actual HUD depth and exact hand history: "+postEffect);
             report.addProperty("verified", true);
             report.addProperty("activeConduitExercised", true);
             report.addProperty("emptyLecternAbsent", true);
+            report.addProperty("firstPersonHeldItemsExercised", true);
+            report.addProperty("postEffectHudDepthIsolated", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
             catch (IOException failure) { throw new IllegalStateException("Could not write source motion evidence", failure); }
@@ -882,7 +916,16 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             context.runOnClient(client -> {
                 client.options.improvedTransparency().set(previous);
                 client.options.setCameraType(previousCamera);
+                if (client.gui.hud.isHidden() != previousHudHidden) client.gui.hud.toggle();
+                client.player.setActivePostEffects(previousPostEffects);
             });
+            singleplayer.getServer().runCommand("gamemode "+previousGameMode.getName()+" @a");
+            singleplayer.getServer().runOnServer(server -> server.getPlayerList().getPlayers().forEach(player -> {
+                player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,previousMainHand.copy());
+                player.setItemInHand(net.minecraft.world.InteractionHand.OFF_HAND,previousOffHand.copy());
+                player.getAbilities().flying = previousFlying;
+                player.onUpdateAbilities();
+            }));
         }
     }
 
