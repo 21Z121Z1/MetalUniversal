@@ -12,6 +12,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ValidationStorageBudgetTest {
     @Test
+    void streamingCleanupFailureKeepsTheOriginalSerializationFailure(@org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        var budget=ValidationStorageBudget.shared(root,4096);
+        Path file=root.resolve("manifest.json"),partial=root.resolve("manifest.json.partial");
+        budget.writeAtomicUtf8(file,4096,writer->writer.write("previous complete evidence"));
+        RuntimeException primary=new IllegalStateException("injected original serialization failure");
+        var thrown=assertThrows(IllegalStateException.class,()->budget.writeAtomicUtf8(file,4096,writer->{
+            writer.write("unpublished");
+            // The owned temporary inode remains open; an independent filesystem
+            // failure at the pathname makes finally-cleanup fail as well.
+            Files.delete(partial);Files.createDirectory(partial);Files.writeString(partial.resolve("cause"),"retain diagnostic");
+            throw primary;
+        }));
+        assertTrue(thrown==primary,"Cleanup must not replace the first failure");
+        assertEquals(1,thrown.getSuppressed().length);
+        assertTrue(thrown.getSuppressed()[0] instanceof java.nio.file.DirectoryNotEmptyException);
+        assertEquals("previous complete evidence",Files.readString(file));
+        assertEquals(Files.size(file),budget.artifactBytes());
+        assertEquals("retain diagnostic",Files.readString(partial.resolve("cause")));
+    }
+
+    @Test
     void streamingCountsUtf8BytesAndRewritesOnlyCommittedSize() throws Exception {
         Path root = Files.createTempDirectory("render-contract-stream-utf8-");
         var budget = ValidationStorageBudget.shared(root, 32);

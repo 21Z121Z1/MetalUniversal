@@ -14,7 +14,7 @@ final class TerminalTrace {
     private static final Set<String> FIELDS=Set.of("schemaVersion","gitCommit","runId","status","manifestComplete",
             "frameCount","passCount","resourceCount","producerCount","droppedEvents","forcedClosedPassCount",
             "invalidPassReferenceCount","producerBudgetExceeded","tracePayloadOmitted","manifestFailureReason",
-            "manifestRequiredBytes");
+            "requiredManifestBytes");
 
     static JsonObject read(Path path) throws IOException {
         JsonObject header=new JsonObject();

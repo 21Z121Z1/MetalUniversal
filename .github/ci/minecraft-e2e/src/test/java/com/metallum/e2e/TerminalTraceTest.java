@@ -25,6 +25,16 @@ final class TerminalTraceTest {
         assertFalse(header.has("passes"));assertEquals(5,header.size());
     }
 
+    @Test void failedBudgetHeaderRetainsItsExactRequiredByteCount() throws Exception {
+        Path file=root.resolve("budget.json");
+        Files.writeString(file,"{\"status\":\"failed\",\"manifestComplete\":false,"
+                +"\"manifestFailureReason\":\"render contract manifest byte budget exceeded\","
+                +"\"requiredManifestBytes\":67108865}");
+        var header=TerminalTrace.read(file);
+        assertEquals(67108865L,header.get("requiredManifestBytes").getAsLong());
+        assertThrows(IllegalStateException.class,()->TerminalTrace.requireComplete(header));
+    }
+
     @Test void activeIncompleteDroppedOrMissingEvidenceCannotPass() throws Exception {
         for(String invalid:new String[]{HEADER.replace("passed","active"),HEADER.replace("true","false"),HEADER.replace("true","\"true\""),
                 HEADER.replace("\"droppedEvents\":0","\"droppedEvents\":1"),"\"status\":\"passed\""}) {

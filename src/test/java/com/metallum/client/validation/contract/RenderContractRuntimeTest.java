@@ -19,6 +19,45 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class RenderContractRuntimeTest {
     @Test
+    void successfulCaptureCannotHideABudgetFailureFirstEncounteredAtFinalClose() throws Exception {
+        String enabled=System.getProperty("metallum.renderContract.enabled");
+        String limit=System.getProperty("metallum.renderContract.maxManifestBytes");
+        Path output=Files.createTempDirectory("render-contract-close-budget-");
+        try {
+            System.setProperty("metallum.renderContract.enabled","true");
+            System.setProperty("metallum.renderContract.maxManifestBytes","32768");
+            RenderContractRuntime.start(output,"close-budget");
+            completedCapture();assertTrue(RenderContractRuntime.completionGatePassed());
+            // Captures already passed. Append real logical passes without an
+            // intermediate manifest flush, so the first byte-limit decision
+            // is the same final-close path as the client terminal oracle.
+            for(int i=0;i<40;i++) {
+                long pass=RenderContractRuntime.beginRenderPass("synthetic/late-payload",PassType.RENDER,
+                        List.of(),null,null,new ViewportRecord(0,0,1,1),ScissorRecord.disabled(),"pipeline",
+                        List.of("fragment"),Map.of("retainedPayload","x".repeat(1024),"index",Integer.toString(i)));
+                RenderContractRuntime.endPass(pass);
+            }
+            RenderContractRuntime.close();
+            var terminal=RenderContractRuntime.snapshot();
+            assertTrue(terminal.requestedCaptures()==1 && terminal.completedCaptures()==1);
+            assertTrue(terminal.failedCaptures()==0 && terminal.pendingCaptures()==0 && terminal.droppedCaptures()==0);
+            assertTrue(terminal.status().equals("failed"));assertFalse(terminal.ready());
+            assertFalse(terminal.manifestFinalized());assertFalse(RenderContractRuntime.completionGatePassed());
+            Path path=output.resolve("render-contract/pass-manifest.json");
+            assertTrue(Files.size(path)<4096,"Budget failure must remain bounded and inspectable");
+            var trace=com.google.gson.JsonParser.parseString(Files.readString(path)).getAsJsonObject();
+            assertTrue(trace.get("status").getAsString().equals("failed"));
+            assertFalse(trace.get("manifestComplete").getAsBoolean());
+            assertTrue(trace.get("manifestFailureReason").getAsString().equals("render contract manifest byte budget exceeded"));
+            assertTrue(trace.get("requiredManifestBytes").getAsLong()>32768);
+            assertTrue(trace.get("tracePayloadOmitted").getAsBoolean());
+        } finally {
+            RenderContractRuntime.close();restoreProperty("metallum.renderContract.enabled",enabled);
+            restoreProperty("metallum.renderContract.maxManifestBytes",limit);
+        }
+    }
+
+    @Test
     void successfulClosePublishesACompleteOnDiskTraceAndTerminalSnapshot() throws Exception {
         String enabled=System.getProperty("metallum.renderContract.enabled");
         Path output=Files.createTempDirectory("render-contract-close-success-");

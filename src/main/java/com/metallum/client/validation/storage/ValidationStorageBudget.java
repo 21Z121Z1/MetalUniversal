@@ -181,6 +181,7 @@ public final class ValidationStorageBudget {
         Files.createDirectories(normalized.getParent());
         Path temporary = normalized.resolveSibling(normalized.getFileName() + ".partial");
         boolean owned = false;
+        Throwable primaryFailure = null;
         try {
             long required;
             try (OutputStream file = Files.newOutputStream(temporary,
@@ -204,9 +205,19 @@ public final class ValidationStorageBudget {
             if (critical != null) criticalBytes -= critical;
             artifactBytes = artifactBytes - previous + required;
             return required;
+        } catch (IOException | RuntimeException | Error failure) {
+            primaryFailure = failure;
+            throw failure;
         } finally {
             // Never delete a preexisting crash checkpoint that CREATE_NEW rejected.
-            if (owned) Files.deleteIfExists(temporary);
+            if (owned) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException | RuntimeException | Error cleanupFailure) {
+                    if (primaryFailure == null) throw cleanupFailure;
+                    if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
+                }
+            }
         }
     }
 
