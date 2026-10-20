@@ -790,7 +790,7 @@ final class MetalMotionProducerGpuTest {
         return new double[]{1-a-b,a,b};
     }
 
-    private static double halfRoundingBudgetPixels(double value, int extent) {
+    static double halfRoundingBudgetPixels(double value, int extent) {
         // Near previous w=0, valid vectors can approach 32 NDC. A fixed .1-pixel
         // threshold would reject correct RG16F quantization there (up to .25 pixel).
         float roundedMagnitude = Math.abs(Float.float16ToFloat(Float.floatToFloat16((float)value)));
@@ -1264,7 +1264,11 @@ final class MetalMotionProducerGpuTest {
                 if(!red&&!green)continue;
                 covered++;float x=Float.float16ToFloat(vectors.getShort(p*4)),y=Float.float16ToFloat(vectors.getShort(p*4+2));
                 float z=green ? normalZ : overlayZ;
-                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x-(green ? .25F : -.125F))>1e-5||Math.abs(y)>1e-5) {
+                double expectedX=green ? .25 : -.125;
+                // Independent binary16 calibration includes the boundary ULP.
+                if(!Float.isFinite(x)||!Float.isFinite(y)
+                        || Math.abs(x-expectedX)*W/2>halfRoundingBudgetPixels(expectedX,W)
+                        || Math.abs(y)>1e-5) {
                     if(wrongMotion<3)System.out.println("SOURCE_DEPTH_POLICY_DIAGNOSTIC "+name+" pixel="+p
                             +" actualXY="+x+","+y+" green="+green+" tag="+Byte.toUnsignedInt(mask[p])
                             +" z="+pairs.getFloat(p*8)+","+pairs.getFloat(p*8+4));
