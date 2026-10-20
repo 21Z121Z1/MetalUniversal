@@ -52,7 +52,13 @@ final class MetalMotionShaderCompilationTest {
                 variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
                         List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"));
             }
-            for (List<String> defines : variants) cases.add(Arguments.of(name, defines));
+            for (List<String> defines : variants) {
+                cases.add(Arguments.of(name, defines));
+                List<String> depthDefines = new ArrayList<>(defines);
+                depthDefines.add("METALLUM_MOTION_DEPTH");
+                if (name.endsWith("previous_motion.vsh")) depthDefines.add("METALLUM_PREVIOUS_VALIDITY");
+                cases.add(Arguments.of(name, depthDefines));
+            }
         }
         return cases.stream();
     }

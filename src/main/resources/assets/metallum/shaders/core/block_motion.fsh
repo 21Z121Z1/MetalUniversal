@@ -24,5 +24,5 @@ void main() {
 #endif
     MetallumMotionSample metallumSample = metallumMotionSample();
     metallumMotionTarget = metallumSample.motion;
-    metallumValidityTarget = metallumSample.validity;
+    metallumValidityTarget = metallumExportValidity(metallumSample);
 }

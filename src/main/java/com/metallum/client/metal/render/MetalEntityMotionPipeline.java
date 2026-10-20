@@ -87,6 +87,9 @@ final class MetalEntityMotionPipeline {
     private static final VertexFormat PREVIOUS_POSITION_FORMAT = VertexFormat.builder(0)
             .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
             .build();
+    private static final VertexFormat PREVIOUS_VALIDITY_FORMAT = VertexFormat.builder(0)
+            .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
+            .addAttribute("PreviousValidity", GpuFormat.R32_FLOAT).build();
     private static final BindGroupLayout RESOURCES = BindGroupLayout.builder()
             .withUniform("MetallumMotion", UniformType.UNIFORM_BUFFER)
             .build();
@@ -94,8 +97,12 @@ final class MetalEntityMotionPipeline {
             new ColorTargetState(Optional.empty(), GpuFormat.RG16_FLOAT, ColorTargetState.WRITE_COLOR);
     private static final ColorTargetState VALIDITY_TARGET =
             new ColorTargetState(Optional.empty(), GpuFormat.R8_UNORM, ColorTargetState.WRITE_RED);
+    private static final ColorTargetState DEPTH_TARGET =
+            new ColorTargetState(Optional.empty(), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_RED | ColorTargetState.WRITE_GREEN);
     private static final Map<RenderPipeline, RenderPipeline> CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline> DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
 
     private MetalEntityMotionPipeline() {
     }
@@ -215,6 +222,18 @@ final class MetalEntityMotionPipeline {
     static void clear() {
         CACHE.clear();
         PREVIOUS_POSITION_CACHE.clear();
+        DEPTH_CACHE.clear();
+        PREVIOUS_POSITION_DEPTH_CACHE.clear();
+    }
+
+    static RenderPipeline forSourceWithDepth(final RenderPipeline source) {
+        return DEPTH_CACHE.computeIfAbsent(source, pipeline -> buildVariant(pipeline, familyOf(pipeline), null, true));
+    }
+
+    static RenderPipeline forPreviousPositionsWithDepth(final RenderPipeline source) {
+        PreviousFamily family = previousFamilyOf(source);
+        if (family == null) throw new IllegalArgumentException("Source has no previous-position ABI: "+source.getLocation());
+        return PREVIOUS_POSITION_DEPTH_CACHE.computeIfAbsent(source, pipeline -> buildVariant(pipeline, null, family, true));
     }
 
     private static RenderPipeline build(final RenderPipeline source) {
@@ -252,6 +271,15 @@ final class MetalEntityMotionPipeline {
             final @Nullable Family family,
             final @Nullable PreviousFamily previousFamily
     ) {
+        return buildVariant(source, family, previousFamily, false);
+    }
+
+    private static RenderPipeline buildVariant(
+            final RenderPipeline source,
+            final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,
+            final boolean depthCorrespondence
+    ) {
         boolean previousPositions = previousFamily != null;
         if (!previousPositions && family == null) {
             throw new IllegalArgumentException("Missing root motion family for " + source.getLocation());
@@ -262,7 +290,8 @@ final class MetalEntityMotionPipeline {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
-                        (previousPositions ? previousFamily.locationPrefix : family.locationPrefix()) + sourceName
+                        (previousPositions ? previousFamily.locationPrefix : family.locationPrefix())
+                                + (depthCorrespondence ? "depth/" : "") + sourceName
                 ))
                 .withVertexShader(previousPositions ? previousFamily.vertexShader : family.shader())
                 .withFragmentShader(previousPositions ? previousFamily.fragmentShader : family.shader())
@@ -280,7 +309,8 @@ final class MetalEntityMotionPipeline {
             }
         }
         if (previousPositions) {
-            builder.withVertexBinding(1, PREVIOUS_POSITION_FORMAT);
+            builder.withVertexBinding(1, depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
+            if (depthCorrespondence) builder.withShaderDefine("METALLUM_PREVIOUS_VALIDITY");
         }
         source.getShaderDefines().flags().forEach(builder::withShaderDefine);
         source.getShaderDefines().values().forEach((name, value) -> {
@@ -301,6 +331,9 @@ final class MetalEntityMotionPipeline {
                 }
             }
         });
+        if (depthCorrespondence) {
+            builder.withShaderDefine("METALLUM_MOTION_DEPTH").withColorTargetState(2, DEPTH_TARGET);
+        }
         boolean alphaComposite = source.getColorTargetStates().stream().filter(java.util.Objects::nonNull)
                 .anyMatch(target -> target.blendFunction().map(blend -> blend.color().sourceFactor() == BlendFactor.SRC_ALPHA).orElse(false))
                 || (source.getShaderDefines().flags().contains("OIT_ACCUMULATE")

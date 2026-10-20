@@ -11,6 +11,8 @@ import org.jspecify.annotations.Nullable;
 import org.joml.Matrix4f;
 import com.mojang.renderpearl.util.TextureViewAndSampler;
 import java.util.Map;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /**
  * Resolves a previous-position replay only after the whole source frame has finished staging.
@@ -61,6 +63,22 @@ final class MetalPreviousVertexReplay {
     }
 
     private MetalPreviousVertexReplay() {
+    }
+
+    /** Never send NaN sentinels through the rasterizer: varyings can canonicalize nonfinite values. */
+    static boolean writePreviousPositions(final float[] positions, final ByteBuffer destination) {
+        if (positions.length == 0 || positions.length%3 != 0 || destination.remaining() < (long)positions.length/3*16) {
+            throw new IllegalArgumentException("Malformed previous position/validity upload");
+        }
+        destination.order(ByteOrder.nativeOrder());
+        boolean complete = true;
+        for (int i = 0; i < positions.length; i += 3) {
+            boolean valid = Float.isFinite(positions[i]) && Float.isFinite(positions[i+1]) && Float.isFinite(positions[i+2]);
+            destination.putFloat(valid ? positions[i] : 0).putFloat(valid ? positions[i+1] : 0)
+                    .putFloat(valid ? positions[i+2] : 0).putFloat(valid ? 1 : 0);
+            complete &= valid;
+        }
+        return complete;
     }
 
     static @Nullable SourceDrawInputs sourceDrawInputs(final RenderPass pass) {

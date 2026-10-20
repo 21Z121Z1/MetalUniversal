@@ -12,5 +12,5 @@ void main() {
     // in the frame-interpolator source contract, so encode exact geometry motion here.
     MetallumMotionSample metallumSample = metallumMotionSample();
     metallumMotionTarget = metallumSample.motion;
-    metallumValidityTarget = metallumSample.validity;
+    metallumValidityTarget = metallumExportValidity(metallumSample);
 }

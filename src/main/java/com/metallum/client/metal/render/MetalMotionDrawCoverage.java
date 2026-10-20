@@ -14,6 +14,7 @@ public final class MetalMotionDrawCoverage {
     private static long source, owned, unowned, depthBounds, transmittance, accumulate, duplicates, queued, encoded;
     private static final boolean VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
     private static boolean scene;
+    private static int motionReplayDepth;
     private static final Map<String, long[]> PIPELINES = new TreeMap<>();
     private static final Map<RenderPipeline, MetalMotionProgramIdentity.Identity> PROGRAM_IDENTITIES = new java.util.IdentityHashMap<>();
     private static final Map<String, MetalMotionProgramIdentity.Description> PROGRAM_DESCRIPTIONS = new TreeMap<>();
@@ -22,11 +23,13 @@ public final class MetalMotionDrawCoverage {
     private static final Map<OwnerKey, String> FRAME_OWNER_CLASSES = new java.util.HashMap<>();
     private static final Map<String, long[]> OWNERS = new TreeMap<>();
 
-    public record PipelineCounts(long actualDraws, long hookedExecutions, long ownedColorExecutions, long encodedMotionDraws) {}
+    public record PipelineCounts(long actualDraws, long hookedExecutions, long ownedColorExecutions,
+                                 long encodedMotionDraws, long internalMotionReplays) {}
     public record OwnerCounts(long capturedStates, long sourceColorDraws, long matchingGeometryDraws,
                               long matchingTransformDraws, long matchingSurfaceDraws, long encodedMotionDraws) {}
     public record ProgramCounts(MetalMotionProgramIdentity.@Nullable Description source,
-                                long actualDraws, long hookedExecutions, long ownedColorExecutions, long encodedMotionDraws) {}
+                                long actualDraws, long hookedExecutions, long ownedColorExecutions,
+                                long encodedMotionDraws, long internalMotionReplays) {}
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
                          Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture) {}
@@ -35,6 +38,7 @@ public final class MetalMotionDrawCoverage {
 
     static void beginFrame() {
         scene = false;
+        motionReplayDepth = 0;
         FRAME_OWNER_CLASSES.clear();
         source = owned = unowned = depthBounds = transmittance = accumulate = duplicates = queued = encoded = 0;
     }
@@ -67,11 +71,16 @@ public final class MetalMotionDrawCoverage {
 
     static void beginScene() { scene = true; }
     static void endScene() { scene = false; }
+    static void beginMotionReplay() { motionReplayDepth++; }
+    static void endMotionReplay() {
+        if (motionReplayDepth <= 0) throw new IllegalStateException("Unbalanced motion replay scope");
+        motionReplayDepth--;
+    }
 
     private static void countProgram(final RenderPipeline pipeline, final int counter, final long count) {
         var identity = PROGRAM_IDENTITIES.computeIfAbsent(pipeline, MetalMotionProgramIdentity::of);
         PROGRAM_DESCRIPTIONS.putIfAbsent(identity.key(), identity.source());
-        PROGRAMS.computeIfAbsent(identity.key(), ignored -> new long[4])[counter] += count;
+        PROGRAMS.computeIfAbsent(identity.key(), ignored -> new long[5])[counter] += count;
     }
 
     /** Independent denominator from the production backend, including direct and unowned draws. */
@@ -79,16 +88,17 @@ public final class MetalMotionDrawCoverage {
         if (VALIDATION && scene && compiled != null && count > 0) {
             RenderPipeline source = compiled.sourcePipeline();
             String name = source == null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
-            PIPELINES.computeIfAbsent(name, ignored -> new long[4])[0] += count;
-            if (source == null) PROGRAMS.computeIfAbsent(name, ignored -> new long[4])[0] += count;
-            else countProgram(source, 0, count);
+            int counter = motionReplayDepth > 0 ? 4 : 0;
+            PIPELINES.computeIfAbsent(name, ignored -> new long[5])[counter] += count;
+            if (source == null) PROGRAMS.computeIfAbsent(name, ignored -> new long[5])[counter] += count;
+            else countProgram(source, counter, count);
         }
     }
 
     static void hookedDraw(final MetalPreviousVertexReplay.@Nullable SourceState state, final @Nullable OitStage stage,
                            final MetalEntityMotionCapture.@Nullable Sample sample) {
         if (VALIDATION && scene && state != null) {
-            long[] counts = PIPELINES.computeIfAbsent(state.pipeline().getLocation().toString(), ignored -> new long[4]);
+            long[] counts = PIPELINES.computeIfAbsent(state.pipeline().getLocation().toString(), ignored -> new long[5]);
             counts[1]++;
             countProgram(state.pipeline(), 1, 1);
             if ((stage == null || stage == OitStage.ACCUMULATE) && sample != null) {
@@ -101,12 +111,12 @@ public final class MetalMotionDrawCoverage {
 
     public static Census census() {
         Map<String, PipelineCounts> copy = new TreeMap<>();
-        PIPELINES.forEach((name, counts) -> copy.put(name, new PipelineCounts(counts[0], counts[1], counts[2], counts[3])));
+        PIPELINES.forEach((name, counts) -> copy.put(name, new PipelineCounts(counts[0], counts[1], counts[2], counts[3], counts[4])));
         Map<String, OwnerCounts> owners = new TreeMap<>();
         OWNERS.forEach((name, counts) -> owners.put(name, new OwnerCounts(counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         Map<String, ProgramCounts> programs = new TreeMap<>();
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
-                counts[0], counts[1], counts[2], counts[3])));
+                counts[0], counts[1], counts[2], counts[3], counts[4])));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics());
     }
@@ -128,7 +138,7 @@ public final class MetalMotionDrawCoverage {
         encoded++;
         if (VALIDATION) {
             ownerCounts(sample)[5]++;
-            PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[4])[3]++;
+            PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[5])[3]++;
             countProgram(source, 3, 1);
         }
     }

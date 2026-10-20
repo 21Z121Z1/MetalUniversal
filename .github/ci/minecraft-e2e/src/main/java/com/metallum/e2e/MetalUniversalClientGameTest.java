@@ -811,7 +811,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(census.rawMotionValidation(), "Real draw coverage capture was not enabled");
             require(!census.programs().isEmpty(), "Source-program coverage is missing");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
-                var rows = census.pipelines().entrySet().stream().filter(row -> row.getKey().endsWith("/" + suffix)).toList();
+                var rows = census.pipelines().entrySet().stream().filter(row -> row.getValue().actualDraws() > 0
+                        && row.getKey().endsWith("/" + suffix)).toList();
                 require(!rows.isEmpty(), "Minecraft never executed particle source pipeline " + suffix + ": " + census);
                 for (var row : rows) {
                     require(row.getValue().actualDraws() > 0
@@ -821,7 +822,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         require(row.getValue().ownedColorExecutions() > 0, "Particle color draw has no staged motion owner: " + row);
                     }
                 }
-                var programs = census.programs().values().stream().filter(row -> row.source() != null
+                var programs = census.programs().values().stream().filter(row -> row.actualDraws() > 0 && row.source() != null
                         && row.source().location().endsWith("/"+suffix)).toList();
                 require(!programs.isEmpty(), "No actual original shader program for "+suffix);
                 for (var program : programs) {
@@ -835,6 +836,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                             "Particle hook captured ownership but never encoded actual GPU motion: "+suffix);
                 }
             }
+            require(census.programs().values().stream().mapToLong(row -> row.internalMotionReplays()).sum() > 0,
+                    "Diagnostic replay draws must be reported separately from real Minecraft source draws");
             long oitFeatures = census.pipelines().entrySet().stream()
                     .filter(row -> row.getKey().contains("oit_accumulate_entity"))
                     .mapToLong(row -> row.getValue().encodedMotionDraws()).sum();
@@ -866,6 +869,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                             && raw.frameId() > 0 && raw.historyEpoch() > 0 && raw.worldValidPixels() > 0
                             && raw.finiteValidPixels() >= raw.worldValidPixels() && raw.maxMotionPixels() > 0
                             && raw.worldDepthPixels() > 0 && raw.handDepthPixels() > 0 && raw.worldPixelsOutsideHand() > 0
+                            && raw.validCorrespondencePixels() > 0
                             && !raw.temporalQualityValidated() && !raw.frameGenerationQualityValidated(),
                     "Real producer GPU motion readback failed or claimed unsupported quality: " + raw);
             report.addProperty("verified", true);

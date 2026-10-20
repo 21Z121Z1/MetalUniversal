@@ -3,6 +3,13 @@
 
 layout(location = 0) in vec4 metallumCurrentClip;
 layout(location = 1) in vec4 metallumPreviousClip;
+layout(location = 5) noperspective in float metallumHistoryValidity;
+
+#ifdef METALLUM_MOTION_DEPTH
+// Same visible surface as XY/validity. Background clears to (-1,-1), while
+// an owned pixel without usable previous history keeps current Z and previous=-1.
+layout(location = 2) out vec2 metallumDepthTarget;
+#endif
 
 struct MetallumMotionSample {
     vec2 motion;
@@ -15,7 +22,8 @@ MetallumMotionSample metallumMotionSample() {
     result.motion = vec2(0.0);
     result.previousDepth = 0.0;
     result.validity = 0.0;
-    if (!(metallumCurrentClip.w > 1.0e-6) || !(metallumPreviousClip.w > 1.0e-6)
+    if (!(metallumHistoryValidity > 0.99999)
+            || !(metallumCurrentClip.w > 1.0e-6) || !(metallumPreviousClip.w > 1.0e-6)
             || any(isnan(metallumCurrentClip)) || any(isinf(metallumCurrentClip))
             || any(isnan(metallumPreviousClip)) || any(isinf(metallumPreviousClip))) return result;
 
@@ -35,6 +43,16 @@ MetallumMotionSample metallumMotionSample() {
     result.previousDepth = previousNdc.z;
     result.validity = 1.0;
     return result;
+}
+
+float metallumExportValidity(MetallumMotionSample motion) {
+#ifdef METALLUM_MOTION_DEPTH
+    metallumDepthTarget = vec2(motion.validity > 0.5 ? motion.previousDepth : -1.0, gl_FragCoord.z);
+    // Distinguish owned-but-invalid history from untouched background.
+    return motion.validity > 0.5 ? 1.0 : 0.25;
+#else
+    return motion.validity;
+#endif
 }
 
 #endif

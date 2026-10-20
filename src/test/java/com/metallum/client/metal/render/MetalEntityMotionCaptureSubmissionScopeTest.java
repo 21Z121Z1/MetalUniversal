@@ -5,6 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -83,6 +84,7 @@ final class MetalEntityMotionCaptureSubmissionScopeTest {
         assertFalse(MetalEntityMotionCapture.shouldSplitEntityDraw(pipeline),
                 "the old callback-only scope has not started when Minecraft allocates the builder");
         var submits = MetalEntityMotionCapture.activateBuildSampleOnAccess(java.util.List.of(owned, unowned));
+        for (Object submit : submits) assertNotNull(submit);
         assertEquals(owned, submits.get(0));
         assertTrue(MetalEntityMotionCapture.shouldSplitEntityDraw(pipeline), "the owner must exist before allocation");
         MetalEntityMotionCapture.endModelBuild();

@@ -23,6 +23,15 @@ final class MetalParticleVertexCorrespondenceTest {
     void reset() { MetalPreviousVertexHistory.reset(); }
 
     @Test
+    void gpuUploadUsesAnExplicitValidityAttributeAndFinitePositions() {
+        var bytes = java.nio.ByteBuffer.allocate(32).order(java.nio.ByteOrder.nativeOrder());
+        assertFalse(MetalPreviousVertexReplay.writePreviousPositions(new float[]{1,2,3,Float.NaN,4,5},bytes));
+        bytes.flip();
+        assertEquals(1,bytes.getFloat()); assertEquals(2,bytes.getFloat()); assertEquals(3,bytes.getFloat()); assertEquals(1,bytes.getFloat());
+        assertEquals(0,bytes.getFloat()); assertEquals(0,bytes.getFloat()); assertEquals(0,bytes.getFloat()); assertEquals(0,bytes.getFloat());
+    }
+
+    @Test
     void reorderedQuadsUseTheirOwnPreviousVertices() {
         seed(List.of(11L, 22L), 10, 20);
         var token = stage(List.of(22L, 11L), 200, 100);

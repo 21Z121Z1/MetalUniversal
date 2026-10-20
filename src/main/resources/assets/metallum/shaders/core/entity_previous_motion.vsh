@@ -11,6 +11,9 @@ layout(location = 0) in vec3 Position;
 layout(location = 1) in vec4 Color;
 layout(location = 2) in vec2 UV0;
 layout(location = 6) in vec3 PreviousPosition;
+#ifdef METALLUM_PREVIOUS_VALIDITY
+layout(location = 7) in float PreviousValidity;
+#endif
 
 layout(std140) uniform MetallumMotion {
     mat4 CurrentUnjitteredFromRaster;

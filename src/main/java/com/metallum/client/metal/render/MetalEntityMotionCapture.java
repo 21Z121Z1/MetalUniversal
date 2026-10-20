@@ -441,7 +441,10 @@ public final class MetalEntityMotionCapture {
             @Override
             public T get(final int index) {
                 T submit = submits.get(index);
-                beginModelBuild(submit);
+                // HEAD observers and the renderer can both traverse the list.
+                // Attribution is a frame-owned carrier, not a consumable queue:
+                // an inspection must not erase ownership before builder allocation.
+                beginBuild(submit, true);
                 return submit;
             }
 

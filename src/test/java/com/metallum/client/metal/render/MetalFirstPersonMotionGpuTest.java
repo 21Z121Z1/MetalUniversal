@@ -309,10 +309,14 @@ final class MetalFirstPersonMotionGpuTest {
                 .withBindGroupLayout(BindGroupLayout.builder()
                         .withUniform("Projection", UniformType.UNIFORM_BUFFER)
                         .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
-                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build())
+                        .withUniform("Fog", UniformType.UNIFORM_BUFFER).withUniform("Lighting", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
+                        .withUniform("Sampler1", UniformType.COMBINED_IMAGE_SAMPLER)
+                        .withUniform("Sampler2", UniformType.COMBINED_IMAGE_SAMPLER).build())
                 .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
-                .withShaderDefine("ALPHA_CUTOUT", .5F).build();
+                .withShaderDefine("ALPHA_CUTOUT", .5F).withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").build();
         var pipeline = MetalEntityMotionPipeline.forPreviousPositions(source);
         var sample = new MetalEntityMotionCapture.Sample(f.side() > 0 ? 101 : 102, -7,
                 new Matrix4f(), new Matrix4f(), FrameSynthesisContract.ProducerDomain.FIRST_PERSON);
@@ -330,15 +334,13 @@ final class MetalFirstPersonMotionGpuTest {
         try (GpuBuffer previousVertices = device.createBuffer(() -> "previous posed hand", GpuBuffer.USAGE_VERTEX, oldVertices);
              GpuBuffer currentVertices = device.createBuffer(() -> "current posed hand", GpuBuffer.USAGE_VERTEX, vertices);
              GpuBuffer index = device.createBuffer(() -> "hand indices", GpuBuffer.USAGE_INDEX, indices);
-             GpuBuffer previousPositions = positionBuffer(oldPositions);
              GpuBuffer oldPr = projectionBuffer(oldProjection);
              GpuBuffer pr = projectionBuffer(projection);
              GpuBuffer oldDynamic = dynamicBuffer(oldView);
              GpuBuffer dynamic = dynamicBuffer(view);
-             GpuBuffer oldMotion = motionBuffer(MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()),
-                     MetalMotionContract.minecraftToMetalFxClip(new Matrix4f(oldProjection).mul(oldView)));
-             GpuBuffer currentMotion = motionBuffer(MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()),
-                     MetalMotionContract.minecraftToMetalFxClip(new Matrix4f(projection).mul(view)));
+             GpuBuffer fog = device.createBuffer(() -> "actual HUD source fog",GpuBuffer.USAGE_UNIFORM,hudSourceFog());
+             GpuBuffer lighting = device.createBuffer(() -> "actual HUD source lighting",GpuBuffer.USAGE_UNIFORM,ByteBuffer.allocateDirect(64));
+             MetalGpuTexture sourceColor = texture("actual HUD source color",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_COPY_SRC);
              MetalGpuTexture sampled = texture("hand texture", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_TEXTURE_BINDING);
              MetalGpuTexture flow = texture("hand flow", GpuFormat.RG16_FLOAT, GpuTexture.USAGE_COPY_SRC);
              MetalGpuTexture valid = texture("dedicated hand validity", GpuFormat.R8_UNORM, GpuTexture.USAGE_COPY_SRC);
@@ -347,12 +349,14 @@ final class MetalFirstPersonMotionGpuTest {
              var flowView = device.createTextureView(flow);
              var validView = device.createTextureView(valid);
              var depthView = device.createTextureView(depth);
+             var sourceColorView = device.createTextureView(sourceColor);
              var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE,
                      FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty())) {
             encoder.clearColorTexture(sampled, new Vector4f(1, 1, 1, f.alphaHole() ? 0 : 1));
             // Rasterize each real source frame with its own projection/model-view, independently
             // of the history-derived motion matrices. Capture exactly the bound source slices.
             byte[][] sourceMasks = new byte[2][];
+            byte[][] sourceColors = new byte[2][];
             MetalPreviousVertexHistory.DrawToken token = null;
             for (int frame = 0; frame < 2; frame++) {
                 MetalPreviousVertexHistory.beginFrame();
@@ -362,27 +366,30 @@ final class MetalFirstPersonMotionGpuTest {
                         source.getLocation().toString(), format.getElements(), format.getVertexSize(),
                         PrimitiveTopology.TRIANGLES, 6, 6), frame == 0 ? oldPositions : currentPositions);
                 var descriptor = RenderPassDescriptor.builder(() -> "Independent HUD source raster")
-                        .withColorAttachment(flowView, Optional.of(new Vector4f()))
-                        .withColorAttachment(validView, Optional.of(new Vector4f()))
+                        .withColorAttachment(sourceColorView, Optional.of(new Vector4f(0)))
                         .withDepthAttachment(depthView, OptionalDouble.of(0))
                         .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build();
                 try (MetalRenderPass pass = encoder.createRenderPass(descriptor)) {
-                    pass.setPipeline(pipeline);
+                    pass.setPipeline(source);
                     pass.setUniform("Projection", (frame == 0 ? oldPr : pr).slice(UNIFORM_OFFSET, 64));
                     pass.setUniform("DynamicTransforms", (frame == 0 ? oldDynamic : dynamic).slice(UNIFORM_OFFSET, 256));
-                    pass.setUniform("MetallumMotion", (frame == 0 ? oldMotion : currentMotion).slice());
+                    pass.setUniform("Fog",fog.slice()); pass.setUniform("Lighting",lighting.slice());
                     pass.bindTexture("Sampler0", sampledView, sampler);
+                    pass.bindTexture("Sampler1", sampledView, sampler); pass.bindTexture("Sampler2", sampledView, sampler);
                     pass.setVertexBuffer(0, (frame == 0 ? previousVertices : currentVertices).slice());
-                    pass.setVertexBuffer(1, previousPositions.slice());
                     pass.setIndexBuffer(index, IndexType.SHORT);
                     pass.drawIndexed(6, 1, 0, 0, 0);
                     var inputs = MetalPreviousVertexReplay.sourceDrawInputs(pass);
                     assertNotNull(inputs);
+                    assertSame(source,pass.motionSourceState().pipeline(), "source semantics must survive backend compilation");
                     assertSame(depthView, inputs.depth(), "Hand replay must retain the source HUD depth attachment");
                     assertTrue(MetalPreviousVertexReplay.captureHandTransform(token, inputs));
                 }
                 encoder.submit(); device.waitForSubmittedGpuWork();
-                sourceMasks[frame] = readback(valid);
+                byte[] sourcePixels = readback(sourceColor);
+                sourceColors[frame] = sourcePixels;
+                sourceMasks[frame] = new byte[W*H];
+                for (int pixel = 0; pixel < W*H; pixel++) sourceMasks[frame][pixel] = sourcePixels[pixel*4+3];
                 if (frame == 0) MetalPreviousVertexHistory.commitSubmittedFrame();
             }
             var hand = MetalPreviousVertexReplay.handTransforms(token);
@@ -429,6 +436,8 @@ final class MetalFirstPersonMotionGpuTest {
             if (count > 0) { x /= count; y /= count; }
             Path dir = Path.of("build/agent-evidence/motion-producers/" + f.name()); Files.createDirectories(dir);
             Files.write(dir.resolve("previous-validity.r8"), sourceMasks[0]);
+            Files.write(dir.resolve("previous-source.rgba8"),sourceColors[0]);
+            Files.write(dir.resolve("current-source.rgba8"),sourceColors[1]);
             Files.write(dir.resolve("source-current-validity.r8"), sourceMasks[1]);
             Files.write(dir.resolve("current-validity.r8"), mask); Files.write(dir.resolve("motion.rg16f"), vectors);
             Files.writeString(dir.resolve("result.json"), "{\"fixture\":\"" + f.name() + "\",\"width\":" + W
@@ -445,6 +454,12 @@ final class MetalFirstPersonMotionGpuTest {
                 else assertTrue(maxMotion > 1, "Swing/FOV/model-view motion must not silently collapse to zero");
             }
         }
+    }
+
+    private static ByteBuffer hudSourceFog() {
+        ByteBuffer fog = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        return fog;
     }
 
     @Test

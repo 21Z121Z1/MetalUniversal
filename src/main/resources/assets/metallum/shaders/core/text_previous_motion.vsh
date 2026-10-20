@@ -12,10 +12,16 @@ layout(location = 1) in vec2 UV0;
 #ifdef IS_SEE_THROUGH
 layout(location = 2) in vec4 Color;
 layout(location = 3) in vec3 PreviousPosition;
+#ifdef METALLUM_PREVIOUS_VALIDITY
+layout(location = 4) in float PreviousValidity;
+#endif
 #else
 layout(location = 2) in ivec2 UV2;
 layout(location = 3) in vec4 Color;
 layout(location = 4) in vec3 PreviousPosition;
+#ifdef METALLUM_PREVIOUS_VALIDITY
+layout(location = 5) in float PreviousValidity;
+#endif
 uniform sampler2D Sampler2;
 #endif
 

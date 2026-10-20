@@ -393,6 +393,8 @@ public final class MetalFxManager {
     @Nullable private GpuTextureView handMotionDepthView;
     @Nullable private MetalGpuTexture handOverlayDepthTexture;
     @Nullable private MetalGpuTexture frameHandDepthTexture;
+    @Nullable private MetalGpuTexture motionCorrespondenceTexture;
+    @Nullable private GpuTextureView motionCorrespondenceView;
     private boolean handDepthSourceWasMain;
     @Nullable
     private MetalGpuTexture frameDepthTexture;
@@ -405,6 +407,7 @@ public final class MetalFxManager {
                                       long finiteValidPixels, double maxMotionPixels, String scalerMode,
                                       boolean handDepthSourceWasMain, long worldDepthPixels,
                                       long handDepthPixels, long worldPixelsOutsideHand,
+                                      long validCorrespondencePixels, long invalidOwnedPixels,
                                       boolean temporalQualityValidated, boolean frameGenerationQualityValidated) {}
 
     private record RawMotionRequest(Path output, java.util.concurrent.CompletableFuture<RawMotionValidation> result) {}
@@ -1962,7 +1965,7 @@ public final class MetalFxManager {
 
         MetalCommandEncoder encoder = this.device.commandEncoder();
         if (objectMotionDepthTexture == null || objectMotionDepthView == null
-                || handMotionDepthTexture == null || handMotionDepthView == null) return;
+                || handMotionDepthTexture == null || handMotionDepthView == null || motionCorrespondenceView == null) return;
         // Motion selects the nearest participating surface. Never write the game's scene/HUD
         // depth while resolving overlapping transparent geometry; use renderer-owned copies.
         if (!objectMotionInputsCleared) copyMotionDepth(depthView, objectMotionDepthTexture);
@@ -2031,17 +2034,14 @@ public final class MetalFxManager {
             GpuBufferSlice previousPositionBuffer = null;
             if (exactPreviousPositions) {
                 float[] previousPositions = exactPlan.previousPositions();
-                long previousByteCount = Math.multiplyExact((long) previousPositions.length, Float.BYTES);
+                long previousByteCount = Math.multiplyExact(previousPositions.length/3L, 16L);
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                         .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
                     ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                    boolean partialHistory = false;
-                    for (float value : previousPositions) {
-                        bytes.putFloat(value);
-                        partialHistory |= !Float.isFinite(value);
-                    }
-                    if (partialHistory) MetalEntityMotionCapture.failExactSample(replay.sample(),
+                    if (!MetalPreviousVertexReplay.writePreviousPositions(previousPositions, bytes)) {
+                        MetalEntityMotionCapture.failExactSample(replay.sample(),
                             "particle-emission-has-no-unambiguous-previous-vertices");
+                    }
                     previousPositionBuffer = mapped.slice();
                 }
                 MetalFxMotionTelemetry.recordGpuUpload(previousByteCount);
@@ -2103,11 +2103,13 @@ public final class MetalFxManager {
         if (objectMotionInputsCleared) {
             worldDescriptor = worldDescriptor
                     .withColorAttachment(objectMotionView)
-                    .withColorAttachment(objectValidityView);
+                    .withColorAttachment(objectValidityView)
+                    .withColorAttachment(motionCorrespondenceView);
         } else {
             worldDescriptor = worldDescriptor
                     .withColorAttachment(objectMotionView, Optional.of(UI_CLEAR))
-                    .withColorAttachment(objectValidityView, Optional.of(UI_CLEAR));
+                    .withColorAttachment(objectValidityView, Optional.of(UI_CLEAR))
+                    .withColorAttachment(motionCorrespondenceView, Optional.of(new Vector4f(-1)));
         }
         worldDescriptor = worldDescriptor
                 .withDepthAttachment(objectMotionDepthView)
@@ -2129,6 +2131,7 @@ public final class MetalFxManager {
                     .builder(() -> "Metallum batched first-person exact motion")
                     .withColorAttachment(objectMotionView)
                     .withColorAttachment(handExactValidityView)
+                    .withColorAttachment(motionCorrespondenceView)
                     .withDepthAttachment(handMotionDepthView)
                     .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight))
                     .build();
@@ -2147,43 +2150,48 @@ public final class MetalFxManager {
             final MetalRenderPass pass,
             final List<PreparedObjectMotionReplay> replays
     ) {
-        for (PreparedObjectMotionReplay replay : replays) {
-            var prepared = replay.prepared();
-            StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
-            boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
-            pass.setPipeline(exactPreviousPositions
-                    ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
-                    : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
-            RenderSystem.bindDefaultUniforms(pass);
-            // A later HUD or effect pass may have changed RenderSystem's global
-            // projection. Replay the actual source draw's same-frame slice.
-            pass.setUniform("Projection", replay.projection());
-            pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
-            pass.setUniform("MetallumMotion", replay.motionUniform());
-            pass.setVertexBuffer(0, replay.currentVertexBuffer());
-            if (exactPreviousPositions) {
-                pass.setVertexBuffer(1, replay.previousPositionBuffer());
+        MetalMotionDrawCoverage.beginMotionReplay();
+        try {
+            for (PreparedObjectMotionReplay replay : replays) {
+                var prepared = replay.prepared();
+                StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+                boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
+                pass.setPipeline(exactPreviousPositions
+                        ? MetalEntityMotionPipeline.forPreviousPositionsWithDepth(prepared.pipeline())
+                        : MetalEntityMotionPipeline.forSourceWithDepth(prepared.pipeline()));
+                RenderSystem.bindDefaultUniforms(pass);
+                // A later HUD or effect pass may have changed RenderSystem's global
+                // projection. Replay the actual source draw's same-frame slice.
+                pass.setUniform("Projection", replay.projection());
+                pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+                pass.setUniform("MetallumMotion", replay.motionUniform());
+                pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                if (exactPreviousPositions) {
+                    pass.setVertexBuffer(1, replay.previousPositionBuffer());
+                }
+                if (prepared.scissor() == null) pass.disableScissor();
+                else pass.enableScissor(prepared.scissor().x(), prepared.scissor().y(),
+                        prepared.scissor().width(), prepared.scissor().height());
+                for (var texture : prepared.textures().entrySet()) {
+                    pass.bindTexture(texture.getKey(), texture.getValue().view(), texture.getValue().sampler());
+                }
+                pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
+                pass.drawIndexed(
+                        executeInfo.indexCount(),
+                        1,
+                        executeInfo.firstIndex(),
+                        replay.replayBaseVertex(),
+                        0
+                );
+                if (exactPreviousPositions) {
+                    MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+                }
+                recordMotionProducerEncoded(replay.sample());
+                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
+                MetalMotionDrawCoverage.encoded(replay.sample(), prepared.pipeline());
             }
-            if (prepared.scissor() == null) pass.disableScissor();
-            else pass.enableScissor(prepared.scissor().x(), prepared.scissor().y(),
-                    prepared.scissor().width(), prepared.scissor().height());
-            for (var texture : prepared.textures().entrySet()) {
-                pass.bindTexture(texture.getKey(), texture.getValue().view(), texture.getValue().sampler());
-            }
-            pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
-            pass.drawIndexed(
-                    executeInfo.indexCount(),
-                    1,
-                    executeInfo.firstIndex(),
-                    replay.replayBaseVertex(),
-                    0
-            );
-            if (exactPreviousPositions) {
-                MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
-            }
-            recordMotionProducerEncoded(replay.sample());
-            MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
-            MetalMotionDrawCoverage.encoded(replay.sample(), prepared.pipeline());
+        } finally {
+            MetalMotionDrawCoverage.endMotionReplay();
         }
     }
 
@@ -2758,7 +2766,7 @@ public final class MetalFxManager {
         rawMotionRequest = null;
         if (!sceneFrame || !objectMotionInputsCleared || sourceFrameStamp == null || sourceFrameStampInvalidated
                 || objectMotionTexture == null || objectValidityTexture == null || handExactValidityTexture == null
-                || frameDepthTexture == null || frameHandDepthTexture == null) {
+                || frameDepthTexture == null || frameHandDepthTexture == null || motionCorrespondenceTexture == null) {
             request.result().completeExceptionally(new IllegalStateException("Raw source motion inputs were not completed"));
             return;
         }
@@ -2777,6 +2785,7 @@ public final class MetalFxManager {
             readbacks.add(validationReadback("hand-exact-validity", handExactValidityTexture));
             readbacks.add(validationReadback("preserved-world-depth", frameDepthTexture));
             readbacks.add(validationReadback("isolated-hand-depth", frameHandDepthTexture));
+            readbacks.add(validationReadback("surface-correspondence-depth", motionCorrespondenceTexture));
             Runnable finish = () -> {
                 if (released.get()) return;
                 try {
@@ -2784,8 +2793,10 @@ public final class MetalFxManager {
                     ByteBuffer vectors = ByteBuffer.wrap(bytes.get(0)).order(ByteOrder.nativeOrder());
                     ByteBuffer worldDepth = ByteBuffer.wrap(bytes.get(3)).order(ByteOrder.nativeOrder());
                     ByteBuffer handDepth = ByteBuffer.wrap(bytes.get(4)).order(ByteOrder.nativeOrder());
+                    ByteBuffer surfaceDepth = ByteBuffer.wrap(bytes.get(5)).order(ByteOrder.nativeOrder());
                     long world = 0, hand = 0, finite = 0; double max = 0;
                     long worldDepthPixels = 0, handDepthPixels = 0, worldOutsideHand = 0;
+                    long validCorrespondence = 0, invalidOwned = 0;
                     for (int pixel = 0; pixel < width * height; pixel++) {
                         float wd = worldDepth.getFloat(pixel * 4), hd = handDepth.getFloat(pixel * 4);
                         if (!Float.isFinite(wd) || !Float.isFinite(hd) || wd < 0 || wd > 1 || hd < 0 || hd > 1) {
@@ -2796,6 +2807,23 @@ public final class MetalFxManager {
                         if (wd > 0 && hd == 0) worldOutsideHand++;
                         boolean worldValid = Byte.toUnsignedInt(bytes.get(1)[pixel]) > 127;
                         boolean handValid = Byte.toUnsignedInt(bytes.get(2)[pixel]) > 127;
+                        int worldMask = Byte.toUnsignedInt(bytes.get(1)[pixel]), handMask = Byte.toUnsignedInt(bytes.get(2)[pixel]);
+                        int selectedMask = handMask > 31 ? handMask : worldMask;
+                        if (selectedMask > 31) {
+                            float previousZ = surfaceDepth.getFloat(pixel*8), currentZ = surfaceDepth.getFloat(pixel*8+4);
+                            if (!Float.isFinite(currentZ) || currentZ < 0 || currentZ > 1) {
+                                throw new IllegalStateException("Owned source pixel has no current surface depth");
+                            }
+                            if (selectedMask > 127) {
+                                if (!Float.isFinite(previousZ) || previousZ < 0 || previousZ > 1) {
+                                    throw new IllegalStateException("Valid motion has no previous surface depth");
+                                }
+                                validCorrespondence++;
+                            } else {
+                                if (previousZ != -1) throw new IllegalStateException("Invalid history must not claim previous Z");
+                                invalidOwned++;
+                            }
+                        }
                         if (worldValid) world++;
                         if (handValid) hand++;
                         if (!worldValid && !handValid) continue;
@@ -2809,10 +2837,11 @@ public final class MetalFxManager {
                     }
                     var result = new RawMotionValidation(System.getProperty("metallum.validation.sourceCommit", "unknown"),
                             stamp.frameId(), stamp.historyEpoch(), width, height, world, hand, finite, max, scaler,
-                            handSourceWasMain, worldDepthPixels, handDepthPixels, worldOutsideHand, false, false);
+                            handSourceWasMain, worldDepthPixels, handDepthPixels, worldOutsideHand,
+                            validCorrespondence, invalidOwned, false, false);
                     Files.createDirectories(request.output());
                     for (int i = 0; i < readbacks.size(); i++) Files.write(request.output().resolve(readbacks.get(i).name()
-                            + (i == 0 ? ".rg16f" : i < 3 ? ".r8" : ".d32f")), bytes.get(i));
+                            + (i == 0 ? ".rg16f" : i < 3 ? ".r8" : i == 5 ? ".rg32f" : ".d32f")), bytes.get(i));
                     Files.writeString(request.output().resolve("result.json"), new com.google.gson.GsonBuilder()
                             .setPrettyPrinting().create().toJson(result) + "\n");
                     request.result().complete(result);
@@ -4547,6 +4576,8 @@ public final class MetalFxManager {
                 && handMotionDepthTexture.getWidth(0) == renderWidth && handMotionDepthTexture.getHeight(0) == renderHeight
                 && handOverlayDepthTexture != null && handOverlayDepthTexture.getWidth(0) == renderWidth
                 && handOverlayDepthTexture.getHeight(0) == renderHeight
+                && motionCorrespondenceTexture != null && motionCorrespondenceView != null
+                && motionCorrespondenceTexture.getWidth(0) == renderWidth && motionCorrespondenceTexture.getHeight(0) == renderHeight
                 && disocclusionTexture != null && disocclusionTexture.getWidth(0) == renderWidth
                 && disocclusionTexture.getHeight(0) == renderHeight
                 && reactiveTexture != null && reactiveTexture.getWidth(0) == renderWidth
@@ -4589,6 +4620,9 @@ public final class MetalFxManager {
         objectMotionView = RenderSystem.getDevice().createTextureView(objectMotionTexture);
         objectValidityView = RenderSystem.getDevice().createTextureView(objectValidityTexture);
         handExactValidityView = RenderSystem.getDevice().createTextureView(handExactValidityTexture);
+        motionCorrespondenceTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
+                "MetalFX Surface Previous/Current Depth RG32F", objectUsage, GpuFormat.RG32_FLOAT, renderWidth, renderHeight, 1, 1);
+        motionCorrespondenceView = RenderSystem.getDevice().createTextureView(motionCorrespondenceTexture);
         disocclusionTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Disocclusion R8", usage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
@@ -4774,10 +4808,14 @@ public final class MetalFxManager {
     private void closeAuxiliaryTextures() {
         if (objectMotionDepthView != null) objectMotionDepthView.close();
         if (handMotionDepthView != null) handMotionDepthView.close();
+        if (motionCorrespondenceView != null) motionCorrespondenceView.close();
+        motionCorrespondenceView = null;
         objectMotionDepthView = handMotionDepthView = null;
         if (objectMotionDepthTexture != null) objectMotionDepthTexture.close();
         if (handMotionDepthTexture != null) handMotionDepthTexture.close();
         if (handOverlayDepthTexture != null) handOverlayDepthTexture.close();
+        if (motionCorrespondenceTexture != null) motionCorrespondenceTexture.close();
+        motionCorrespondenceTexture = null;
         objectMotionDepthTexture = handMotionDepthTexture = null;
         handOverlayDepthTexture = frameHandDepthTexture = null;
         if (objectMotionView != null) objectMotionView.close();
@@ -4822,6 +4860,7 @@ public final class MetalFxManager {
                 + (objectMotionDepthTexture == null ? 0 : 1)
                 + (handMotionDepthTexture == null ? 0 : 1)
                 + (handOverlayDepthTexture == null ? 0 : 1)
+                + (motionCorrespondenceTexture == null ? 0 : 1)
                 + (disocclusionTexture == null ? 0 : 1)
                 + (reactiveTexture == null ? 0 : 1)
                 + (cutoutReactiveTexture == null ? 0 : 1)

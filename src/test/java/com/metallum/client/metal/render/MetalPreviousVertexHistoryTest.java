@@ -63,6 +63,20 @@ final class MetalPreviousVertexHistoryTest {
     }
 
     @Test
+    void surfaceDepthVariantHasAnExplicitValidityAttributeAndFullPrecisionDepthPair() {
+        var source = RenderPipeline.builder().withLocation("test/surface_depth_abi")
+                .withVertexShader("core/particle").withFragmentShader("core/particle")
+                .withVertexBinding(0, com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS).build();
+        var variant = MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertTrue(variant.getVertexFormatBinding(1).getVertexSize() == 16);
+        assertTrue(variant.getVertexFormatBinding(1).contains("PreviousValidity"));
+        assertTrue(variant.getColorTargetStates().get(2).format() == GpuFormat.RG32_FLOAT);
+        assertTrue(variant.getShaderDefines().flags().contains("METALLUM_PREVIOUS_VALIDITY"));
+        assertTrue(variant.getShaderDefines().flags().contains("METALLUM_MOTION_DEPTH"));
+    }
+
+    @Test
     void historyAdvancesOnlyOnSuccessfulCommit() {
         RenderPipeline pipeline = pipeline("previous_vertex_transaction");
         MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(
