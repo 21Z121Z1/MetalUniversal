@@ -24,6 +24,8 @@ public final class MetalMotionDrawCoverage {
     private static final Map<RenderPipeline, MetalMotionProgramIdentity.Identity> PROGRAM_IDENTITIES = new java.util.IdentityHashMap<>();
     private static final Map<String, MetalMotionProgramIdentity.Description> PROGRAM_DESCRIPTIONS = new TreeMap<>();
     private static final Map<String, long[]> PROGRAMS = new TreeMap<>();
+    private static final Map<String,Map<String,MetalShaderInputCapture.Snapshot>> PROGRAM_INPUTS=new TreeMap<>();
+    private static final java.util.Set<String> PROGRAM_INPUT_OVERFLOW=new java.util.HashSet<>();
     private record OwnerKey(FrameSynthesisContract.ProducerDomain domain, long id, long generation) {}
     private static final Map<OwnerKey, String> FRAME_OWNER_CLASSES = new java.util.HashMap<>();
     private static final Map<String, long[]> OWNERS = new TreeMap<>();
@@ -33,9 +35,11 @@ public final class MetalMotionDrawCoverage {
     public record OwnerCounts(long capturedStates, long sourceColorDraws, long matchingGeometryDraws,
                               long matchingTransformDraws, long matchingSurfaceDraws, long encodedMotionDraws,
                               long encodedDisocclusionDraws) {}
+    public record ShaderInputs(Map<String,MetalShaderInputCapture.Snapshot> observedCompiles,boolean overflow) {}
     public record ProgramCounts(MetalMotionProgramIdentity.@Nullable Description source,
                                 long actualDraws, long hookedExecutions, long ownedColorExecutions,
-                                long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws) {}
+                                long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws,
+                                ShaderInputs shaderInputs) {}
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
                          Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture, MetalMotionFrameManifest.Snapshot sourceFrame,MetalUiDrawCoverage.Snapshot uiFrame) {}
@@ -146,7 +150,17 @@ public final class MetalMotionDrawCoverage {
             int counter=motionReplayDepth>0 ? 4 : 0;
             PIPELINES.computeIfAbsent(name,ignored->new long[6])[counter]+=count;
             if(source==null)PROGRAMS.computeIfAbsent(name,ignored->new long[6])[counter]+=count;
-            else countProgram(source,counter,count);
+            else {
+                countProgram(source,counter,count);
+                var inputs=compiled.shaderInputs();
+                if(inputs!=null) {
+                    String key=programIdentity(source).key();
+                    var variants=PROGRAM_INPUTS.computeIfAbsent(key,ignored->new TreeMap<>());
+                    if(variants.containsKey(inputs.contentSha256()) || variants.size()<4)
+                        variants.put(inputs.contentSha256(),inputs);
+                    else PROGRAM_INPUT_OVERFLOW.add(key);
+                }
+            }
         }
     }
 
@@ -176,7 +190,8 @@ public final class MetalMotionDrawCoverage {
         OWNERS.forEach((name, counts) -> owners.put(name, new OwnerCounts(counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6])));
         Map<String, ProgramCounts> programs = new TreeMap<>();
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
-                counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
+                counts[0], counts[1], counts[2], counts[3], counts[4], counts[5],
+                new ShaderInputs(Map.copyOf(PROGRAM_INPUTS.getOrDefault(key,Map.of())),PROGRAM_INPUT_OVERFLOW.contains(key)))));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
                 MetalUiDrawCoverage.forSourceFrame(lastSourceFrame.frameId(),lastSourceFrame.epoch(),

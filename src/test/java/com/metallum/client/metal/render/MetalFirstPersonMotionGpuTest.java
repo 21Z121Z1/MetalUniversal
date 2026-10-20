@@ -152,15 +152,24 @@ final class MetalFirstPersonMotionGpuTest {
         var second = RenderPipeline.builder(snippet).withLocation("source_contract/shared_location")
                 .withShaderDefine("ALPHA_CUTOUT", .8F).withShaderDefine("APPLY_TEXTURE_MATRIX").build();
         try (var builder = new com.mojang.renderpearl.frontend.shaders.PipelineBuilder(device)) {
+            var firstInputs=MetalBackend.captureCompileInputs(device.activeShaderSource());
+            var secondInputs=MetalBackend.captureCompileInputs(MetalShaderSourceAdapters.from((id,type)->
+                    device.activeShaderSource().getShader(id,type)+"\n// independent second compile input\n"));
             var pendingFirst = MetalBackend.preservePipelineSource(
-                    builder.compilePipeline(first, device.activeShaderSource(), Runnable::run).join(), first);
+                    builder.compilePipeline(first,firstInputs,Runnable::run).join(),first,firstInputs);
             var pendingSecond = MetalBackend.preservePipelineSource(
-                    builder.compilePipeline(second, device.activeShaderSource(), Runnable::run).join(), second);
+                    builder.compilePipeline(second,secondInputs,Runnable::run).join(),second,secondInputs);
             // Reverse completion proves source identity belongs to the pending compile,
             // rather than a global current-pipeline slot or a map keyed by location.
             try (var b = pendingSecond.finishCompile(); var a = pendingFirst.finishCompile()) {
                 var backendA = (MetalCompiledRenderPipeline)((com.mojang.renderpearl.frontend.FrontendRenderPipeline)a).backendRenderPipeline();
                 var backendB = (MetalCompiledRenderPipeline)((com.mojang.renderpearl.frontend.FrontendRenderPipeline)b).backendRenderPipeline();
+                var firstRead=backendA.shaderInputs();var secondRead=backendB.shaderInputs();
+                assertNotNull(firstRead);assertNotNull(secondRead);
+                assertEquals(2,firstRead.shaders().size());assertEquals(2,secondRead.shaders().size());
+                assertTrue(firstRead.consistent());assertTrue(secondRead.consistent());
+                assertNotEquals(firstRead.contentSha256(),secondRead.contentSha256());
+                assertFalse(firstRead.sourceAdmissionGranted());assertFalse(secondRead.sourceAdmissionGranted());
                 assertSame(first, backendA.sourcePipeline()); assertSame(second, backendB.sourcePipeline());
                 assertEquals(DefaultVertexFormat.ENTITY, backendA.sourcePipeline().getVertexFormatBinding(0));
                 assertEquals("0.1", backendA.sourcePipeline().getShaderDefines().values().get("ALPHA_CUTOUT"));

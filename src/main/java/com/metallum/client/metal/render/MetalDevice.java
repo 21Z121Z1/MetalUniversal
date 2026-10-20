@@ -683,12 +683,13 @@ final class MetalDevice implements GpuDeviceBackend {
             // The renderer library is owned by captureShaderSource/resource reload. A one-pipeline
             // generated overlay (Iris, validation, etc.) must not replace that global library.
             CompiledRenderPipeline frontend;
+            ShaderSource compilationSource=MetalShaderSourceAdapters.captureCompileInputs(effectiveSource);
             try {
                 if (rasterStorage) {
                     if (this.rasterStorageCompiler == null) this.rasterStorageCompiler = new StorageRasterPipelineCompiler(this);
-                    frontend = this.rasterStorageCompiler.compile(pipeline, effectiveSource);
+                    frontend = this.rasterStorageCompiler.compile(pipeline, compilationSource);
                 } else {
-                    frontend = this.pipelineBuilder.compilePipeline(pipeline, effectiveSource, Runnable::run)
+                    frontend = this.pipelineBuilder.compilePipeline(pipeline, compilationSource, Runnable::run)
                             .join().finishCompile();
                 }
             } catch (java.util.concurrent.CompletionException failure) {
@@ -703,6 +704,7 @@ final class MetalDevice implements GpuDeviceBackend {
                 throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
             }
             compiled.captureSourcePipeline(pipeline);
+            compiled.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
             this.compiledPipelines.put(pipeline, compiled);
             this.frontendPipelines.put(pipeline, frontendPipeline);
             return compiled;

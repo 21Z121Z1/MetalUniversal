@@ -40,9 +40,22 @@ public final class MetalBackend implements GpuBackend {
 
     public static CompiledRenderPipeline.Pending preservePipelineSource(
             final CompiledRenderPipeline.Pending pending, final RenderPipeline source) {
+        return preservePipelineSource(pending,source,null);
+    }
+
+    public static ShaderSource captureCompileInputs(final ShaderSource source) {
+        return MetalShaderSourceAdapters.captureCompileInputs(source);
+    }
+
+    public static CompiledRenderPipeline.Pending preservePipelineSource(
+            final CompiledRenderPipeline.Pending pending,final RenderPipeline source,
+            final @Nullable ShaderSource compilationSource) {
         return () -> {
             CompiledRenderPipeline compiled = pending.finishCompile();
             capturePipelineSource(compiled, source);
+            if(compilationSource!=null && compiled instanceof FrontendRenderPipeline frontend
+                    && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal)
+                metal.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
             return compiled;
         };
     }

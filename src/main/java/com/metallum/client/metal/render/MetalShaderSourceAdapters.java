@@ -16,6 +16,33 @@ final class MetalShaderSourceAdapters {
     private MetalShaderSourceAdapters() {
     }
 
+    /** Each pending compile owns this capture; an async completion never consults the live library. */
+    static ShaderSource captureCompileInputs(ShaderSource source) {
+        return source instanceof CompilationSource ? source : new CompilationSource(source);
+    }
+
+    static MetalShaderInputCapture.@Nullable Snapshot compiledInputs(ShaderSource source) {
+        return source instanceof CompilationSource capture ? capture.inputs.finish() : null;
+    }
+
+    private static final class CompilationSource implements ShaderSource {
+        private final ShaderSource delegate;
+        private final MetalShaderInputCapture inputs=new MetalShaderInputCapture();
+        private CompilationSource(ShaderSource delegate) {this.delegate=delegate;}
+        @Override public @Nullable String getShader(Identifier id,ShaderType type) {
+            String text=delegate.getShader(id,type);inputs.shader(type.name()+":"+id,text);return text;
+        }
+        @Override public @Nullable CachedIncludeSource getInclude(Identifier id) {
+            CachedIncludeSource include=delegate.getInclude(id);
+            if(include==null || include.includeResultPtr()==0)inputs.reject("missing-include-input");
+            else inputs.include(id.toString(),org.lwjgl.util.shaderc.ShadercIncludeResult.create(include.includeResultPtr()).content());
+            return include;
+        }
+        @Override public void close() {
+            // The original provider and its native include allocations remain owned by the library.
+        }
+    }
+
     static ShaderSource overlay(
             final Map<Identifier, String> generated,
             @Nullable final ShaderSource fallback

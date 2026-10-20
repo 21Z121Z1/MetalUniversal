@@ -19,7 +19,8 @@ public abstract class PipelineBuilderMetalSourceMixin {
     private CompletableFuture<CompiledRenderPipeline.Pending> metallum$preserveSourceIdentity(
             final RenderPipeline pipeline, final ShaderSource source, final Executor executor,
             final Operation<CompletableFuture<CompiledRenderPipeline.Pending>> original) {
-        return original.call(pipeline, source, executor)
-                .thenApply(pending -> MetalBackend.preservePipelineSource(pending, pipeline));
+        ShaderSource compilationSource=MetalBackend.captureCompileInputs(source);
+        return original.call(pipeline, compilationSource, executor)
+                .thenApply(pending -> MetalBackend.preservePipelineSource(pending,pipeline,compilationSource));
     }
 }
