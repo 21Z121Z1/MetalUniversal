@@ -439,7 +439,8 @@ public final class MetalFxManager {
             MetalSourceUniforms uniforms,
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
-            MetalPreviousVertexHistory.DrawToken previousVertexToken
+            MetalPreviousVertexHistory.DrawToken previousVertexToken,
+            boolean directSource
     ) {
     }
 
@@ -456,6 +457,8 @@ public final class MetalFxManager {
             @Nullable GpuBufferSlice rasterUniform,
             GpuBufferSlice currentVertexBuffer,
             @Nullable GpuBufferSlice previousPositionBuffer,
+            boolean boundedPreviousCoverage,
+            boolean directSource,
             MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,
             boolean ownedInvalid,
             int replayBaseVertex
@@ -943,6 +946,24 @@ public final class MetalFxManager {
         MetalFxManager manager = active;
         if (manager != null) manager.drawEntityMotionInternal(info, sample, sourcePass);
         else MetalEntityMotionCapture.takePreviousVertexToken(info);
+    }
+
+    /** Direct renderer draws supply an explicit token instead of a staged sidecar lifetime. */
+    static void drawDirectMotion(final StagedVertexBuffer.ExecuteInfo info,final MetalEntityMotionCapture.Sample sample,
+            final MetalPreviousVertexHistory.DrawToken token,final net.minecraft.client.renderer.oit.@Nullable OitStage stage,
+            final RenderPass sourcePass) {
+        if(!MetalEntityMotionCapture.isEnabled())return;
+        MetalMotionDrawCoverage.sourceExecution(stage,sample,false);
+        if(MOTION_CAPTURE_VALIDATION)MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass),stage,sample);
+        if(stage!=null && stage!=net.minecraft.client.renderer.oit.OitStage.ACCUMULATE)return;
+        MetalFxManager manager=active;
+        if(manager!=null)manager.queueObjectMotionReplay(info,sample,sourcePass,token,true);
+    }
+
+    static @Nullable GpuBufferSlice freezeMotionVertices(final byte[] vertices) {
+        MetalFxManager manager=active;
+        if(manager==null || !manager.capturesMotion() || vertices.length==0)return null;
+        return MetalPreviousVertexReplay.freezeSourceVertices(manager.device.commandEncoder(),vertices);
     }
 
     /** Flushes queued object-motion draws before Minecraft releases their staged buffers. */
@@ -1925,6 +1946,12 @@ public final class MetalFxManager {
         // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
         MetalPreviousVertexHistory.DrawToken previousVertexToken =
                 MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
+        queueObjectMotionReplay(executeInfo,sample,sourcePass,previousVertexToken,false);
+    }
+
+    private void queueObjectMotionReplay(final StagedVertexBuffer.ExecuteInfo executeInfo,
+            final MetalEntityMotionCapture.Sample sample,final RenderPass sourcePass,
+            final MetalPreviousVertexHistory.@Nullable DrawToken previousVertexToken,final boolean directSource) {
         var prepared = MetalPreviousVertexReplay.sourceState(sourcePass);
         var sourceInputs = MetalPreviousVertexReplay.sourceDrawInputs(sourcePass);
         boolean firstPerson = sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
@@ -1991,7 +2018,8 @@ public final class MetalFxManager {
                 uniforms,
                 sourceInputs.depth(),
                 sample,
-                previousVertexToken
+                previousVertexToken,
+                directSource
         ));
         MetalMotionDrawCoverage.queued();
     }
@@ -2037,7 +2065,7 @@ public final class MetalFxManager {
                 continue;
             }
             MetalPreviousVertexReplay.Plan exactPlan = !ownedInvalid && exactMotionSupported
-                    ? MetalPreviousVertexReplay.plan(
+                    ? replay.directSource() ? MetalWeatherMotion.plan(replay.previousVertexToken(),true) : MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
             var drawTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())
@@ -2054,7 +2082,7 @@ public final class MetalFxManager {
                         : !surfaceMatches ? "source-material-history-unavailable"
                         : "source-history-unavailable-current-ownership-only";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
-                exactPlan = exactMotionSupported ? MetalPreviousVertexReplay.currentOnlyPlan(
+                exactPlan = exactMotionSupported ? replay.directSource() ? MetalWeatherMotion.plan(replay.previousVertexToken(),false) : MetalPreviousVertexReplay.currentOnlyPlan(
                         prepared.pipeline(), executeInfo, replay.previousVertexToken()) : null;
                 drawTransforms = MetalPreviousVertexReplay.currentOnlyTransforms(replay.previousVertexToken(), firstPerson);
                 if (drawTransforms == null || (exactMotionSupported && exactPlan == null)) {
@@ -2063,6 +2091,13 @@ public final class MetalFxManager {
                 }
             }
             boolean exactPreviousPositions = exactPlan != null;
+            if(replay.directSource() && exactPreviousPositions) {
+                // The global sequential index buffer may have grown since the source draw.
+                var indices=RenderSystem.getSequentialBuffer(executeInfo.topology());
+                indices.requestIndexCount(executeInfo.indexCount());
+                executeInfo=new StagedVertexBuffer.ExecuteInfo(exactPlan.currentVertexBuffer().buffer(),indices.getBuffer(),indices.type(),
+                        0,0,executeInfo.indexCount(),executeInfo.topology());
+            }
             if (!exactPreviousPositions && !rootMotionSupported) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("exact-plan-unavailable");
                 continue;
@@ -2090,13 +2125,16 @@ public final class MetalFxManager {
                     ? exactPlan.replayBaseVertex()
                     : executeInfo.baseVertex();
             GpuBufferSlice previousPositionBuffer = null;
+            boolean boundedPreviousCoverage=false;
             if (exactPreviousPositions) {
                 float[] previousPositions = exactPlan.previousPositions();
-                long previousByteCount = Math.multiplyExact(previousPositions.length/3L, 16L);
+                float[] previousCoverage=exactPlan.previousCoverage();
+                boundedPreviousCoverage=previousCoverage!=null;
+                long previousByteCount = Math.multiplyExact(previousPositions.length/3L,boundedPreviousCoverage ? 24L : 16L);
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                         .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
                     ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                    if (!MetalPreviousVertexReplay.writePreviousPositions(previousPositions, bytes) && !ownedInvalid) {
+                    if (!MetalPreviousVertexReplay.writePreviousPositions(previousPositions,previousCoverage, bytes) && !ownedInvalid) {
                         MetalEntityMotionCapture.failExactSample(replay.sample(),
                             "particle-emission-has-no-unambiguous-previous-vertices");
                     }
@@ -2167,6 +2205,8 @@ public final class MetalFxManager {
                     rasterUniform,
                     currentVertexBuffer,
                     previousPositionBuffer,
+                    boundedPreviousCoverage,
+                    replay.directSource(),
                     exactPreviousPositions && !ownedInvalid ? replay.previousVertexToken() : null,
                     ownedInvalid,
                     replayBaseVertex
@@ -2279,7 +2319,9 @@ public final class MetalFxManager {
                 StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
                 boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
                 pass.setPipeline(exactPreviousPositions
-                        ? MetalEntityMotionPipeline.forPreviousPositionsWithDepth(prepared.pipeline(),prepared.depthAttachmentPresent())
+                        ? replay.boundedPreviousCoverage()
+                        ? MetalEntityMotionPipeline.forPreviousPositionsWithCoverage(prepared.pipeline(),prepared.depthAttachmentPresent())
+                        : MetalEntityMotionPipeline.forPreviousPositionsWithDepth(prepared.pipeline(),prepared.depthAttachmentPresent())
                         : MetalEntityMotionPipeline.forSourceWithDepth(prepared.pipeline(),prepared.depthAttachmentPresent()));
                 RenderSystem.bindDefaultUniforms(pass);
                 // A later HUD or effect pass may have changed RenderSystem's global
@@ -2314,6 +2356,7 @@ public final class MetalFxManager {
                 );
                 if (replay.exactPreviousVertexToken() != null) {
                     MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+                    if(replay.directSource())MetalMotionDrawCoverage.stagedHistory(replay.sample(),replay.exactPreviousVertexToken());
                 }
                 if (replay.ownedInvalid()) {
                     observeReactiveProducer(replay.sample().domain(), 1);
@@ -5175,6 +5218,7 @@ public final class MetalFxManager {
         // evict an allocation still referenced by submitted GPU work.
         device.waitForSubmittedGpuWork();
         motionStateStore.reset();
+        MetalWeatherMotion.reset();
         frameSynthesisReceipts.reset();
         sourceFrameStamp = null;
         sourceFrameStampInvalidated = false;

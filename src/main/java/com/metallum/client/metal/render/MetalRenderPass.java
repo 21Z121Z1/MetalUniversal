@@ -90,6 +90,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private MTLRenderCommandEncoder nativeEncoder;
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
+    private boolean motionReplayFlushOnClose;
 
     /** Actual source bindings, captured before another draw can replace this pass's state. */
     MetalPreviousVertexReplay.@Nullable SourceDrawInputs motionDrawInputs() {
@@ -101,6 +102,14 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                         this.uniforms.get("Globals"),source!=null && MetalEntityMotionPipeline.requiresFogSnapshot(source)
                         ? this.uniforms.get("Fog") : null);
     }
+
+    MetalPreviousVertexReplay.@Nullable SourceGeometry motionSourceGeometry() {
+        return indexBuffer==null ? null
+                : new MetalPreviousVertexReplay.SourceGeometry(vertexBuffers[0],indexBuffer,
+                        indexType==MTLIndexType.UInt16 ? IndexType.SHORT : IndexType.INT);
+    }
+
+    void flushMotionReplayAfterClose() {motionReplayFlushOnClose=true;}
 
     MetalPreviousVertexReplay.@Nullable SourceState motionSourceState() {
         RenderPipeline source = compiledPipeline == null ? null : compiledPipeline.sourcePipeline();
@@ -402,6 +411,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     @Override
     public void close() {
         commandEncoder.submitRenderPass();
+        if(motionReplayFlushOnClose) {
+            motionReplayFlushOnClose=false;
+            MetalFxManager.flushEntityMotionReplays();
+        }
     }
 
     @Override

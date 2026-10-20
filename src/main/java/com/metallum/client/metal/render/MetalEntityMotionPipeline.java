@@ -93,6 +93,9 @@ final class MetalEntityMotionPipeline {
     private static final VertexFormat PREVIOUS_VALIDITY_FORMAT = VertexFormat.builder(0)
             .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
             .addAttribute("PreviousValidity", GpuFormat.R32_FLOAT).build();
+    private static final VertexFormat PREVIOUS_COVERAGE_FORMAT=VertexFormat.builder(0)
+            .addAttribute("PreviousPosition",GpuFormat.RGB32_FLOAT).addAttribute("PreviousValidity",GpuFormat.R32_FLOAT)
+            .addAttribute("PreviousCoverage",GpuFormat.RG32_FLOAT).build();
     private static final BindGroupLayout RESOURCES = BindGroupLayout.builder()
             .withUniform("MetallumMotion", UniformType.UNIFORM_BUFFER)
             .build();
@@ -106,6 +109,7 @@ final class MetalEntityMotionPipeline {
     private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline[]> DEPTH_CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_COVERAGE_DEPTH_CACHE = new IdentityHashMap<>();
     private static final BindGroupLayout SOURCE_DEPTH = BindGroupLayout.builder()
             .withUniform("MetallumSourceDepth",UniformType.COMBINED_IMAGE_SAMPLER).build();
     private static final BindGroupLayout PREVIOUS_RASTER = BindGroupLayout.builder()
@@ -261,6 +265,7 @@ final class MetalEntityMotionPipeline {
         PREVIOUS_POSITION_CACHE.clear();
         DEPTH_CACHE.clear();
         PREVIOUS_POSITION_DEPTH_CACHE.clear();
+        PREVIOUS_COVERAGE_DEPTH_CACHE.clear();
     }
 
     static RenderPipeline forSourceWithDepth(final RenderPipeline source) {
@@ -292,6 +297,15 @@ final class MetalEntityMotionPipeline {
     static boolean testsSourceDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
         return depthAttachmentPresent && source.getDepthStencilState()!=null
                 && source.getDepthStencilState().depthTest()!=CompareOp.ALWAYS_PASS;
+    }
+
+    static RenderPipeline forPreviousPositionsWithCoverage(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(previousFamilyOf(source)!=PreviousFamily.PARTICLE || !replayableDepth(source))
+            throw new IllegalArgumentException("Source has no bounded weather correspondence ABI: "+source.getLocation());
+        RenderPipeline[] variants=PREVIOUS_COVERAGE_DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,null,PreviousFamily.PARTICLE,true,depthAttachmentPresent,true);
+        return variants[slot];
     }
 
     private static boolean overridesPrivateDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
@@ -350,6 +364,12 @@ final class MetalEntityMotionPipeline {
     private static RenderPipeline buildVariant(final RenderPipeline source,final @Nullable Family family,
             final @Nullable PreviousFamily previousFamily,final boolean depthCorrespondence,
             final boolean depthAttachmentPresent) {
+        return buildVariant(source,family,previousFamily,depthCorrespondence,depthAttachmentPresent,false);
+    }
+
+    private static RenderPipeline buildVariant(final RenderPipeline source,final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,final boolean depthCorrespondence,
+            final boolean depthAttachmentPresent,final boolean previousCoverage) {
         boolean previousPositions = previousFamily != null;
         if (!previousPositions && family == null) {
             throw new IllegalArgumentException("Missing root motion family for " + source.getLocation());
@@ -361,6 +381,7 @@ final class MetalEntityMotionPipeline {
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
                         (previousPositions ? previousFamily.locationPrefix : family.locationPrefix())
+                                + (previousCoverage ? "bounded/" : "")
                                 + (depthCorrespondence ? depthAttachmentPresent ? "depth/" : "depth/no_source_attachment/" : "") + sourceName
                 ))
                 .withVertexShader(previousPositions ? previousFamily.vertexShader : family.shader())
@@ -379,7 +400,9 @@ final class MetalEntityMotionPipeline {
             }
         }
         if (previousPositions) {
-            builder.withVertexBinding(1, depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
+            builder.withVertexBinding(1,previousCoverage ? PREVIOUS_COVERAGE_FORMAT
+                    : depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
+            if(previousCoverage)builder.withShaderDefine("METALLUM_PREVIOUS_COVERAGE").withShaderDefine("METALLUM_REACTIVE_MATERIAL");
             if (depthCorrespondence) builder.withShaderDefine("METALLUM_PREVIOUS_VALIDITY");
             if (DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(source.getVertexFormatBinding(0))) {
                 builder.withShaderDefine("METALLUM_ENTITY_GLINT_SPECIAL");

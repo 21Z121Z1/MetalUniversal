@@ -1,6 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.pipeline.IndexType;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
@@ -24,6 +26,7 @@ import java.nio.ByteOrder;
  */
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexReplay {
+    record SourceGeometry(@Nullable GpuBufferSlice vertices,GpuBuffer indices,IndexType indexType) {}
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
                             @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals,@Nullable GpuBufferSlice fog) {
         SourceDrawInputs(GpuBufferSlice projection,GpuBufferSlice dynamicTransforms,@Nullable GpuTextureView depth,
@@ -88,31 +91,54 @@ final class MetalPreviousVertexReplay {
         public Matrix4f previousFromPosition() { return new Matrix4f(previousFromPosition); }
     }
 
-    record Plan(GpuBufferSlice currentVertexBuffer, int replayBaseVertex, float[] previousPositions) {
+    record Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage) {
+        Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions) {
+            this(currentVertexBuffer,replayBaseVertex,previousPositions,null);
+        }
         Plan {
             previousPositions = previousPositions.clone();
+            if(previousCoverage!=null && previousCoverage.length!=previousPositions.length/3*2)
+                throw new IllegalArgumentException("Previous coverage does not match the vertex stream");
+            previousCoverage=previousCoverage==null ? null : previousCoverage.clone();
         }
 
         @Override
         public float[] previousPositions() {
             return previousPositions.clone();
         }
+        @Override public float @Nullable [] previousCoverage() {return previousCoverage==null ? null : previousCoverage.clone();}
     }
 
     private MetalPreviousVertexReplay() {
     }
 
+    static GpuBufferSlice freezeSourceVertices(final MetalCommandEncoder encoder,final byte[] vertices) {
+        if(vertices.length==0)throw new IllegalArgumentException("Empty source vertex snapshot");
+        try(GpuBufferSlice.MappedView mapped=encoder.transientMemory().allocateGpuMapped(vertices.length,16L,GpuBuffer.USAGE_VERTEX)) {
+            mapped.data().put(vertices);MetalFxMotionTelemetry.recordGpuUpload(vertices.length);return mapped.slice();
+        }
+    }
+
     /** Never send NaN sentinels through the rasterizer: varyings can canonicalize nonfinite values. */
     static boolean writePreviousPositions(final float[] positions, final ByteBuffer destination) {
-        if (positions.length == 0 || positions.length%3 != 0 || destination.remaining() < (long)positions.length/3*16) {
+        return writePreviousPositions(positions,null,destination);
+    }
+
+    static boolean writePreviousPositions(final float[] positions,final float @Nullable [] coverage,final ByteBuffer destination) {
+        int stride=coverage==null ? 16 : 24;
+        if (positions.length == 0 || positions.length%3 != 0 || destination.remaining() < (long)positions.length/3*stride
+                || (coverage!=null && coverage.length!=positions.length/3*2)) {
             throw new IllegalArgumentException("Malformed previous position/validity upload");
         }
         destination.order(ByteOrder.nativeOrder());
         boolean complete = true;
         for (int i = 0; i < positions.length; i += 3) {
             boolean valid = Float.isFinite(positions[i]) && Float.isFinite(positions[i+1]) && Float.isFinite(positions[i+2]);
+            int uv=i/3*2;
+            valid &= coverage==null || (Float.isFinite(coverage[uv])&&Float.isFinite(coverage[uv+1]));
             destination.putFloat(valid ? positions[i] : 0).putFloat(valid ? positions[i+1] : 0)
                     .putFloat(valid ? positions[i+2] : 0).putFloat(valid ? 1 : 0);
+            if(coverage!=null)destination.putFloat(valid ? coverage[uv] : 0).putFloat(valid ? coverage[uv+1] : 0);
             complete &= valid;
         }
         return complete;
@@ -125,6 +151,19 @@ final class MetalPreviousVertexReplay {
             return metal.motionDrawInputs();
         }
         return null;
+    }
+
+    static @Nullable SourceGeometry sourceGeometry(final RenderPass pass) {
+        if(pass instanceof MetalRenderPass metal)return metal.motionSourceGeometry();
+        if(pass instanceof RenderPearlBackendAccess access
+                && access.metallum$getBackend() instanceof MetalRenderPass metal)return metal.motionSourceGeometry();
+        return null;
+    }
+
+    static void flushAfterSourcePass(final RenderPass pass) {
+        if(pass instanceof MetalRenderPass metal)metal.flushMotionReplayAfterClose();
+        else if(pass instanceof RenderPearlBackendAccess access
+                && access.metallum$getBackend() instanceof MetalRenderPass metal)metal.flushMotionReplayAfterClose();
     }
 
     static @Nullable SourceState sourceState(final RenderPass pass) {

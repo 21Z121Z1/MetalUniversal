@@ -201,6 +201,127 @@ final class MetalMotionProducerGpuTest {
         return (MetalGpuTexture) device.createTexture(name, usage | GpuTexture.USAGE_RENDER_ATTACHMENT, format, W, H, 1, 1);
     }
 
+    static Stream<String> weatherScrollFixtures() {return Stream.of("rain_fall","snow_drift","rain_uv_wrap","column_birth","empty_camera_column");}
+
+    @ParameterizedTest(name="actual weather scrolling: {0}")
+    @MethodSource("weatherScrollFixtures")
+    void weatherPatternMotionMatchesOriginalParticleCoverageAndOldQuadBounds(String name) throws Exception {
+        boolean snow=name.equals("snow_drift"),wrap=name.equals("rain_uv_wrap"),birth=name.equals("column_birth"),empty=name.equals("empty_camera_column");
+        var format=DefaultVertexFormat.PARTICLE;
+        var source=RenderPipeline.builder().withLocation("motion_contract/weather/"+name)
+                .withVertexShader("core/particle").withFragmentShader("core/particle").withVertexBinding(0,format)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,false))
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA8_UNORM,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        float[] positions={-.5F,1,.5F,.5F,1,.5F,.5F,-1,.5F,-.5F,-1,.5F};
+        float[] currentPositions=positions.clone(),oldPositions=positions.clone();
+        if(empty)for(int vertex=0;vertex<4;vertex++) {oldPositions[vertex*3]=Float.NaN;oldPositions[vertex*3+2]=Float.NaN;currentPositions[vertex*3]=0;}
+        float[] u={0,snow ? .25F : 0},v={wrap ? -31.98F : 0,wrap ? -.105F : -.125F};
+        MetalWeatherCorrespondence.Column[] columns=new MetalWeatherCorrespondence.Column[2];
+        ByteBuffer[] mesh=new ByteBuffer[2];
+        for(int frame=0;frame<2;frame++) {
+            float[] xyz=frame==0 ? oldPositions : currentPositions;
+            // The real weather preparer uses V=bottomY/4 at the top, topY/4 at the bottom.
+            float[] uv={u[frame],v[frame]-.25F,u[frame]+1,v[frame]-.25F,
+                    u[frame]+1,v[frame]+.25F,u[frame],v[frame]+.25F};
+            columns[frame]=new MetalWeatherCorrespondence.Column(-1,frame,0,u[frame],v[frame],snow ? .25 : 0,-.125,xyz,uv);
+            mesh[frame]=ByteBuffer.allocateDirect(4*format.getVertexSize()).order(ByteOrder.nativeOrder());
+            for(int vertex=0;vertex<4;vertex++) {
+                int base=vertex*format.getVertexSize();
+                for(int axis=0;axis<3;axis++)mesh[frame].putFloat(base+axis*4,xyz[vertex*3+axis]);
+                mesh[frame].putFloat(base+format.getElement("UV0").offset(),uv[vertex*2])
+                        .putFloat(base+format.getElement("UV0").offset()+4,uv[vertex*2+1]);
+                mesh[frame].putInt(base+format.getElement("Color").offset(),-1);
+            }
+        }
+        var previous=MetalWeatherCorrespondence.reproject(birth ? null : columns[0],columns[1],1,1);
+        ByteBuffer old=ByteBuffer.allocateDirect(4*24).order(ByteOrder.nativeOrder());
+        MetalPreviousVertexReplay.writePreviousPositions(previous.positions(),previous.previousCoverage(),old);old.flip();
+        ByteBuffer indices=ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());for(short i:new short[]{0,1,2,2,3,0})indices.putShort(i);indices.flip();
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());new Matrix4f().get(0,dynamic);new Matrix4f().get(64,dynamic);
+        for(int c=0;c<4;c++)dynamic.putFloat(128+c*4,1);
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().scaling(.7F,.7F,1).get(0,projection);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());new Matrix4f().scaling(1,-1,1).get(0,motion);new Matrix4f().scaling(.7F,-.7F,1).get(64,motion);
+        ByteBuffer fog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        byte[] frozenBytes=new byte[mesh[1].remaining()];mesh[1].get(0,frozenBytes);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;byte[][] sourceColors=new byte[2][];
+        try(var v0=device.createBuffer(()->"original old weather",GpuBuffer.USAGE_VERTEX,mesh[0]);
+            var v1=device.createBuffer(()->"mutable original current weather",GpuBuffer.USAGE_VERTEX|GpuBuffer.USAGE_COPY_DST,mesh[1]);
+            var ib=device.createBuffer(()->"canonical weather indices",GpuBuffer.USAGE_INDEX,indices);
+            var pb=device.createBuffer(()->"actual pattern previous positions and bounds",GpuBuffer.USAGE_VERTEX,old);
+            var du=device.createBuffer(()->"weather actual dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var pr=device.createBuffer(()->"weather actual projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var fo=device.createBuffer(()->"weather fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var mo=device.createBuffer(()->"weather history mapping",GpuBuffer.USAGE_UNIFORM,motion);
+            var sampled=texture("weather repeated pattern",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING|copy);
+            var lightmap=texture("weather actual lightmap",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var color=texture("original weather color",GpuFormat.RGBA8_UNORM,copy);
+            var scene=texture("weather original scene depth",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var ownership=texture("weather motion private depth",GpuFormat.D32_FLOAT,copy);
+            var flow=texture("weather pattern flow",GpuFormat.RG16_FLOAT,copy);var valid=texture("weather exact and disoccluded pixels",GpuFormat.R8_UNORM,copy);
+            var pair=texture("weather pattern surface Z",GpuFormat.RG32_FLOAT,copy);
+            var sv=device.createTextureView(sampled);var lv=device.createTextureView(lightmap);var cv=device.createTextureView(color);
+            var sd=device.createTextureView(scene);var od=device.createTextureView(ownership);var fv=device.createTextureView(flow);
+            var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.REPEAT,AddressMode.REPEAT,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            ByteBuffer pattern=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
+            for(int y=0;y<H;y++)for(int x=0;x<W;x++)pattern.putInt(((x/8+y/6)&1)==0 ? -1 : 0x00FFFFFF);pattern.flip();
+            encoder.writeToTexture(sampled,pattern,0,0,0,0,W,H);encoder.clearColorTexture(lightmap,new Vector4f(1));
+            for(int frame=0;frame<2;frame++) {
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent original Minecraft weather frame")
+                        .withColorAttachment(cv,Optional.of(new Vector4f(0))).withDepthAttachment(sd,java.util.OptionalDouble.of(0)).build())) {
+                    pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("Fog",fo.slice());
+                    pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler2",lv,sampler);pass.setVertexBuffer(0,(frame==0 ? v0 : v1).slice());
+                    pass.setIndexBuffer(ib,IndexType.SHORT);if(!(birth&&frame==0))pass.drawIndexed(6,1,0,0,0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();sourceColors[frame]=readback(color);
+            }
+            var frozen=MetalPreviousVertexReplay.freezeSourceVertices(encoder,frozenBytes);
+            ByteBuffer overwritten=ByteBuffer.allocateDirect(frozenBytes.length).order(ByteOrder.nativeOrder());
+            for(int vertex=0;vertex<4;vertex++)overwritten.putFloat(vertex*format.getVertexSize(),1000);
+            encoder.writeToBuffer(v1.slice(),overwritten);v1.close();
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Production bounded weather replay after source rewrite and close")
+                    .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                    .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withDepthAttachment(od,java.util.OptionalDouble.of(0)).build())) {
+                pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithCoverage(source,true));
+                pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("MetallumMotion",mo.slice());
+                pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler2",lv,sampler);pass.bindTexture("MetallumSourceDepth",sd,sampler);
+                pass.setVertexBuffer(0,frozen);pass.setVertexBuffer(1,pb.slice());pass.setIndexBuffer(ib,IndexType.SHORT);pass.drawIndexed(6,1,0,0,0);
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] mask=readback(valid),xy=readback(flow),z=readback(pair);
+            ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder()),depth=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder());
+            int covered=0,exact=0,disoccluded=0,wrongCoverage=0,wrongValidity=0,wrongMotion=0,wrongDepth=0;
+            double dx=snow ? .175 : 0,dy=.35;
+            for(int p=0;p<W*H;p++) {
+                boolean visible=Byte.toUnsignedInt(sourceColors[1][p*4+3])>127;
+                if(visible!=(Byte.toUnsignedInt(mask[p])>31))wrongCoverage++;
+                if(!visible)continue;covered++;
+                double x=2*(p%W+.5)/W-1,y=2*(p/W+.5)/H-1;
+                double oldU=x/.7+.5+(snow ? .25 : 0),oldV=(1-y/.7)/2-.25;
+                boolean history=!birth && oldU>=0 && oldU<=1 && oldV>=0 && oldV<=1;
+                if(history)exact++;else disoccluded++;
+                if(Byte.toUnsignedInt(mask[p])!=(history ? 191 : 64))wrongValidity++;
+                float vx=Float.float16ToFloat(vectors.getShort(p*4)),vy=Float.float16ToFloat(vectors.getShort(p*4+2));
+                if(!Float.isFinite(vx)||!Float.isFinite(vy)||Math.abs(vx-(history ? dx : 0))*W/2>.02
+                        ||Math.abs(vy-(history ? dy : 0))*H/2>.02)wrongMotion++;
+                if(Math.abs(depth.getFloat(p*8)-(history ? .5 : -1))>3e-6||Math.abs(depth.getFloat(p*8+4)-.5)>3e-6)wrongDepth++;
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/weather-scroll/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("old-original.rgba8"),sourceColors[0]);Files.write(dir.resolve("current-original.rgba8"),sourceColors[1]);
+            Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("ownership.r8"),mask);Files.write(dir.resolve("correspondence.rg32f"),z);
+            Files.writeString(dir.resolve("result.json"),"{\"coveredPixels\":"+covered+",\"exactPixels\":"+exact+",\"disoccludedPixels\":"+disoccluded
+                    +",\"wrongCoveragePixels\":"+wrongCoverage+",\"wrongValidityPixels\":"+wrongValidity+",\"wrongMotionPixels\":"+wrongMotion
+                    +",\"wrongDepthPixels\":"+wrongDepth+",\"sourceVerticesRewrittenAndClosed\":true}");
+            assertEquals(0,wrongCoverage);assertEquals(0,wrongValidity);assertEquals(0,wrongMotion);assertEquals(0,wrongDepth);
+            if(empty) {assertEquals(0,covered);for(int p=0;p<W*H;p++)assertEquals(0,Byte.toUnsignedInt(sourceColors[0][p*4+3]),"NaN camera column and finite degenerate replacement both cover no pixels");}
+            else {assertTrue(covered>100);assertTrue(disoccluded>0);if(!birth)assertTrue(exact>100);}
+        }
+    }
+
     static Stream<String> surfaceResolveFixtures() {
         return Stream.of("object_approaching", "previous_occluder", "previous_surface_absent",
                 "current_occluder", "owned_invalid", "previous_z_nan", "previous_z_outside",

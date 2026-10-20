@@ -814,6 +814,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         var previousCamera = context.computeOnClient(client -> client.options.getCameraType());
         var previousGameMode = context.computeOnClient(client -> client.gameMode.getPlayerMode());
         boolean previousHudHidden = context.computeOnClient(client -> client.gui.hud.isHidden());
+        boolean previousRain=context.computeOnClient(client->client.level.isRaining());
+        boolean previousThunder=context.computeOnClient(client->client.level.isThundering());
+        float previousRainLevel=context.computeOnClient(client->client.level.getRainLevel(1));
+        float previousThunderLevel=context.computeOnClient(client->client.level.getThunderLevel(1));
         boolean previousFlying = context.computeOnClient(client -> client.player.getAbilities().flying);
         var previousMainHand = context.computeOnClient(client -> client.player.getMainHandItem().copy());
         var previousOffHand = context.computeOnClient(client -> client.player.getOffhandItem().copy());
@@ -855,6 +859,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             singleplayer.getServer().runCommand("setblock 160 128 168 minecraft:conduit");
             singleplayer.getServer().runCommand("setblock 162 128 165 minecraft:decorated_pot");
             singleplayer.getServer().runCommand("setblock 164 128 165 minecraft:skeleton_skull");
+            singleplayer.getServer().runCommand("fillbiome 148 112 156 159 144 176 minecraft:snowy_plains");
+            singleplayer.getServer().runCommand("weather rain 600");
+            context.waitTicks(40);
             for (boolean oit : new boolean[]{false, true}) {
                 context.runOnClient(client -> client.options.improvedTransparency().set(oit));
                 singleplayer.getServer().runOnServer(server -> {
@@ -973,6 +980,18 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 && counts.matchingTransformDraws() > 0 && counts.matchingSurfaceDraws() > 0 && counts.encodedMotionDraws() > 0,
                         "Entity never proved its real source draw and complete previous history: " + state + " " + counts);
             }
+            for(String kind:new String[]{"RainOwner","SnowOwner"}) {
+                var counts=census.owners().get("com.metallum.client.metal.render.MetalWeatherMotion$"+kind);
+                require(counts!=null && counts.sourceColorDraws()>0 && counts.matchingGeometryDraws()>0
+                                && counts.matchingTransformDraws()>0 && counts.matchingSurfaceDraws()>0 && counts.encodedMotionDraws()>0,
+                        "Actual weather draw never proved its own scrolling history: "+kind+" "+counts);
+            }
+            for(String suffix:new String[]{"weather","oit_accumulate_weather"}) {
+                var counts=census.pipelines().get("minecraft:pipeline/"+suffix);
+                require(counts!=null && counts.actualDraws()>0 && counts.actualDraws()==counts.hookedExecutions()
+                                && counts.ownedColorExecutions()>0 && counts.encodedMotionDraws()>0,
+                        "Weather bypassed its ordinary/OIT execution hook: "+suffix+" "+counts);
+            }
             String lecternClass = "net.minecraft.client.renderer.blockentity.state.LecternRenderState";
             require(beforeEmpty.owners().get(lecternClass).capturedStates() == census.owners().get(lecternClass).capturedStates(),
                     "Empty lectern must not claim source geometry or become an exact candidate");
@@ -1012,6 +1031,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             report.addProperty("glintSourceMotionExercised", true);
             report.addProperty("specialGlintSourceMotionExercised", true);
             report.addProperty("seeThroughSourceMotionExercised", true);
+            report.addProperty("rainSnowScrollingMotionExercised",true);
             report.addProperty("postEffectHudDepthIsolated", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
@@ -1024,6 +1044,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 client.player.setActivePostEffects(previousPostEffects);
             });
             singleplayer.getServer().runCommand("gamemode "+previousGameMode.getName()+" @a");
+            singleplayer.getServer().runOnServer(server->{
+                server.setWeatherParameters(previousRain ? 0 : 6000,previousRain ? 6000 : 0,previousRain,previousThunder);
+                server.overworld().setRainLevel(previousRainLevel);server.overworld().setThunderLevel(previousThunderLevel);
+            });
+            context.runOnClient(client->{client.level.setRainLevel(previousRainLevel);client.level.setThunderLevel(previousThunderLevel);});
             singleplayer.getServer().runOnServer(server -> server.getPlayerList().getPlayers().forEach(player -> {
                 player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,previousMainHand.copy());
                 player.setItemInHand(net.minecraft.world.InteractionHand.OFF_HAND,previousOffHand.copy());
