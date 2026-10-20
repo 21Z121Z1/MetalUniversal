@@ -504,17 +504,18 @@ public final class RenderContractRuntime {
         if (service == null && current == null) {
             return;
         }
-        if (service != null) {
-            service.close();
-        }
-        if (current != null) {
-            current.close();
-        }
-        lastSnapshot = snapshotOf(current, service, false);
+        // Detach before final IO: a failed manifest write must not leave a closed
+        // recorder installed for later resource retirement or obscure its first error.
         captureService = null;
         recorder = null;
-        storageBudget = null;
         requestedFinalDrawableFrame = -1L;
+        try (current; service) {
+            // Reverse resource order closes captures before the trace; both are
+            // attempted and Java preserves the first failure with suppressed errors.
+        } finally {
+            try {lastSnapshot = snapshotOf(current, service, false);}
+            finally {storageBudget = null;}
+        }
     }
 
     private static Snapshot snapshotOf(

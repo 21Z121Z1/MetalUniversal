@@ -377,6 +377,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             // stationary lane. Halt on the server owner before Fabric closes
             // the client, without bypassing its disconnect/wait or later tests.
             requestServerOwnedHalt(singleplayer);
+        } catch(RuntimeException | Error failure) {
+            // Fabric disconnects the world before reporting the test exception.
+            // Keep the primary failure even if teardown raises a second error.
+            try(var writer=new java.io.PrintWriter(Files.newBufferedWriter(evidenceDir.resolve("primary-client-failure.txt")))) {
+                failure.printStackTrace(writer);
+            } catch(IOException reportFailure) {failure.addSuppressed(reportFailure);}
+            failure.printStackTrace(System.err);
+            throw failure;
         } finally {
             System.setProperty("metallum.renderContract.captureFinalDrawable", "false");
             context.runOnClient(client -> closeRenderContractQuietly());

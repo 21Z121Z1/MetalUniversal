@@ -126,6 +126,8 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 VS 中先乘顶点 alpha 再插值并参与 cutout；ENTITY 独立插值 lightmap alpha，在纹理 cutout、DISSOLVE 替换及 GLINT alpha floor 之后相乘。EMISSIVE 实体不采样，ITEM 包括 GLINT_SPECIAL 始终采样，UV2 仍是原版物理属性 4；阴影不错误继承实体光照语义。Sampler2 资源／采样身份也纳入这些实际依赖光照可见性的表面历史。新增十项原版颜色 GPU 对照涵盖顺序负例、零 lightmap、cutout 前后区别及 emissive 特例，手部 ITEM 与 BLOCK 回放对照补齐真实绑定。本地完整 1273 项、零失败／错误、43 项条件跳过；新增材质行为仍需对应 Actions 验收。
 
+`ec63dec` 的 macOS 15／26 GPU job 均成功；macOS 26 完成日志逐项确认 126 producer + 13 first-person，139/139，包含五项雨雪及十项 lightmap 场景。原始 GPU 附件下载遇到存储超时，尚未复核其中逐像素统计。真实 Vanilla 客户端仍在关闭 recorder 后报错，渲染线程调度本身没有解决。关闭入口补充异常安全：最终 IO 前先退役全局入口，以 Java 资源关闭语义尝试关闭采集服务和 trace，并保留首错／suppressed 错误；不会让已关闭 recorder 留给之后的资源失效事件。两个独立文件系统故障用例先建立可通过的捕获，再分别破坏最终结果／manifest 路径，要求保留失败、关闭两个所有者并拒绝完成门禁。GameTest 同时保存和打印原始失败，以便下一轮日志定位最初异常；不减少断言或提高容差。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
