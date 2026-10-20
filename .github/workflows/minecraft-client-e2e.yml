@@ -212,9 +212,10 @@ jobs:
 
           if os.environ['METALLUM_E2E_SCENE'] == 'stationary':
               sys.path.insert(0, 'scripts/agent')
-              from check_metal4_main_e2e_pair import stationary_scene
+              from check_metal4_main_e2e_pair import stationary_scene, stationary_terrain_control
               scene = stationary_scene(runtime)
               print('verified stationary time and camera receipts:', json.dumps(scene, sort_keys=True))
+              print('verified isolated terrain capture:', json.dumps(stationary_terrain_control(root), sort_keys=True))
 
           optimization = json.loads((root / 'optimization-evidence.json').read_text(encoding='utf-8'))
           if optimization.get('profile') != os.environ['METALLUM_E2E_TRANSPORT'] or optimization.get('verified') is not True:

@@ -159,6 +159,29 @@ def stationary_scene(runtime: dict[str, Any]) -> dict[str, Any]:
     return scene
 
 
+def stationary_terrain_control(evidence_root: Path) -> dict[str, Any]:
+    """The optional hosted RGB control must not enter the eight-frame P1 session."""
+    summary = {}
+    for directory, expected in (("metal-framebuffer", FRAMEBUFFER_SAMPLE_COUNT), ("terrain-color-control", 1)):
+        result = load(evidence_root / directory / "render-contract" / "results.json")
+        captures = result.get("captures")
+        frame_ids = list(range(1, FRAMEBUFFER_SAMPLE_COUNT + 1)) if expected != 1 else [FRAMEBUFFER_SAMPLE_COUNT + 1]
+        if (
+            result.get("status") != "passed"
+            or result.get("requestedCaptures") != expected
+            or result.get("completedCaptures") != expected
+            or any(result.get(field) != 0 for field in ("failedCaptures", "pendingCaptures", "droppedCaptures"))
+            or not isinstance(captures, list) or len(captures) != expected
+            or any(not isinstance(capture, dict) or capture.get("status") != "passed"
+                   or capture.get("semanticPassId") != "metallum/present"
+                   or capture.get("capturePoint") != "FINAL_DRAWABLE" for capture in captures)
+            or [capture.get("frameId") for capture in captures] != frame_ids
+        ):
+            raise ValueError(f"isolated stationary terrain capture contract failed: {directory}")
+        summary[directory] = {"requestedCaptures": expected, "completedCaptures": len(captures)}
+    return summary
+
+
 def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[str, Any]]:
     runtime = load(evidence_root / "runtime-evidence.json")
     scene = stationary_scene(runtime)
@@ -568,6 +591,42 @@ def self_test() -> None:
             result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
             assert code == 2 and expected_reason in result["reason"], (defect, result)
         runtime_path.write_text(pristine_runtime, encoding="utf-8")
+
+        # A ninth control must remain outside the P1 recorder. Missing, failed
+        # or mixed sessions cannot be accepted as an isolated terrain check.
+        session_paths = [candidate_root / name / "render-contract" / "results.json"
+                         for name in ("metal-framebuffer", "terrain-color-control")]
+        original_session = session_paths[0].read_text(encoding="utf-8")
+        sessions = [{"status": "passed", "requestedCaptures": count, "completedCaptures": count,
+                     "failedCaptures": 0, "pendingCaptures": 0, "droppedCaptures": 0,
+                     "captures": [{"status": "passed", "frameId": frame_id, "semanticPassId": "metallum/present",
+                                   "capturePoint": "FINAL_DRAWABLE"} for frame_id in ids]}
+                    for count, ids in ((FRAMEBUFFER_SAMPLE_COUNT, range(1, FRAMEBUFFER_SAMPLE_COUNT + 1)),
+                                       (1, [FRAMEBUFFER_SAMPLE_COUNT + 1]))]
+        for path, session in zip(session_paths, sessions):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(session), encoding="utf-8")
+        assert stationary_terrain_control(candidate_root)["metal-framebuffer"]["completedCaptures"] == 8
+        for index, field, value in ((0, "requestedCaptures", 9), (0, "completedCaptures", 9),
+                                    (1, "failedCaptures", 1), (1, "captures", []),
+                                    (1, "captures", [sessions[0]["captures"][0]])):
+            altered = dict(sessions[index]); altered[field] = value
+            session_paths[index].write_text(json.dumps(altered), encoding="utf-8")
+            try:
+                stationary_terrain_control(candidate_root)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError((index, field, "invalid isolated session accepted"))
+            session_paths[index].write_text(json.dumps(sessions[index]), encoding="utf-8")
+        session_paths[1].unlink()
+        try:
+            stationary_terrain_control(candidate_root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing terrain session accepted")
+        session_paths[0].write_text(original_session, encoding="utf-8")
 
         # Keep canonical RGBA acceptance: an alpha-only difference remains a
         # rejected pixel difference even on an opaque presentation surface.

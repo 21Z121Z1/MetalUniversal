@@ -369,6 +369,25 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             closeRenderContract();
 
+            if (Boolean.getBoolean("metallum.ci.stationaryTerrainControl")) {
+                require(p1FramebufferScenario, "The isolated terrain control requires completed stationary samples");
+                // CI still needs the independent terrain RGB expectation. Run
+                // it after the eight immutable P1 captures, in its own recorder
+                // directory, so physical P1 payloads keep exactly eight frames.
+                Path controlRoot = evidenceDir.resolve("terrain-color-control");
+                startRenderContract(controlRoot);
+                try {
+                    verifyTerrainColorProbe(context, singleplayer, controlRoot, evidenceDir);
+                    RenderContractSnapshot control = renderContractSnapshot();
+                    require(control.requestedCaptures() == 1 && control.completedCaptures() == 1
+                                    && control.failedCaptures() == 0 && control.pendingCaptures() == 0
+                                    && control.droppedCaptures() == 0,
+                            "The isolated terrain control did not complete exactly one capture: " + control);
+                } finally {
+                    closeRenderContract();
+                }
+            }
+
             Path windowScreenshot = context.takeScreenshot(SCREENSHOT_NAME);
             require(Files.isRegularFile(windowScreenshot),
                     "Client GameTest did not create diagnostic window screenshot: " + windowScreenshot);
