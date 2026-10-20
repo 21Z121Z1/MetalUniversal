@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 运动方向、单位、坐标 | `MetalMotionContract`、`MetalFxMath`、`motion_fragment.glsl`、`MetalFxFrameMotionContract`；Java／原生独立数值对照 | current→previous；NDC XY，Y 翻转；Temporal scale=输入颜色宽高/2，FG scale=前帧颜色宽高/2，depth/motion 降采样不改变 FG 位移单位；奇数／非方形、透视与半精度预算按独立数值预期 |
 | jitter | `prepareSceneProjectionInternal`、源 draw 冻结 projection、V4 surface resolver | 当前反矩阵使用 raster jitter；对应向量不含 jitter；世界历史查找补偿前后 jitter，HUD 独立 |
-| 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史 | 不用当前深度冒充动态表面 previous Z；无历史保留 current Z 与无效所有权。前帧 raster depth bias 尚需与原版前帧深度独立核对 |
+| 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史、接受的 raster 状态 | 不用当前深度冒充动态表面 previous Z；前帧 bias 从旧屏幕 Jacobian 还原，D32 常量受限；独立两帧原版 D32 与错误当前坡度负例。无历史、未知 viewport、更大常量及退化映射保持无效所有权 |
 | 动态分辨率 | `ensureTargets`、scaler key、历史 reset | 当前策略重新分配并 reset；尚未采用保留最大分配、逐帧 content size 改变的优化，不宣称无 reset 的动态历史 |
 | 独立投影 | `MetalPreviousVertexReplay`、`MetalFirstPersonMotionGpuTest`、`ProjectionEncodingEvidence` | 手部实际 projection/model-view 与世界相机分开；普通及后处理 HUD 深度分别捕获。混合 world/HUD 的原始 Z 尚不能由单一 FG 相机／jitter 描述，准确手部几何也不解除这项准入 |
 | 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调 | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史 |

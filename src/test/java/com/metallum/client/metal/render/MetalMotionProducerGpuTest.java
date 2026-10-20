@@ -992,6 +992,7 @@ final class MetalMotionProducerGpuTest {
                 "entity_texture_matrix_visibility", "item_ignores_entity_texture_matrix", "per_face_dissolve",
                 "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth",
                 "entity_negative_slope_depth_bias_self", "entity_projective_slope_depth_bias_self",
+                "entity_previous_scaled_slope_depth_bias_self",
                 "block_cutout_after_vertex_alpha", "block_cutout_after_modulator", "block_alpha_composite_zero",
                 "block_opaque_zero_alpha", "block_visible_offset_and_alpha");
     }
@@ -1005,6 +1006,7 @@ final class MetalMotionProducerGpuTest {
         boolean blended=!name.equals("zero_alpha_opaque")&&!name.equals("block_opaque_zero_alpha"), perFace=name.equals("per_face_dissolve");
         boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
         boolean projective=name.contains("projective");
+        boolean scaledHistory=name.contains("previous_scaled");
         float slopeBias=sloped ? name.contains("negative") ? -2 : 2 : 0;
         float constantBias=biased ? name.contains("negative") ? -10 : 3 : 0;
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
@@ -1077,11 +1079,14 @@ final class MetalMotionProducerGpuTest {
         if(block)for(int i=0;i<oldPositions.length;i+=3) {oldPositions[i]+=offsetX;oldPositions[i+1]+=offsetY;oldPositions[i+2]+=offsetZ;}
         assertTrue(MetalPreviousVertexReplay.writePreviousPositions(oldPositions,old));old.flip();
         Matrix4f modelView=projective ? new Matrix4f().translate(.1F,-.05F,-2).rotateY(.2F).rotateZ(.1F) : new Matrix4f();
+        Matrix4f previousModelView=scaledHistory ? new Matrix4f().scaling(.5F,.75F,1) : new Matrix4f(modelView);
         Matrix4f projectionMatrix=projective ? new Matrix4f().perspective((float)Math.toRadians(70),(float)W/H,.1F,100,true) : new Matrix4f();
         ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());modelView.get(0,dynamic);
         new Matrix4f().translation(matrix ? .5F : 0,0,0).get(64,dynamic);
         for(int i=0;i<4;i++)dynamic.putFloat(128+i*4,i==3 ? modAlpha : 1);
         dynamic.putFloat(144,offsetX).putFloat(148,offsetY).putFloat(152,offsetZ);
+        ByteBuffer previousDynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());
+        previousDynamic.put(dynamic.duplicate()).flip();previousModelView.get(0,previousDynamic);
         ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());projectionMatrix.get(0,projection);
         ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
@@ -1089,13 +1094,14 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer globals=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());globals.putFloat(12,.6F).putFloat(32,W).putFloat(36,H);
         ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         new Matrix4f().scaling(1,-1,1).get(0,motion);
-        new Matrix4f().scaling(1,-1,1).mul(projectionMatrix).mul(modelView).get(64,motion);
+        new Matrix4f().scaling(1,-1,1).mul(projectionMatrix).mul(previousModelView).get(64,motion);
         int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
         ByteBuffer raster=ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
         new MetalPreviousVertexReplay.RasterState(W,H,slopeBias,constantBias).write(raster);raster.flip();
         try(var vb=device.createBuffer(()->"actual material mesh",GpuBuffer.USAGE_VERTEX,mesh);
             var pb=device.createBuffer(()->"previous material positions",GpuBuffer.USAGE_VERTEX,old);
             var du=device.createBuffer(()->"material dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var oldDu=device.createBuffer(()->"previous source material dynamic",GpuBuffer.USAGE_UNIFORM,previousDynamic);
             var pr=device.createBuffer(()->"material projection",GpuBuffer.USAGE_UNIFORM,projection);
             var fo=device.createBuffer(()->"material fog",GpuBuffer.USAGE_UNIFORM,fog);
             var li=device.createBuffer(()->"material lighting",GpuBuffer.USAGE_UNIFORM,lighting);
@@ -1121,6 +1127,23 @@ final class MetalMotionProducerGpuTest {
                 for(int y=0;y<H;y++)for(int x=0;x<W;x++)pattern.putInt(x<W/2 ? 0x00FFFFFF : -1);pattern.flip();
                 encoder.writeToTexture(sampled,pattern,0,0,0,0,W,H);
             } else encoder.clearColorTexture(sampled,new Vector4f(1,1,1,texAlpha));
+            byte[] previousRasterDepth=null;
+            if(scaledHistory) {
+                // Render the preceding source with its own transform. Its D32
+                // raster is the oracle; the motion reconstruction does not
+                // provide these expected depths or sample coordinates.
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent preceding source raster")
+                        .withColorAttachment(cv,Optional.of(new Vector4f(0)))
+                        .withDepthAttachment(sd,java.util.OptionalDouble.of(0))
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                    pass.setPipeline(original);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",oldDu.slice());
+                    pass.setUniform("Fog",fo.slice());pass.setUniform("Lighting",li.slice());pass.setUniform("Globals",gl.slice());
+                    pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler1",wv,sampler);pass.bindTexture("Sampler2",wv,sampler);
+                    pass.bindTexture("GlintSampler",wv,sampler);pass.bindTexture("DissolveMaskSampler",dv,sampler);
+                    pass.setVertexBuffer(0,vb.slice());pass.draw(6,1,0,0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();previousRasterDepth=readback(survival);
+            }
             for(int phase=0;phase<2;phase++) {
                 var descriptor=RenderPassDescriptor.builder(()->"Source material and exact motion")
                         .withColorAttachment(phase==0 ? cv : fv,Optional.of(new Vector4f(0)))
@@ -1146,6 +1169,8 @@ final class MetalMotionProducerGpuTest {
             ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),survived=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
             ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder()),depths=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder());
             int count=0,mismatches=0,wrongAlpha=0,wrongTag=0,wrongMotion=0,wrongDepth=0;
+            int previousDepthComparisons=0,currentSlopeNegativeControls=0;
+            ByteBuffer oldRaster=previousRasterDepth==null ? null : ByteBuffer.wrap(previousRasterDepth).order(ByteOrder.nativeOrder());
             boolean reactive=glint||dissolve||matrix;
             for(int p=0;p<W*H;p++) {
                 boolean contributes=survived.getFloat(p*4)>0 && (!blended || reference.getFloat(p*16+12)>0);
@@ -1156,24 +1181,49 @@ final class MetalMotionProducerGpuTest {
                 float y=Float.float16ToFloat(vectors.getShort(p*4+2)),before=depths.getFloat(p*8),now=depths.getFloat(p*8+4);
                 if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
-                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
+                if(scaledHistory) {
+                    double expectedX=-.5*(2*(p%W+.5)/W-1),expectedY=.25*(1-2*(p/W+.5)/H);
+                    if(!Float.isFinite(x)||!Float.isFinite(y)
+                            ||Math.abs(x-expectedX)*W/2>halfRoundingBudgetPixels(expectedX,W)+.0001
+                            ||Math.abs(y-expectedY)*H/2>halfRoundingBudgetPixels(expectedY,H)+.0001)wrongMotion++;
+                } else if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
                 float expectedBefore=survived.getFloat(p*4);
                 float expectedNow=survived.getFloat(p*4);
-                if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-expectedBefore)>3e-6||Math.abs(now-expectedNow)>3e-6)wrongDepth++;
+                if(oldRaster!=null) {
+                    float oldX=(p%W+.5F-W*.5F)*.5F+W*.5F-.5F;
+                    float oldY=(p/W+.5F-H*.5F)*.75F+H*.5F-.5F;
+                    int x0=(int)Math.floor(oldX),y0=(int)Math.floor(oldY);
+                    float a=oldRaster.getFloat((y0*W+x0)*4),b=oldRaster.getFloat((y0*W+x0+1)*4);
+                    float c=oldRaster.getFloat(((y0+1)*W+x0)*4),d=oldRaster.getFloat(((y0+1)*W+x0+1)*4);
+                    // Only interpolate a footprint wholly inside the original
+                    // source surface, never its cleared background.
+                    if(a>0&&b>0&&c>0&&d>0) {
+                        float fx=oldX-x0,fy=oldY-y0;
+                        expectedBefore=(a*(1-fx)+b*fx)*(1-fy)+(c*(1-fx)+d*fx)*fy;
+                        previousDepthComparisons++;
+                        if(Math.abs(expectedBefore-expectedNow)>1e-4)currentSlopeNegativeControls++;
+                    } else expectedBefore=Float.NaN;
+                }
+                if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(now-expectedNow)>3e-6
+                        ||(Float.isFinite(expectedBefore)&&Math.abs(before-expectedBefore)>3e-6))wrongDepth++;
             }
             Path dir=Path.of("build/agent-evidence/motion-producers/material-visibility/"+name);Files.createDirectories(dir);
             Files.write(dir.resolve("actual-source.rgba32f"),rgba);Files.write(dir.resolve("actual-fragment-survival.d32f"),depth);
             Files.write(dir.resolve("motion-ownership.r8"),mask);Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("correspondence.rg32f"),z);
+            if(previousRasterDepth!=null)Files.write(dir.resolve("actual-previous-source.d32f"),previousRasterDepth);
             Files.writeString(dir.resolve("result.json"),"{\"visibleSourcePixels\":"+count+",\"coverageMismatches\":"+mismatches
                     +",\"reactiveMaterial\":"+reactive+",\"specialVertexLayout\":"+special+",\"wrongAlphaPixels\":"+wrongAlpha
-                    +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth+"}");
+                    +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth
+                    +",\"previousDepthComparisons\":"+previousDepthComparisons+",\"currentSlopeNegativeControls\":"+currentSlopeNegativeControls+"}");
             assertEquals(0,mismatches,"Motion must follow original fragment survival and the actual alpha blend contribution");
             assertEquals(0,wrongAlpha,"Independent original material alpha");
             assertEquals(0,wrongTag,"Reactive material tags must preserve exact geometry");
-            assertEquals(0,wrongMotion,"An unchanged exact surface must retain zero XY");
-            assertEquals(0,wrongDepth,"Unchanged geometry must reproduce actual original raster Z including depth bias");
+            assertEquals(0,wrongMotion,"Motion must match independent previous/current raster coordinates");
+            assertEquals(0,wrongDepth,"Correspondence must reproduce original raster Z including depth bias");
+            if(scaledHistory)assertTrue(previousDepthComparisons>100&&currentSlopeNegativeControls>100,
+                    "The preceding source raster must independently distinguish previous slope from current slope");
             if(visible)assertTrue(count>100);else assertEquals(0,count);
-            if(sloped && !projective)assertStationaryBiasedSurfaceHistory(survival,ownership,flow,valid,pair,depth,dir);
+            if(sloped && !projective && !scaledHistory)assertStationaryBiasedSurfaceHistory(survival,ownership,flow,valid,pair,depth,dir);
         }
     }
 
