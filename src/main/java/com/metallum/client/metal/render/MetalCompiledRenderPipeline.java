@@ -70,6 +70,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final boolean indexedVertexRebaseSafe;
 
     private final MemorySegment depthStencilState;
+    private final MemorySegment attachmentFreeDepthStencilState;
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
     private final List<MTLPixelFormat> colorFormatsView;
@@ -231,6 +232,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
                 depthCompareOp,
                 depthWrite
         );
+        // Both handles borrow the existing immutable native device cache. State packets
+        // require an explicit state object, including a pass with no depth attachment.
+        this.attachmentFreeDepthStencilState = depthStencilState == null ? this.depthStencilState
+                : MetalNativeBridge.MTLDevice_makeDepthStencilState(device.metalDeviceHandle(),MTLCompareFunction.Always,0);
 
         List<@Nullable ColorTargetState> colorTargets = info.getColorTargetStates();
         if (colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS) {
@@ -620,6 +625,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     MemorySegment getDepthStencilState() {
         return this.depthStencilState;
+    }
+
+    MemorySegment getDepthStencilState(final boolean depthAttachmentPresent) {
+        return depthAttachmentPresent ? this.depthStencilState : this.attachmentFreeDepthStencilState;
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
