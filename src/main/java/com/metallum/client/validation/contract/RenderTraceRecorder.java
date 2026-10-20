@@ -672,6 +672,9 @@ public final class RenderTraceRecorder implements AutoCloseable {
         } catch (IOException exception) {
             status = "failed";
             throw new IllegalStateException("Could not write render contract manifest", exception);
+        } catch (RuntimeException | Error failure) {
+            status = "failed";
+            throw failure;
         }
     }
 
@@ -681,64 +684,75 @@ public final class RenderTraceRecorder implements AutoCloseable {
             writeManifestFailureSummary(manifestRequiredBytes, manifestFailureReason);
             return;
         }
-        JsonObject root = new JsonObject();
-        root.addProperty("schemaVersion", SCHEMA_VERSION);
-        root.addProperty("runId", runId);
-        root.addProperty("gitCommit", gitCommit);
-        root.addProperty("status", status);
-        root.addProperty("manifestComplete", manifestComplete());
-        root.addProperty("frameCount", frameIds.size());
-        root.addProperty("passCount", completedPasses.size() + openPasses.size());
-        root.addProperty("resourceCount", resourceHistory.size());
-        root.addProperty("droppedEvents", droppedEvents);
-        root.addProperty("forcedClosedPassCount", forcedClosedPassCount);
-        root.addProperty("invalidPassReferenceCount", invalidPassReferenceCount);
-        root.addProperty("producerBudgetExceeded", producerBudgetExceeded);
-        root.addProperty("producerCount", producerCount);
-        root.addProperty("producerDetailsCaptured", captureProducerDetails);
-        root.addProperty("producerCapturePolicy", producerCapturePolicy.descriptor());
-        JsonObject limits = new JsonObject();
-        limits.addProperty("maxFrames", maxFrames);
-        limits.addProperty("maxPasses", maxPasses);
-        limits.addProperty("maxProducers", maxProducers);
-        limits.addProperty("maxManifestBytes", maxManifestBytes);
-        root.add("limits", limits);
-        root.add("storageBudget", GSON.toJsonTree(storageBudget.snapshot()));
-        root.add("frames", GSON.toJsonTree(frameIds.stream().sorted().toList()));
-        root.add("resources", GSON.toJsonTree(resourceHistory.values()));
-        root.add("resourceLifecycle", GSON.toJsonTree(resourceLifecycleEvents));
-        root.add("passes", GSON.toJsonTree(completedPasses));
-        JsonArray open = new JsonArray();
-        for (PassState pass : openPasses.values()) {
-            open.add(GSON.toJsonTree(pass.toRecord(captureProducerDetails, producerCapturePolicy, false)));
-        }
-        root.add("openPasses", open);
-        byte[] bytes = (GSON.toJson(root) + "\n").getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > maxManifestBytes) {
+        try {
+            storageBudget.writeAtomicUtf8(manifestPath, maxManifestBytes, this::writeManifestDocument);
+            manifestFinalized = true;
+        } catch (ValidationStorageBudget.FileByteLimitExceededException exception) {
             manifestBudgetExceeded = true;
             status = "failed";
             droppedEvents++;
-            manifestRequiredBytes = bytes.length;
+            manifestRequiredBytes = exception.requiredBytes();
             manifestFailureReason = "render contract manifest byte budget exceeded";
-            writeManifestFailureSummary(bytes.length, "render contract manifest byte budget exceeded");
-            return;
-        }
-        try {
-            storageBudget.writeBytes(manifestPath, bytes);
-            manifestFinalized = true;
+            writeManifestFailureSummary(manifestRequiredBytes, manifestFailureReason);
         } catch (ValidationStorageBudget.StorageBudgetExceededException exception) {
             manifestBudgetExceeded = true;
             status = "failed";
             droppedEvents++;
-            manifestRequiredBytes = bytes.length;
+            manifestRequiredBytes = exception.requiredBytes();
             manifestFailureReason = "render contract manifest could not fit the shared artifact budget";
-            storageBudget.recordFailure(
-                    "render contract manifest could not fit the shared artifact budget",
-                    bytes.length,
-                    storageBudget.artifactBytes() + bytes.length
-            );
-            writeManifestFailureSummary(bytes.length, "render contract manifest could not fit the shared artifact budget");
+            storageBudget.recordFailure(manifestFailureReason, manifestRequiredBytes,
+                    storageBudget.artifactBytes() + manifestRequiredBytes);
+            writeManifestFailureSummary(manifestRequiredBytes, manifestFailureReason);
         }
+    }
+
+    /** No document-sized JsonElement tree, StringBuilder, String or UTF-8 byte array. */
+    private void writeManifestDocument(final java.io.Writer writer) throws IOException {
+        com.google.gson.stream.JsonWriter json = GSON.newJsonWriter(writer);
+        json.beginObject();
+        json.name("schemaVersion").value(SCHEMA_VERSION);
+        json.name("runId").value(runId);
+        json.name("gitCommit").value(gitCommit);
+        json.name("status").value(status);
+        json.name("manifestComplete").value(manifestComplete());
+        json.name("frameCount").value(frameIds.size());
+        json.name("passCount").value(completedPasses.size() + openPasses.size());
+        json.name("resourceCount").value(resourceHistory.size());
+        json.name("droppedEvents").value(droppedEvents);
+        json.name("forcedClosedPassCount").value(forcedClosedPassCount);
+        json.name("invalidPassReferenceCount").value(invalidPassReferenceCount);
+        json.name("producerBudgetExceeded").value(producerBudgetExceeded);
+        json.name("producerCount").value(producerCount);
+        json.name("producerDetailsCaptured").value(captureProducerDetails);
+        json.name("producerCapturePolicy").value(producerCapturePolicy.descriptor());
+        json.name("limits").beginObject();
+        json.name("maxFrames").value(maxFrames);
+        json.name("maxPasses").value(maxPasses);
+        json.name("maxProducers").value(maxProducers);
+        json.name("maxManifestBytes").value(maxManifestBytes);
+        json.endObject();
+        json.name("storageBudget");
+        GSON.toJson(storageBudget.snapshot(), ValidationStorageBudget.Snapshot.class, json);
+        json.name("frames").beginArray();
+        for (long frame : frameIds.stream().sorted().toList()) json.value(frame);
+        json.endArray();
+        json.name("resources").beginArray();
+        for (ResourceIdentity resource : resourceHistory.values()) GSON.toJson(resource, ResourceIdentity.class, json);
+        json.endArray();
+        json.name("resourceLifecycle").beginArray();
+        for (ResourceLifecycleEvent event : resourceLifecycleEvents) GSON.toJson(event, ResourceLifecycleEvent.class, json);
+        json.endArray();
+        json.name("passes").beginArray();
+        for (RenderPassRecord pass : completedPasses) GSON.toJson(pass, RenderPassRecord.class, json);
+        json.endArray();
+        json.name("openPasses").beginArray();
+        for (PassState pass : openPasses.values()) {
+            GSON.toJson(pass.toRecord(captureProducerDetails, producerCapturePolicy, false), RenderPassRecord.class, json);
+        }
+        json.endArray();
+        json.endObject();
+        json.flush();
+        writer.write("\n");
     }
 
     private void writeManifestFailureSummary(final long requiredBytes, final String reason) {
@@ -766,9 +780,13 @@ public final class RenderTraceRecorder implements AutoCloseable {
         limits.addProperty("maxManifestBytes", maxManifestBytes);
         summary.add("limits", limits);
         summary.add("storageBudget", GSON.toJsonTree(storageBudget.snapshot()));
-        summary.add("frames", GSON.toJsonTree(frameIds.stream().sorted().toList()));
-        summary.add("resources", GSON.toJsonTree(resourceHistory.values()));
-        summary.add("resourceLifecycle", GSON.toJsonTree(resourceLifecycleEvents));
+        // A failed trace never publishes partial payload as a complete oracle.
+        // Its critical reserve must not rebuild the oversized tree that failed.
+        summary.addProperty("tracePayloadOmitted", true);
+        summary.addProperty("resourceLifecycleCount", resourceLifecycleEvents.size());
+        summary.add("frames", new JsonArray());
+        summary.add("resources", new JsonArray());
+        summary.add("resourceLifecycle", new JsonArray());
         summary.add("passes", new JsonArray());
         summary.add("openPasses", new JsonArray());
         try {

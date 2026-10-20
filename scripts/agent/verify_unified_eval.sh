@@ -75,6 +75,9 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.contract.RenderContractRuntimeTest \
+  --tests com.metallum.client.validation.contract.RenderTraceRecorderStreamingTest \
+  --tests com.metallum.client.validation.storage.ValidationStorageBudgetTest \
+  --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 
 echo "Unified evaluation static verification: PASS"

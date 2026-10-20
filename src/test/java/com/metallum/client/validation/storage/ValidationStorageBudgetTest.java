@@ -12,6 +12,67 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ValidationStorageBudgetTest {
     @Test
+    void streamingCountsUtf8BytesAndRewritesOnlyCommittedSize() throws Exception {
+        Path root = Files.createTempDirectory("render-contract-stream-utf8-");
+        var budget = ValidationStorageBudget.shared(root, 32);
+        Path file = root.resolve("manifest.json");
+        budget.writeAtomicUtf8(file, 32, writer -> writer.write("old"));
+        assertEquals(8L, budget.writeAtomicUtf8(file, 32, writer -> writer.write("雨😀\n")));
+        assertEquals("雨😀\n", Files.readString(file));
+        assertEquals(8L, Files.size(file));
+        assertEquals(8L, budget.artifactBytes());
+    }
+
+    @Test
+    void streamingFileLimitCountsWholeDocumentAndPreservesPreviousEvidence() throws Exception {
+        Path root = Files.createTempDirectory("render-contract-stream-file-limit-");
+        var budget = ValidationStorageBudget.shared(root, 32);
+        Path file = root.resolve("manifest.json");
+        budget.writeAtomicUtf8(file, 32, writer -> writer.write("ok"));
+        var failure = assertThrows(ValidationStorageBudget.FileByteLimitExceededException.class,
+                () -> budget.writeAtomicUtf8(file, 5, writer -> {
+                    writer.write("雨"); writer.write("\uD83D"); writer.write("\uDE00");
+                }));
+        assertEquals(7L, failure.requiredBytes());
+        assertEquals("ok", Files.readString(file));
+        assertEquals(2L, budget.artifactBytes());
+        assertFalse(budget.exceeded(), "A file limit does not consume the shared root's critical reserve");
+        assertFalse(Files.exists(root.resolve("manifest.json.partial")));
+    }
+
+    @Test
+    void streamingSharedLimitAndBodyFailureCannotPublishPartialEvidence() throws Exception {
+        Path root = Files.createTempDirectory("render-contract-stream-failure-");
+        var budget = ValidationStorageBudget.shared(root, 8);
+        Path file = root.resolve("manifest.json");
+        budget.writeAtomicUtf8(file, 32, writer -> writer.write("ok"));
+        assertThrows(java.io.IOException.class, () -> budget.writeAtomicUtf8(file, 32, writer -> {
+            writer.write("partial"); throw new java.io.IOException("injected write failure");
+        }));
+        assertEquals("ok", Files.readString(file));
+        assertEquals(2L, budget.artifactBytes());
+        assertFalse(Files.exists(root.resolve("manifest.json.partial")));
+        var failure = assertThrows(ValidationStorageBudget.StorageBudgetExceededException.class,
+                () -> budget.writeAtomicUtf8(file, 32, writer -> writer.write("123456789")));
+        assertEquals(9L, failure.requiredBytes());
+        assertEquals("ok", Files.readString(file));
+        assertTrue(budget.exceeded());
+        assertFalse(Files.exists(root.resolve("manifest.json.partial")));
+    }
+
+    @Test
+    void streamingNeverDeletesAnExistingCheckpointOrEscapesTheRoot() throws Exception {
+        Path root = Files.createTempDirectory("render-contract-stream-checkpoint-");
+        var budget = ValidationStorageBudget.shared(root, 32);
+        Path file = root.resolve("manifest.json"), partial = root.resolve("manifest.json.partial");
+        Files.writeString(partial, "crash evidence");
+        assertThrows(java.io.IOException.class, () -> budget.writeAtomicUtf8(file, 32, writer -> writer.write("new")));
+        assertEquals("crash evidence", Files.readString(partial));
+        assertThrows(IllegalArgumentException.class,
+                () -> budget.writeAtomicUtf8(root.resolve("../outside.json"), 32, writer -> writer.write("no")));
+    }
+
+    @Test
     void budgetCountsFinalFileSizeAndRewritesDoNotDoubleCount() throws Exception {
         Path root = Files.createTempDirectory("render-contract-budget-");
         ValidationStorageBudget budget = ValidationStorageBudget.shared(root, 32L);

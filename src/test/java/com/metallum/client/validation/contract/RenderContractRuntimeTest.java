@@ -23,9 +23,12 @@ final class RenderContractRuntimeTest {
         String previousEnabled = System.getProperty("metallum.renderContract.enabled");
         try {
             System.setProperty("metallum.renderContract.enabled", "true");
-            for (boolean failResultsToo : new boolean[]{false, true}) {
+            for (int fault : new int[]{0, 1, 2}) {
+                boolean failManifest = fault != 1, failResults = fault != 0;
                 Path output = Files.createTempDirectory("render-contract-close-write-failure-");
                 RenderContractRuntime.start(output, "close-write-failure");
+                completedCapture();
+                assertTrue(RenderContractRuntime.completionGatePassed(), "The fault must invalidate a previously passing gate");
                 var recorderField = RenderContractRuntime.class.getDeclaredField("recorder");
                 recorderField.setAccessible(true);
                 var recorder = (RenderTraceRecorder) recorderField.get(null);
@@ -33,9 +36,8 @@ final class RenderContractRuntimeTest {
                 Path results = output.resolve("render-contract/results.json");
                 // A directory at a file destination reliably fails on both
                 // hosted macOS and Linux, including a privileged test process.
-                Files.delete(manifest);
-                Files.createDirectory(manifest);
-                if (failResultsToo) {
+                if (failManifest) { Files.delete(manifest); Files.createDirectory(manifest); }
+                if (failResults) {
                     Files.delete(results);
                     Files.createDirectory(results);
                 }
@@ -47,9 +49,9 @@ final class RenderContractRuntimeTest {
                         failure = exception;
                     }
                     assertTrue(failure != null, "A failed terminal write must be reported");
-                    assertTrue(failure.getMessage().equals(failResultsToo
+                    assertTrue(failure.getMessage().equals(failResults
                             ? "Could not write capture results" : "Could not write render contract manifest"));
-                    assertTrue(failure.getSuppressed().length == (failResultsToo ? 1 : 0),
+                    assertTrue(failure.getSuppressed().length == (fault == 2 ? 1 : 0),
                             "Attempt both disposals and retain the secondary failure");
                     assertTrue(recorder.isClosed(), "A results failure must not skip recorder disposal");
                     // Exact entry point reached by MetalGpuBuffer.swapBacking
@@ -71,7 +73,7 @@ final class RenderContractRuntimeTest {
                     assertTrue(rejected, "Direct use of a disposed recorder must still fail");
                 } finally {
                     Files.deleteIfExists(manifest);
-                    if (failResultsToo) Files.deleteIfExists(results);
+                    if (failResults) Files.deleteIfExists(results);
                     RenderContractRuntime.close();
                 }
             }
@@ -130,6 +132,23 @@ final class RenderContractRuntimeTest {
             releaseService.countDown();workers.shutdownNow();workers.awaitTermination(5,TimeUnit.SECONDS);
             RenderContractRuntime.close();restoreProperty("metallum.renderContract.enabled",previousEnabled);
         }
+    }
+
+    private static void completedCapture() {
+        RenderContractRuntime.beginFrame(0);
+        var resource = RenderContractRuntime.identifyResource("color0", 1, "texture-1", "RGBA8_UNORM", 1, 1, 1, 0, 1, 3);
+        long pass = RenderContractRuntime.beginRenderPass("synthetic/runtime-close", PassType.RENDER,
+                List.of(new AttachmentBindingRecord(0, resource, AttachmentSemantic.COLOR, "clear", "store", true)),
+                null, null, new ViewportRecord(0, 0, 1, 1), ScissorRecord.disabled(), "pipeline", List.of("fragment"), Map.of());
+        RenderContractRuntime.recordProducer(pass, ProducerType.DRAW, "pipeline", Map.of("vertexCount", "3"),
+                Map.of(), List.of(resource.stableKey()));
+        RenderContractRuntime.endPass(pass);
+        RenderContractRuntime.endFrame(0);
+        var point = new CapturePoint(0, "synthetic/runtime-close", CapturePointKind.AFTER_PASS, -1);
+        RenderContractRuntime.requestReadbacks(point, List.of(new RenderContractRuntime.ReadbackRequest(
+                "color0", 1, "texture-1", "RGBA8_UNORM", 4, 1, 1, 1, 0, 1, 3, AttachmentSemantic.COLOR)), List.of());
+        RenderContractRuntime.recordReadback(point, "color0", 1, "texture-1", "RGBA8_UNORM", 4,
+                1, 1, 1, 0, 1, 3, new byte[]{1, 2, 3, (byte)255}, List.of());
     }
 
     private static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
