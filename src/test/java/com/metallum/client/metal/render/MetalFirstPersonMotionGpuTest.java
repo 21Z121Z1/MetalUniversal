@@ -120,7 +120,7 @@ final class MetalFirstPersonMotionGpuTest {
                         PrimitiveTopology.TRIANGLES, 6, 6), frame == 0 ? oldPositions : currentPositions);
                 for (boolean unjitteredReference : new boolean[]{false, true}) {
                     try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Actual Minecraft source shader")
-                            .withColorAttachment(colorView, Optional.of(new Vector4f()))
+                            .withColorAttachment(colorView, Optional.of(new Vector4f(0, 0, 0, 0)))
                             .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
                         pass.setPipeline(source);
                         pass.setUniform("Projection", (unjitteredReference ? referenceProjection
@@ -173,17 +173,19 @@ final class MetalFirstPersonMotionGpuTest {
             for (int p=0; p<W*H; p++) if (Byte.toUnsignedInt(mask[p]) > 127) {
                 x += Float.float16ToFloat(values.getShort(p*4))*W/2; y += Float.float16ToFloat(values.getShort(p*4+2))*H/2; count++;
             }
-            assertTrue(count > 100 && before[2] > 100 && after[2] > 100);
-            x /= count; y /= count;
-            assertEquals(before[0]-after[0], x, .6, "motion must agree with the actual Minecraft unjittered color shader");
-            assertEquals(before[1]-after[1], y, .6);
+            if (count > 0) { x /= count; y /= count; }
             Path dir = Path.of("build/agent-evidence/motion-producers/world_actual_shader_source"); Files.createDirectories(dir);
             Files.write(dir.resolve("previous-source.rgba8"), actualSource[0]); Files.write(dir.resolve("current-source.rgba8"), actualSource[1]);
             Files.write(dir.resolve("previous-reference.rgba8"), reference[0]); Files.write(dir.resolve("current-reference.rgba8"), reference[1]);
             Files.write(dir.resolve("motion.rg16f"), vectors); Files.write(dir.resolve("current-validity.r8"), mask);
             Files.writeString(dir.resolve("result.json"), "{\"fixture\":\"world_actual_shader_source\",\"width\":"+W+",\"height\":"+H
                     +",\"coveredPixels\":"+count+",\"motionPixels\":["+x+","+y+"],\"rasterDisplacementPixels\":["
-                    +(before[0]-after[0])+","+(before[1]-after[1])+"],\"surfaceHistoryMatched\":true}");
+                    +(before[0]-after[0])+","+(before[1]-after[1])+"],\"referencePixels\":["+before[2]+","+after[2]+"],\"surfaceHistoryMatched\":true}");
+            assertTrue(count > 100 && before[2] > 100 && after[2] > 100);
+            assertTrue(before[2] < W*H/2 && after[2] < W*H/2,
+                    "transparent reference background must not count as geometry");
+            assertEquals(before[0]-after[0], x, .6, "motion must agree with the actual Minecraft unjittered color shader");
+            assertEquals(before[1]-after[1], y, .6);
         }
     }
 
