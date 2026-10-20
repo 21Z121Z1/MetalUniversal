@@ -96,7 +96,11 @@ final class MetalPreviousVertexHistory {
         }
     }
 
-    record SurfaceIdentity(RenderPipeline pipeline, Map<String, TextureIdentity> textures, boolean depthAttachmentPresent) {
+    record SurfaceIdentity(RenderPipeline pipeline, Map<String, TextureIdentity> textures, boolean depthAttachmentPresent,
+                           MetalPreviousVertexReplay.RasterState raster) {
+        SurfaceIdentity(RenderPipeline pipeline,Map<String,TextureIdentity> textures,boolean depthAttachmentPresent) {
+            this(pipeline,textures,depthAttachmentPresent,MetalPreviousVertexReplay.RasterState.UNBIASED);
+        }
         SurfaceIdentity(RenderPipeline pipeline,Map<String,TextureIdentity> textures) {this(pipeline,textures,true);}
         SurfaceIdentity { textures = Map.copyOf(textures); }
     }

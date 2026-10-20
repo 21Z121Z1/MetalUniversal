@@ -96,6 +96,12 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 原始斜面附件还揭示后续闭环目标：`f78a995` 的 current Z 已包含真实 raster depth bias，previous Z 仍是几何 clip Z。斜面样本相差约 0.00625；它可能使没有遮挡的表面被判为历史不匹配。必须进一步补齐前帧偏移并用原版前帧深度独立对照，不能只以“自身偏移用例通过”宣称 previous raster Z 已完整。
 
+`95890b8` 的 macOS 26 原始 JUnit 记录为 91 producer + 13 first-person，104/104 通过；macOS 15 对应任务成功。五项 BLOCK alpha／偏移场景和两帧 BLOCK 历史均无覆盖、深度错误。实际客户端的 vanilla candidate 已成功，完整矩阵仍需等同一提交的各 lane 完成。
+
+前帧 raster bias 的后续实现从实际 compiled pipeline 捕获硬件方向的 slope／constant 和源 viewport，纳入接受提交的 surface identity，使用独立 16 字节帧内 uniform。片元在任何 discard／历史分支前取得前帧 NDC 的导数，通过前帧屏幕映射 Jacobian 还原旧深度坡度；不能直接采用当前画面坡度。previous Z 加旧偏移并按 [0,1] 裁定，current Z 保持真实 gl_FragCoord.z。D32 constant 的片元／primitive 指数误差按原有 3e-6 预算约束，仅准入绝对值不超过 16 的常量；未知 viewport、非有限参数、更大自定义常量和退化映射保留 current-only ownership，等待 primitive 证据提供者。
+
+自身偏移测试改为逐像素对照实际原版 D32，加入负偏移和透视斜面；容差保持 3e-6。静止斜面还经过生产 V4 历史消费，并关闭 dilation、用故意遗漏偏移的独立几何平面作负例，要求分别接受／拒绝。以上新增实现仍待新提交 Actions 验证，不能预先扩大 producer 门禁。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。

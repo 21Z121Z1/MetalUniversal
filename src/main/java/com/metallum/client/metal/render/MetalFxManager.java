@@ -444,6 +444,7 @@ public final class MetalFxManager {
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
+            @Nullable GpuBufferSlice rasterUniform,
             GpuBufferSlice currentVertexBuffer,
             @Nullable GpuBufferSlice previousPositionBuffer,
             MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,
@@ -2005,7 +2006,9 @@ public final class MetalFxManager {
             boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
             boolean firstPerson = replay.sample().domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
             boolean surfaceMatches = MetalPreviousVertexHistory.matchingSurfaceManifest(replay.previousVertexToken());
-            boolean ownedInvalid = historyReset || !replay.sample().hasPrevious() || !surfaceMatches;
+            boolean rasterHistorySupported = !MetalEntityMotionPipeline.usesPreviousDepthBias(prepared.pipeline(),prepared.depthAttachmentPresent())
+                    || (prepared.raster().biased() && prepared.raster().reconstructible());
+            boolean ownedInvalid = historyReset || !replay.sample().hasPrevious() || !surfaceMatches || !rasterHistorySupported;
             if (!firstPerson && !MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform");
                 continue;
@@ -2024,7 +2027,8 @@ public final class MetalFxManager {
                 continue;
             }
             if (ownedInvalid) {
-                String reason = !surfaceMatches ? "source-material-history-unavailable"
+                String reason = !rasterHistorySupported ? "source-previous-depth-bias-unrepresentable"
+                        : !surfaceMatches ? "source-material-history-unavailable"
                         : "source-history-unavailable-current-ownership-only";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
                 exactPlan = exactMotionSupported ? MetalPreviousVertexReplay.currentOnlyPlan(
@@ -2087,6 +2091,15 @@ public final class MetalFxManager {
                 motionUniform = mapped.slice();
             }
             MetalFxMotionTelemetry.recordGpuUpload(128L);
+            GpuBufferSlice rasterUniform = null;
+            if (MetalEntityMotionPipeline.usesPreviousDepthBias(prepared.pipeline(),prepared.depthAttachmentPresent())) {
+                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                        .allocateGpuMapped(16L,256L,GpuBuffer.USAGE_UNIFORM)) {
+                    prepared.raster().write(mapped.data());
+                    rasterUniform = mapped.slice();
+                }
+                MetalFxMotionTelemetry.recordGpuUpload(16L);
+            }
             // Every source binding is immutable at replay time, including root/invalid paths.
             // The source buffer object may already have been rewritten or orphaned since its draw.
             GpuBufferSlice replayProjection, replayDynamic, replayGlobals = null;
@@ -2120,6 +2133,7 @@ public final class MetalFxManager {
                     replay.sourceDepth(),
                     replay.sample(),
                     motionUniform,
+                    rasterUniform,
                     currentVertexBuffer,
                     previousPositionBuffer,
                     exactPreviousPositions && !ownedInvalid ? replay.previousVertexToken() : null,
@@ -2243,6 +2257,7 @@ public final class MetalFxManager {
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
                 if (replay.globals() != null) pass.setUniform("Globals", replay.globals());
                 pass.setUniform("MetallumMotion", replay.motionUniform());
+                if (replay.rasterUniform() != null) pass.setUniform("MetallumSurface",replay.rasterUniform());
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());
                 if (exactPreviousPositions) {
                     pass.setVertexBuffer(1, replay.previousPositionBuffer());

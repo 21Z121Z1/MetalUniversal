@@ -104,7 +104,10 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         return source == null ? null : new MetalPreviousVertexReplay.SourceState(
                 source, samplers, scissorState.enabled()
                 ? new RenderPass.RenderArea(scissorState.x(), scissorState.y(), scissorState.width(), scissorState.height())
-                : null,depthTexture != null);
+                : null,depthTexture != null,new MetalPreviousVertexReplay.RasterState(
+                        renderArea.width(),renderArea.height(),
+                        depthTexture == null ? 0 : compiledPipeline.depthBiasScaleFactor(),
+                        depthTexture == null ? 0 : compiledPipeline.depthBiasConstant()));
     }
 
     /**

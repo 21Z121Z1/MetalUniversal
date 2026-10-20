@@ -17,6 +17,13 @@ struct MetallumMotionSample {
     float validity;
 };
 
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+layout(std140) uniform MetallumSurface {
+    // Accepted source viewport size and actual Metal slope/constant bias.
+    vec4 metallumPreviousRaster;
+};
+#endif
+
 #ifdef METALLUM_TEST_SOURCE_DEPTH
 uniform sampler2D MetallumSourceDepth;
 
@@ -50,6 +57,27 @@ MetallumMotionSample metallumMotionSample() {
     result.motion = vec2(0.0);
     result.previousDepth = 0.0;
     result.validity = 0.0;
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    // Evaluate every derivative before discard or history-dependent control flow.
+    // The old screen mapping can rotate, shear and change scale independently
+    // of this frame. Invert its Jacobian rather than using this frame's slope.
+    vec3 oldNdc = metallumPreviousClip.xyz / max(abs(metallumPreviousClip.w), 1.0e-20);
+    vec3 dx = dFdx(oldNdc), dy = dFdy(oldNdc);
+    vec2 screenDx = dx.xy * metallumPreviousRaster.xy * 0.5;
+    vec2 screenDy = dy.xy * metallumPreviousRaster.xy * 0.5;
+    float determinant = screenDx.x * screenDy.y - screenDy.x * screenDx.y;
+    vec2 oldGradient = vec2(dx.z * screenDy.y - dy.z * screenDx.y,
+                            dy.z * screenDx.x - dx.z * screenDy.x) / determinant;
+    float slope = max(abs(oldGradient.x), abs(oldGradient.y));
+    // For bounded vanilla constants, the primitive/fragment exponent difference
+    // contributes at most 16 * 2^-23 < 2e-6 absolute D32 error. Larger custom
+    // constants need a primitive-depth provider and cannot claim exact history.
+    float unit = exp2(floor(log2(max(abs(oldNdc.z), 1.0e-30))) - 23.0);
+    float oldBias = metallumPreviousRaster.z * slope + metallumPreviousRaster.w * unit;
+    bool biasValid = all(greaterThan(metallumPreviousRaster.xy, vec2(0.0)))
+            && abs(metallumPreviousRaster.w) <= 16.0 && abs(determinant) > 1.0e-12
+            && !isnan(oldBias) && !isinf(oldBias);
+#endif
     if (!(metallumHistoryValidity > 0.99999)
             || !(metallumCurrentClip.w > 1.0e-6) || !(metallumPreviousClip.w > 1.0e-6)
             || any(isnan(metallumCurrentClip)) || any(isinf(metallumCurrentClip))
@@ -67,6 +95,10 @@ MetallumMotionSample metallumMotionSample() {
             || previousNdc.z < 0.0 || previousNdc.z > 1.0
             || any(isnan(motion)) || any(isinf(motion))
             || any(greaterThan(abs(motion), vec2(32.0)))) return result;
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    if (!biasValid) return result;
+    previousNdc.z = clamp(previousNdc.z + oldBias, 0.0, 1.0);
+#endif
     result.motion = motion;
     result.previousDepth = previousNdc.z;
     result.validity = 1.0;
