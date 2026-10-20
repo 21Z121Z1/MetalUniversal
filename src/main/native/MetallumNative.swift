@@ -3587,8 +3587,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.isUITextureComposited = false
             frameInterpolator.jitterOffsetX = frame.jitterX
             frameInterpolator.jitterOffsetY = frame.jitterY
-            frameInterpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            frameInterpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: sceneBuffers[work.previousIndex].width, height: sceneBuffers[work.previousIndex].height)
+            frameInterpolator.motionVectorScaleX = motionScale.x
+            frameInterpolator.motionVectorScaleY = motionScale.y
             frameInterpolator.fieldOfView = frame.fieldOfView
             frameInterpolator.nearPlane = frame.nearPlane
             frameInterpolator.farPlane = frame.farPlane
@@ -3729,8 +3731,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.isUITextureComposited = false
             interpolator.jitterOffsetX = frame.jitterX
             interpolator.jitterOffsetY = frame.jitterY
-            interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            interpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: sceneBuffers[work.previousIndex].width, height: sceneBuffers[work.previousIndex].height)
+            interpolator.motionVectorScaleX = motionScale.x
+            interpolator.motionVectorScaleY = motionScale.y
             interpolator.fieldOfView = frame.fieldOfView
             interpolator.nearPlane = frame.nearPlane
             interpolator.farPlane = frame.farPlane
@@ -8262,8 +8266,10 @@ public func metallum_metalfx_frame_interpolator_encode_offscreen(
             interpolator.isUITextureComposited = uiComposited != 0
             interpolator.jitterOffsetX = jitterX
             interpolator.jitterOffsetY = jitterY
-            interpolator.motionVectorScaleX = Float(motionTexture.width) * 0.5
-            interpolator.motionVectorScaleY = Float(motionTexture.height) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: previousColorTexture.width, height: previousColorTexture.height)
+            interpolator.motionVectorScaleX = motionScale.x
+            interpolator.motionVectorScaleY = motionScale.y
             interpolator.fieldOfView = fieldOfView
             interpolator.nearPlane = nearPlane
             interpolator.farPlane = farPlane

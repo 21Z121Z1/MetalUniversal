@@ -9,15 +9,16 @@
 - [WWDC22 10103](https://developer.apple.com/videos/play/wwdc2022/10103/)：采样抖动、颜色／深度／运动及历史输入；scaler 缓存随尺寸变化更新。
 - [WWDC25 211](https://developer.apple.com/videos/play/wwdc2025/211/)：Temporal 输入／输出为线性颜色；插值在 tone mapping 之后，UI 可独立合成；生成帧先于相应真实帧呈现。动态输入、reactive 提示、相机参数和源帧间隔分别需要验证。
 - [Temporal API](https://developer.apple.com/documentation/metalfx/mtlfxtemporalscalerbase)、[Frame Interpolator API](https://developer.apple.com/documentation/metalfx/mtlfxframeinterpolatorbase)：以 descriptor 的设备查询、实际 SDK 与纹理 usage 为准，不以 OS 名称推断能力。
+- [FG motion scale](https://developer.apple.com/documentation/metalfx/mtlfxframeinterpolatorbase/motionvectorscalex)：实际 SDK `MTLFXFrameInterpolator.h` 将位移换算为 `prevColorTexture` 像素；不能沿用低分辨率 depth/motion 纹理尺寸。SDK 注释还明确 FOV 用角度、deltaTime 用秒；CI 保存头文件 SHA 与相关片段，空收据会失败。
 - [CPU/GPU 同步官方样例](https://developer.apple.com/documentation/metal/synchronizing-cpu-and-gpu-work)：资源复用受 GPU 完成约束。
 
 ## 逐项对照
 
 | 项目 | 实现与检查入口 | 工程边界／待验 |
 | --- | --- | --- |
-| 运动方向、单位、坐标 | `MetalMotionContract`、`MetalFxMath`、`motion_fragment.glsl`；`MetalFxRasterConventionTest`、`MetalMotionContractValidation` | current→previous；NDC XY，Y 翻转；奇数／非方形、透视与半精度预算按独立数值预期 |
+| 运动方向、单位、坐标 | `MetalMotionContract`、`MetalFxMath`、`motion_fragment.glsl`、`MetalFxFrameMotionContract`；Java／原生独立数值对照 | current→previous；NDC XY，Y 翻转；Temporal scale=输入颜色宽高/2，FG scale=前帧颜色宽高/2，depth/motion 降采样不改变 FG 位移单位；奇数／非方形、透视与半精度预算按独立数值预期 |
 | jitter | `prepareSceneProjectionInternal`、源 draw 冻结 projection、V4 surface resolver | 当前反矩阵使用 raster jitter；对应向量不含 jitter；世界历史查找补偿前后 jitter，HUD 独立 |
-| 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史 | 不用当前深度冒充动态表面 previous Z；无历史保留 current Z 与无效所有权 |
+| 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史 | 不用当前深度冒充动态表面 previous Z；无历史保留 current Z 与无效所有权。前帧 raster depth bias 尚需与原版前帧深度独立核对 |
 | 动态分辨率 | `ensureTargets`、scaler key、历史 reset | 当前策略重新分配并 reset；尚未采用保留最大分配、逐帧 content size 改变的优化，不宣称无 reset 的动态历史 |
 | 独立投影 | `MetalPreviousVertexReplay`、`MetalFirstPersonMotionGpuTest`、`ProjectionEncodingEvidence` | 手部实际 projection/model-view 与世界相机分开；普通及后处理 HUD 深度分别捕获。混合 world/HUD 的原始 Z 尚不能由单一 FG 相机／jitter 描述，准确手部几何也不解除这项准入 |
 | 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调 | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史 |

@@ -7,7 +7,7 @@
 | 链路 | 起点源码现状 | 本轮需要验证的缺口 |
 | --- | --- | --- |
 | 相机运动 | `MetalFxManager.prepareSceneProjectionInternal` 保存未抖动的当前／前帧 VP，使用实际抖动 VP 的逆矩阵重建深度；Swift 三个 camera/fused kernel 输出 current→previous | camera kernel 对 clip.w 使用绝对值，可能接受位于上一相机后方的点；用独立数值预期和实际 GPU 复现 |
-| 单位与坐标 | RG16F 存 NDC 差，X=prev.x-current.x，Y=current.y-prev.y；MetalFX scale=inputWidth/2,inputHeight/2；JOML→FFM→simd 均按列 | 非方形和奇数分辨率、X/Y、jitter-only、旋转、非法矩阵与大运动；不能拿 UV 差的 scale=width 直接替换 |
+| 单位与坐标 | RG16F 存 NDC 差，X=prev.x-current.x，Y=current.y-prev.y；Temporal scale=输入颜色宽高/2，FG scale=前帧颜色宽高/2（不是 depth/motion 分配尺寸）；JOML→FFM→simd 均按列 | 非方形和奇数分辨率、X/Y、jitter-only、旋转、非法矩阵与大运动；不能拿 UV 差的 scale=width 直接替换 |
 | 深度 | Minecraft reversed Z，清零表示远端；world depth 在第一人称清深度前保存；融合 kernel 做深度边界和前帧深度拒绝 | 同时覆盖 standard/reversed Z 的遮挡判断、无历史、天空、反遮挡；深度重投影比较仍需区别相机空间变化与真实遮挡 |
 | 动态／蒙皮 | `MetalPreviousVertexHistory` 按成功提交源帧保存实际 CPU posed position，匹配对象 generation、pipeline、格式、拓扑、顶点数及完整 draw manifest；并非只有刚体根矩阵 | 单测和着色器编译已有覆盖，旧报告“完全没有逐顶点 producer”已过时；当前提交没有完整真实游戏 GPU 收据矩阵 |
 | 粒子／透明／自定义 | 有 staged particle、shared、shadow、piston 与辅助 draw carrier；不匹配历史时通过 eligibility／receipt 拒绝插值，Temporal 使用 reactive 或 fail closed | 不能将 reactive-only 记为精确运动；对未观察到与不支持必须分别报告 |

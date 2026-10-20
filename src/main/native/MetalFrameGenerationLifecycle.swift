@@ -1,5 +1,14 @@
 import Foundation
 
+/// Frame interpolation consumes current-to-previous motion in previous color
+/// pixels (MTLFXFrameInterpolator.h, motionVectorScaleX/Y). Downsampling the
+/// depth/motion field changes its sampling footprint, not displacement units.
+enum MetalFxFrameMotionContract {
+    static func ndcToPreviousColorPixels(width: Int, height: Int) -> SIMD2<Float> {
+        SIMD2(Float(width) * 0.5, Float(height) * 0.5)
+    }
+}
+
 /// Shared by the Metal 3/4 presenter and windowless interpolation. MetalFX
 /// fieldOfView is in degrees; jitter is measured in source-texture pixels.
 enum MetalFxFrameCameraContract {
