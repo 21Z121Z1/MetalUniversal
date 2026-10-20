@@ -115,6 +115,18 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void sourceAttachmentPresenceSelectsIndependentDepthPolicies() {
+        var source=net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT;
+        var tested=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);
+        var overlay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,false);
+        assertTrue(tested.getShaderDefines().flags().contains("METALLUM_TEST_SOURCE_DEPTH"));
+        assertFalse(tested.getShaderDefines().flags().contains("METALLUM_MOTION_OVERLAY"));
+        assertTrue(overlay.getShaderDefines().flags().contains("METALLUM_MOTION_OVERLAY"));
+        assertFalse(overlay.getShaderDefines().flags().contains("METALLUM_TEST_SOURCE_DEPTH"));
+        assertEquals(com.mojang.renderpearl.api.pipeline.CompareOp.ALWAYS_PASS,overlay.getDepthStencilState().depthTest());
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
         RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
                 .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))

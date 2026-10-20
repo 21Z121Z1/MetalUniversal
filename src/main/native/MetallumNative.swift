@@ -5962,6 +5962,12 @@ func motionSurfaceResolveV4MslSource() -> String {
     inline bool surfaceHud(float z, bool reversed) {
       return surfaceDepth(z) && (reversed ? z > 0.0000001 : z < 0.9999999);
     }
+    inline uint surfaceTag(float mask) {
+      return isfinite(mask) ? uint(clamp(floor(mask*255.0+0.5),0.0,255.0)) : 0u;
+    }
+    inline bool surfaceOverlay(uint tag) { return tag == 96u || tag == 159u || tag == 223u; }
+    inline bool surfaceExact(uint tag) { return tag == 159u || tag == 191u || tag == 223u || tag == 255u; }
+    inline bool surfaceReactive(uint tag) { return tag == 159u || tag == 191u; }
     inline float surfaceTolerance(float z, bool reversed) {
       return max(0.000003, abs(reversed ? z : 1.0-z)*0.01);
     }
@@ -5991,10 +5997,12 @@ func motionSurfaceResolveV4MslSource() -> String {
       if (any(pixel >= extent)) return;
       bool reversed = u.flags.w != 0u;
       float worldMask = worldValidity.read(pixel).r, handMask = hudValidity.read(pixel).r;
+      uint worldTag = surfaceTag(worldMask), handTag = surfaceTag(handMask);
+      bool worldOverlay = surfaceOverlay(worldTag);
       float2 pair = correspondence.read(pixel).rg;
       float sceneZ = sceneDepth.read(pixel).r, ownershipZ = worldOwnershipDepth.read(pixel).r;
-      bool worldDepthValid = surfaceDepth(sceneZ) && surfaceDepth(ownershipZ);
-      float worldZ = worldDepthValid ? (reversed ? max(sceneZ,ownershipZ) : min(sceneZ,ownershipZ)) : (reversed ? 0.0 : 1.0);
+      bool worldDepthValid = surfaceDepth(ownershipZ) && (worldOverlay || surfaceDepth(sceneZ));
+      float worldZ = worldDepthValid ? (worldOverlay ? ownershipZ : (reversed ? max(sceneZ,ownershipZ) : min(sceneZ,ownershipZ))) : (reversed ? 0.0 : 1.0);
       float farZ = reversed ? 0.0 : 1.0;
       float handZ = u.options.z != 0u ? hudDepth.read(pixel).r : farZ;
       bool actualHandCovered = surfaceHud(handZ,reversed);
@@ -6017,17 +6025,18 @@ func motionSurfaceResolveV4MslSource() -> String {
           int2 probe=int2(pixel)+int2(dx,dy);
           if (any(probe < int2(0)) || any(probe >= int2(extent))) continue;
           float a=sceneDepth.read(uint2(probe)).r,b=worldOwnershipDepth.read(uint2(probe)).r;
-          bool finite=surfaceDepth(a) && surfaceDepth(b);
-          float z=finite ? (reversed ? max(a,b) : min(a,b)) : (reversed ? 0.0 : 1.0);
+          bool overlay=surfaceOverlay(surfaceTag(worldValidity.read(uint2(probe)).r));
+          bool finite=surfaceDepth(b) && (overlay || surfaceDepth(a));
+          float z=finite ? (overlay ? b : (reversed ? max(a,b) : min(a,b))) : (reversed ? 0.0 : 1.0);
           bool foreground=finite && (reversed ? z > 0.00001 : z < 0.99999);
           boundary=boundary || (centerForeground != foreground);
           if (foreground && centerForeground) gradient=max(gradient,abs(z-worldZ));
         }
         reactive=max(reactive,boundary ? u.params.x : min(u.params.x,clamp(gradient*4.0,0.0,1.0)));
       }
-      float mask = handCovered ? handMask : worldMask;
+      uint tag = handCovered ? handTag : worldTag;
       bool owned = handCovered || (isfinite(worldMask) && worldMask > 0.125);
-      bool validOwned = owned && isfinite(mask) && mask > 0.5;
+      bool validOwned = owned && surfaceExact(tag);
       float2 selected = float2(0.0), cameraMotion = float2(0.0);
       float expectedZ = -1.0, disocclusion = 0.0;
       bool skyCurrent = !owned && u.flags.y != 0u && reversed && surfaceDepth(sceneZ) && sceneZ <= 0.00001;
@@ -6058,8 +6067,7 @@ func motionSurfaceResolveV4MslSource() -> String {
             && all(isfinite(selected)) && all(abs(selected) <= float2(32.0)) && !closerSurface(visibleZ,pair.y,reversed);
         if (validOwned) {
           expectedZ = pair.x;
-          // R8=0.75: exact geometric correspondence with animated/reactive color.
-          if (mask < 0.9) reactive=1.0;
+          if (surfaceReactive(tag)) reactive=1.0;
         }
         else { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
         if (handCovered) reactive=max(reactive,u.params.z);
@@ -6136,8 +6144,8 @@ private func ensureSurfaceMotionV4Pipeline(_ device: MTLDevice) -> MTLComputePip
 
 @_cdecl("metallum_metalfx_supports_surface_motion_v4")
 public func metallumMetalFxSupportsSurfaceMotionV4(_ device: MTLDevice) -> Int32 {
-    // Capability bits: base surface resolve, reactive material tag, explicit HUD ownership.
-    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 7
+    // Capability bits: base resolve, reactive tags, explicit HUD ownership, source depth policy.
+    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 15
 }
 
 @_cdecl("metallum_metalfx_resolve_motion_v4")

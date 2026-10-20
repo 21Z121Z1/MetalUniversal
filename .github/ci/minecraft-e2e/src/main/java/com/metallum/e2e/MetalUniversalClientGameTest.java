@@ -785,6 +785,12 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     && !client.player.getOffhandItem().isEmpty());
             singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
             singleplayer.getServer().runCommand("difficulty normal");
+            singleplayer.getServer().runOnServer(server -> {
+                var zombie=new net.minecraft.world.entity.monster.zombie.Zombie(server.overworld());
+                zombie.setPos(160.5,126,165);zombie.setNoAi(true);zombie.setNoGravity(true);
+                zombie.setCustomName(net.minecraft.network.chat.Component.literal("Motion depth overlay"));zombie.setCustomNameVisible(true);
+                server.overworld().addFreshEntity(zombie);
+            });
             singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
             singleplayer.getServer().runCommand("summon minecraft:end_crystal 163 128 169 {beam_target:[I;160,131,171],ShowBottom:0b}");
             singleplayer.getServer().runCommand("summon minecraft:shulker_bullet 159 130 166 {NoGravity:1b}");
@@ -847,6 +853,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                             && row.source().flags().contains("GLINT_SPECIAL") && row.ownedColorExecutions() > 0
                             && row.encodedMotionDraws() > 0),
                     "Actual compass special-glint source never proved its seven-attribute layout and exact history");
+            require(census.programs().values().stream().anyMatch(row -> row.source() != null
+                            && row.source().flags().contains("IS_SEE_THROUGH") && row.ownedColorExecutions() > 0
+                            && row.encodedMotionDraws() > 0),
+                    "Actual see-through source never proved its depth policy and owned exact motion");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
                 var rows = census.pipelines().entrySet().stream().filter(row -> row.getValue().actualDraws() > 0
                         && row.getKey().endsWith("/" + suffix)).toList();
@@ -933,6 +943,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             report.addProperty("firstPersonHeldItemsExercised", true);
             report.addProperty("glintSourceMotionExercised", true);
             report.addProperty("specialGlintSourceMotionExercised", true);
+            report.addProperty("seeThroughSourceMotionExercised", true);
             report.addProperty("postEffectHudDepthIsolated", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }

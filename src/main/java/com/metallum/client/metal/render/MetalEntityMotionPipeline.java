@@ -4,6 +4,7 @@ import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.CompareOp;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
@@ -101,8 +102,10 @@ final class MetalEntityMotionPipeline {
             new ColorTargetState(Optional.empty(), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_RED | ColorTargetState.WRITE_GREEN);
     private static final Map<RenderPipeline, RenderPipeline> CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_CACHE = new IdentityHashMap<>();
-    private static final Map<RenderPipeline, RenderPipeline> DEPTH_CACHE = new IdentityHashMap<>();
-    private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
+    private static final BindGroupLayout SOURCE_DEPTH = BindGroupLayout.builder()
+            .withUniform("MetallumSourceDepth",UniformType.COMBINED_IMAGE_SAMPLER).build();
 
     private MetalEntityMotionPipeline() {
     }
@@ -140,7 +143,7 @@ final class MetalEntityMotionPipeline {
     }
 
     static boolean supports(final RenderPipeline source) {
-        if (familyOf(source) == null) {
+        if (familyOf(source) == null || !replayableDepth(source)) {
             return false;
         }
         ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
@@ -156,7 +159,18 @@ final class MetalEntityMotionPipeline {
      * families and must never fall back to a closest-looking root motion shader.
      */
     static boolean supportsPreviousPositions(final RenderPipeline source) {
-        return previousFamilyOf(source) != null;
+        return previousFamilyOf(source) != null && replayableDepth(source);
+    }
+
+    private static boolean replayableDepth(final RenderPipeline source) {
+        var depth=source.getDepthStencilState();
+        if(depth!=null && (depth.depthTest()==CompareOp.EQUAL || depth.depthTest()==CompareOp.NOT_EQUAL)
+                && (depth.depthBiasScaleFactor()!=0 || depth.depthBiasConstant()!=0)) return false;
+        // A live final attachment cannot reconstruct the pre-draw depth for these self-writing tests.
+        return depth==null || !depth.writeDepth() || switch(depth.depthTest()) {
+            case GREATER_THAN,LESS_THAN,NOT_EQUAL -> false;
+            default -> true;
+        };
     }
 
     private static @Nullable PreviousFamily previousFamilyOf(final RenderPipeline source) {
@@ -232,13 +246,40 @@ final class MetalEntityMotionPipeline {
     }
 
     static RenderPipeline forSourceWithDepth(final RenderPipeline source) {
-        return DEPTH_CACHE.computeIfAbsent(source, pipeline -> buildVariant(pipeline, familyOf(pipeline), null, true));
+        return forSourceWithDepth(source,true);
+    }
+
+    static RenderPipeline forSourceWithDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(!replayableDepth(source))throw new IllegalArgumentException("Source needs pre-draw depth provenance: "+source.getLocation());
+        RenderPipeline[] variants=DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,familyOf(source),null,true,depthAttachmentPresent);
+        return variants[slot];
     }
 
     static RenderPipeline forPreviousPositionsWithDepth(final RenderPipeline source) {
+        return forPreviousPositionsWithDepth(source,true);
+    }
+
+    static RenderPipeline forPreviousPositionsWithDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(!replayableDepth(source))throw new IllegalArgumentException("Source needs pre-draw depth provenance: "+source.getLocation());
         PreviousFamily family = previousFamilyOf(source);
         if (family == null) throw new IllegalArgumentException("Source has no previous-position ABI: "+source.getLocation());
-        return PREVIOUS_POSITION_DEPTH_CACHE.computeIfAbsent(source, pipeline -> buildVariant(pipeline, null, family, true));
+        RenderPipeline[] variants=PREVIOUS_POSITION_DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,null,family,true,depthAttachmentPresent);
+        return variants[slot];
+    }
+
+    static boolean testsSourceDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        return depthAttachmentPresent && source.getDepthStencilState()!=null
+                && source.getDepthStencilState().depthTest()!=CompareOp.ALWAYS_PASS;
+    }
+
+    private static boolean overridesPrivateDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        return !testsSourceDepth(source,depthAttachmentPresent)
+                || source.getDepthStencilState().depthTest()==CompareOp.EQUAL
+                || source.getDepthStencilState().depthTest()==CompareOp.NOT_EQUAL;
     }
 
     private static RenderPipeline build(final RenderPipeline source) {
@@ -285,6 +326,12 @@ final class MetalEntityMotionPipeline {
             final @Nullable PreviousFamily previousFamily,
             final boolean depthCorrespondence
     ) {
+        return buildVariant(source,family,previousFamily,depthCorrespondence,true);
+    }
+
+    private static RenderPipeline buildVariant(final RenderPipeline source,final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,final boolean depthCorrespondence,
+            final boolean depthAttachmentPresent) {
         boolean previousPositions = previousFamily != null;
         if (!previousPositions && family == null) {
             throw new IllegalArgumentException("Missing root motion family for " + source.getLocation());
@@ -296,7 +343,7 @@ final class MetalEntityMotionPipeline {
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
                         (previousPositions ? previousFamily.locationPrefix : family.locationPrefix())
-                                + (depthCorrespondence ? "depth/" : "") + sourceName
+                                + (depthCorrespondence ? depthAttachmentPresent ? "depth/" : "depth/no_source_attachment/" : "") + sourceName
                 ))
                 .withVertexShader(previousPositions ? previousFamily.vertexShader : family.shader())
                 .withFragmentShader(previousPositions ? previousFamily.fragmentShader : family.shader())
@@ -344,6 +391,12 @@ final class MetalEntityMotionPipeline {
         });
         if (depthCorrespondence) {
             builder.withShaderDefine("METALLUM_MOTION_DEPTH").withColorTargetState(2, DEPTH_TARGET);
+            if (testsSourceDepth(source,depthAttachmentPresent)) {
+                builder.withBindGroupLayout(SOURCE_DEPTH)
+                        .withShaderDefine("METALLUM_TEST_SOURCE_DEPTH")
+                        .withShaderDefine("METALLUM_SOURCE_DEPTH_"+source.getDepthStencilState().depthTest().name());
+            }
+            if(overridesPrivateDepth(source,depthAttachmentPresent))builder.withShaderDefine("METALLUM_MOTION_OVERLAY");
             if (source.getShaderDefines().flags().stream().anyMatch(flag -> flag.equals("GLINT")
                     || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))) {
                 builder.withShaderDefine("METALLUM_REACTIVE_MATERIAL");
@@ -356,7 +409,10 @@ final class MetalEntityMotionPipeline {
         if (alphaComposite) builder.withShaderDefine("METALLUM_ALPHA_COMPOSITE");
 
         DepthStencilState sourceDepth = source.getDepthStencilState();
-        if (sourceDepth != null) {
+        if (depthCorrespondence && overridesPrivateDepth(source,depthAttachmentPresent)) {
+            // A source overlay ignores scene Z. Keep its raster Z in our private attachment.
+            builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,true));
+        } else if (sourceDepth != null) {
             builder.withDepthStencilState(new DepthStencilState(
                     sourceDepth.depthTest(),
                     true,

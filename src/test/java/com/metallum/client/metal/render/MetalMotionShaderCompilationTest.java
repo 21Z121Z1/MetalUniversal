@@ -67,6 +67,9 @@ final class MetalMotionShaderCompilationTest {
                 depthDefines.add("METALLUM_REACTIVE_MATERIAL");
                 if (name.endsWith("previous_motion.vsh")) depthDefines.add("METALLUM_PREVIOUS_VALIDITY");
                 cases.add(Arguments.of(name, depthDefines));
+                List<String> overlayDefines=new ArrayList<>(depthDefines);
+                overlayDefines.add("METALLUM_MOTION_OVERLAY");
+                cases.add(Arguments.of(name,overlayDefines));
             }
         }
         return cases.stream();
@@ -108,6 +111,19 @@ final class MetalMotionShaderCompilationTest {
                 Shaderc.shaderc_fragment_shader,"independent-surface-point-fragment",List.of());
         assertEquals(Shaderc.shaderc_compilation_status_success,vertex.status(),vertex.message());
         assertEquals(Shaderc.shaderc_compilation_status_success,fragment.status(),fragment.message());
+    }
+
+    static Stream<String> sourceDepthComparisons() {
+        return Stream.of("GREATER_THAN_OR_EQUAL","GREATER_THAN","LESS_THAN_OR_EQUAL","LESS_THAN","EQUAL","NOT_EQUAL","NEVER_PASS");
+    }
+
+    @ParameterizedTest
+    @MethodSource("sourceDepthComparisons")
+    void independentSourceDepthTestCompilesForEveryDepthComparison(String comparison) throws IOException {
+        String source=expandIncludes("assets/metallum/shaders/core/entity_motion.fsh",new HashSet<>());
+        Compilation result=compile(source,Shaderc.shaderc_fragment_shader,"original-source-depth-"+comparison,
+                List.of("METALLUM_MOTION_DEPTH","METALLUM_TEST_SOURCE_DEPTH","METALLUM_SOURCE_DEPTH_"+comparison));
+        assertEquals(Shaderc.shaderc_compilation_status_success,result.status(),result.message());
     }
 
     @Test
