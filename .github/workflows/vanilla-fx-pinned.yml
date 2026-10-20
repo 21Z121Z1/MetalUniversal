@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  METALLUM_SOURCE_SHA: 'c2c309497ce6e1a7aa3b600490edbfaa50ef4a84'
+  METALLUM_SOURCE_SHA: 'b8de8772989b2d47c58e612f78660bca2b622525'
 
 jobs:
   pinned-vanilla-fx:
@@ -161,6 +161,17 @@ jobs:
             -PmetalFxProfile=${{ matrix.metalfx }} \
             -PstationaryFramebufferScene=${{ matrix.scene == 'stationary' }} \
             test runProductionClientGameTest
+      - name: Verify persisted terminal capture with independent oracle
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git show "${GITHUB_SHA}:scripts/agent/verify_render_contract_terminal.py" > "$RUNNER_TEMP/verify-render-contract-terminal.py"
+          echo "terminal oracle harness=$GITHUB_SHA product=$METALLUM_SOURCE_SHA"
+          shasum -a 256 "$RUNNER_TEMP/verify-render-contract-terminal.py"
+          python3 "$RUNNER_TEMP/verify-render-contract-terminal.py" --self-test
+          python3 "$RUNNER_TEMP/verify-render-contract-terminal.py" \
+            --root .github/ci/minecraft-e2e/build/evidence/metal-framebuffer/render-contract \
+            --source "$METALLUM_SOURCE_SHA" --captures 9
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
           set -euo pipefail
