@@ -75,6 +75,8 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 
 ## 后续目标与完成条件
 
+阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理；这些用例尚待后续 Actions 执行，不能用 GLSL 编译通过代替可见性验收。
+
 | 目标 | 需要的证据 |
 | --- | --- |
 | 特殊材质 | DISSOLVE、GLINT_SPECIAL、发光／能量／光束／线的实际顶点 ABI、可见性、前帧参数及 GPU 遮挡读回 |

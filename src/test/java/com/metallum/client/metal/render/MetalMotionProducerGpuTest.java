@@ -849,6 +849,90 @@ final class MetalMotionProducerGpuTest {
         }
     }
 
+    static Stream<String> shadowVisibilityFixtures() {
+        return Stream.of("ordinary_shadow","uv_clamp_low","uv_clamp_high","interpolated_alpha",
+                "modulator_zero","transparent_texel");
+    }
+
+    @ParameterizedTest(name = "actual shadow visibility: {0}")
+    @MethodSource("shadowVisibilityFixtures")
+    void shadowMotionCoverageMatchesActualMinecraftFragmentVisibility(String name) throws Exception {
+        var source=RenderPipeline.builder().withLocation("motion_contract/shadow_visibility/"+name)
+                .withVertexShader("core/rendertype_entity_shadow").withFragmentShader("core/rendertype_entity_shadow")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        var f=new Fixture(name,"core/rendertype_entity_shadow",DefaultVertexFormat.ENTITY,false,false,false,false);
+        ByteBuffer mesh=vertices(f,false);
+        float uv=name.equals("uv_clamp_low") ? -.25F : name.equals("uv_clamp_high") ? 1.75F
+                : name.equals("transparent_texel") ? .75F : .25F;
+        for(int i=0;i<6;i++) {
+            int offset=i*DefaultVertexFormat.ENTITY.getVertexSize();
+            mesh.putFloat(offset+DefaultVertexFormat.ENTITY.getElement("UV0").offset(),uv);
+            mesh.putFloat(offset+DefaultVertexFormat.ENTITY.getElement("UV0").offset()+4,.5F);
+            if(name.equals("interpolated_alpha")) mesh.putInt(offset+DefaultVertexFormat.ENTITY.getElement("Color").offset(),
+                    new int[]{0x00FFFFFF,-1,0x00FFFFFF,0x00FFFFFF,-1,-1}[i]);
+        }
+        ByteBuffer old=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
+        assertTrue(MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(
+                DefaultVertexFormat.ENTITY,java.util.List.of(mesh),6),old));old.flip();
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
+        new Matrix4f().get(0,dynamic);new Matrix4f().get(64,dynamic);
+        for(int i=0;i<4;i++)dynamic.putFloat(128+i*4,name.equals("modulator_zero")&&i==3 ? 0 : 1);
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        new Matrix4f().scaling(1,-1,1).get(0,motion);new Matrix4f().scaling(1,-1,1).get(64,motion);
+        ByteBuffer sprite=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
+        for(int y=0;y<H;y++)for(int x=0;x<W;x++)sprite.putInt(x<W/2 ? -1 : 0x00FFFFFF);sprite.flip();
+        try(var vb=device.createBuffer(()->"actual shadow vertices",GpuBuffer.USAGE_VERTEX,mesh);
+            var pb=device.createBuffer(()->"previous shadow vertices",GpuBuffer.USAGE_VERTEX,old);
+            var du=device.createBuffer(()->"shadow dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var pr=device.createBuffer(()->"shadow projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var fo=device.createBuffer(()->"shadow fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var mo=device.createBuffer(()->"shadow motion",GpuBuffer.USAGE_UNIFORM,motion);
+            var sampled=texture("shadow alpha edge",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_DST);
+            var color=texture("actual shadow contribution",GpuFormat.RGBA32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var flow=texture("shadow XY",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var valid=texture("shadow ownership",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
+            var pair=texture("shadow surface depth",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var sv=device.createTextureView(sampled);var cv=device.createTextureView(color);
+            var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.REPEAT,AddressMode.REPEAT,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.writeToTexture(sampled,sprite,0,0,0,0,W,H);
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Original Minecraft shadow visibility")
+                    .withColorAttachment(cv,Optional.of(new Vector4f(0))).withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());
+                pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.draw(6,1,0,0);
+            }
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Exact shadow visibility replay")
+                    .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                    .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
+                pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("MetallumMotion",mo.slice());
+                pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.setVertexBuffer(1,pb.slice());pass.draw(6,1,0,0);
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] rgba=readback(color),mask=readback(valid),xy=readback(flow),z=readback(pair);
+            ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder());int visible=0,mismatched=0;
+            for(int p=0;p<W*H;p++) {
+                boolean contributes=reference.getFloat(p*16+12)>0;
+                if(contributes)visible++;
+                if(contributes!=(Byte.toUnsignedInt(mask[p])>127))mismatched++;
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/shadow-visibility/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("actual-source.rgba32f"),rgba);Files.write(dir.resolve("motion-ownership.r8"),mask);
+            Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("correspondence.rg32f"),z);
+            Files.writeString(dir.resolve("result.json"),"{\"visibleSourcePixels\":"+visible+",\"coverageMismatches\":"+mismatched+"}");
+            assertEquals(0,mismatched,"Motion coverage must follow actual shadow UV clamp and interpolated alpha/modulator");
+            if(name.equals("modulator_zero")||name.equals("transparent_texel"))assertEquals(0,visible);
+            else assertTrue(visible>100);
+        }
+    }
+
     private static ByteBuffer vertices(Fixture f, boolean previous) {
         float[][] xy = {{-.4F,-.4F},{.4F,-.4F},{-.4F,.4F},{-.4F,.4F},{.4F,-.4F},{.4F,.4F}};
         int stride = f.format().getVertexSize();
