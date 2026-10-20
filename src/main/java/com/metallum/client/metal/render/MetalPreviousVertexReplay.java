@@ -26,6 +26,10 @@ import java.nio.ByteOrder;
  */
 @Environment(EnvType.CLIENT)
 final class MetalPreviousVertexReplay {
+    @FunctionalInterface
+    interface DirectPlan {
+        @Nullable Plan resolve(MetalPreviousVertexHistory.DrawToken token,boolean previous);
+    }
     record SourceGeometry(@Nullable GpuBufferSlice vertices,GpuBuffer indices,IndexType indexType) {}
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
                             @Nullable GpuTextureView depth, @Nullable GpuBufferSlice globals,@Nullable GpuBufferSlice fog) {
@@ -91,12 +95,17 @@ final class MetalPreviousVertexReplay {
         public Matrix4f previousFromPosition() { return new Matrix4f(previousFromPosition); }
     }
 
-    record Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage) {
+    record Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage,
+                Map<String,GpuBufferSlice> sourceUniforms) {
         Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions) {
             this(currentVertexBuffer,replayBaseVertex,previousPositions,null);
         }
+        Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage) {
+            this(currentVertexBuffer,replayBaseVertex,previousPositions,previousCoverage,Map.of());
+        }
         Plan {
             previousPositions = previousPositions.clone();
+            sourceUniforms=Map.copyOf(sourceUniforms);
             if(previousCoverage!=null && previousCoverage.length!=previousPositions.length/3*2)
                 throw new IllegalArgumentException("Previous coverage does not match the vertex stream");
             previousCoverage=previousCoverage==null ? null : previousCoverage.clone();
@@ -113,9 +122,14 @@ final class MetalPreviousVertexReplay {
     }
 
     static GpuBufferSlice freezeSourceVertices(final MetalCommandEncoder encoder,final byte[] vertices) {
-        if(vertices.length==0)throw new IllegalArgumentException("Empty source vertex snapshot");
-        try(GpuBufferSlice.MappedView mapped=encoder.transientMemory().allocateGpuMapped(vertices.length,16L,GpuBuffer.USAGE_VERTEX)) {
-            mapped.data().put(vertices);MetalFxMotionTelemetry.recordGpuUpload(vertices.length);return mapped.slice();
+        return freezeSourceBuffer(encoder,vertices,GpuBuffer.USAGE_VERTEX);
+    }
+
+    static GpuBufferSlice freezeSourceBuffer(final MetalCommandEncoder encoder,final byte[] bytes,final int usage) {
+        if(bytes.length==0)throw new IllegalArgumentException("Empty source buffer snapshot");
+        long alignment=usage==GpuBuffer.USAGE_VERTEX ? 16L : 256L;
+        try(GpuBufferSlice.MappedView mapped=encoder.transientMemory().allocateGpuMapped(bytes.length,alignment,usage)) {
+            mapped.data().put(bytes);MetalFxMotionTelemetry.recordGpuUpload(bytes.length);return mapped.slice();
         }
     }
 
@@ -160,6 +174,13 @@ final class MetalPreviousVertexReplay {
         return null;
     }
 
+    static @Nullable GpuBufferSlice sourceUniform(final RenderPass pass,final String name) {
+        if(pass instanceof MetalRenderPass metal)return metal.motionUniform(name);
+        if(pass instanceof RenderPearlBackendAccess access
+                && access.metallum$getBackend() instanceof MetalRenderPass metal)return metal.motionUniform(name);
+        return null;
+    }
+
     static void flushAfterSourcePass(final RenderPass pass) {
         if(pass instanceof MetalRenderPass metal)metal.flushMotionReplayAfterClose();
         else if(pass instanceof RenderPearlBackendAccess access
@@ -197,9 +218,8 @@ final class MetalPreviousVertexReplay {
         Map<String, MetalPreviousVertexHistory.TextureIdentity> textures = new java.util.TreeMap<>();
         // OIT's per-frame coefficient/depth targets describe compositing, not material identity.
         // Track the sampled resources that define visibility of the audited reduced families.
-        boolean lightmap=MetalEntityMotionPipeline.usesVisibilityLightmap(state.pipeline());
         for (String name : java.util.List.of("Sampler0","DissolveMaskSampler","GlintSampler","Sampler2")) {
-            if(name.equals("Sampler2") && !lightmap)continue;
+            if(!MetalEntityMotionPipeline.usesSurfaceTexture(state.pipeline(),name))continue;
             var pair = state.textures().get(name);
             if (pair == null) continue;
             var view = pair.view(); var sampler = pair.sampler();

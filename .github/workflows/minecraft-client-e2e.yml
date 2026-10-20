@@ -188,10 +188,21 @@ jobs:
               root / 'presentation-evidence.json',
               root / 'reload-evidence.json',
               root / 'artifact-identity.json',
+              root / 'metal-framebuffer' / 'render-contract' / 'pass-manifest.json',
           ]
           for path in required:
               if not path.is_file() or path.stat().st_size == 0:
                   raise SystemExit(f'missing E2E evidence: {path}')
+
+          trace = json.loads((root / 'metal-framebuffer' / 'render-contract' / 'pass-manifest.json').read_text())
+          if (trace.get('status') != 'passed' or trace.get('manifestComplete') is not True
+                  or any(trace.get(key, -1) != 0 for key in
+                         ('droppedEvents', 'forcedClosedPassCount', 'invalidPassReferenceCount'))):
+              raise SystemExit('render-contract trace is incomplete or invalid after client shutdown')
+          runtime = json.loads((root / 'runtime-evidence.json').read_text())
+          if (runtime.get('renderContractStatus') != 'passed' or runtime.get('renderContractReady') is not True
+                  or runtime.get('renderContractManifestFinalized') is not True):
+              raise SystemExit('client did not attest a complete terminal render-contract snapshot')
 
           suite = json.loads(required[0].read_text(encoding='utf-8'))
           if suite.get('allExact') is not True:

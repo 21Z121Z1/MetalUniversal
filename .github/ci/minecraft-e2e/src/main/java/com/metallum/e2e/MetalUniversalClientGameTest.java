@@ -368,10 +368,13 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 verifyMotionSourceEntries(context, singleplayer, evidenceDir);
             }
 
-            RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             // Resource identity events are emitted by the render owner. Retire its
             // recorder there too, before any subsequent frame can orphan a buffer.
-            context.runOnClient(client -> closeRenderContract());
+            RenderContractSnapshot contractSnapshot = context.computeOnClient(client -> {
+                closeRenderContract();
+                return renderContractSnapshot();
+            });
+            verifyTerminalTrace(metalCaptureRoot,contractSnapshot);
 
             if (Boolean.getBoolean("metallum.ci.stationaryTerrainControl")) {
                 require(p1FramebufferScenario, "The isolated terrain control requires completed stationary samples");
@@ -390,6 +393,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 } finally {
                     context.runOnClient(client -> closeRenderContract());
                 }
+                RenderContractSnapshot control=context.computeOnClient(client->renderContractSnapshot());
+                verifyTerminalTrace(controlRoot,control);
+                require(control.requestedCaptures()==1 && control.completedCaptures()==1
+                                && control.failedCaptures()==0 && control.pendingCaptures()==0 && control.droppedCaptures()==0,
+                        "The isolated terrain control lost its terminal capture: "+control);
             }
 
             Path windowScreenshot = context.takeScreenshot(SCREENSHOT_NAME);
@@ -695,6 +703,18 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         }
     }
 
+    private static void verifyTerminalTrace(Path captureRoot,RenderContractSnapshot contractSnapshot) {
+        Path tracePath=captureRoot.resolve("render-contract/pass-manifest.json");
+        try {
+            JsonObject trace=TerminalTrace.read(tracePath);
+            System.out.println("Persisted terminal trace "+tracePath+": "+trace);
+            TerminalTrace.requireComplete(trace);
+            require(contractSnapshot.ready() && contractSnapshot.status().equals("passed")
+                            && contractSnapshot.manifestFinalized(),
+                    "Render contract terminal snapshot failed: "+contractSnapshot+"; trace="+trace);
+        } catch(IOException failure) {throw new IllegalStateException("Cannot read the final render trace "+tracePath,failure);}
+    }
+
     private static RenderContractSnapshot renderContractSnapshot() {
         try {
             Class<?> runtime = Class.forName(RENDER_CONTRACT_RUNTIME);
@@ -703,6 +723,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             return new RenderContractSnapshot(
                     (boolean) snapshotClass.getMethod("enabled").invoke(snapshot),
                     (String) snapshotClass.getMethod("status").invoke(snapshot),
+                    (boolean) snapshotClass.getMethod("ready").invoke(snapshot),
+                    (boolean) snapshotClass.getMethod("manifestFinalized").invoke(snapshot),
                     (int) snapshotClass.getMethod("requestedCaptures").invoke(snapshot),
                     (int) snapshotClass.getMethod("completedCaptures").invoke(snapshot),
                     (int) snapshotClass.getMethod("failedCaptures").invoke(snapshot),
@@ -849,6 +871,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     && client.player.getAbilities().flying && !client.player.getMainHandItem().isEmpty()
                     && !client.player.getOffhandItem().isEmpty());
             singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
+            verifyCloudSourceEntries(context,singleplayer,output);
             singleplayer.getServer().runCommand("difficulty normal");
             singleplayer.getServer().runOnServer(server -> {
                 var zombie=new net.minecraft.world.entity.monster.zombie.Zombie(server.overworld());
@@ -1003,6 +1026,16 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 && counts.ownedColorExecutions()>0 && counts.encodedMotionDraws()>0,
                         "Weather bypassed its ordinary/OIT execution hook: "+suffix+" "+counts);
             }
+            var cloud=census.owners().get("com.metallum.client.metal.render.MetalCloudMotion$CloudOwner");
+            require(cloud!=null && cloud.sourceColorDraws()>0 && cloud.matchingGeometryDraws()>0
+                            && cloud.matchingTransformDraws()>0 && cloud.matchingSurfaceDraws()>0 && cloud.encodedMotionDraws()>0,
+                    "Actual procedural cloud never proved its source and accepted face history: "+cloud);
+            for(String suffix:new String[]{"clouds","flat_clouds","oit_accumulate_clouds","oit_accumulate_flat_clouds"}) {
+                var counts=census.pipelines().get("minecraft:pipeline/"+suffix);
+                require(counts!=null && counts.actualDraws()>0 && counts.actualDraws()==counts.hookedExecutions()
+                                && counts.ownedColorExecutions()>0 && counts.encodedMotionDraws()>0,
+                        "Cloud bypassed a flat/fancy ordinary/OIT source boundary: "+suffix+" "+counts);
+            }
             String lecternClass = "net.minecraft.client.renderer.blockentity.state.LecternRenderState";
             require(beforeEmpty.owners().get(lecternClass).capturedStates() == census.owners().get(lecternClass).capturedStates(),
                     "Empty lectern must not claim source geometry or become an exact candidate");
@@ -1043,6 +1076,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             report.addProperty("specialGlintSourceMotionExercised", true);
             report.addProperty("seeThroughSourceMotionExercised", true);
             report.addProperty("rainSnowScrollingMotionExercised",true);
+            report.addProperty("proceduralCloudFaceMotionExercised",true);
             report.addProperty("postEffectHudDepthIsolated", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
@@ -1066,6 +1100,41 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 player.getAbilities().flying = previousFlying;
                 player.onUpdateAbilities();
             }));
+        }
+    }
+
+    private static void verifyCloudSourceEntries(ClientGameTestContext context,TestSingleplayerContext singleplayer,Path output) {
+        var original=context.computeOnClient(client->client.options.cloudStatus().get());
+        boolean transparency=context.computeOnClient(client->client.options.improvedTransparency().get());
+        float height=context.computeOnClient(client->client.gameRenderer.mainCamera().attributeProbe()
+                .getValue(net.minecraft.world.attribute.EnvironmentAttributes.CLOUD_HEIGHT,1));
+        try {
+            singleplayer.getServer().runCommand("weather clear 600");
+            singleplayer.getServer().runOnServer(server->{server.overworld().setRainLevel(0);server.overworld().setThunderLevel(0);});
+            context.runOnClient(client->{client.level.setRainLevel(0);client.level.setThunderLevel(0);});
+            for(var status:new net.minecraft.client.CloudStatus[]{net.minecraft.client.CloudStatus.FAST,net.minecraft.client.CloudStatus.FANCY}) {
+                for(boolean oit:new boolean[]{false,true}) {
+                    context.runOnClient(client->{client.options.cloudStatus().set(status);client.options.improvedTransparency().set(oit);});
+                    // Upward view before entities/weather are spawned isolates world ownership to clouds.
+                    singleplayer.getServer().runCommand("tp @a 160.5 "+(height-16)+" 160.5 0 -35");
+                    context.waitTicks(8);
+                    Path dir=output.resolve("cloud-motion-"+status.name().toLowerCase(java.util.Locale.ROOT)+(oit ? "-oit" : "-ordinary"));
+                    var pending=context.computeOnClient(client->com.metallum.client.metal.render.MetalFxManager.requestRawMotionValidation(dir));
+                    context.waitFor(client->pending.isDone(),200);var raw=pending.join();
+                    require(raw.worldValidPixels()>0 && raw.worldPixelsOutsideHand()>0 && raw.finiteValidPixels()>=raw.worldValidPixels()
+                                    && raw.validCorrespondencePixels()>0 && raw.mergedFinitePixels()==(long)raw.width()*raw.height(),
+                            "Actual cloud view has no finite owned surface correspondence: "+status+" oit="+oit+" "+raw);
+                    try {
+                        long reactive=0;for(byte pixel:Files.readAllBytes(dir.resolve("object-validity.r8"))) {
+                            int tag=Byte.toUnsignedInt(pixel);if(tag==191)reactive++;
+                        }
+                        require(reactive>0,"Cloud-only sky view never exported reactive exact world ownership");
+                    } catch(IOException failure) {throw new IllegalStateException("Cannot inspect actual cloud source pixels",failure);}
+                }
+            }
+        } finally {
+            context.runOnClient(client->{client.options.cloudStatus().set(original);client.options.improvedTransparency().set(transparency);});
+            singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
         }
     }
 
@@ -1203,6 +1272,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         try {
             JsonObject report = JsonParser.parseString(json).getAsJsonObject();
+            report.addProperty("renderContractStatus",contractSnapshot.status());
+            report.addProperty("renderContractReady",contractSnapshot.ready());
+            report.addProperty("renderContractManifestFinalized",contractSnapshot.manifestFinalized());
             report.add("world", worldEvidence);
             Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n", StandardCharsets.UTF_8);
         } catch (IOException exception) {
@@ -1274,6 +1346,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private record RenderContractSnapshot(
             boolean enabled,
             String status,
+            boolean ready,
+            boolean manifestFinalized,
             int requestedCaptures,
             int completedCaptures,
             int failedCaptures,

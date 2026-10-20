@@ -36,6 +36,7 @@ final class MetalMotionStateStore {
         MetalShadowBatchMotion.beginFrame();
         MetalParticleBatchMotion.beginFrame();
         MetalWeatherMotion.beginFrame();
+        MetalCloudMotion.beginFrame();
         MetalSyntheticExactMotion.beginFrame();
     }
 
@@ -86,6 +87,7 @@ final class MetalMotionStateStore {
         MetalShadowBatchMotion.commitSubmittedFrame();
         MetalParticleBatchMotion.commitSubmittedFrame();
         MetalWeatherMotion.commitSubmittedFrame();
+        MetalCloudMotion.commitSubmittedFrame();
         MetalSyntheticExactMotion.commitSubmittedFrame();
         frameOpen = false;
     }
@@ -97,6 +99,7 @@ final class MetalMotionStateStore {
         MetalShadowBatchMotion.discardFrame();
         MetalParticleBatchMotion.discardFrame();
         MetalWeatherMotion.discardFrame();
+        MetalCloudMotion.discardFrame();
         MetalSyntheticExactMotion.discardFrame();
         frameOpen = false;
     }
@@ -110,6 +113,7 @@ final class MetalMotionStateStore {
         MetalShadowBatchMotion.reset();
         MetalParticleBatchMotion.reset();
         MetalWeatherMotion.resetHistory();
+        MetalCloudMotion.resetHistory();
         MetalSyntheticExactMotion.reset();
         frameOpen = wasOpen;
     }

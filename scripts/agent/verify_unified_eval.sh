@@ -80,6 +80,8 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.contract.RenderTraceRecorderStreamingTest \
   --tests com.metallum.client.validation.storage.ValidationStorageBudgetTest \
   --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
+  --tests com.metallum.client.metal.render.MetalCloudGeometryTest \
+  --tests com.metallum.client.metal.render.MetalCloudMotionHistoryTest \
   --tests com.metallum.client.metal.render.MetalParticleQuadHistoryTest \
   --tests com.metallum.client.metal.render.MetalParticleCrossGroupHistoryTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest

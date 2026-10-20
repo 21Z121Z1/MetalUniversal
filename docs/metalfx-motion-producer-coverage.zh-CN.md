@@ -124,6 +124,16 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 VS 中先乘顶点 alpha 再插值并参与 cutout；ENTITY 独立插值 lightmap alpha，在纹理 cutout、DISSOLVE 替换及 GLINT alpha floor 之后相乘。EMISSIVE 实体不采样，ITEM 包括 GLINT_SPECIAL 始终采样，UV2 仍是原版物理属性 4；阴影不错误继承实体光照语义。Sampler2 资源／采样身份也纳入这些实际依赖光照可见性的表面历史。新增十项原版颜色 GPU 对照涵盖顺序负例、零 lightmap、cutout 前后区别及 emissive 特例，手部 ITEM 与 BLOCK 回放对照补齐真实绑定。本地完整 1273 项、零失败／错误、43 项条件跳过；新增材质行为仍需对应 Actions 验收。
 
+`ec63dec` 的 macOS 15／26 GPU job 均成功；macOS 26 完成日志逐项确认 126 producer + 13 first-person，139/139，包含五项雨雪及十项 lightmap 场景。原始 GPU 附件下载遇到存储超时，尚未复核其中逐像素统计。真实 Vanilla 客户端仍在关闭 recorder 后报错，渲染线程调度本身没有解决。关闭入口补充异常安全：最终 IO 前先退役全局入口，以 Java 资源关闭语义尝试关闭采集服务和 trace，并保留首错／suppressed 错误；不会让已关闭 recorder 留给之后的资源失效事件。两个独立文件系统故障用例先建立可通过的捕获，再分别破坏最终结果／manifest 路径，要求保留失败、关闭两个所有者并拒绝完成门禁。GameTest 同时保存和打印原始失败，以便下一轮日志定位最初异常；不减少断言或提高容差。
+
+`14cc12a` 的 Sodium 真实 FX fallback 客户端任务成功，包含此前的雨雪与特殊材质清单、普通／后处理手部深度和原生合成断言；下载后的 9 项捕获与实际 draw census 均通过，但磁盘 trace 仍为 active／manifestComplete=false，不能把任务成功视为完整 trace 验收。新增关闭后终态 snapshot 与磁盘 manifest 的双重检查，以及工作流上传前的独立复核；独立成功关闭和两个 IO 故障测试保留严格完成门禁。该提交 Vanilla FX 未完成，不能据此宣称整个客户端矩阵通过。
+
+云的后续接入读取真实上传的有符号三字节 CloudFaces 和实际绑定的 44 字节 CloudInfo，并核对源 GPU face backing。按原版准备阶段实际选出的中心单元、完整时间周期和相机纹理 tile 建立完整坐标／朝向／内外面 tuple 身份，避免在 torus 边界重新除以 12 产生不同的单元；tuple 按接受的源提交分配持久 ID，无坐标截断或 hash 碰撞。CPU 解码固定原版 12／4／12 网格用于前帧对应与身份；当前 GPU 栅格保留原版 CloudFaces 程序化顶点表达式，冻结实际 CloudInfo／CloudFaces 到同次提交拥有的缓冲切片，复用真实 source MVP 与 Fog。新增／改变朝向的面保持当前覆盖但不伪造前帧。
+
+普通／OIT、FAST／FANCY 共用实际 indexed draw 入口，只在颜色阶段推进一次历史。reload、消失、reset、失败源提交与 renderer 关闭保持独立事务。新增 17 项原版程序化 cloud shader／真实 texel-buffer 对照覆盖六面、内外 winding、负／奇坐标、Fog、零 alpha、出生和自身 XY/Z；CPU 使用独立六面顶点表及故障／连续性回归。真实客户端新增四个云层向上视角，要求各自读回有效世界 ownership、有限 XY／双 Z 和 reactive 标签，并核对四条实际管线 source/history/encode 清单。本地完整 1293 项、零失败／错误、43 项条件跳过，客户端编译和统一契约通过；`dcb7c0e` 的 macOS 15／26 均在新增云 GPU 对照中失败。已下载 macOS 26 原始产物：原有 139 项通过，17 项新增云对照中 12 项存在覆盖缺失，错误 XY／Z／标签均随缺失像素出现；未提高容差或降低覆盖期望。后续修复保留 GPU 原版程序化顶点运算，另加改写并关闭原始 CloudInfo／CloudFaces 后仍使用冻结切片的回归，共 18 项云场景。修复后的运行行为仍待对应 Actions，不能提前视为全量 producer 完成。
+
+后续环境审计还需保持背景绘制顺序：日月／星辰原版没有深度测试，但发生在地形之前，不能因无 depth state 就按前景 overlay 回放。接入需明确背景深度／后续遮挡语义。previous Z 本身也不能区分同深度的错误表面、前帧透明度为零或已被 discard 的对应点；仍需前帧可见 ownership／element 身份与完整清单验证。完整 FG 门禁继续关闭。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
@@ -139,3 +149,5 @@ lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 
 | Temporal／FG 最终验收 | 独立 supportsDevice 为真；实际时域／插值图像、呈现节拍与延迟。托管 GPU 不支持时只阻塞这一验收层 |
 
 Temporal 默认 OFF、FG 默认 false、完整 producer 总门禁保持 false，直到上述证据完整。原有六项 CPU 优化、Metal 3 回退和可选 Metal 4 路径不改变。
+
+整合分支进一步在 buildMesh 写入前失效旧 CPU faces/backing/origin；捕获停用或同帧重复替换退役 generation，失败重建不能借用原地复写前的数据。云客户端 reactive 检查只接受世界标签 191，HUD 标签 159 不再代替云。主捕获和独立 terrain 控制都读取关闭后的快照及磁盘终态；终态头以流式 reader 跳过大 producer payload，保留完整失败计数诊断。仍需准确整合 head 的 GPU／客户端验收。

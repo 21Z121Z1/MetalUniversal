@@ -203,6 +203,119 @@ final class MetalMotionProducerGpuTest {
 
     static Stream<String> weatherScrollFixtures() {return Stream.of("rain_fall","snow_drift","rain_uv_wrap","column_birth","empty_camera_column");}
 
+    static Stream<String> cloudFixtures() {
+        return Stream.of("0","1","2","3","4","5","16","17","18","19","20","21","fully_fogged","zero_alpha","birth",
+                "negative_cell","positive_odd","frozen_source_rewrite");
+    }
+
+    @ParameterizedTest(name="actual procedural cloud: {0}")
+    @MethodSource("cloudFixtures")
+    void decodedCloudReplayMatchesOriginalProceduralRasterAndOwnMotion(String name) throws Exception {
+        boolean fogged=name.equals("fully_fogged"),zero=name.equals("zero_alpha"),birth=name.equals("birth");
+        int flags=Character.isDigit(name.charAt(0)) ? Integer.parseInt(name) : 0;
+        int cellX=name.equals("negative_cell") ? -17 : name.equals("positive_odd") ? 19 : 0;
+        int cellZ=name.equals("negative_cell") ? 18 : name.equals("positive_odd") ? -3 : 0;
+        byte[] faces=MetalCloudGeometryTest.face(cellX,cellZ,flags),info=MetalCloudGeometryTest.info();
+        ByteBuffer sourceInfo=ByteBuffer.wrap(info).order(ByteOrder.nativeOrder());
+        sourceInfo.putFloat(12,zero ? 0 : .6F).putFloat(16,-6.3F-cellX*12).putFloat(20,-2).putFloat(24,-5.9F-cellZ*12);
+        var mesh=MetalCloudGeometry.decode(faces,info,new MetalCloudGeometry.Origin(0,0));assertNotNull(mesh);
+        float[] previous=mesh.positions();
+        for(int vertex=0;vertex<4;vertex++) {previous[vertex*3]+=.3F;previous[vertex*3+2]-=.1F;}
+        if(birth)java.util.Arrays.fill(previous,Float.NaN);
+        ByteBuffer old=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());MetalPreviousVertexReplay.writePreviousPositions(previous,old);old.flip();
+        ByteBuffer faceBytes=ByteBuffer.allocateDirect(3).put(faces);faceBytes.flip();
+        ByteBuffer cloudInfo=ByteBuffer.allocateDirect(44).order(ByteOrder.nativeOrder()).put(info);cloudInfo.flip();
+        ByteBuffer indices=ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());for(short i:new short[]{0,1,2,2,3,0})indices.putShort(i);indices.flip();
+        var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                .withUniform("CloudInfo",UniformType.UNIFORM_BUFFER).withUniform("CloudFaces",UniformType.TEXEL_BUFFER,GpuFormat.R8_SINT).build();
+        var builder=RenderPipeline.builder().withLocation("motion_contract/procedural_cloud/"+name)
+                .withVertexShader("core/clouds").withFragmentShader("core/clouds").withBindGroupLayout(resources)
+                .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true))
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
+        var original=builder.build();
+        var intended=builder.withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,false))
+                .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT)).build();
+        Matrix4f view=new Matrix4f().translate(0,0,.55F).rotateX(.55F).rotateY(.7F).scale(.045F),flip=new Matrix4f().scaling(1,-1,1);
+        Vector4f delta=new Matrix4f(flip).mul(view).transform(new Vector4f(.3F,0,-.1F,0));
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());view.get(0,dynamic);new Matrix4f().get(64,dynamic);
+        // Clouds use CloudColor, so zero DynamicTransforms.ColorModulator cannot hide them.
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());flip.get(0,motion);new Matrix4f(flip).mul(view).get(64,motion);
+        ByteBuffer fog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());fog.putFloat(36,fogged ? 1 : 20);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        try(var fb=device.createBuffer(()->"original signed cloud faces",GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE,faceBytes);
+            var ci=device.createBuffer(()->"actual original cloud info",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_MAP_WRITE,cloudInfo);
+            var pb=device.createBuffer(()->"old matching cloud face",GpuBuffer.USAGE_VERTEX,old);
+            var ib=device.createBuffer(()->"actual cloud quad indices",GpuBuffer.USAGE_INDEX,indices);
+            var du=device.createBuffer(()->"cloud dynamic transform",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var pr=device.createBuffer(()->"cloud projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var mo=device.createBuffer(()->"cloud history matrices",GpuBuffer.USAGE_UNIFORM,motion);
+            var fo=device.createBuffer(()->"actual cloud Fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var color=texture("original procedural cloud color",GpuFormat.RGBA32_FLOAT,copy);
+            var scene=texture("original procedural cloud depth",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var ownership=texture("cloud private motion depth",GpuFormat.D32_FLOAT,copy);
+            var flow=texture("cloud own XY",GpuFormat.RG16_FLOAT,copy);var valid=texture("cloud visibility and ownership",GpuFormat.R8_UNORM,copy);
+            var pair=texture("cloud old and current surface",GpuFormat.RG32_FLOAT,copy);
+            var cv=device.createTextureView(color);var sd=device.createTextureView(scene);var od=device.createTextureView(ownership);
+            var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            var frozenInfo=ci.slice();var frozenFaces=fb.slice();
+            for(int phase=0;phase<2;phase++) {
+                if(phase==1) {
+                    if(name.equals("frozen_source_rewrite")) {encoder.submit();device.waitForSubmittedGpuWork();}
+                    frozenInfo=MetalPreviousVertexReplay.freezeSourceBuffer(encoder,info,GpuBuffer.USAGE_UNIFORM);
+                    frozenFaces=MetalPreviousVertexReplay.freezeSourceBuffer(encoder,faces,GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE);
+                    if(name.equals("frozen_source_rewrite")) {
+                        ByteBuffer changed=ByteBuffer.allocateDirect(44).order(ByteOrder.nativeOrder()).put(info);changed.putFloat(16,1000);changed.flip();
+                        encoder.writeToBuffer(ci.slice(),changed);
+                        ByteBuffer changedFaces=ByteBuffer.allocateDirect(3).put(new byte[]{50,50,4});changedFaces.flip();
+                        encoder.writeToBuffer(fb.slice(),changedFaces);ci.close();fb.close();
+                    }
+                }
+                var descriptor=RenderPassDescriptor.builder(()->"Original procedural cloud versus decoded replay")
+                        .withColorAttachment(phase==0 ? cv : fv,Optional.of(new Vector4f(0)))
+                        .withDepthAttachment(phase==0 ? sd : od,java.util.OptionalDouble.of(0));
+                if(phase==1)descriptor.withColorAttachment(vv,Optional.of(new Vector4f(0))).withColorAttachment(zv,Optional.of(new Vector4f(-1)));
+                try(var pass=encoder.createRenderPass(descriptor.build())) {
+                    pass.setPipeline(phase==0 ? original : MetalEntityMotionPipeline.forPreviousPositionsWithDepth(intended));
+                    pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("Fog",fo.slice());
+                    pass.setUniform("CloudInfo",phase==0 ? ci.slice() : frozenInfo);
+                    pass.setUniform("CloudFaces",phase==0 ? fb.slice() : frozenFaces);pass.setVertexBuffer(0,null);
+                    if(phase==0) {pass.setVertexBuffer(1,null);}
+                    else {pass.setUniform("MetallumMotion",mo.slice());pass.bindTexture("MetallumSourceDepth",sd,sampler);
+                        pass.setVertexBuffer(1,pb.slice());}
+                    pass.setIndexBuffer(ib,IndexType.SHORT);pass.drawIndexed(6,1,0,0,0);
+                }
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] rgba=readback(color),mask=readback(valid),xy=readback(flow),zs=readback(pair),sourceDepth=readback(scene);
+            ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder());
+            ByteBuffer depths=ByteBuffer.wrap(zs).order(ByteOrder.nativeOrder()),sourceZ=ByteBuffer.wrap(sourceDepth).order(ByteOrder.nativeOrder());
+            int visible=0,wrongCoverage=0,wrongTag=0,wrongMotion=0,wrongDepth=0;
+            for(int p=0;p<W*H;p++) {
+                boolean contributes=reference.getFloat(p*16+12)>0;
+                if(contributes!=(Byte.toUnsignedInt(mask[p])>31))wrongCoverage++;
+                if(!contributes)continue;visible++;
+                if(Byte.toUnsignedInt(mask[p])!=(birth ? 64 : 191))wrongTag++;
+                float x=Float.float16ToFloat(vectors.getShort(p*4)),y=Float.float16ToFloat(vectors.getShort(p*4+2));
+                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x-(birth ? 0 : delta.x))*W/2>.02
+                        ||Math.abs(y-(birth ? 0 : -delta.y))*H/2>.02)wrongMotion++;
+                float actualZ=sourceZ.getFloat(p*4);
+                if(Math.abs(depths.getFloat(p*8)-(birth ? -1 : actualZ+delta.z))>3e-6
+                        ||Math.abs(depths.getFloat(p*8+4)-actualZ)>3e-6)wrongDepth++;
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/clouds/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("original-source.rgba32f"),rgba);Files.write(dir.resolve("original-source.d32f"),sourceDepth);
+            Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("ownership.r8"),mask);Files.write(dir.resolve("correspondence.rg32f"),zs);
+            Files.writeString(dir.resolve("result.json"),"{\"visiblePixels\":"+visible+",\"wrongCoveragePixels\":"+wrongCoverage
+                    +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth+"}");
+            assertEquals(0,wrongCoverage);assertEquals(0,wrongTag);assertEquals(0,wrongMotion);assertEquals(0,wrongDepth);
+            if(fogged||zero)assertEquals(0,visible);else assertTrue(visible>20);
+        }
+    }
+
     @ParameterizedTest(name="actual weather scrolling: {0}")
     @MethodSource("weatherScrollFixtures")
     void weatherPatternMotionMatchesOriginalParticleCoverageAndOldQuadBounds(String name) throws Exception {

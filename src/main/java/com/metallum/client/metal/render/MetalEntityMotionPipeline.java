@@ -75,6 +75,7 @@ final class MetalEntityMotionPipeline {
         TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
         TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/"),
         LIGHTNING("core/lightning_previous_motion", "core/lightning_previous_motion", "lightning_previous_motion/"),
+        CLOUD("core/cloud_previous_motion", "core/cloud_previous_motion", "cloud_previous_motion/"),
         WATER_MASK("core/position_previous_motion", "core/position_previous_motion", "position_previous_motion/");
 
         private final Identifier vertexShader;
@@ -125,7 +126,8 @@ final class MetalEntityMotionPipeline {
     }
 
     static boolean requiresFogSnapshot(final RenderPipeline source) {
-        return previousFamilyOf(source)==PreviousFamily.LIGHTNING;
+        var family=previousFamilyOf(source);
+        return family==PreviousFamily.LIGHTNING || family==PreviousFamily.CLOUD;
     }
 
     static boolean usesEntityLightmap(final RenderPipeline source) {
@@ -139,6 +141,20 @@ final class MetalEntityMotionPipeline {
         return usesEntityLightmap(source) || family==PreviousFamily.BLOCK || family==PreviousFamily.PARTICLE
                 || ((family==PreviousFamily.TEXT || family==PreviousFamily.TEXT_BACKGROUND)
                     && !source.getShaderDefines().flags().contains("IS_SEE_THROUGH"));
+    }
+
+    static boolean usesSurfaceTexture(final RenderPipeline source,final String name) {
+        var family=previousFamilyOf(source);
+        return switch(name) {
+            case "Sampler0" -> family==PreviousFamily.ENTITY || family==PreviousFamily.BLOCK
+                    || family==PreviousFamily.SHADOW || family==PreviousFamily.PARTICLE || family==PreviousFamily.TEXT;
+            case "Sampler2" -> usesVisibilityLightmap(source);
+            case "DissolveMaskSampler" -> family==PreviousFamily.ENTITY
+                    && source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/entity")
+                    && source.getShaderDefines().flags().contains("DISSOLVE");
+            case "GlintSampler" -> family==PreviousFamily.ENTITY && source.getShaderDefines().flags().contains("GLINT");
+            default -> false;
+        };
     }
 
     private static boolean auditedShaders(final RenderPipeline source) {
@@ -209,11 +225,12 @@ final class MetalEntityMotionPipeline {
             return null;
         }
         java.util.List<@Nullable VertexFormat> bindings = source.getVertexFormatBindings();
+        String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
+        if(shader.equals("core/clouds") && bindings.stream().allMatch(java.util.Objects::isNull))return PreviousFamily.CLOUD;
         if (bindings.isEmpty() || bindings.get(0) == null || (bindings.size() >= 2 && bindings.get(1) != null)) {
             return null;
         }
         VertexFormat format = bindings.get(0);
-        String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
         if (shader.equals("core/entity") || shader.equals("core/item")) {
             boolean special = source.getShaderDefines().flags().contains("GLINT_SPECIAL");
             if (!special && DefaultVertexFormat.ENTITY.equals(format)) return PreviousFamily.ENTITY;
@@ -417,7 +434,8 @@ final class MetalEntityMotionPipeline {
                     : depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
             if(previousCoverage)builder.withShaderDefine("METALLUM_PREVIOUS_COVERAGE").withShaderDefine("METALLUM_REACTIVE_MATERIAL");
             if (depthCorrespondence) builder.withShaderDefine("METALLUM_PREVIOUS_VALIDITY");
-            if (DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(source.getVertexFormatBinding(0))) {
+            if (!source.getVertexFormatBindings().isEmpty()
+                    && DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(source.getVertexFormatBinding(0))) {
                 builder.withShaderDefine("METALLUM_ENTITY_GLINT_SPECIAL");
             }
         }
@@ -457,7 +475,7 @@ final class MetalEntityMotionPipeline {
             if(overridesPrivateDepth(source,depthAttachmentPresent))builder.withShaderDefine("METALLUM_MOTION_OVERLAY");
             if (source.getShaderDefines().flags().stream().anyMatch(flag -> flag.equals("GLINT")
                     || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))
-                    || previousFamily==PreviousFamily.LIGHTNING) {
+                    || previousFamily==PreviousFamily.LIGHTNING || previousFamily==PreviousFamily.CLOUD) {
                 builder.withShaderDefine("METALLUM_REACTIVE_MATERIAL");
             }
         }

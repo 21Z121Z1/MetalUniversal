@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -136,6 +137,26 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertEquals("core/block_motion",exact.getShaders().get(ShaderType.FRAGMENT).getPath());
         assertEquals(DefaultVertexFormat.BLOCK,exact.getVertexFormatBinding(0));
         assertEquals(16,exact.getVertexFormatBinding(1).getVertexSize());
+    }
+
+    @Test
+    void proceduralCloudsRequireDecodedFaceGeometryAndOwnFogRatherThanRigidFallback() {
+        for(var source:java.util.List.of(net.minecraft.client.renderer.RenderPipelines.CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.FLAT_CLOUDS,
+                net.minecraft.client.renderer.RenderPipelines.OIT_CLOUDS.accumulatePipeline())) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            assertFalse(MetalEntityMotionPipeline.supports(source));
+            assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
+            var replay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+            assertNull(replay.getVertexFormatBinding(0),
+                    "Current raster positions must retain the original procedural CloudFaces expression");
+            assertEquals("core/cloud_previous_motion",replay.getShaders().get(ShaderType.VERTEX).getPath());
+            assertTrue(replay.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler0"));
+            assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler2"));
+        }
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(pipeline("core/clouds",DefaultVertexFormat.POSITION_COLOR)),
+                "Custom attribute-based clouds cannot masquerade as the audited procedural source ABI");
     }
 
     @Test

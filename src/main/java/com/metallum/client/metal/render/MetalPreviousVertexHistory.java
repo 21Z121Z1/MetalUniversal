@@ -242,7 +242,7 @@ final class MetalPreviousVertexHistory {
         stageQuadIdentities(token,ids,true);
     }
 
-    /** Weather column coordinates use the full signed 64-bit key space, including the origin. */
+    /** Direct weather/cloud quads provide persistent identities, including signed column coordinates. */
     static void stageQuadIdentities(final @Nullable DrawToken token,final List<Long> ids) {
         stageQuadIdentities(token,ids,false);
     }
@@ -253,8 +253,10 @@ final class MetalPreviousVertexHistory {
         Signature s = snapshot.signature();
         if (ids == null || ids.isEmpty() || ids.stream().anyMatch(id -> id == null || (positiveOnly && id <= 0))
                 || s.topology() != PrimitiveTopology.QUADS
-                || !s.elements().equals(com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getElements())
-                || s.vertexSize() != com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getVertexSize()
+                || !(s.elements().equals(com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getElements())
+                        && s.vertexSize()==com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getVertexSize()
+                    || !positiveOnly && s.elements().equals(com.mojang.blaze3d.vertex.DefaultVertexFormat.POSITION_COLOR.getElements())
+                        && s.vertexSize()==com.mojang.blaze3d.vertex.DefaultVertexFormat.POSITION_COLOR.getVertexSize())
                 || s.vertexCount() != (long)ids.size()*4 || s.indexCount() != (long)ids.size()*6) {
             PENDING.remove(token.key());
             PARTICLE_MATCHES.remove(token.key().object());

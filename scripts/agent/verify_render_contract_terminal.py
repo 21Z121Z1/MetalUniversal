@@ -26,7 +26,7 @@ def check(manifest: dict, results: dict, source: str, captures: int) -> dict:
         require(type(document.get("schemaVersion")) is int and document["schemaVersion"] == 1,
                 f"{label} schema is unsupported")
         require(document.get("gitCommit") == source, f"{label} belongs to another source")
-        require(document.get("status") == "passed", f"{label} is not terminal passed")
+        require(document.get("status") == "passed", f"{label} is not terminal passed: status={document.get('status')!r}, complete={document.get('manifestComplete')!r}, dropped={document.get('droppedEvents')!r}, forced={document.get('forcedClosedPassCount')!r}, invalid={document.get('invalidPassReferenceCount')!r}, reason={document.get('manifestFailureReason')!r}")
     require(isinstance(manifest.get("runId"), str) and bool(manifest["runId"])
             and manifest["runId"] == results.get("runId"), "capture and trace run identities differ")
     require(manifest.get("manifestComplete") is True, "manifest is not complete after close")
