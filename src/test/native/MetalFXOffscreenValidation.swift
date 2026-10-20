@@ -167,7 +167,7 @@ private func bytesPerPixel(_ format: MTLPixelFormat) throws -> Int {
         return 4
     case .r8Unorm:
         return 1
-    case .depth32Float:
+    case .depth32Float, .r32Float:
         return 4
     default:
         try fail("unsupported validation readback format \(format.rawValue)")
@@ -1361,6 +1361,80 @@ private func runStandaloneInterpolation(harness: OffscreenHarness, root: URL) th
     return results
 }
 
+// Explicitly cover the production V4 producer/consumer boundary. Legacy v2
+// scenarios above remain independent image-quality fixtures, not evidence for it.
+private func runPreparedSurfaceConsumers(harness h: OffscreenHarness, root: URL,
+                                         temporal: Bool, interpolation: Bool) throws -> [String: Any] {
+    let frame = try h.makeFrame(label:"V4 source")
+    try h.clearColor(frame.color,color:MTLClearColor(red:0.2,green:0.4,blue:0.6,alpha:1))
+    try h.clearColor(frame.objectMotion)
+    try h.clearColor(frame.validity)
+    guard let depthClear = h.queue.makeCommandBuffer() else { try fail("V4 depth clear command") }
+    let depthPass = MTLRenderPassDescriptor()
+    depthPass.depthAttachment.texture = frame.depth
+    depthPass.depthAttachment.loadAction = .clear;depthPass.depthAttachment.clearDepth = 0.6
+    depthPass.depthAttachment.storeAction = .store
+    guard let depthEncoder = depthClear.makeRenderCommandEncoder(descriptor:depthPass) else { try fail("V4 depth clear") }
+    depthEncoder.endEncoding();try h.commitAndWait(depthClear,label:"V4 source depth")
+    let hud = try h.makeWorkingTexture(format:.r8Unorm,label:"V4 no HUD ownership")
+    let pair = try h.makeWorkingTexture(format:.rg32Float,label:"V4 correspondence")
+    let previousWorld = try h.makeWorkingTexture(format:.r32Float,label:"V4 previous world")
+    let previousHud = try h.makeWorkingTexture(format:.r32Float,label:"V4 previous HUD")
+    let nextWorld = try h.makeWorkingTexture(format:.r32Float,label:"V4 next world")
+    let nextHud = try h.makeWorkingTexture(format:.r32Float,label:"V4 next HUD")
+    let presentation = try h.makeWorkingTexture(format:.r32Float,label:"V4 presentation depth")
+    let motion = try h.makeWorkingTexture(format:.rg16Float,label:"V4 merged motion")
+    let camera = try h.makeWorkingTexture(format:.rg16Float,label:"V4 camera diagnostics")
+    let reactive = try h.makeWorkingTexture(format:.r8Unorm,label:"V4 reactive")
+    let disocclusion = try h.makeWorkingTexture(format:.r8Unorm,label:"V4 disocclusion")
+    for t in [hud,pair,previousWorld,previousHud,reactive] { try h.clearColor(t) }
+    guard let cb = h.queue.makeCommandBuffer() else { try fail("V4 resolve command") }
+    let pointer = Unmanaged.passUnretained(cb as AnyObject).toOpaque()
+    let identity = matrixFloats(matrix_identity_float4x4)
+    let jitterX: Float = 0.25, jitterY: Float = -0.375
+    let result = identity.withUnsafeBufferPointer { matrix in
+        metallumMetalFxResolveMotionV4(pointer,h.device,frame.depth,frame.depth,nil,
+            frame.objectMotion,frame.validity,hud,pair,previousWorld,previousHud,
+            motion,reactive,camera,disocclusion,nextWorld,presentation,nextHud,
+            matrix.baseAddress,matrix.baseAddress,matrix.baseAddress,nil,
+            jitterX,jitterY,0,0,0.35,Int32(h.width),Int32(h.height),0,1,0,1)
+    }
+    try require(result == 1,"V4 raw surface resolver must run independently of MetalFX support")
+    try h.commitAndWait(cb,label:"V4 raw resolve")
+    let depthBytes = try h.readback(presentation)
+    for p in 0..<h.width*h.height {
+        let bits = UInt32(depthBytes[p*4]) | UInt32(depthBytes[p*4+1])<<8
+            | UInt32(depthBytes[p*4+2])<<16 | UInt32(depthBytes[p*4+3])<<24
+        try require(abs(Float(bitPattern:bits)-0.6) < 0.000001,"V4 presentation depth differs from source")
+    }
+    let temporalOutput = try h.makeWorkingTexture(format:.rgba8Unorm,label:"prepared Temporal output")
+    guard let tc = h.queue.makeCommandBuffer() else { try fail("V4 prepared command") }
+    let encoded = metallumMetalFxEncodePreparedV4(Unmanaged.passUnretained(tc as AnyObject).toOpaque(),h.device,
+        frame.color,presentation,motion,reactive,temporalOutput,nil,jitterX,jitterY,
+        Int32(h.width),Int32(h.height),1,1)
+    try require(encoded == (temporal ? 1 : 0),"V4 prepared Temporal capability/result mismatch")
+    try h.commitAndWait(tc,label:"V4 prepared Temporal")
+    if interpolation {
+        let ui = try h.makeWorkingTexture(format:.rgba8Unorm,label:"V4 transparent UI")
+        let output = try h.makeWorkingTexture(format:.rgba8Unorm,label:"V4 interpolated output")
+        try h.clearColor(ui)
+        guard let ic = h.queue.makeCommandBuffer() else { try fail("V4 interpolation command") }
+        let color = temporal ? temporalOutput : frame.color
+        let fg = metallum_metalfx_frame_interpolator_encode_offscreen(ic,h.device,color,color,ui,
+            presentation,motion,output,jitterX,jitterY,60,0.05,1000,Float(h.width)/Float(h.height),1.0/30.0,0,1,1)
+        try require(fg == 1,"FrameInterpolator rejected actual V4 R32F presentation depth")
+        try h.commitAndWait(ic,label:"V4 R32F interpolation")
+    }
+    let dir = root.appendingPathComponent("prepared-surface-v4")
+    try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+    try Data(depthBytes).write(to:dir.appendingPathComponent("presentation.r32f"))
+    return ["name":"prepared_surface_v4_consumers","rawResolve":"passed",
+        "depthFormat":"R32Float","jitterPixels":[jitterX,jitterY],
+        "preparedTemporal":temporal ? "passed" : "blocked: supportsDevice=false",
+        "interpolation":interpolation ? "passed" : "blocked: supportsDevice=false",
+        "scope":"consumer wiring and metadata; synthetic scene, no quality or mixed-projection acceptance"]
+}
+
 @main
 private enum MetalFXOffscreenValidationMain {
     static func main() {
@@ -1383,6 +1457,8 @@ private enum MetalFXOffscreenValidationMain {
             }
 
             var results: [[String: Any]] = []
+            results.append(try runPreparedSurfaceConsumers(harness:harness,root:root,
+                temporal:temporalSupported,interpolation:interpolationSupported))
             if !temporalSupported || !interpolationSupported {
                 results.append(try runUnsupportedContracts(harness: harness, temporal: temporalSupported,
                                                           interpolation: interpolationSupported))

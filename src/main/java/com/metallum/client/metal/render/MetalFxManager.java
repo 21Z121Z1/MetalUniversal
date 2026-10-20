@@ -5348,7 +5348,9 @@ public final class MetalFxManager {
                         frameId,
                         false,
                         0,
-                        "colorEncodingContractUnproven:RGBA8_UNORM_sRGB_view"
+                        admission.projectionContractProven()
+                                ? "colorEncodingContractUnproven:RGBA8_UNORM_sRGB_view"
+                                : "projectionContractUnproven:mixed-world-HUD-depth-and-jitter"
                 );
             }
             // RGBA8_UNORM storage alone does not establish whether the attached

@@ -237,21 +237,40 @@ final class FrameSynthesisContract {
      * Frame Generation gate remains closed until a texture-view contract proves
      * the transfer function and composition order.</p>
      */
+    enum ProjectionEncodingEvidence {
+        SINGLE_CAMERA_DOMAIN,
+        /** Accurate HUD correspondence does not prove a world-camera depth/jitter encoding. */
+        MIXED_WORLD_HUD_UNPROVEN;
+
+        static ProjectionEncodingEvidence forCoverage(ProducerCoverageSet coverage) {
+            return coverage.receipts().stream().anyMatch(receipt -> receipt.domain() == ProducerDomain.FIRST_PERSON
+                    && receipt.samples() > 0) ? MIXED_WORLD_HUD_UNPROVEN : SINGLE_CAMERA_DOMAIN;
+        }
+    }
+
     record FrameGenerationAdmission(
             FrameStamp stamp,
             ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
             boolean reset,
-            ColorEncodingEvidence colorEncoding
+            ColorEncodingEvidence colorEncoding,
+            ProjectionEncodingEvidence projectionEncoding
     ) {
         FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
             Objects.requireNonNull(colorEncoding, "colorEncoding");
+            Objects.requireNonNull(projectionEncoding, "projectionEncoding");
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
+        }
+
+        FrameGenerationAdmission(FrameStamp stamp, ProducerCoverageSet producerCoverage, CameraFrameInput camera,
+                                 boolean reset, ColorEncodingEvidence colorEncoding) {
+            this(stamp, producerCoverage, camera, reset, colorEncoding,
+                    ProjectionEncodingEvidence.forCoverage(producerCoverage));
         }
 
         /**
@@ -285,8 +304,13 @@ final class FrameSynthesisContract {
          */
         boolean frameGenerationEligible(boolean allowDiagnosticColorAssumption) {
             return producerCoverage.frameGenerationEligible()
+                    && projectionContractProven()
                     && (colorEncoding.provenForFrameGeneration()
                     || allowDiagnosticColorAssumption && colorEncoding.diagnosticAssumption());
+        }
+
+        boolean projectionContractProven() {
+            return projectionEncoding == ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN;
         }
 
         boolean colorContractProven() {

@@ -99,6 +99,7 @@ final class MetalMotionShaderCompilationTest {
             Compilation result = compile(expandIncludes(resource, new HashSet<>()),
                     suffix.equals("vsh") ? Shaderc.shaderc_vertex_shader : Shaderc.shaderc_fragment_shader,
                     name, defines);
+            if (result.status() != Shaderc.shaderc_compilation_status_success) System.err.println(name + ": " + result.message());
             assertEquals(Shaderc.shaderc_compilation_status_success, result.status(), result.message());
         }
     }

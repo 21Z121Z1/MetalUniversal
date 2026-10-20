@@ -18,6 +18,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class FrameSynthesisContractTest {
     @Test
+    void exactHandHistoryDoesNotProveSingleCameraInterpolationInputs() {
+        var receipts = completeCoverage(REAL_MOTION, REAL_MOTION);
+        receipts.set(FrameSynthesisContract.ProducerDomain.FIRST_PERSON.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(FrameSynthesisContract.ProducerDomain.FIRST_PERSON, REAL_MOTION, 1));
+        var coverage = new FrameSynthesisContract.ProducerCoverageSet(receipts);
+        assertTrue(coverage.frameGenerationEligible(), "producer correspondence remains accurate");
+        var admission = new FrameSynthesisContract.FrameGenerationAdmission(
+                new FrameSynthesisContract.FrameStamp(1,1), coverage,
+                new FrameSynthesisContract.CameraFrameInput(70,.05F,1000,16F/9F,1F/60F), false,
+                FrameSynthesisContract.ColorEncodingEvidence.LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI);
+        assertFalse(admission.projectionContractProven());
+        assertFalse(admission.frameGenerationEligible());
+        assertFalse(admission.frameGenerationEligible(true), "color diagnostic cannot waive mixed projection");
+        receipts.set(FrameSynthesisContract.ProducerDomain.FIRST_PERSON.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(FrameSynthesisContract.ProducerDomain.FIRST_PERSON, NOT_PRESENT, 0));
+        var worldOnly = new FrameSynthesisContract.FrameGenerationAdmission(
+                new FrameSynthesisContract.FrameStamp(2,1),new FrameSynthesisContract.ProducerCoverageSet(receipts),
+                admission.camera(),false,admission.colorEncoding());
+        assertTrue(worldOnly.projectionContractProven());
+        assertTrue(worldOnly.frameGenerationEligible());
+    }
+
+    @Test
     void frameStampRequiresPositiveIdentity() {
         assertDoesNotThrow(() -> new FrameSynthesisContract.FrameStamp(1L, 1L));
         assertThrows(
