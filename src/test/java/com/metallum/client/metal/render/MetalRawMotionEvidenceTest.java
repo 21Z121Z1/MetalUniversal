@@ -13,7 +13,7 @@ final class MetalRawMotionEvidenceTest {
     }
 
     @Test void lateGpuCompletionKeepsTheOriginalSourceFrameAndUnprovenProducer() {
-        var pending=new MetalRawMotionEvidence("source-A",new FrameSynthesisContract.FrameStamp(7,3));
+        var pending=new MetalRawMotionEvidence("source-A",new FrameSynthesisContract.FrameStamp(7,3),9);
         assertThrows(IllegalStateException.class,pending::requireSnapshot);
         var clouds=new java.util.HashMap<String,MetalCloudMotion.LayerDiagnostics>();
         clouds.put("cloud",new MetalCloudMotion.LayerDiagnostics(2,16,true,true,true,"none"));
@@ -23,6 +23,7 @@ final class MetalRawMotionEvidenceTest {
         var captured=pending.requireSnapshot();
         assertEquals("source-A",captured.sourceCommit());assertEquals(7,captured.frameId());assertEquals(3,captured.historyEpoch());
         assertTrue(captured.diagnosticOnly());
+        assertEquals(9,captured.recordedTraceFrameId(),"Optional capture numbering is a separate diagnostic domain");
         assertEquals(7,captured.sourceCensus().sourceFrame().frameId());assertEquals(1,captured.cloudLayers().size());
         assertFalse(captured.sourceCensus().sourceFrame().linkageComplete(),"Diagnostic capture does not grant full motion admission");
         assertThrows(UnsupportedOperationException.class,()->captured.cloudLayers().clear());
@@ -31,7 +32,7 @@ final class MetalRawMotionEvidenceTest {
     }
 
     @Test void wrongFrameEpochOrOpenObservationNeverReplaceTheCapture() {
-        var pending=new MetalRawMotionEvidence("source-A",new FrameSynthesisContract.FrameStamp(7,3));
+        var pending=new MetalRawMotionEvidence("source-A",new FrameSynthesisContract.FrameStamp(7,3),9);
         for(var source:List.of(census(8,3,true),census(7,4,true),census(7,3,false))) {
             assertThrows(IllegalStateException.class,()->pending.freeze(source,Map.of()));
             assertThrows(IllegalStateException.class,pending::requireSnapshot);

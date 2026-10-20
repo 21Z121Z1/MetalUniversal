@@ -2,6 +2,8 @@
 
 代码复核发现，原raw纹理复制在源帧内捕获frame/epoch，而cloud诊断在future完成后再读取全局census和layer状态。客户端可能已推进到后续帧；这是一处由异步生命周期直接造成的关联风险，尚不声称已在旧运行中测得错配。场景像素断言通过不证明两个独立时刻的清单属于同一帧。
 
+准确1bbee646 Vanilla FX job118920982829的四份cloud收据进一步证明，FAST/FANCY×ordinary/OIT的world有效像素分别为12897/13015/30258/30421，faceBytes由75207变为110073，却都沿用frameId=9、epoch=23。根因是`bindSourceFrameStamp`优先采用停在9的可选记录器currentFrameId。源帧语义ID现改为独立递增，编号耗尽时推进history epoch；记录器编号只作为`recordedTraceFrameId`诊断字段保留。真实cloud验收要求同epoch的不同请求严格推进，不能让同值编号伪装同帧绑定。
+
 本修正为每个raw请求建立独立证据owner，在原有source observation关闭点冻结当前不可变census与cloud层快照；不移动关闭点，不改变颜色/运动编码、深度、容差或功能准入。冻结要求collected、closed以及相同frame/epoch，且只能成功一次。GPU完成回调只消费该owner，不重新读取当前全局状态。结果和`source-frame-evidence.json`全部写完后才完成future。
 
 UI清单选择也同时核对frame和epoch；当当前及上次UI都不属于对应源帧时返回明确的未观察状态，不能凭相同frameId借用另一个epoch的clear-only条件。source证据JSON逐条写入Writer，避免为整个清单再构造一份大字符串。

@@ -109,4 +109,13 @@ final class CloudMotionEvidenceTest {
         Files.delete(root.resolve("source-frame-evidence.json"));
         assertThrows(java.io.IOException.class,()->CloudMotionEvidence.sourceFrameEvidence(root,"abc123",7,3));
     }
+
+    @Test void frozenTraceFrameNineCannotProveFourDistinctCloudSourceFrames() {
+        CloudMotionEvidence.requireSourceFrameAdvance(0,0,9,23);
+        assertThrows(IllegalStateException.class,()->CloudMotionEvidence.requireSourceFrameAdvance(9,23,9,23));
+        assertThrows(IllegalStateException.class,()->CloudMotionEvidence.requireSourceFrameAdvance(9,23,8,23));
+        CloudMotionEvidence.requireSourceFrameAdvance(9,23,17,23);
+        CloudMotionEvidence.requireSourceFrameAdvance(Long.MAX_VALUE,23,1,24);
+        assertThrows(IllegalStateException.class,()->CloudMotionEvidence.requireSourceFrameAdvance(9,23,0,24));
+    }
 }

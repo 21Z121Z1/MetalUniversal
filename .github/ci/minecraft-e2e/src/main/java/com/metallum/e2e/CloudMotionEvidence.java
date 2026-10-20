@@ -13,6 +13,12 @@ final class CloudMotionEvidence {
     record Pixels(long worldSurfaceOutsideHud,long reactiveWorldOutsideHud,long transparentWorldOutsideHud,
                   long opaqueDepthOutsideHud,long hudCovered) {}
 
+    static void requireSourceFrameAdvance(long previousFrame,long previousEpoch,long frame,long epoch) {
+        if(frame<=0 || epoch<=0 || (epoch==previousEpoch && frame<=previousFrame))
+            throw new IllegalStateException("Distinct raw captures reused or reversed a source frame within one epoch: "
+                    +previousFrame+"/"+previousEpoch+" -> "+frame+"/"+epoch);
+    }
+
     static JsonObject sourceFrameEvidence(Path root,String source,long frameId,long epoch) throws IOException {
         var evidence=JsonParser.parseString(Files.readString(root.resolve("source-frame-evidence.json"))).getAsJsonObject();
         var census=object(evidence,"sourceCensus");

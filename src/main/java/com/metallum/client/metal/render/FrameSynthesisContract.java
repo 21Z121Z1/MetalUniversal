@@ -33,6 +33,14 @@ final class FrameSynthesisContract {
         }
     }
 
+    /** Source identity advances independently of an optional, bounded trace recorder. */
+    static FrameStamp nextSourceFrame(long previousFrameId,long historyEpoch) {
+        if(previousFrameId<0 || historyEpoch<=0)throw new IllegalArgumentException("Invalid source sequence/epoch");
+        return previousFrameId==Long.MAX_VALUE
+                ? new FrameStamp(1,historyEpoch==Long.MAX_VALUE ? 1 : historyEpoch+1)
+                : new FrameStamp(previousFrameId+1,historyEpoch);
+    }
+
     enum ProducerCoverage {
         REAL_MOTION,
         REACTIVE_ONLY,

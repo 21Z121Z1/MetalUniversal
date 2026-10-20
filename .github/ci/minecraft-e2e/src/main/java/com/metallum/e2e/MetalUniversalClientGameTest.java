@@ -1116,6 +1116,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     }
 
     private static void verifyCloudSourceEntries(ClientGameTestContext context,TestSingleplayerContext singleplayer,Path output) {
+        long previousSourceFrame=0,previousSourceEpoch=0;
         var original=context.computeOnClient(client->client.options.cloudStatus().get());
         boolean transparency=context.computeOnClient(client->client.options.improvedTransparency().get());
         float height=context.computeOnClient(client->client.gameRenderer.mainCamera().attributeProbe()
@@ -1133,6 +1134,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     Path dir=output.resolve("cloud-motion-"+status.name().toLowerCase(java.util.Locale.ROOT)+(oit ? "-oit" : "-ordinary"));
                     var pending=context.computeOnClient(client->com.metallum.client.metal.render.MetalFxManager.requestRawMotionValidation(dir));
                     context.waitFor(client->pending.isDone(),200);var raw=pending.join();
+                    CloudMotionEvidence.requireSourceFrameAdvance(previousSourceFrame,previousSourceEpoch,raw.frameId(),raw.historyEpoch());
+                    previousSourceFrame=raw.frameId();previousSourceEpoch=raw.historyEpoch();
                     try {
                         var frozen=CloudMotionEvidence.sourceFrameEvidence(dir,raw.sourceCommit(),raw.frameId(),raw.historyEpoch());
                         var report=new JsonObject();var gson=new GsonBuilder().setPrettyPrinting().create();
@@ -1142,6 +1145,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         report.addProperty("sourceEvidenceFrameId",frozen.get("frameId").getAsLong());
                         report.addProperty("sourceEvidenceHistoryEpoch",frozen.get("historyEpoch").getAsLong());
                         report.addProperty("sourceEvidenceSourceCommit",frozen.get("sourceCommit").getAsString());
+                        report.addProperty("sourceEvidenceTraceFrameId",frozen.get("recordedTraceFrameId").getAsLong());
                         Files.writeString(dir.resolve("cloud-source-census.json"),gson.toJson(report)+"\n");
                     } catch(IOException failure) {throw new IllegalStateException("Cannot retain actual cloud source census",failure);}
                     require(raw.worldValidPixels()>0 && raw.worldSurfacePixelsOutsideHand()>0 && raw.finiteValidPixels()>=raw.worldValidPixels()

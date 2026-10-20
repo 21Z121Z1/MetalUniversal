@@ -6,17 +6,21 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Frame-bound immutable diagnostics retained until asynchronous GPU readback completes. */
 final class MetalRawMotionEvidence {
-    record Snapshot(String sourceCommit,long frameId,long historyEpoch,boolean diagnosticOnly,String observationPoint,
+    record Snapshot(String sourceCommit,long frameId,long historyEpoch,long recordedTraceFrameId,
+                    boolean diagnosticOnly,String observationPoint,
                     MetalMotionDrawCoverage.Census sourceCensus,
                     Map<String,MetalCloudMotion.LayerDiagnostics> cloudLayers) {}
 
     private final String sourceCommit;
     private final FrameSynthesisContract.FrameStamp stamp;
+    private final long recordedTraceFrameId;
     private final AtomicReference<Snapshot> frozen=new AtomicReference<>();
 
-    MetalRawMotionEvidence(String sourceCommit,FrameSynthesisContract.FrameStamp stamp) {
+    MetalRawMotionEvidence(String sourceCommit,FrameSynthesisContract.FrameStamp stamp,long recordedTraceFrameId) {
         this.sourceCommit=Objects.requireNonNull(sourceCommit);
         this.stamp=Objects.requireNonNull(stamp);
+        if(recordedTraceFrameId<0)throw new IllegalArgumentException("Invalid diagnostic trace frame");
+        this.recordedTraceFrameId=recordedTraceFrameId;
     }
 
     void freeze(MetalMotionDrawCoverage.Census census,Map<String,MetalCloudMotion.LayerDiagnostics> clouds) {
@@ -29,7 +33,7 @@ final class MetalRawMotionEvidence {
                     +stamp.frameId()+"/"+stamp.historyEpoch()+", observed "
                     +(source==null ? "missing" : source.frameId()+"/"+source.epoch()+", closed="+source.closed()));
         }
-        var snapshot=new Snapshot(sourceCommit,stamp.frameId(),stamp.historyEpoch(),true,
+        var snapshot=new Snapshot(sourceCommit,stamp.frameId(),stamp.historyEpoch(),recordedTraceFrameId,true,
                 "source motion closed before later GUI",census,Map.copyOf(clouds));
         if(!frozen.compareAndSet(null,snapshot))throw new IllegalStateException("Raw motion source evidence already frozen");
     }

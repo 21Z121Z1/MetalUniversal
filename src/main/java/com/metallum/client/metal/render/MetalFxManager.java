@@ -3041,7 +3041,7 @@ public final class MetalFxManager {
         var stamp = sourceFrameStamp;
         retirePendingRawMotionEvidence("Raw motion source frame retired before its evidence was frozen");
         var sourceEvidence=new MetalRawMotionEvidence(
-                System.getProperty("metallum.validation.sourceCommit","unknown"),stamp);
+                System.getProperty("metallum.validation.sourceCommit","unknown"),stamp,RenderContractRuntime.currentFrameId());
         var pendingEvidence=new PendingRawMotionEvidence(request,sourceEvidence);
         pendingRawMotionEvidence.set(pendingEvidence);
         int width = renderWidth, height = renderHeight;
@@ -5065,23 +5065,13 @@ public final class MetalFxManager {
                 || sourceFrameStamp != null) {
             return;
         }
-        long contractFrameId = RenderContractRuntime.currentFrameId();
-        long frameId;
-        if (contractFrameId > 0L) {
-            sourceFrameSequence = Math.max(sourceFrameSequence, contractFrameId);
-            frameId = contractFrameId;
-        } else {
-            frameId = sourceFrameSequence == Long.MAX_VALUE ? 1L : sourceFrameSequence + 1L;
-            sourceFrameSequence = frameId;
+        var next=FrameSynthesisContract.nextSourceFrame(sourceFrameSequence,historyEpoch);
+        if(next.historyEpoch()!=historyEpoch) {
+            resetHistoryInternal("source-frame-id-wrap");
+            motionInputsPrepared=prepareMotionInputs();
         }
-        if (frameId <= 0L) {
-            // The contract rejects zero/negative ids.  This is practically
-            // unreachable, but keeping the fallback explicit preserves the
-            // fail-closed invariant across a long-running counter wrap.
-            sourceFrameSequence = 1L;
-            frameId = sourceFrameSequence;
-        }
-        sourceFrameStamp = new FrameSynthesisContract.FrameStamp(frameId, historyEpoch);
+        sourceFrameSequence=next.frameId();
+        sourceFrameStamp=next;
         frameSynthesisReceipts.beginFrame(sourceFrameStamp);
         MetalMotionDrawCoverage.bindSourceFrame(sourceFrameStamp);
         if (irisMotionSemanticsUnprovenThisFrame) {
