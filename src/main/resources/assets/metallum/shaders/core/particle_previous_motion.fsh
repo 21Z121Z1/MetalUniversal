@@ -5,8 +5,7 @@
 
 uniform sampler2D Sampler0;
 
-layout(location = 0) noperspective in vec2 metallumObjectMotion;
-layout(location = 1) flat in float metallumObjectValidity;
+#include <metallum:motion_fragment.glsl>
 layout(location = 2) in vec2 metallumTexCoord;
 layout(location = 3) in float metallumVertexAlpha;
 
@@ -21,6 +20,7 @@ void main() {
     if (alpha < 0.1) {
         discard;
     }
-    metallumMotionTarget = metallumObjectMotion;
-    metallumValidityTarget = metallumObjectValidity;
+    MetallumMotionSample metallumSample = metallumMotionSample();
+    metallumMotionTarget = metallumSample.motion;
+    metallumValidityTarget = metallumSample.validity;
 }

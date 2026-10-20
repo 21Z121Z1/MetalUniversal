@@ -4,8 +4,7 @@
 uniform sampler2D Sampler0;
 #include <minecraft:dynamictransforms.glsl>
 
-layout(location = 0) noperspective in vec2 metallumObjectMotion;
-layout(location = 1) flat in float metallumObjectValidity;
+#include <metallum:motion_fragment.glsl>
 layout(location = 2) in vec2 metallumTexCoord;
 layout(location = 3) flat in float metallumVertexColorGuard;
 layout(location = 4) in float metallumVertexAlpha;
@@ -30,6 +29,7 @@ void main() {
     // occlude another producer's flow in the private motion depth buffer.
     if (texture(Sampler0, metallumTexCoord).a * metallumVertexAlpha * ColorModulator.a <= 0.0) discard;
 #endif
-    metallumMotionTarget = metallumObjectMotion;
-    metallumValidityTarget = metallumObjectValidity;
+    MetallumMotionSample metallumSample = metallumMotionSample();
+    metallumMotionTarget = metallumSample.motion;
+    metallumValidityTarget = metallumSample.validity;
 }

@@ -45,6 +45,14 @@ final class MetalMotionProducerGpuTest {
     record Fixture(String name, String source, VertexFormat format, boolean alphaCutout,
                    boolean deformed, boolean alphaHole, boolean behind) {}
 
+    record ProjectiveFixture(String name, boolean deformed, boolean previousBehind, boolean jitter) {}
+
+    static Stream<ProjectiveFixture> projectiveFixtures() {
+        return Stream.of(new ProjectiveFixture("projective_yaw", false, false, false),
+                new ProjectiveFixture("projective_posed_jitter", true, false, true),
+                new ProjectiveFixture("projective_partial_previous_behind", true, true, true));
+    }
+
     static Stream<Fixture> fixtures() {
         return Stream.of(
                 new Fixture("entity_rigid", "core/entity", DefaultVertexFormat.ENTITY, false, false, false, false),
@@ -179,6 +187,143 @@ final class MetalMotionProducerGpuTest {
 
     private MetalGpuTexture texture(String name, GpuFormat format, int usage) {
         return (MetalGpuTexture) device.createTexture(name, usage | GpuTexture.USAGE_RENDER_ATTACHMENT, format, W, H, 1, 1);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("projectiveFixtures")
+    void eachFragmentMatchesIndependentPerspectiveCorrespondence(ProjectiveFixture fixture) throws Exception {
+        float[][] current = {{-.85F,-.5F,-1.4F},{.9F,-.5F,-4.6F},{-.1F,.85F,-2.4F}};
+        float[][] previous = new float[3][3];
+        for (int i=0; i<3; i++) {
+            previous[i] = current[i].clone();
+            if (fixture.deformed()) { previous[i][0] += i == 0 ? -.18F : .07F; previous[i][2] += i == 1 ? 1.1F : -.2F; }
+        }
+        if (fixture.previousBehind()) previous[0][2] = .95F;
+        Matrix4f baseP = new Matrix4f().perspective((float)Math.toRadians(75), (float)W/H, 100, .05F, true);
+        Matrix4f rasterP = new Matrix4f(baseP);
+        if (fixture.jitter()) rasterP.m20(.012F).m21(-.009F);
+        Matrix4f view = new Matrix4f().translate(.02F,-.015F,0).rotateY(-.08F);
+        Matrix4f previousView = new Matrix4f().rotateY(.18F).translate(-.05F,.03F,0);
+        var source = RenderPipeline.builder().withLocation("motion_contract/"+fixture.name())
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0, DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(ColorTargetState.DEFAULT).withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE")
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        ByteBuffer mesh = ByteBuffer.allocateDirect(3*DefaultVertexFormat.ENTITY.getVertexSize()).order(ByteOrder.nativeOrder());
+        ByteBuffer old = ByteBuffer.allocateDirect(36).order(ByteOrder.nativeOrder());
+        for (int i=0; i<3; i++) {
+            int offset = i*DefaultVertexFormat.ENTITY.getVertexSize();
+            for (int c=0; c<3; c++) { mesh.putFloat(offset+4*c,current[i][c]); old.putFloat(previous[i][c]); }
+            mesh.putInt(offset+DefaultVertexFormat.ENTITY.getElement("Color").offset(), -1);
+        }
+        old.flip();
+        ByteBuffer dynamic = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder()); view.get(0,dynamic);new Matrix4f().get(64,dynamic);
+        for (int i=0;i<4;i++) dynamic.putFloat(128+i*4,1);
+        ByteBuffer projection = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());rasterP.get(0,projection);
+        ByteBuffer fog = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        Matrix4f flip = new Matrix4f().scaling(1,-1,1);
+        Matrix4f currentMvp = new Matrix4f(flip).mul(baseP).mul(view);
+        Matrix4f previousMvp = new Matrix4f(flip).mul(baseP).mul(previousView);
+        Matrix4f rasterMvp = new Matrix4f(flip).mul(rasterP).mul(view);
+        ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        new Matrix4f(flip).mul(baseP).mul(new Matrix4f(rasterP).invert()).get(0,motion); previousMvp.get(64,motion);
+        try (var vb=device.createBuffer(() -> "projective source",GpuBuffer.USAGE_VERTEX,mesh);
+             var pb=device.createBuffer(() -> "projective previous",GpuBuffer.USAGE_VERTEX,old);
+             var du=device.createBuffer(() -> "projective dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+             var pr=device.createBuffer(() -> "projective projection",GpuBuffer.USAGE_UNIFORM,projection);
+             var fo=device.createBuffer(() -> "projective fog",GpuBuffer.USAGE_UNIFORM,fog);
+             var mo=device.createBuffer(() -> "projective motion",GpuBuffer.USAGE_UNIFORM,motion);
+             var color=texture("actual projective source",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_COPY_SRC);
+             var flow=texture("projective motion",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
+             var valid=texture("projective validity",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
+             var sampled=texture("projective texture",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+             var cv=device.createTextureView(color);var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var sv=device.createTextureView(sampled);
+             var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled,new Vector4f(1));
+            try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Actual projective Minecraft color")
+                    .withColorAttachment(cv,Optional.of(new Vector4f(0))).build())) {
+                pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());
+                pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.draw(3,1,0,0);
+            }
+            try (var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Projective motion contract")
+                    .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0))).build())) {
+                pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositions(source));pass.setUniform("Projection",pr.slice());
+                pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("MetallumMotion",mo.slice());pass.bindTexture("Sampler0",sv,sampler);
+                pass.setVertexBuffer(0,vb.slice());pass.setVertexBuffer(1,pb.slice());pass.draw(3,1,0,0);
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] pixels=readback(color),mask=readback(valid),vectors=readback(flow);
+            ByteBuffer values=ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
+            Vector4f[] rasterClip=project(rasterMvp,current),currentClip=project(currentMvp,current),previousClip=project(previousMvp,previous);
+            int covered=0,expectedValid=0,invalid=0,wrongValidity=0;
+            double maxError=0,maxLinearError=0,maxPrecisionExcess=0;
+            for (int p=0;p<W*H;p++) {
+                if (Byte.toUnsignedInt(pixels[p*4+3])<128) continue;
+                covered++;
+                double[] screen=barycentric(2*(p%W+.5)/W-1,1-2*(p/W+.5)/H,rasterClip);
+                double[] weights=new double[3];double sum=0;
+                for(int i=0;i<3;i++){weights[i]=screen[i]/rasterClip[i].w;sum+=weights[i];}
+                for(int i=0;i<3;i++)weights[i]/=sum;
+                double[] c=interpolate(currentClip,weights),b=interpolate(previousClip,weights);
+                double x=b[0]/b[3]-c[0]/c[3],y=c[1]/c[3]-b[1]/b[3];
+                boolean expected=c[3]>1E-6&&b[3]>1E-6&&Double.isFinite(x)&&Double.isFinite(y)&&Math.abs(x)<=32&&Math.abs(y)<=32;
+                boolean actual=Byte.toUnsignedInt(mask[p])>127;
+                if(expected!=actual)wrongValidity++;
+                if(!expected){invalid++;continue;}
+                expectedValid++;
+                if (actual) {
+                    double errorX = Math.abs(x-Float.float16ToFloat(values.getShort(p*4)))*W/2;
+                    double errorY = Math.abs(y-Float.float16ToFloat(values.getShort(p*4+2)))*H/2;
+                    maxError = Math.max(maxError, Math.max(errorX, errorY));
+                    maxPrecisionExcess = Math.max(maxPrecisionExcess, Math.max(
+                            errorX-halfRoundingBudgetPixels(x,W), errorY-halfRoundingBudgetPixels(y,H)));
+                }
+                if(!fixture.previousBehind()) {
+                    double lx=0,ly=0;
+                    for(int i=0;i<3;i++){lx+=screen[i]*(previousClip[i].x/previousClip[i].w-currentClip[i].x/currentClip[i].w);
+                        ly+=screen[i]*(currentClip[i].y/currentClip[i].w-previousClip[i].y/previousClip[i].w);}
+                    maxLinearError=Math.max(maxLinearError,Math.max(Math.abs(x-lx)*W/2,Math.abs(y-ly)*H/2));
+                }
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/"+fixture.name());Files.createDirectories(dir);
+            Files.write(dir.resolve("source.rgba8"),pixels);Files.write(dir.resolve("validity.r8"),mask);Files.write(dir.resolve("motion.rg16f"),vectors);
+            Files.writeString(dir.resolve("result.json"),"{\"fixture\":\""+fixture.name()+"\",\"width\":"+W+",\"height\":"+H
+                    +",\"sourcePixels\":"+covered+",\"expectedValidPixels\":"+expectedValid+",\"expectedInvalidPixels\":"+invalid
+                    +",\"wrongValidityPixels\":"+wrongValidity+",\"maxErrorPixels\":"+maxError
+                    +",\"maxErrorBeyondHalfPrecisionPixels\":"+maxPrecisionExcess+",\"oldLinearErrorPixels\":"+maxLinearError+"}");
+            assertTrue(covered>100&&expectedValid>50);
+            if(fixture.previousBehind())assertTrue(invalid>10,"the fixture must cross previous camera w=0");
+            else assertTrue(maxLinearError>.2,"the independent oracle must detect old per-vertex NDC interpolation");
+            assertEquals(0,wrongValidity,"validity is evaluated per fragment, not from a provoking vertex");
+            assertTrue(maxPrecisionExcess<.02,
+                    "each pixel must match the independent surface point within RG16F rounding + .02 pixel: "+maxPrecisionExcess);
+        }
+    }
+
+    private static double halfRoundingBudgetPixels(double value, int extent) {
+        // Near previous w=0, valid vectors can approach 32 NDC. A fixed .1-pixel
+        // threshold would reject correct RG16F quantization there (up to .25 pixel).
+        float roundedMagnitude = Math.abs(Float.float16ToFloat(Float.floatToFloat16((float)value)));
+        int bits = Short.toUnsignedInt(Float.floatToFloat16(roundedMagnitude));
+        float nextMagnitude = Float.float16ToFloat((short)(bits+1));
+        return (nextMagnitude-roundedMagnitude)*.5*extent/2;
+    }
+
+    private static Vector4f[] project(Matrix4f matrix,float[][] positions) {
+        Vector4f[] out=new Vector4f[3];for(int i=0;i<3;i++)out[i]=matrix.transform(new Vector4f(positions[i][0],positions[i][1],positions[i][2],1));return out;
+    }
+
+    private static double[] interpolate(Vector4f[] values,double[] weights) {
+        double[] out=new double[4];for(int i=0;i<3;i++){out[0]+=weights[i]*values[i].x;out[1]+=weights[i]*values[i].y;out[2]+=weights[i]*values[i].z;out[3]+=weights[i]*values[i].w;}return out;
+    }
+
+    private static double[] barycentric(double x,double y,Vector4f[] clip) {
+        double ax=clip[0].x/clip[0].w,ay=clip[0].y/clip[0].w,bx=clip[1].x/clip[1].w,by=clip[1].y/clip[1].w,cx=clip[2].x/clip[2].w,cy=clip[2].y/clip[2].w;
+        double d=(by-cy)*(ax-cx)+(cx-bx)*(ay-cy),a=((by-cy)*(x-cx)+(cx-bx)*(y-cy))/d,b=((cy-ay)*(x-cx)+(ax-cx)*(y-cy))/d;return new double[]{a,b,1-a-b};
     }
 
     @Test

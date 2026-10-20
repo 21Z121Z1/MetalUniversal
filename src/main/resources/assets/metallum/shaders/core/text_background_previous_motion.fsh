@@ -3,8 +3,7 @@
 
 #include <minecraft:dynamictransforms.glsl>
 
-layout(location = 0) noperspective in vec2 metallumObjectMotion;
-layout(location = 1) flat in float metallumObjectValidity;
+#include <metallum:motion_fragment.glsl>
 layout(location = 2) in vec4 metallumVertexColor;
 
 layout(location = 0) out vec2 metallumMotionTarget;
@@ -19,6 +18,7 @@ void main() {
     if (color.a < 0.1) {
         discard;
     }
-    metallumMotionTarget = metallumObjectMotion;
-    metallumValidityTarget = metallumObjectValidity;
+    MetallumMotionSample metallumSample = metallumMotionSample();
+    metallumMotionTarget = metallumSample.motion;
+    metallumValidityTarget = metallumSample.validity;
 }
