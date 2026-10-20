@@ -71,15 +71,26 @@ jobs:
           xcodebuild -version > build/agent-evidence/metalfx/xcode.txt
           xcrun --sdk macosx --show-sdk-version > build/agent-evidence/metalfx/sdk.txt
           sdk="$(xcrun --sdk macosx --show-sdk-path)"
-          cp -R "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
+          cp -RL "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
           python3 - <<'PY'
+          import hashlib, json
           from pathlib import Path
-          for path in sorted(Path('build/agent-evidence/metalfx/sdk-headers').rglob('*.h')):
+          headers = sorted(Path('build/agent-evidence/metalfx/sdk-headers').rglob('*.h'))
+          if not headers:
+              raise SystemExit('SDK header evidence is empty')
+          contracts = []
+          for path in headers:
               lines = path.read_text().splitlines()
               for index, line in enumerate(lines):
                   if any(name in line for name in ('motionVectorScaleX', 'jitterOffsetX', 'deltaTime', 'fieldOfView')):
+                      excerpt = '\n'.join(lines[max(0,index-9):index+2])
+                      contracts.append({'header':path.name, 'line':index+1,
+                          'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'excerpt':excerpt})
                       print('SDK_CONTRACT', path.name, index + 1)
-                      print('\n'.join(lines[max(0,index-9):index+2]))
+                      print(excerpt)
+          if not contracts:
+              raise SystemExit('SDK motion/camera contract evidence is empty')
+          Path('build/agent-evidence/metalfx/sdk-contracts.json').write_text(json.dumps(contracts, sort_keys=True))
           PY
           shasum -a 256 src/main/native/MetallumNative.swift src/test/native/MetalMotionContractValidation.swift > build/agent-evidence/metalfx/source-sha256.txt
       - name: Execute raw Metal and native lifecycle contracts
@@ -132,6 +143,7 @@ jobs:
           import base64, gzip, hashlib, json, os, pathlib, xml.etree.ElementTree as ET
           paths = [pathlib.Path(p) for p in (
               'build/agent-evidence/metalfx/capabilities.json',
+              'build/agent-evidence/metalfx/sdk-contracts.json',
               'build/metal-validation/motion-current/summary.json',
               'build/metal-validation/offscreen-current/summary.json',
               'build/agent-evidence/metalfx-color-transfer/ramp.json')]

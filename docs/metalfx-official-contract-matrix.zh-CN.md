@@ -19,7 +19,7 @@
 | jitter | `prepareSceneProjectionInternal`、源 draw 冻结 projection、V4 surface resolver | 当前反矩阵使用 raster jitter；对应向量不含 jitter；世界历史查找补偿前后 jitter，HUD 独立 |
 | 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史 | 不用当前深度冒充动态表面 previous Z；无历史保留 current Z 与无效所有权 |
 | 动态分辨率 | `ensureTargets`、scaler key、历史 reset | 当前策略重新分配并 reset；尚未采用保留最大分配、逐帧 content size 改变的优化，不宣称无 reset 的动态历史 |
-| 独立投影 | `MetalPreviousVertexReplay`、`MetalFirstPersonMotionGpuTest` | 手部实际 projection/model-view 与世界相机分开；普通及后处理 HUD 深度分别捕获 |
+| 独立投影 | `MetalPreviousVertexReplay`、`MetalFirstPersonMotionGpuTest`、`ProjectionEncodingEvidence` | 手部实际 projection/model-view 与世界相机分开；普通及后处理 HUD 深度分别捕获。混合 world/HUD 的原始 Z 尚不能由单一 FG 相机／jitter 描述，准确手部几何也不解除这项准入 |
 | 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调 | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史 |
 | 遮挡 | V4 surface resolver 与 `MetalMotionContractValidation` | previous 表面 Z、前帧 HUD 遮挡、标准／反向 Z、中心遮挡、无效对应不得回退为相机运动 |
 | 透明与特殊材质 | source draw 真实状态、材质 reactive 与 previous validity 分离 | 单一运动不能表示多层混合；未知 pipeline／格式仍拒绝，reactive 不算完整 FG 对应 |
@@ -31,7 +31,7 @@
 | scaler／FG 关联 | `compatibleLinkedTemporalScaler` | 线性 RGBA16F scaler 输出与 SDR RGBA8 FG 输入不兼容时使用已有 standalone 路径；不能伪报 linked |
 | 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放 |
 | GPU 同步 | 公共 render pass、encoder fence、Metal4 barrier；present worker completion | 转换 pass 与 native scaler 处于同一公共编码事务；实际 Metal3/4 执行需按对应路径收据区分 |
-| 插帧节奏 | `MetalFrameGenerationLifecycle`、`MetalFramePacing`、present worker | deltaTime 秒、源提交身份、generated/real 顺序、丢帧／迟到回退；真实显示节拍和延迟需要物理显示器 |
+| 插帧节奏与相机 | `MetalFrameGenerationLifecycle`、`MetalFramePacing`、`Perspective.fromProjection`、present worker | 从实际对称有限 reversed-Z 投影提取 FOV／near／far／aspect，拒绝猜测相机参数；保留真实源帧 deltaTime 秒、源提交身份、generated/real 顺序、丢帧／迟到回退；真实显示节拍和延迟需要物理显示器 |
 | UI 合成 | `uiTarget` 与 scene 分离、`isUITextureComposited=false` | 完整 GUI 混合集合尚未证明 premultiplied；保持颜色／生产者准入失败关闭 |
 | 能力与回退 | `MetalFxCapabilityProbe`、独立 Temporal／FG offscreen 检查 | raw Metal／Spatial 可用不等于 Temporal／FG；失败回退原始 fullscreen copy，默认 Temporal OFF、FG false |
 
