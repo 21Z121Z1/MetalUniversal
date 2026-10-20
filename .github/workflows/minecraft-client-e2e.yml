@@ -161,6 +161,16 @@ jobs:
           set -euo pipefail
           root='.github/ci/minecraft-e2e/build/evidence'
           log='.github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log'
+          captures=9
+          if [[ "$METALLUM_E2E_SCENE" == stationary ]]; then captures=8; fi
+          python3 scripts/agent/verify_render_contract_terminal.py \
+            --root "$root/metal-framebuffer/render-contract" \
+            --source "$METALLUM_SOURCE_SHA" --captures "$captures"
+          if [[ "$METALLUM_E2E_SCENE" == stationary ]]; then
+            python3 scripts/agent/verify_render_contract_terminal.py \
+              --root "$root/terrain-color-control/render-contract" \
+              --source "$METALLUM_SOURCE_SHA" --captures 1
+          fi
           python3 - "$root" "${{ steps.metallum.outputs.jar }}" <<'PY'
           import json
           import pathlib

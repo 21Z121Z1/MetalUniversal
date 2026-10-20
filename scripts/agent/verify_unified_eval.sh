@@ -24,6 +24,7 @@ python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 scripts/agent/verify_terrain_work_events.py --self-test
 python3 scripts/agent/verify_frame_evidence.py --self-test
+python3 scripts/agent/verify_render_contract_terminal.py --self-test
 python3 -m unittest discover -s scripts/agent -p 'test_frame_*.py'
 python3 -m py_compile \
   scripts/agent/verify_benchmark_profiles.py \
@@ -37,6 +38,7 @@ python3 -m py_compile \
   scripts/agent/check_unified_eval_admission.py \
   scripts/agent/verify_terrain_work_events.py \
   scripts/agent/verify_frame_evidence.py
+python3 -m py_compile scripts/agent/verify_render_contract_terminal.py
 bash -n scripts/agent/doctor.sh
 bash -n scripts/agent/run_unified_eval_cycle.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
