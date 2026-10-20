@@ -1334,13 +1334,42 @@ final class MetalMotionProducerGpuTest {
 
     static Stream<String> sourceDepthPolicyFixtures() {
         return Stream.of("no_depth_state", "missing_depth_attachment", "always_pass", "later_visible_normal",
+                "missing_depth_attachment_with_write", "missing_depth_attachment_with_write_and_bias",
                 "standard_z_hidden_normal", "overlay_after_normal", "strict_hidden_equal", "different_source_attachment");
+    }
+
+    @Test
+    void actualFragmentDepthOutputRequiresAnAttachmentEvenWhenRasterWritesAreDisabled() {
+        var vertex=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/depth_output_vertex");
+        var fragment=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/depth_output_fragment");
+        var source=RenderPipeline.builder().withLocation("motion_contract/actual_fragment_depth_output")
+                .withVertexShader(vertex).withFragmentShader(fragment).withCull(false)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,false))
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA8_UNORM,ColorTargetState.WRITE_ALL)).build();
+        var shaders=MetalShaderSourceAdapters.overlay(java.util.Map.of(vertex,"""
+                #version 330
+                void main(){gl_Position=vec4(0,0,0.5,1);}
+                """,fragment,"""
+                #version 330
+                #extension GL_ARB_separate_shader_objects : require
+                layout(location=0) out vec4 color;
+                void main(){color=vec4(1);gl_FragDepth=.25;}
+                """),device.activeShaderSource());
+        var compiled=(MetalCompiledRenderPipeline)device.precompilePipeline(source,shaders);
+        assertTrue(compiled.isValid());
+        assertFalse(MetalNativeBridge.isNullHandle(compiled.getNativePipeline(
+                com.metallum.client.metal.render.mtl.MTLPixelFormat.Depth32Float,
+                com.metallum.client.metal.render.mtl.MTLPixelFormat.Invalid)));
+        assertThrows(IllegalArgumentException.class,()->compiled.getNativePipeline(
+                com.metallum.client.metal.render.mtl.MTLPixelFormat.Invalid,
+                com.metallum.client.metal.render.mtl.MTLPixelFormat.Invalid));
     }
 
     @ParameterizedTest(name = "actual source depth policy: {0}")
     @MethodSource("sourceDepthPolicyFixtures")
     void overlayAndLaterGeometryFollowActualSourceDepthAndDrawOrder(String name) throws Exception {
-        boolean standard=name.startsWith("standard_"), missing=name.equals("missing_depth_attachment");
+        boolean standard=name.startsWith("standard_"), missing=name.startsWith("missing_depth_attachment");
         boolean lastOverlay=name.equals("overlay_after_normal");
         float sceneZ=standard ? .2F : name.equals("different_source_attachment") ? .9F : .8F;
         float initialOwnership=standard ? .2F : .8F, overlayZ=standard ? .8F : .2F;
@@ -1357,7 +1386,8 @@ final class MetalMotionProducerGpuTest {
                 .withShaderDefine("EMISSIVE").withShaderDefine("NO_OVERLAY").withShaderDefine("NO_CARDINAL_LIGHTING")
                 .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
-        if(missing)builder.withDepthStencilState(new DepthStencilState(comparison,false));
+        if(missing)builder.withDepthStencilState(new DepthStencilState(comparison,name.contains("with_write"),
+                name.contains("and_bias") ? 2 : 0,name.contains("and_bias") ? 3 : 0));
         if(name.equals("always_pass"))builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,false));
         var overlayPipeline=builder.build();
         var normalPipeline=builder.withLocation("motion_contract/source_policy/"+name+"/normal")

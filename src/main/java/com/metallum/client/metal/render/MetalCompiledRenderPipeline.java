@@ -64,7 +64,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final MTLTriangleFillMode fillMode;
     private final float depthBiasScaleFactor;
     private final float depthBiasConstant;
-    private final boolean writesDepth;
+    private final boolean writesFragmentDepth;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
     private final boolean indexedVertexRebaseSafe;
@@ -127,7 +127,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final String vertexEntryPoint,
             final String fragmentEntryPoint,
             final List<ResourceBinding> resources,
-            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            final boolean writesFragmentDepth
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
@@ -208,7 +209,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         int depthWrite;
         var depthStencilState = info.getDepthStencilState();
         this.hasDepthStencilState = depthStencilState != null;
-        this.writesDepth = depthStencilState != null && depthStencilState.writeDepth();
+        this.writesFragmentDepth = writesFragmentDepth;
         if (depthStencilState == null) {
             depthCompareOp = MTLCompareFunction.Always;
             depthWrite = 0;
@@ -472,7 +473,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     }
 
     private List<DepthStencilFormats> supportedDepthStencilFormats() {
-        if (this.writesDepth) {
+        if (this.writesFragmentDepth) {
             // A fragment shader that writes depth cannot be paired with an
             // invalid depth attachment on Apple Metal. Keep only signatures
             // that can actually receive the shader output.
@@ -497,7 +498,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
      * real demand; async prewarm may additionally create it in the background.
      */
     private List<DepthStencilFormats> eagerDepthStencilFormats() {
-        if (this.writesDepth) {
+        if (this.writesFragmentDepth) {
             return List.of(new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid));
         }
         return List.of(
@@ -642,7 +643,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private NativePipeline nativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
         if (this.closed) throw new IllegalStateException("Metal pipeline is closed");
         if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)
-                || (this.writesDepth && depthFormat == MTLPixelFormat.Invalid)) {
+                || (this.writesFragmentDepth && depthFormat == MTLPixelFormat.Invalid)) {
             throw new IllegalArgumentException(
                     "Unsupported Metal depth/stencil attachment signature: depth=" + depthFormat
                             + ", stencil=" + stencilFormat

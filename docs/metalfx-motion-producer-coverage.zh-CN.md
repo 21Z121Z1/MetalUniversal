@@ -100,6 +100,10 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 自身偏移测试改为逐像素对照实际原版 D32，加入负偏移和透视斜面；容差保持 3e-6。静止斜面还经过生产 V4 历史消费，并关闭 dilation、用故意遗漏偏移的独立几何平面作负例，要求分别接受／拒绝。以上新增实现仍待新提交 Actions 验证，不能预先扩大 producer 门禁。
 
+`cc4c413` 两个 macOS GPU job 均成功；已下载的 macOS 15 原始 JUnit 为 93 producer + 13 first-person，106/106 通过。前帧 Z 对原版实际 D32 的最大误差：常量偏移 0，正坡度 4.18e-7，负坡度 4.48e-7，透视坡度 3.58e-7；各材质覆盖／alpha／tag／运动／深度错误为零。正负斜面实际历史拒绝值均为 0，故意遗漏偏移的反例均为 255，且 dilation=false。该结果关闭静止自身偏移回归；旧、新斜面姿态改变的独立对照仍需补充。
+
+附件自由颜色路径还需区分 raster writeDepth 与实际片元 FragDepth 输出。编译层从真实 SPIR-V 反射 active FragDepth，包含 MSL 缓存命中路径；前者不应禁止无附件 PSO，后者仍必须有有效深度格式。CPU 用例覆盖颜色、深度读取、直接／条件写出及未调用的写深度函数；GPU 新增声明 writeDepth 的无附件颜色绘制、带未生效 bias 的无附件绘制，以及 writeDepth=false 仍有实际片元深度输出的反例。新增验证仍待对应提交 Actions。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
