@@ -49,7 +49,8 @@ final class MetalMotionShaderCompilationTest {
             } else if (name.startsWith("text_background")) {
                 variants = List.of(List.of(), List.of("IS_SEE_THROUGH"));
             } else if (name.startsWith("block_") || name.startsWith("entity_")) {
-                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"));
+                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
+                        List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"));
             }
             for (List<String> defines : variants) cases.add(Arguments.of(name, defines));
         }

@@ -62,6 +62,17 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void blendedEntityAndOitColorHaveExactGeometryButNoRigidFallback() {
+        for (var source : java.util.List.of(net.minecraft.client.renderer.RenderPipelines.ENTITY_TRANSLUCENT,
+                net.minecraft.client.renderer.RenderPipelines.OIT_ENTITY.accumulatePipeline())) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            assertFalse(MetalEntityMotionPipeline.supports(source));
+            assertTrue(MetalEntityMotionPipeline.forPreviousPositions(source).getDepthStencilState().writeDepth(),
+                    "transparent overlap resolves against a private depth copy");
+        }
+    }
+
+    @Test
     void entityShadowUsesExactPreviousPositionsDespiteTranslucentSource() {
         RenderPipeline shadow = pipeline("core/rendertype_entity_shadow", DefaultVertexFormat.ENTITY);
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(shadow));
@@ -85,6 +96,13 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
 
     @Test
     void wrongLayoutsRemainFailClosed() {
+        RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
+                .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))
+                .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS).build();
+        assertFalse(MetalEntityMotionPipeline.supports(replacement));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(replacement),
+                "a matching path in a different namespace does not prove matching vertex semantics");
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
                 pipeline("core/rendertype_leash", DefaultVertexFormat.ENTITY)));
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(

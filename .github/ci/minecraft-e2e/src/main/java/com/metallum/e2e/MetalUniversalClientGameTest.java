@@ -331,6 +331,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 verifyTerrainColorProbe(context, singleplayer, metalCaptureRoot, evidenceDir);
             }
             writeMetalFxEvidence(context, evidenceDir.resolve("metalfx-runtime-evidence.json"));
+            if (System.getProperty("metallum.metalfx.captureMotionValidation", "false").equals("true")) {
+                verifyMotionSourceEntries(context, singleplayer, evidenceDir);
+            }
 
             RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             closeRenderContract();
@@ -753,6 +756,47 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         report.addProperty("boundary", "production encode activation and capability fallback; completion/pixels in separate evidence");
         try { Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
         catch (IOException failure) { throw new IllegalStateException("Could not write MetalFX runtime evidence", failure); }
+    }
+
+    private static void verifyMotionSourceEntries(ClientGameTestContext context,
+            TestSingleplayerContext singleplayer, Path output) {
+        boolean previous = context.computeOnClient(client -> client.options.improvedTransparency().get());
+        try {
+            singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
+            singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
+            for (boolean oit : new boolean[]{false, true}) {
+                context.runOnClient(client -> client.options.improvedTransparency().set(oit));
+                singleplayer.getServer().runCommand("particle minecraft:flame 160.5 128 164 1 1 1 0.01 100 force @a");
+                singleplayer.getServer().runCommand("particle minecraft:campfire_cosy_smoke 160.5 128 165 1 1 1 0.01 100 force @a");
+                context.waitTicks(12);
+            }
+            var census = context.computeOnClient(client -> com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
+            require(census.captureOnlyValidation(), "Real draw coverage capture was not enabled");
+            for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
+                var rows = census.pipelines().entrySet().stream().filter(row -> row.getKey().endsWith("/" + suffix)).toList();
+                require(!rows.isEmpty(), "Minecraft never executed particle source pipeline " + suffix + ": " + census);
+                for (var row : rows) {
+                    require(row.getValue().actualDraws() > 0
+                        && row.getValue().actualDraws() == row.getValue().hookedExecutions(),
+                        "Real particle draws bypassed the motion hook: " + row);
+                    if (suffix.equals("opaque_particle") || suffix.equals("oit_accumulate_particle")) {
+                        require(row.getValue().ownedColorExecutions() > 0, "Particle color draw has no staged motion owner: " + row);
+                    }
+                }
+            }
+            long oitFeatures = census.pipelines().entrySet().stream()
+                    .filter(row -> row.getKey().contains("oit_accumulate_entity"))
+                    .mapToLong(row -> row.getValue().hookedExecutions()).sum();
+            require(oitFeatures > 0, "PreparedRenderType OIT color hook never executed");
+            JsonObject report = new GsonBuilder().create().toJsonTree(census).getAsJsonObject();
+            report.addProperty("verified", true);
+            report.addProperty("boundary", "real Minecraft source draw/owner capture; not Temporal or FG execution/quality");
+            try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
+                    new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
+            catch (IOException failure) { throw new IllegalStateException("Could not write source motion evidence", failure); }
+        } finally {
+            context.runOnClient(client -> client.options.improvedTransparency().set(previous));
+        }
     }
 
     private static void writeOptimizationEvidence(Path output) {

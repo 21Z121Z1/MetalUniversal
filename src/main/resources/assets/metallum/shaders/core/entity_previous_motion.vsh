@@ -25,6 +25,7 @@ layout(location = 0) noperspective out vec2 metallumObjectMotion;
 layout(location = 1) flat out float metallumObjectValidity;
 layout(location = 2) out vec2 metallumTexCoord;
 layout(location = 3) flat out float metallumVertexColorGuard;
+layout(location = 4) out float metallumVertexAlpha;
 
 void main() {
     vec4 rasterClip = ProjMat * ModelViewMat * vec4(Position, 1.0);
@@ -50,5 +51,9 @@ void main() {
     }
     metallumObjectValidity = valid ? 1.0 : 0.0;
     metallumTexCoord = UV0;
+#ifdef APPLY_TEXTURE_MATRIX
+    metallumTexCoord = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;
+#endif
     metallumVertexColorGuard = Color.a;
+    metallumVertexAlpha = Color.a;
 }

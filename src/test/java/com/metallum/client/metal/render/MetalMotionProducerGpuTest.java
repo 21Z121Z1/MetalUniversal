@@ -16,6 +16,7 @@ import org.joml.Matrix4f;
 import org.joml.Vector4f;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -178,6 +179,91 @@ final class MetalMotionProducerGpuTest {
 
     private MetalGpuTexture texture(String name, GpuFormat format, int usage) {
         return (MetalGpuTexture) device.createTexture(name, usage | GpuTexture.USAGE_RENDER_ATTACHMENT, format, W, H, 1, 1);
+    }
+
+    @Test
+    void transparentOwnershipIsOrderIndependentAndLeavesSceneDepthUntouched() throws Exception {
+        var resources = BindGroupLayout.builder().withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
+                .withUniform("Projection", UniformType.UNIFORM_BUFFER).withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
+        var source = RenderPipeline.builder().withLocation("motion_contract/oit_ownership")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0, DefaultVertexFormat.ENTITY).withBindGroupLayout(resources)
+                .withColorTargetState(new ColorTargetState(BlendFunction.ADDITIVE))
+                .withShaderDefine("OIT_ACCUMULATE").withShaderDefine("ALPHA_CUTOUT", .1F)
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, false))
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false).build();
+        var pipeline = MetalEntityMotionPipeline.forPreviousPositions(source);
+        var fixture = new Fixture("ownership", "core/entity", DefaultVertexFormat.ENTITY, true, false, false, false);
+        ByteBuffer near = vertices(fixture, false), far = vertices(fixture, false);
+        ByteBuffer nearPrevious = ByteBuffer.allocateDirect(72).order(ByteOrder.nativeOrder());
+        ByteBuffer farPrevious = ByteBuffer.allocateDirect(72).order(ByteOrder.nativeOrder());
+        for (int i = 0; i < 6; i++) {
+            int p = i * DefaultVertexFormat.ENTITY.getVertexSize();
+            near.putFloat(p+8, .8F); far.putFloat(p+8, .3F);
+            nearPrevious.putFloat(near.getFloat(p)-.125F).putFloat(near.getFloat(p+4)).putFloat(.8F);
+            farPrevious.putFloat(far.getFloat(p)+.25F).putFloat(far.getFloat(p+4)).putFloat(.3F);
+        }
+        nearPrevious.flip(); farPrevious.flip();
+        ByteBuffer dynamic = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
+        new Matrix4f().get(0, dynamic); new Matrix4f().get(64, dynamic);
+        for (int i=0; i<4; i++) dynamic.putFloat(128+4*i, 1);
+        ByteBuffer projection = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        new Matrix4f().get(0, projection);
+        ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()).get(0, motion);
+        MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()).get(64, motion);
+        int copy = GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_COPY_DST;
+        try (var n = device.createBuffer(() -> "near", GpuBuffer.USAGE_VERTEX, near);
+             var f = device.createBuffer(() -> "far", GpuBuffer.USAGE_VERTEX, far);
+             var np = device.createBuffer(() -> "near previous", GpuBuffer.USAGE_VERTEX, nearPrevious);
+             var fp = device.createBuffer(() -> "far previous", GpuBuffer.USAGE_VERTEX, farPrevious);
+             var du = device.createBuffer(() -> "dynamic", GpuBuffer.USAGE_UNIFORM, dynamic);
+             var pr = device.createBuffer(() -> "projection", GpuBuffer.USAGE_UNIFORM, projection);
+             var mo = device.createBuffer(() -> "motion", GpuBuffer.USAGE_UNIFORM, motion);
+             var scene = texture("source scene depth", GpuFormat.D32_FLOAT, copy);
+             var ownership = texture("private motion depth", GpuFormat.D32_FLOAT, copy);
+             var flow = texture("motion", GpuFormat.RG16_FLOAT, copy);
+             var valid = texture("validity", GpuFormat.R8_UNORM, copy);
+             var sampled = texture("alpha", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_TEXTURE_BINDING);
+             var ov = device.createTextureView(ownership); var mv = device.createTextureView(flow);
+             var vv = device.createTextureView(valid); var sv = device.createTextureView(sampled);
+             var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE,
+                     FilterMode.NEAREST, FilterMode.NEAREST, 1, java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled, new Vector4f(1));
+            for (boolean reversed : new boolean[]{false, true}) {
+                encoder.clearDepthTexture(scene, .1);
+                encoder.copyTextureToTexture(scene, ownership, 0, 0, 0, 0, 0, W, H);
+                try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "transparent motion ownership")
+                        .withColorAttachment(mv, Optional.of(new Vector4f()))
+                        .withColorAttachment(vv, Optional.of(new Vector4f())).withDepthAttachment(ov).build())) {
+                    pass.setPipeline(pipeline); pass.setUniform("Projection", pr.slice());
+                    pass.setUniform("DynamicTransforms", du.slice()); pass.setUniform("MetallumMotion", mo.slice());
+                    pass.bindTexture("Sampler0", sv, sampler);
+                    for (boolean drawNear : new boolean[]{reversed, !reversed}) {
+                        pass.setVertexBuffer(0, (drawNear ? n : f).slice());
+                        pass.setVertexBuffer(1, (drawNear ? np : fp).slice());
+                        pass.draw(6, 1, 0, 0);
+                    }
+                }
+                encoder.submit(); device.waitForSubmittedGpuWork();
+                byte[] mask = readback(valid), vectors = readback(flow), sceneBytes = readback(scene);
+                ByteBuffer values = ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
+                ByteBuffer depth = ByteBuffer.wrap(sceneBytes).order(ByteOrder.nativeOrder());
+                int covered = 0;
+                for (int p=0; p<W*H; p++) {
+                    assertEquals(.1F, depth.getFloat(p*4), 1E-6, "motion must not mutate scene depth");
+                    if (Byte.toUnsignedInt(mask[p]) < 128) continue;
+                    covered++;
+                    assertEquals(-.125F, Float.float16ToFloat(values.getShort(p*4)), .001,
+                            "nearest transparent surface owns flow for either source submission order");
+                }
+                assertTrue(covered > 100);
+                Path dir = Path.of("build/agent-evidence/motion-producers/transparent_ownership_" + reversed);
+                Files.createDirectories(dir); Files.write(dir.resolve("motion.rg16f"), vectors);
+                Files.write(dir.resolve("validity.r8"), mask); Files.write(dir.resolve("source-depth.d32"), sceneBytes);
+                Files.writeString(dir.resolve("result.json"), "{\"coveredPixels\":"+covered+",\"sourceDepthUnchanged\":true,\"nearestMotionX\":-0.125}");
+            }
+        }
     }
 
     private static ByteBuffer vertices(Fixture f, boolean previous) {

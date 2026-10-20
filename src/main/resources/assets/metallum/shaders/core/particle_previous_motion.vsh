@@ -19,7 +19,7 @@ layout(std140) uniform MetallumMotion {
 layout(location = 0) noperspective out vec2 metallumObjectMotion;
 layout(location = 1) flat out float metallumObjectValidity;
 layout(location = 2) out vec2 metallumTexCoord;
-layout(location = 3) flat out float metallumVertexAlpha;
+layout(location = 3) out float metallumVertexAlpha;
 
 void main() {
     vec4 rasterClip = ProjMat * ModelViewMat * vec4(Position, 1.0);

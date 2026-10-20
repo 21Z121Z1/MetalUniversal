@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
@@ -99,6 +100,13 @@ final class MetalEntityMotionPipeline {
     private MetalEntityMotionPipeline() {
     }
 
+    private static boolean auditedShaders(final RenderPipeline source) {
+        if (source == null) return false;
+        var vertex = source.getShaders().get(ShaderType.VERTEX);
+        var fragment = source.getShaders().get(ShaderType.FRAGMENT);
+        return vertex != null && vertex.equals(fragment) && "minecraft".equals(vertex.getNamespace());
+    }
+
     /**
      * The family that can replay {@code source}, or null if none can.
      *
@@ -107,7 +115,7 @@ final class MetalEntityMotionPipeline {
      * rather than replayed by the closest-looking family.</p>
      */
     static @Nullable Family familyOf(final RenderPipeline source) {
-        if (source == null) {
+        if (!auditedShaders(source)) {
             return null;
         }
         return switch (source.getShaders().get(ShaderType.VERTEX).getPath()) {
@@ -133,7 +141,7 @@ final class MetalEntityMotionPipeline {
     }
 
     /**
-     * Exact staged-position replay ABIs proven against the Minecraft 26.2 client shaders.
+     * Exact staged-position replay ABIs checked against the Minecraft 26.3 client shaders.
      * Root-transform support is intentionally independent: leash and world text are exact-only
      * families and must never fall back to a closest-looking root motion shader.
      */
@@ -142,7 +150,7 @@ final class MetalEntityMotionPipeline {
     }
 
     private static @Nullable PreviousFamily previousFamilyOf(final RenderPipeline source) {
-        if (source == null) {
+        if (!auditedShaders(source)) {
             return null;
         }
         java.util.List<@Nullable VertexFormat> bindings = source.getVertexFormatBindings();
@@ -153,7 +161,7 @@ final class MetalEntityMotionPipeline {
         String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
         if ((shader.equals("core/entity") || shader.equals("core/item"))
                 && DefaultVertexFormat.ENTITY.equals(format)
-                && supports(source)) {
+                && !source.getShaderDefines().flags().contains("DISSOLVE")) {
             return PreviousFamily.ENTITY;
         }
         if (shader.equals("core/rendertype_entity_shadow")
@@ -293,12 +301,17 @@ final class MetalEntityMotionPipeline {
                 }
             }
         });
+        boolean alphaComposite = source.getColorTargetStates().stream().filter(java.util.Objects::nonNull)
+                .anyMatch(target -> target.blendFunction().map(blend -> blend.color().sourceFactor() == BlendFactor.SRC_ALPHA).orElse(false))
+                || (source.getShaderDefines().flags().contains("OIT_ACCUMULATE")
+                && !source.getShaderDefines().flags().contains("OIT_ADDITIVE"));
+        if (alphaComposite) builder.withShaderDefine("METALLUM_ALPHA_COMPOSITE");
 
         DepthStencilState sourceDepth = source.getDepthStencilState();
         if (sourceDepth != null) {
             builder.withDepthStencilState(new DepthStencilState(
                     sourceDepth.depthTest(),
-                    false,
+                    true,
                     sourceDepth.depthBiasScaleFactor(),
                     sourceDepth.depthBiasConstant()
             ));

@@ -91,6 +91,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final boolean lazyVariants;
     private final MetalDevice device;
     private final RenderPipeline info;
+
+    RenderPipeline sourcePipeline() { return info; }
     private final String validationPipelineId;
     private final List<String> validationShaderIds;
     // Keep source identity, not borrowed function handles from a cache that reload can clear.

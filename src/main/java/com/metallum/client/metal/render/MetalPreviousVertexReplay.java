@@ -9,6 +9,8 @@ import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import org.jspecify.annotations.Nullable;
 import org.joml.Matrix4f;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
+import java.util.Map;
 
 /**
  * Resolves a previous-position replay only after the whole source frame has finished staging.
@@ -22,6 +24,12 @@ import org.joml.Matrix4f;
 final class MetalPreviousVertexReplay {
     record SourceDrawInputs(GpuBufferSlice projection, GpuBufferSlice dynamicTransforms,
                             @Nullable GpuTextureView depth) {}
+
+    /** Immutable bindings of the draw that actually executed, including OIT's selected pipeline. */
+    record SourceState(RenderPipeline pipeline, Map<String, TextureViewAndSampler> textures,
+                       RenderPass.@Nullable RenderArea scissor) {
+        SourceState { textures = Map.copyOf(textures); }
+    }
 
     record HandTransforms(Matrix4f currentProjection, Matrix4f currentUnjitteredFromRaster,
                           Matrix4f previousFromPosition) {
@@ -61,6 +69,13 @@ final class MetalPreviousVertexReplay {
                 && access.metallum$getBackend() instanceof MetalRenderPass metal) {
             return metal.motionDrawInputs();
         }
+        return null;
+    }
+
+    static @Nullable SourceState sourceState(final RenderPass pass) {
+        if (pass instanceof MetalRenderPass metal) return metal.motionSourceState();
+        if (pass instanceof RenderPearlBackendAccess access
+                && access.metallum$getBackend() instanceof MetalRenderPass metal) return metal.motionSourceState();
         return null;
     }
 

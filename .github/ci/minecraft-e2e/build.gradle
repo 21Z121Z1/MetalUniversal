@@ -242,6 +242,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.metalfx.mode=${metalFxProfile == 'off' ? 'OFF' : 'TEMPORAL'}")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=${metalFxProfile != 'off'}")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    jvmArgs.add("-Dmetallum.metalfx.captureMotionValidation=${metalFxProfile != 'off'}")
     if (metalFxProfile != 'off') jvmArgs.add('-Dmetallum.metalfx.scale=0.67')
     jvmArgs.add("-Dmetallum.metal.hud=false")
     jvmArgs.add("-Dmetallum.hotpath.telemetry=${!gameplay}")

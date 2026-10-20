@@ -8,7 +8,7 @@ uniform sampler2D Sampler0;
 layout(location = 0) noperspective in vec2 metallumObjectMotion;
 layout(location = 1) flat in float metallumObjectValidity;
 layout(location = 2) in vec2 metallumTexCoord;
-layout(location = 3) flat in float metallumVertexAlpha;
+layout(location = 3) in float metallumVertexAlpha;
 
 layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
