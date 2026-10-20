@@ -42,6 +42,9 @@ final class MetalPrivateBindingHookDescriptorTest {
         report.put("methods",type.methods.stream().map(method->method.name+method.desc).toList());
         report.put("sourceAdmissionGranted",false);
         report.put("boundary","Pinned include API signatures only; shader identifiers and namespace do not prove source semantics.");
+        report.put("assetReference",MetalMotionShaderAssetAudit.inspect());
+        ClassNode includeResult=load("org/lwjgl/util/shaderc/ShadercIncludeResult");
+        report.put("includeResultMethods",includeResult.methods.stream().map(method->method.name+method.desc).toList());
         var compressed=new java.io.ByteArrayOutputStream();
         try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
         System.out.println("METAL_SHADER_SOURCE_API_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
