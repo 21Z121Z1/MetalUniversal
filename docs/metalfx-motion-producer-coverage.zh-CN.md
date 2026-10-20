@@ -80,6 +80,10 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 
 ## 后续目标与完成条件
 
+特殊材质的 exact 回放新增 GLINT_SPECIAL 的七属性 ENTITY_GLINT_SPECIAL ABI，previous position/validity 分别使用属性 7/8。DISSOLVE 按原版顺序执行纹理 alpha cutout、smooth 顶点 alpha 与遮罩比较、替换顶点透明度，再乘 ColorModulator；刚体回退仍拒绝 DISSOLVE。GLINT 在 cutout 后使用实际 Globals.GlintAlpha 提高 alpha，避免错误丢弃零 base-alpha 的闪光贡献。ENTITY 的 OIT_ADDITIVE alpha clamp 不套用到 ITEM，ITEM 也不错误应用 ENTITY 专有的基础纹理矩阵语义。根运动与 exact 的格式准入共同拒绝不匹配布局。
+
+新增 17 项 GPU 对照使用原版 ENTITY/ITEM 颜色着色器的 RGBA32F 和独立 D32 片元存活作为参考，分别验证 alpha、裁剪／透明覆盖、reactive 所有权标签、零运动和 previous/current Z；失败时保存原始纹理。客户端新增真实闪光剑与特殊闪光指南针，并要求按原始 shader defines 区分的实际 draw 存在所有者及 exact 编码。这些新增用例尚待后续 Actions 验收，不能把 GLSL 编译或格式准入视为可见性已经通过。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。

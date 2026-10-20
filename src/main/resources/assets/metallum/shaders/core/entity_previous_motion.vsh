@@ -10,9 +10,17 @@
 layout(location = 0) in vec3 Position;
 layout(location = 1) in vec4 Color;
 layout(location = 2) in vec2 UV0;
+#ifdef METALLUM_ENTITY_GLINT_SPECIAL
+// ITEM GLINT_SPECIAL also owns UV3, making seven physical source attributes.
+layout(location = 7) in vec3 PreviousPosition;
+#ifdef METALLUM_PREVIOUS_VALIDITY
+layout(location = 8) in float PreviousValidity;
+#endif
+#else
 layout(location = 6) in vec3 PreviousPosition;
 #ifdef METALLUM_PREVIOUS_VALIDITY
 layout(location = 7) in float PreviousValidity;
+#endif
 #endif
 
 layout(std140) uniform MetallumMotion {
@@ -37,7 +45,7 @@ void main() {
 
     metallumSetClipHistory(currentClip, previousClip);
     metallumTexCoord = UV0;
-#ifdef APPLY_TEXTURE_MATRIX
+#if defined(APPLY_TEXTURE_MATRIX) && !defined(METALLUM_ITEM_SOURCE)
     metallumTexCoord = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;
 #endif
     metallumVertexColorGuard = Color.a;

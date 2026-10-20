@@ -774,7 +774,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 player.getAbilities().flying = true;
                 player.onUpdateAbilities();
             }));
-            singleplayer.getServer().runCommand("item replace entity @a weapon.mainhand with minecraft:diamond_sword");
+            singleplayer.getServer().runCommand("item replace entity @a weapon.mainhand with minecraft:diamond_sword[minecraft:enchantment_glint_override=true]");
             singleplayer.getServer().runCommand("item replace entity @a weapon.offhand with minecraft:shield");
             context.runOnClient(client -> {
                 client.options.setCameraType(net.minecraft.client.CameraType.FIRST_PERSON);
@@ -814,6 +814,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 singleplayer.getServer().runCommand("particle minecraft:campfire_cosy_smoke 160.5 128 165 1 1 1 0.01 100 force @a");
                 context.waitTicks(12);
             }
+            singleplayer.getServer().runCommand("item replace entity @a weapon.mainhand with minecraft:compass[minecraft:enchantment_glint_override=true]");
+            context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.COMPASS)
+                    && client.player.getMainHandItem().hasFoil());
+            context.waitTicks(8);
+            singleplayer.getServer().runCommand("item replace entity @a weapon.mainhand with minecraft:diamond_sword[minecraft:enchantment_glint_override=true]");
+            context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.DIAMOND_SWORD)
+                    && client.player.getMainHandItem().hasFoil());
+            context.waitTicks(5);
             singleplayer.getServer().runCommand("setblock 158 128 165 minecraft:lectern[facing=north,has_book=false]");
             context.waitFor(client -> client.level != null && !client.level.getBlockState(new BlockPos(158, 128, 165))
                     .getValue(net.minecraft.world.level.block.LecternBlock.HAS_BOOK));
@@ -831,6 +839,14 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(!census.programs().isEmpty(), "Source-program coverage is missing");
             require(census.programs().values().stream().anyMatch(row -> row.encodedDisocclusionDraws() > 0),
                     "New/reset source geometry never encoded explicit invalid-history ownership");
+            require(census.programs().values().stream().anyMatch(row -> row.source() != null
+                            && row.source().flags().contains("GLINT") && row.ownedColorExecutions() > 0
+                            && row.encodedMotionDraws() > 0),
+                    "Actual glint source never proved owned exact motion");
+            require(census.programs().values().stream().anyMatch(row -> row.source() != null
+                            && row.source().flags().contains("GLINT_SPECIAL") && row.ownedColorExecutions() > 0
+                            && row.encodedMotionDraws() > 0),
+                    "Actual compass special-glint source never proved its seven-attribute layout and exact history");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
                 var rows = census.pipelines().entrySet().stream().filter(row -> row.getValue().actualDraws() > 0
                         && row.getKey().endsWith("/" + suffix)).toList();
@@ -915,6 +931,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             report.addProperty("activeConduitExercised", true);
             report.addProperty("emptyLecternAbsent", true);
             report.addProperty("firstPersonHeldItemsExercised", true);
+            report.addProperty("glintSourceMotionExercised", true);
+            report.addProperty("specialGlintSourceMotionExercised", true);
             report.addProperty("postEffectHudDepthIsolated", true);
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }

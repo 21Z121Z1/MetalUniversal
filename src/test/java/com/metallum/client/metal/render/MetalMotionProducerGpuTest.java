@@ -951,6 +951,168 @@ final class MetalMotionProducerGpuTest {
         }
     }
 
+    static Stream<String> materialVisibilityFixtures() {
+        return Stream.of("entity_glint_zero_base_alpha", "item_glint_zero_base_alpha",
+                "item_special_glint_zero_base_alpha", "entity_glint_cutout_first", "item_special_glint_cutout_first",
+                "dissolve_replaces_alpha", "dissolve_hidden", "dissolve_before_modulator", "dissolve_cutout_first",
+                "entity_additive_cutout", "item_additive_flag_does_not_clamp", "zero_alpha_blended", "zero_alpha_opaque",
+                "entity_texture_matrix_visibility", "item_ignores_entity_texture_matrix", "per_face_dissolve",
+                "entity_glint_zero_modulator");
+    }
+
+    @ParameterizedTest(name = "actual material visibility: {0}")
+    @MethodSource("materialVisibilityFixtures")
+    void materialMotionMatchesActualMinecraftColorAndFragmentSurvival(String name) throws Exception {
+        boolean item=name.startsWith("item_"), special=name.contains("special"), glint=name.contains("glint");
+        boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
+        boolean blended=!name.equals("zero_alpha_opaque"), perFace=name.equals("per_face_dissolve");
+        float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
+        boolean visible=true;
+        switch(name) {
+            case "entity_glint_zero_base_alpha", "item_glint_zero_base_alpha", "item_special_glint_zero_base_alpha" -> {
+                texAlpha=0; expectedAlpha=.6F;
+            }
+            case "entity_glint_cutout_first", "item_special_glint_cutout_first" -> { texAlpha=0;cutout=.1F;visible=false; }
+            case "dissolve_replaces_alpha" -> { vertexAlpha=.6F;modAlpha=.5F;expectedAlpha=.5F; }
+            case "dissolve_hidden" -> { vertexAlpha=.4F;visible=false; }
+            case "dissolve_before_modulator" -> { vertexAlpha=.6F;modAlpha=.1F;expectedAlpha=.1F; }
+            case "dissolve_cutout_first" -> { texAlpha=0;cutout=.1F;visible=false; }
+            case "entity_additive_cutout" -> { cutout=1;visible=false; }
+            case "item_additive_flag_does_not_clamp" -> cutout=1;
+            case "zero_alpha_blended" -> { vertexAlpha=0;visible=false; }
+            case "zero_alpha_opaque" -> { vertexAlpha=0;expectedAlpha=0; }
+            case "item_ignores_entity_texture_matrix" -> visible=false;
+            case "per_face_dissolve" -> vertexAlpha=.6F;
+            case "entity_glint_zero_modulator" -> { modAlpha=0;expectedAlpha=.6F; }
+        }
+        var format=special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
+        String shader=item ? "core/item" : "core/entity";
+        var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                .withUniform("Lighting",UniformType.UNIFORM_BUFFER).withUniform("Globals",UniformType.UNIFORM_BUFFER)
+                .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("Sampler1",UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("GlintSampler",UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("DissolveMaskSampler",UniformType.COMBINED_IMAGE_SAMPLER).build();
+        var builder=RenderPipeline.builder().withLocation("motion_contract/material_source/"+name)
+                .withVertexShader(shader).withFragmentShader(shader).withVertexBinding(0,format).withBindGroupLayout(resources)
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true))
+                .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
+        if(glint)builder.withShaderDefine("GLINT");
+        if(special)builder.withShaderDefine("GLINT_SPECIAL");
+        if(dissolve)builder.withShaderDefine("DISSOLVE");
+        if(matrix)builder.withShaderDefine("APPLY_TEXTURE_MATRIX");
+        if(perFace)builder.withShaderDefine("PER_FACE_LIGHTING");
+        if(name.contains("additive"))builder.withShaderDefine("OIT_ADDITIVE");
+        if(cutout>=0)builder.withShaderDefine("ALPHA_CUTOUT",cutout);
+        // The independent oracle stores actual source RGBA without blending and source fragment survival in D32.
+        // The motion variant separately receives the intended color blend semantics.
+        var original=builder.build();
+        var intended=builder.withLocation("motion_contract/material_motion/"+name)
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,false))
+                .withColorTargetState(0,new ColorTargetState(blended ? Optional.of(BlendFunction.TRANSLUCENT) : Optional.empty(),
+                        GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL)).build();
+        var f=new Fixture(name,shader,format,false,false,false,false);
+        ByteBuffer mesh=vertices(f,false);
+        for(int i=0;i<6;i++) {
+            int base=i*format.getVertexSize();
+            mesh.putInt(base+format.getElement("Color").offset(),0x00FFFFFF|Math.round(vertexAlpha*255)<<24);
+            int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);
+            mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
+            if(special) {int extra=base+format.getElement("UV3").offset();mesh.putFloat(extra,.5F).putFloat(extra+4,.5F);}
+        }
+        ByteBuffer old=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
+        assertTrue(MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6),old));old.flip();
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());new Matrix4f().get(0,dynamic);
+        new Matrix4f().translation(matrix ? .5F : 0,0,0).get(64,dynamic);
+        for(int i=0;i<4;i++)dynamic.putFloat(128+i*4,i==3 ? modAlpha : 1);
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f().get(0,projection);
+        ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        ByteBuffer lighting=ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());lighting.putFloat(8,1).putFloat(24,1);
+        ByteBuffer globals=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());globals.putFloat(12,.6F).putFloat(32,W).putFloat(36,H);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        new Matrix4f().scaling(1,-1,1).get(0,motion);new Matrix4f().scaling(1,-1,1).get(64,motion);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        try(var vb=device.createBuffer(()->"actual material mesh",GpuBuffer.USAGE_VERTEX,mesh);
+            var pb=device.createBuffer(()->"previous material positions",GpuBuffer.USAGE_VERTEX,old);
+            var du=device.createBuffer(()->"material dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var pr=device.createBuffer(()->"material projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var fo=device.createBuffer(()->"material fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var li=device.createBuffer(()->"material lighting",GpuBuffer.USAGE_UNIFORM,lighting);
+            var gl=device.createBuffer(()->"actual glint globals",GpuBuffer.USAGE_UNIFORM,globals);
+            var mo=device.createBuffer(()->"material motion",GpuBuffer.USAGE_UNIFORM,motion);
+            var sampled=texture("material alpha",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING|copy);
+            var white=texture("actual lightmap overlay glint",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var dissolveMask=texture("actual dissolve mask",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var color=texture("actual source color",GpuFormat.RGBA32_FLOAT,copy);
+            var survival=texture("source fragment survival",GpuFormat.D32_FLOAT,copy);
+            var ownership=texture("private motion depth",GpuFormat.D32_FLOAT,copy);
+            var flow=texture("material XY",GpuFormat.RG16_FLOAT,copy);
+            var valid=texture("material ownership",GpuFormat.R8_UNORM,copy);
+            var pair=texture("material depth correspondence",GpuFormat.RG32_FLOAT,copy);
+            var sv=device.createTextureView(sampled);var wv=device.createTextureView(white);var dv=device.createTextureView(dissolveMask);
+            var cv=device.createTextureView(color);var sd=device.createTextureView(survival);var od=device.createTextureView(ownership);
+            var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(white,new Vector4f(1));encoder.clearColorTexture(dissolveMask,new Vector4f(1,1,1,maskAlpha));
+            if(matrix) {
+                ByteBuffer pattern=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
+                for(int y=0;y<H;y++)for(int x=0;x<W;x++)pattern.putInt(x<W/2 ? 0x00FFFFFF : -1);pattern.flip();
+                encoder.writeToTexture(sampled,pattern,0,0,0,0,W,H);
+            } else encoder.clearColorTexture(sampled,new Vector4f(1,1,1,texAlpha));
+            for(int phase=0;phase<2;phase++) {
+                var descriptor=RenderPassDescriptor.builder(()->"Source material and exact motion")
+                        .withColorAttachment(phase==0 ? cv : fv,Optional.of(new Vector4f(0)))
+                        .withDepthAttachment(phase==0 ? sd : od,java.util.OptionalDouble.of(0))
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H));
+                if(phase==1)descriptor.withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                        .withColorAttachment(zv,Optional.of(new Vector4f(-1)));
+                try(var pass=encoder.createRenderPass(descriptor.build())) {
+                    pass.setPipeline(phase==0 ? original : MetalEntityMotionPipeline.forPreviousPositionsWithDepth(intended));
+                    pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());
+                    pass.setUniform("Fog",fo.slice());pass.setUniform("Lighting",li.slice());pass.setUniform("Globals",gl.slice());
+                    pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler1",wv,sampler);pass.bindTexture("Sampler2",wv,sampler);
+                    pass.bindTexture("GlintSampler",wv,sampler);pass.bindTexture("DissolveMaskSampler",dv,sampler);
+                    pass.setVertexBuffer(0,vb.slice());
+                    if(phase==1) {pass.setUniform("MetallumMotion",mo.slice());pass.setVertexBuffer(1,pb.slice());}
+                    pass.draw(6,1,0,0);
+                }
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            byte[] rgba=readback(color),depth=readback(survival),mask=readback(valid),xy=readback(flow),z=readback(pair);
+            ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),survived=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
+            ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder()),depths=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder());
+            int count=0,mismatches=0,wrongAlpha=0,wrongTag=0,wrongMotion=0,wrongDepth=0;
+            boolean reactive=glint||dissolve||matrix;
+            for(int p=0;p<W*H;p++) {
+                boolean contributes=survived.getFloat(p*4)>0 && (!blended || reference.getFloat(p*16+12)>0);
+                if(contributes!=(Byte.toUnsignedInt(mask[p])>31))mismatches++;
+                if(!contributes)continue;
+                count++;
+                float alpha=reference.getFloat(p*16+12),x=Float.float16ToFloat(vectors.getShort(p*4));
+                float y=Float.float16ToFloat(vectors.getShort(p*4+2)),before=depths.getFloat(p*8),now=depths.getFloat(p*8+4);
+                if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
+                if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
+                if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
+                if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-.5F)>3e-6||Math.abs(now-.5F)>3e-6)wrongDepth++;
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/material-visibility/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("actual-source.rgba32f"),rgba);Files.write(dir.resolve("actual-fragment-survival.d32f"),depth);
+            Files.write(dir.resolve("motion-ownership.r8"),mask);Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("correspondence.rg32f"),z);
+            Files.writeString(dir.resolve("result.json"),"{\"visibleSourcePixels\":"+count+",\"coverageMismatches\":"+mismatches
+                    +",\"reactiveMaterial\":"+reactive+",\"specialVertexLayout\":"+special+",\"wrongAlphaPixels\":"+wrongAlpha
+                    +",\"wrongTagPixels\":"+wrongTag+",\"wrongMotionPixels\":"+wrongMotion+",\"wrongDepthPixels\":"+wrongDepth+"}");
+            assertEquals(0,mismatches,"Motion must follow original fragment survival and the actual alpha blend contribution");
+            assertEquals(0,wrongAlpha,"Independent original material alpha");
+            assertEquals(0,wrongTag,"Reactive material tags must preserve exact geometry");
+            assertEquals(0,wrongMotion,"An unchanged exact surface must retain zero XY");
+            assertEquals(0,wrongDepth,"The extra special-glint attribute must not alias previous XYZ/validity");
+            if(visible)assertTrue(count>100);else assertEquals(0,count);
+        }
+    }
+
     private static ByteBuffer vertices(Fixture f, boolean previous) {
         float[][] xy = {{-.4F,-.4F},{.4F,-.4F},{-.4F,.4F},{-.4F,.4F},{.4F,-.4F},{.4F,.4F}};
         int stride = f.format().getVertexSize();

@@ -48,7 +48,15 @@ final class MetalMotionShaderCompilationTest {
                 }
             } else if (name.startsWith("text_background")) {
                 variants = List.of(List.of(), List.of("IS_SEE_THROUGH"));
-            } else if (name.startsWith("block_") || name.startsWith("entity_")) {
+            } else if (name.startsWith("entity_")) {
+                variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
+                        List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"),
+                        List.of("GLINT", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("DISSOLVE", "PER_FACE_LIGHTING", "ALPHA_CUTOUT=0.1", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("GLINT", "GLINT_SPECIAL", "METALLUM_ENTITY_GLINT_SPECIAL", "METALLUM_ITEM_SOURCE", "METALLUM_ALPHA_COMPOSITE"),
+                        List.of("OIT_ADDITIVE", "ALPHA_CUTOUT=1.0"),
+                        List.of("APPLY_TEXTURE_MATRIX", "DISSOLVE", "METALLUM_ITEM_SOURCE", "METALLUM_ALPHA_COMPOSITE"));
+            } else if (name.startsWith("block_")) {
                 variants = List.of(List.of(), List.of("ALPHA_CUTOUT=0.5"),
                         List.of("ALPHA_CUTOUT=0.1", "APPLY_TEXTURE_MATRIX", "METALLUM_ALPHA_COMPOSITE", "OIT_ACCUMULATE"));
             }

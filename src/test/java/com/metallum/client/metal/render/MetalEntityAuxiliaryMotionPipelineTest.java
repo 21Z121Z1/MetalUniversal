@@ -95,6 +95,26 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void specialGlintAndDissolveRetainTheirExactOriginalLayouts() {
+        for (var source : java.util.List.of(net.minecraft.client.renderer.RenderPipelines.ITEM_CUTOUT_GLINT_SPECIAL,
+                net.minecraft.client.renderer.RenderPipelines.ITEM_TRANSLUCENT_GLINT_SPECIAL,
+                net.minecraft.client.renderer.RenderPipelines.OIT_ITEM_GLINT_SPECIAL.accumulatePipeline(),
+                net.minecraft.client.renderer.RenderPipelines.ENTITY_CUTOUT_DISSOLVE)) {
+            assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+            var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+            assertEquals(source.getVertexFormatBinding(0),exact.getVertexFormatBinding(0));
+            assertTrue(exact.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+        }
+        assertFalse(MetalEntityMotionPipeline.supports(net.minecraft.client.renderer.RenderPipelines.ENTITY_CUTOUT_DISSOLVE),
+                "Dissolving geometry requires exact history, without a rigid fallback");
+        var wrong=pipeline("core/item",DefaultVertexFormat.ENTITY,"GLINT","GLINT_SPECIAL");
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(wrong));
+        assertFalse(MetalEntityMotionPipeline.supports(wrong));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
+                pipeline("core/entity",DefaultVertexFormat.ENTITY_GLINT_SPECIAL,"GLINT","GLINT_SPECIAL")));
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
         RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
                 .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))

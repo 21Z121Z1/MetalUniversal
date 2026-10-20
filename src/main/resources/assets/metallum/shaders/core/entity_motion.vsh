@@ -35,7 +35,7 @@ void main() {
 
     metallumSetClipHistory(currentClip, previousClip);
     metallumTexCoord = UV0;
-#ifdef APPLY_TEXTURE_MATRIX
+#if defined(APPLY_TEXTURE_MATRIX) && !defined(METALLUM_ITEM_SOURCE)
     metallumTexCoord = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;
 #endif
     metallumVertexColorGuard = Color.a;

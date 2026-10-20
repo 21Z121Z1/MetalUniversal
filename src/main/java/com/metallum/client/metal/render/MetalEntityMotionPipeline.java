@@ -125,9 +125,12 @@ final class MetalEntityMotionPipeline {
         if (!auditedShaders(source)) {
             return null;
         }
+        var bindings = source.getVertexFormatBindings();
+        if (bindings.isEmpty() || bindings.getFirst() == null
+                || bindings.stream().skip(1).anyMatch(java.util.Objects::nonNull)) return null;
         return switch (source.getShaders().get(ShaderType.VERTEX).getPath()) {
-            case "core/entity", "core/item" -> Family.ENTITY;
-            case "core/block" -> Family.BLOCK;
+            case "core/entity", "core/item" -> previousFamilyOf(source) == PreviousFamily.ENTITY ? Family.ENTITY : null;
+            case "core/block" -> DefaultVertexFormat.BLOCK.equals(bindings.getFirst()) ? Family.BLOCK : null;
             default -> null;
         };
     }
@@ -166,10 +169,12 @@ final class MetalEntityMotionPipeline {
         }
         VertexFormat format = bindings.get(0);
         String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
-        if ((shader.equals("core/entity") || shader.equals("core/item"))
-                && DefaultVertexFormat.ENTITY.equals(format)
-                && !source.getShaderDefines().flags().contains("DISSOLVE")) {
-            return PreviousFamily.ENTITY;
+        if (shader.equals("core/entity") || shader.equals("core/item")) {
+            boolean special = source.getShaderDefines().flags().contains("GLINT_SPECIAL");
+            if (!special && DefaultVertexFormat.ENTITY.equals(format)) return PreviousFamily.ENTITY;
+            if (shader.equals("core/item") && special && source.getShaderDefines().flags().contains("GLINT")
+                    && DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(format)) return PreviousFamily.ENTITY;
+            return null;
         }
         if (shader.equals("core/rendertype_entity_shadow")
                 && DefaultVertexFormat.ENTITY.equals(format)) {
@@ -311,6 +316,12 @@ final class MetalEntityMotionPipeline {
         if (previousPositions) {
             builder.withVertexBinding(1, depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
             if (depthCorrespondence) builder.withShaderDefine("METALLUM_PREVIOUS_VALIDITY");
+            if (DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(source.getVertexFormatBinding(0))) {
+                builder.withShaderDefine("METALLUM_ENTITY_GLINT_SPECIAL");
+            }
+        }
+        if (source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/item")) {
+            builder.withShaderDefine("METALLUM_ITEM_SOURCE");
         }
         source.getShaderDefines().flags().forEach(builder::withShaderDefine);
         source.getShaderDefines().values().forEach((name, value) -> {

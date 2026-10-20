@@ -2,6 +2,12 @@
 #extension GL_ARB_separate_shader_objects : require
 
 uniform sampler2D Sampler0;
+#if defined(DISSOLVE) && !defined(METALLUM_ITEM_SOURCE)
+uniform sampler2D DissolveMaskSampler;
+#endif
+#ifdef GLINT
+#include <minecraft:globals.glsl>
+#endif
 #include <minecraft:dynamictransforms.glsl>
 
 #include <metallum:motion_fragment.glsl>
@@ -19,15 +25,28 @@ void main() {
     if (metallumVertexColorGuard < -1.0) {
         discard;
     }
+    float alpha = texture(Sampler0, metallumTexCoord).a;
+#if defined(OIT_ADDITIVE) && !defined(METALLUM_ITEM_SOURCE)
+    alpha = min(0.99, alpha);
+#endif
 #ifdef ALPHA_CUTOUT
-    if (texture(Sampler0, metallumTexCoord).a < ALPHA_CUTOUT) {
+    if (alpha < ALPHA_CUTOUT) {
         discard;
     }
+#endif
+    float vertexAlpha = metallumVertexAlpha;
+#if defined(DISSOLVE) && !defined(METALLUM_ITEM_SOURCE)
+    if (vertexAlpha < texture(DissolveMaskSampler, metallumTexCoord).a) discard;
+    vertexAlpha = 1.0;
+#endif
+    alpha *= vertexAlpha * ColorModulator.a;
+#ifdef GLINT
+    alpha = max(alpha, GlintAlpha);
 #endif
 #ifdef METALLUM_ALPHA_COMPOSITE
     // Alpha-blended and non-additive OIT surfaces with zero contribution must not
     // occlude another producer's flow in the private motion depth buffer.
-    if (texture(Sampler0, metallumTexCoord).a * metallumVertexAlpha * ColorModulator.a <= 0.0) discard;
+    if (alpha <= 0.0) discard;
 #endif
     MetallumMotionSample metallumSample = metallumMotionSample();
     metallumMotionTarget = metallumSample.motion;
