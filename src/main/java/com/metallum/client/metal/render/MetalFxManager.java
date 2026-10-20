@@ -2035,9 +2035,13 @@ public final class MetalFxManager {
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                         .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
                     ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                    boolean partialHistory = false;
                     for (float value : previousPositions) {
                         bytes.putFloat(value);
+                        partialHistory |= !Float.isFinite(value);
                     }
+                    if (partialHistory) MetalEntityMotionCapture.failExactSample(replay.sample(),
+                            "particle-emission-has-no-unambiguous-previous-vertices");
                     previousPositionBuffer = mapped.slice();
                 }
                 MetalFxMotionTelemetry.recordGpuUpload(previousByteCount);

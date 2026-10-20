@@ -809,6 +809,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
             catch (IOException failure) { throw new IllegalStateException("Could not write pending source motion evidence", failure); }
             require(census.rawMotionValidation(), "Real draw coverage capture was not enabled");
+            require(!census.programs().isEmpty(), "Source-program coverage is missing");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
                 var rows = census.pipelines().entrySet().stream().filter(row -> row.getKey().endsWith("/" + suffix)).toList();
                 require(!rows.isEmpty(), "Minecraft never executed particle source pipeline " + suffix + ": " + census);
@@ -819,6 +820,19 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     if (suffix.equals("opaque_particle") || suffix.equals("oit_accumulate_particle")) {
                         require(row.getValue().ownedColorExecutions() > 0, "Particle color draw has no staged motion owner: " + row);
                     }
+                }
+                var programs = census.programs().values().stream().filter(row -> row.source() != null
+                        && row.source().location().endsWith("/"+suffix)).toList();
+                require(!programs.isEmpty(), "No actual original shader program for "+suffix);
+                for (var program : programs) {
+                    require(program.actualDraws() > 0 && program.actualDraws() == program.hookedExecutions()
+                                    && program.source().vertexShader().equals("minecraft:core/particle")
+                                    && program.source().vertexBindings().getFirst().elements().getFirst().semantic().equals("Position"),
+                            "Particle source semantics/variant bypassed the real hook: "+program);
+                }
+                if (suffix.equals("opaque_particle") || suffix.equals("oit_accumulate_particle")) {
+                    require(programs.stream().mapToLong(row -> row.encodedMotionDraws()).sum() > 0,
+                            "Particle hook captured ownership but never encoded actual GPU motion: "+suffix);
                 }
             }
             long oitFeatures = census.pipelines().entrySet().stream()

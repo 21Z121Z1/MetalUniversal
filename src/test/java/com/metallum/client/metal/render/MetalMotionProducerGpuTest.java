@@ -189,6 +189,118 @@ final class MetalMotionProducerGpuTest {
         return (MetalGpuTexture) device.createTexture(name, usage | GpuTexture.USAGE_RENDER_ATTACHMENT, format, W, H, 1, 1);
     }
 
+    @Test
+    void particleIdentityRemappingPreservesSurvivorsAndMarksNewQuadsInvalidOnGpu() throws Exception {
+        var source = RenderPipeline.builder().withLocation("motion_contract/particle_membership")
+                .withVertexShader("core/particle").withFragmentShader("core/particle")
+                .withVertexBinding(0, DefaultVertexFormat.PARTICLE).withPrimitiveTopology(PrimitiveTopology.QUADS)
+                .withCull(false).withColorTargetState(ColorTargetState.DEFAULT)
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
+                        .withUniform("Sampler2", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        var sample = new MetalEntityMotionCapture.Sample(991, -9, new Matrix4f(), new Matrix4f(),
+                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER);
+        var format = DefaultVertexFormat.PARTICLE;
+        float[] before = particleQuadPositions(.5F, -.55F), current = particleQuadPositions(-.65F, 0, .65F);
+        MetalPreviousVertexHistory.reset();
+        try {
+            for (int frame = 0; frame < 2; frame++) {
+                MetalPreviousVertexHistory.beginFrame();
+                var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
+                float[] positions = frame == 0 ? before : current;
+                int quads = positions.length/12;
+                MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(source.getLocation().toString(),
+                        format.getElements(), format.getVertexSize(), PrimitiveTopology.QUADS, quads*4, quads*6), positions);
+                MetalPreviousVertexHistory.stageParticleIdentities(token, frame == 0 ? java.util.List.of(11L,22L) : java.util.List.of(22L,33L,11L));
+                if (frame == 0) MetalPreviousVertexHistory.commitSubmittedFrame();
+            }
+            var token = new MetalPreviousVertexHistory.DrawToken(new MetalPreviousVertexHistory.DrawKey(
+                    new MetalPreviousVertexHistory.ObjectKey(991,-9),0), source.getLocation().toString());
+            float[] previous = MetalPreviousVertexHistory.matchedPreviousPositions(token);
+            assertNotNull(previous);
+            ByteBuffer mesh = ByteBuffer.allocateDirect(12*format.getVertexSize()).order(ByteOrder.nativeOrder());
+            ByteBuffer old = ByteBuffer.allocateDirect(previous.length*4).order(ByteOrder.nativeOrder());
+            for (float value : previous) old.putFloat(value);
+            old.flip();
+            for (int i = 0; i < 12; i++) {
+                int p = i*format.getVertexSize();
+                for (int c = 0; c < 3; c++) mesh.putFloat(p+4*c, current[i*3+c]);
+                mesh.putInt(p+format.getElement("Color").offset(), -1);
+            }
+            ByteBuffer indices = ByteBuffer.allocateDirect(36).order(ByteOrder.nativeOrder());
+            for (int q = 0; q < 3; q++) for (int corner : new int[]{0,1,2,2,3,0}) indices.putShort((short)(q*4+corner));
+            indices.flip();
+            ByteBuffer dynamic = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
+            new Matrix4f().get(0,dynamic); new Matrix4f().get(64,dynamic);
+            for (int i = 0; i < 4; i++) dynamic.putFloat(128+i*4,1);
+            ByteBuffer projection = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()); new Matrix4f().get(0,projection);
+            ByteBuffer fog = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+            fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+            ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+            new Matrix4f().scaling(1,-1,1).get(0,motion); new Matrix4f().scaling(1,-1,1).get(64,motion);
+            try (var vb = device.createBuffer(() -> "current particle membership",GpuBuffer.USAGE_VERTEX,mesh);
+                 var pb = device.createBuffer(() -> "ID-remapped previous particles",GpuBuffer.USAGE_VERTEX,old);
+                 var ib = device.createBuffer(() -> "particle quad indices",GpuBuffer.USAGE_INDEX,indices);
+                 var du = device.createBuffer(() -> "particle dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+                 var pr = device.createBuffer(() -> "particle projection",GpuBuffer.USAGE_UNIFORM,projection);
+                 var fo = device.createBuffer(() -> "particle fog",GpuBuffer.USAGE_UNIFORM,fog);
+                 var mo = device.createBuffer(() -> "particle motion",GpuBuffer.USAGE_UNIFORM,motion);
+                 var color = texture("actual particle source",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_COPY_SRC);
+                 var flow = texture("particle correspondence",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
+                 var valid = texture("particle correspondence validity",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
+                 var sampled = texture("particle sprite and lightmap",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+                 var cv = device.createTextureView(color); var fv = device.createTextureView(flow);
+                 var vv = device.createTextureView(valid); var sv = device.createTextureView(sampled);
+                 var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,
+                         FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+                encoder.clearColorTexture(sampled,new Vector4f(1));
+                try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Original Minecraft particle color")
+                        .withColorAttachment(cv,Optional.of(new Vector4f(0))).build())) {
+                    pass.setPipeline(source); pass.setUniform("Projection",pr.slice()); pass.setUniform("DynamicTransforms",du.slice());
+                    pass.setUniform("Fog",fo.slice()); pass.bindTexture("Sampler0",sv,sampler); pass.bindTexture("Sampler2",sv,sampler);
+                    pass.setVertexBuffer(0,vb.slice()); pass.setIndexBuffer(ib,IndexType.SHORT); pass.drawIndexed(18,1,0,0,0);
+                }
+                try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "ID-remapped particle motion")
+                        .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0))).build())) {
+                    pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositions(source));
+                    pass.setUniform("Projection",pr.slice()); pass.setUniform("DynamicTransforms",du.slice()); pass.setUniform("MetallumMotion",mo.slice());
+                    pass.bindTexture("Sampler0",sv,sampler); pass.setVertexBuffer(0,vb.slice()); pass.setVertexBuffer(1,pb.slice());
+                    pass.setIndexBuffer(ib,IndexType.SHORT); pass.drawIndexed(18,1,0,0,0);
+                }
+                encoder.submit(); device.waitForSubmittedGpuWork();
+                byte[] pixels = readback(color), mask = readback(valid), vectors = readback(flow);
+                ByteBuffer values = ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
+                Path dir = Path.of("build/agent-evidence/motion-producers/particle_id_membership_change"); Files.createDirectories(dir);
+                Files.write(dir.resolve("source.rgba8"),pixels); Files.write(dir.resolve("validity.r8"),mask); Files.write(dir.resolve("motion.rg16f"),vectors);
+                int[] counts = new int[3];
+                for (int p = 0; p < W*H; p++) {
+                    float x = Float.float16ToFloat(values.getShort(p*4)), y = Float.float16ToFloat(values.getShort(p*4+2));
+                    assertTrue(Float.isFinite(x) && Float.isFinite(y), "invalid history must not export NaN flow");
+                    if (Byte.toUnsignedInt(pixels[p*4+3]) < 128) continue;
+                    int group = p%W < W/3 ? 0 : p%W >= W*2/3 ? 2 : 1;
+                    counts[group]++;
+                    assertEquals(group == 1 ? 0 : 255, Byte.toUnsignedInt(mask[p]));
+                    assertEquals(group == 0 ? .1F : group == 2 ? -.15F : 0, x, .001);
+                    assertEquals(0,y,.001);
+                }
+                for (int count : counts) assertTrue(count > 50, "all three real source quads must be visible");
+                Files.writeString(dir.resolve("result.json"),"{\"sourcePixelsByParticle\":"+java.util.Arrays.toString(counts)
+                        +",\"survivorsReordered\":true,\"newParticleInvalid\":true,\"finiteOutput\":true}");
+            }
+        } finally { MetalPreviousVertexHistory.reset(); }
+    }
+
+    private static float[] particleQuadPositions(float... centers) {
+        float[] output = new float[centers.length*12];
+        for (int q = 0; q < centers.length; q++) {
+            float[] corners = {centers[q]-.125F,-.25F,.5F, centers[q]+.125F,-.25F,.5F,
+                    centers[q]+.125F,.25F,.5F, centers[q]-.125F,.25F,.5F};
+            System.arraycopy(corners,0,output,q*12,12);
+        }
+        return output;
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("projectiveFixtures")
     void eachFragmentMatchesIndependentPerspectiveCorrespondence(ProjectiveFixture fixture) throws Exception {
@@ -270,7 +382,8 @@ final class MetalMotionProducerGpuTest {
                 for(int i=0;i<3;i++)weights[i]/=sum;
                 double[] c=interpolate(currentClip,weights),b=interpolate(previousClip,weights);
                 double x=b[0]/b[3]-c[0]/c[3],y=c[1]/c[3]-b[1]/b[3];
-                boolean expected=c[3]>1E-6&&b[3]>1E-6&&Double.isFinite(x)&&Double.isFinite(y)&&Math.abs(x)<=32&&Math.abs(y)<=32;
+                boolean expected=c[3]>1E-6&&b[3]>1E-6&&Double.isFinite(x)&&Double.isFinite(y)&&Math.abs(x)<=32&&Math.abs(y)<=32
+                        && Math.abs(b[0]/b[3])<=1 && Math.abs(b[1]/b[3])<=1 && b[2]/b[3]>=0 && b[2]/b[3]<=1;
                 boolean actual=Byte.toUnsignedInt(mask[p])>127;
                 if(expected!=actual)wrongValidity++;
                 if(!expected){invalid++;continue;}

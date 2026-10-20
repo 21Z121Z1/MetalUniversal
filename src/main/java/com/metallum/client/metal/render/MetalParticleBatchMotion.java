@@ -29,9 +29,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * records that id in layer order, and the later feature group recreates Minecraft's layer batching
  * order before exact previous-position history is admitted.</p>
  *
- * <p>Membership, layer identity, particle order, or draw-plan changes allocate a fresh negative
- * generation. The first frame after any such change therefore remains real; no particle can inherit
- * another particle's four previous vertices merely because the aggregate count stayed constant.</p>
+ * <p>Layer identity and draw-plan changes allocate a fresh negative generation. Membership and
+ * ordering changes retain the layer transaction and remap each quad by persistent particle ID.
+ * New or ambiguous emissions have invalid previous vertices, never another particle's history.</p>
  */
 public final class MetalParticleBatchMotion {
     private static final long PARTICLE_OBJECT_ID_BASE = 0x4D465850415254L; // ASCII "MFXPART".
@@ -61,7 +61,7 @@ public final class MetalParticleBatchMotion {
     private record Extraction(QuadParticleRenderState state, long particleId) {
     }
 
-    private record DrawPlan(boolean attach, RenderPipeline pipeline) {
+    private record DrawPlan(boolean attach, RenderPipeline pipeline, List<Long> particleIds) {
     }
 
     private static final class LayerAccumulator {
@@ -285,7 +285,7 @@ public final class MetalParticleBatchMotion {
                 rejectGroup(pendingIndex, null, "particle-layer-pipeline-missing");
                 return;
             }
-            plans.addLast(new DrawPlan(attach, pipeline));
+            plans.addLast(new DrawPlan(attach, pipeline, List.copyOf(accumulator.particleIds)));
             if (attach) {
                 if (!MetalEntityMotionPipeline.supportsPreviousPositions(pipeline)) {
                     rejectGroup(pendingIndex, null,
@@ -327,7 +327,7 @@ public final class MetalParticleBatchMotion {
         boolean hasPrevious = previous != null
                 && previous.signature() != null
                 && previous.generation() < 0L
-                && signature.equals(previous.signature());
+                && sameLayerPlan(signature, previous.signature());
         long generation = hasPrevious ? previous.generation() : allocateGeneration();
         if (generation >= 0L) {
             return null;
@@ -341,6 +341,16 @@ public final class MetalParticleBatchMotion {
                 hasPrevious ? identity : null,
                 FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER
         );
+    }
+
+    private static boolean sameLayerPlan(final Signature a, final Signature b) {
+        if (a.translucent() != b.translucent() || a.layers().size() != b.layers().size()) return false;
+        for (int i = 0; i < a.layers().size(); i++) {
+            LayerSignature x = a.layers().get(i), y = b.layers().get(i);
+            if (x.translucent() != y.translucent() || !x.textureAtlas().equals(y.textureAtlas())
+                    || !x.pipelineLocation().equals(y.pipelineLocation()) || !x.vertexShader().equals(y.vertexShader())) return false;
+        }
+        return true;
     }
 
     /** Called from the StagedVertexBuffer append hook while this exact feature group is active. */
@@ -363,7 +373,7 @@ public final class MetalParticleBatchMotion {
             return;
         }
         if (plan.attach() && active.sample != null) {
-            MetalEntityMotionCapture.attachDraw(draw, plan.pipeline());
+            MetalEntityMotionCapture.attachDraw(draw, plan.pipeline(), plan.particleIds());
         }
     }
 

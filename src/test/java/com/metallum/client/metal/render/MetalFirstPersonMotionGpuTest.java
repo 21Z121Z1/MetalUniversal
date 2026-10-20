@@ -143,6 +143,7 @@ final class MetalFirstPersonMotionGpuTest {
                 .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
                 .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
         var snippet = RenderPipeline.builder().withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withVertexBinding(0, DefaultVertexFormat.ENTITY).withBindGroupLayout(resources)
                 .withColorTargetState(ColorTargetState.DEFAULT).withShaderDefine("NO_CARDINAL_LIGHTING")
                 .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").buildSnippet();

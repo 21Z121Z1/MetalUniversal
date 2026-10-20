@@ -24,6 +24,11 @@ MetallumMotionSample metallumMotionSample() {
     vec2 motion = vec2(previousNdc.x - currentNdc.x, currentNdc.y - previousNdc.y);
     if (any(isnan(currentNdc)) || any(isinf(currentNdc))
             || any(isnan(previousNdc)) || any(isinf(previousNdc))
+            // There is no previous source sample outside its clip volume. In
+            // particular w close to zero can amplify interpolation error into
+            // huge off-screen vectors; these are disocclusions, not valid flow.
+            || any(greaterThan(abs(previousNdc.xy), vec2(1.0)))
+            || previousNdc.z < 0.0 || previousNdc.z > 1.0
             || any(isnan(motion)) || any(isinf(motion))
             || any(greaterThan(abs(motion), vec2(32.0)))) return result;
     result.motion = motion;

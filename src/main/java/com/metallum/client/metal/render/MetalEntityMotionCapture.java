@@ -99,7 +99,8 @@ public final class MetalEntityMotionCapture {
 
     private record DrawCapture(
             Sample sample,
-            MetalPreviousVertexHistory.DrawToken previousVertexToken
+            MetalPreviousVertexHistory.DrawToken previousVertexToken,
+            @Nullable List<Long> particleIds
     ) {
     }
 
@@ -501,6 +502,10 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline) {
+        attachDraw(draw, pipeline, null);
+    }
+
+    static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline, final @Nullable List<Long> particleIds) {
         if (!enabled) {
             return;
         }
@@ -508,7 +513,8 @@ public final class MetalEntityMotionCapture {
         if (draw != null && sample != null && pipeline != null) {
             DRAWS.put(draw, new DrawCapture(
                     sample,
-                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline)
+                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline),
+                    particleIds == null ? null : List.copyOf(particleIds)
             ));
             drawsAttached++;
         }
@@ -535,6 +541,9 @@ public final class MetalEntityMotionCapture {
                     vertexCount,
                     indexCount
             );
+            if (capture.particleIds() != null) {
+                MetalPreviousVertexHistory.stageParticleIdentities(capture.previousVertexToken(), capture.particleIds());
+            }
         }
     }
 

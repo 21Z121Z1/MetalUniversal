@@ -46,7 +46,7 @@ final class MetalParticleBatchMotionTest {
     }
 
     @Test
-    void sameCountButParticleOrderChangeAllocatesFreshGeneration() {
+    void particleOrderChangeRetainsLayerGenerationForIdentityRemapping() {
         MetalParticleBatchMotion.beginFrame();
         MetalEntityMotionCapture.Sample first = MetalParticleBatchMotion.beginSignatureBatch(SIG_AB);
         assertNotNull(first);
@@ -57,8 +57,8 @@ final class MetalParticleBatchMotionTest {
         MetalParticleBatchMotion.beginFrame();
         MetalEntityMotionCapture.Sample changed = MetalParticleBatchMotion.beginSignatureBatch(reordered);
         assertNotNull(changed);
-        assertNotEquals(first.generation(), changed.generation());
-        assertFalse(changed.hasPrevious());
+        assertEquals(first.generation(), changed.generation());
+        assertTrue(changed.hasPrevious());
     }
 
     @Test

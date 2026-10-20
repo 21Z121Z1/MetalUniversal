@@ -108,12 +108,12 @@ final class MetalPreviousVertexHistory {
                            int anisotropy, java.util.OptionalDouble maxLod) {}
 
     private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
-                            @Nullable SurfaceIdentity surface) {
+                            @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds) {
         Snapshot withTransform(final @Nullable DrawTransform value) {
-            return new Snapshot(signature, positions, value, surface);
+            return new Snapshot(signature, positions, value, surface, particleIds);
         }
         Snapshot withSurface(final @Nullable SurfaceIdentity value) {
-            return new Snapshot(signature, positions, transform, value);
+            return new Snapshot(signature, positions, transform, value, particleIds);
         }
     }
 
@@ -216,8 +216,24 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null));
+            PENDING.put(token.key(), new Snapshot(signature, new Positions(positions), null, null, null));
         }
+    }
+
+    /** Exactly four vertices and six indices per actual SingleQuadParticle emission. */
+    static void stageParticleIdentities(final @Nullable DrawToken token, final List<Long> ids) {
+        Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
+        if (snapshot == null) return;
+        Signature s = snapshot.signature();
+        if (ids == null || ids.isEmpty() || ids.stream().anyMatch(id -> id == null || id <= 0)
+                || s.topology() != PrimitiveTopology.QUADS
+                || !s.elements().equals(com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getElements())
+                || s.vertexSize() != com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE.getVertexSize()
+                || s.vertexCount() != (long)ids.size()*4 || s.indexCount() != (long)ids.size()*6) {
+            PENDING.remove(token.key());
+            return;
+        }
+        PENDING.put(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(), List.copyOf(ids)));
     }
 
     /** Attaches uniforms to the same pending draw/geometry transaction, never a separate history. */
@@ -273,10 +289,44 @@ final class MetalPreviousVertexHistory {
         }
         Snapshot current = PENDING.get(token.key());
         Snapshot previous = PREVIOUS.get(token.key());
-        if (current == null || previous == null || !current.signature().equals(previous.signature())) {
+        if (current == null || previous == null || !compatible(current, previous)) {
             return null;
         }
+        if (current.particleIds() != null) return remapParticlePositions(current, previous);
         return previous.positions().values();
+    }
+
+    private static boolean compatible(final Snapshot current, final Snapshot previous) {
+        if (current.particleIds() == null && previous.particleIds() == null) {
+            return current.signature().equals(previous.signature());
+        }
+        if (current.particleIds() == null || previous.particleIds() == null) return false;
+        Signature a = current.signature(), b = previous.signature();
+        return a.pipelineKey().equals(b.pipelineKey()) && a.elements().equals(b.elements())
+                && a.vertexSize() == b.vertexSize() && a.topology() == b.topology();
+    }
+
+    private static float[] remapParticlePositions(final Snapshot current, final Snapshot previous) {
+        Map<Long, List<Integer>> previousQuads = new HashMap<>();
+        for (int i = 0; i < previous.particleIds().size(); i++) {
+            previousQuads.computeIfAbsent(previous.particleIds().get(i), ignored -> new ArrayList<>()).add(i);
+        }
+        Map<Long, Integer> currentCounts = new HashMap<>(), occurrences = new HashMap<>();
+        current.particleIds().forEach(id -> currentCounts.merge(id, 1, Integer::sum));
+        float[] output = new float[current.signature().vertexCount()*3];
+        java.util.Arrays.fill(output, Float.NaN);
+        for (int i = 0; i < current.particleIds().size(); i++) {
+            long id = current.particleIds().get(i);
+            int occurrence = occurrences.merge(id, 1, Integer::sum)-1;
+            List<Integer> old = previousQuads.get(id);
+            // One particle can emit multiple quads. Preserve their emission order only
+            // if its emission count is unchanged; a changed count is ambiguous for that
+            // particle, without invalidating unrelated particles in the same layer.
+            if (old != null && old.size() == currentCounts.get(id)) {
+                System.arraycopy(previous.positions.values, old.get(occurrence)*12, output, i*12, 12);
+            }
+        }
+        return output;
     }
 
     static int matchingManifestDrawCount(final long objectId, final long generation) {
@@ -293,7 +343,7 @@ final class MetalPreviousVertexHistory {
             DrawKey key = new DrawKey(object, ordinal);
             Snapshot current = PENDING.get(key);
             Snapshot previous = PREVIOUS.get(key);
-            if (current == null || previous == null || !current.signature().equals(previous.signature())) {
+            if (current == null || previous == null || !compatible(current, previous)) {
                 return false;
             }
         }
