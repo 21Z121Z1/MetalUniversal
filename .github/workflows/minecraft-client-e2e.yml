@@ -256,6 +256,28 @@ jobs:
                   raise SystemExit(f'Incomplete motion production admitted frame interpolation: {fx}')
           print('verified MetalFX runtime:', json.dumps(fx, sort_keys=True))
 
+          if fx['profile'] == 'requested-temporal':
+              # Retain the exact existing diagnostics in a second inspectable
+              # channel. A passed scene is not a complete producer/UI admission.
+              import base64
+              import gzip
+              paths = [root / 'motion-source-draw-coverage.json']
+              for status in ('fast', 'fancy'):
+                  for stage in ('ordinary', 'oit'):
+                      directory = root / f'cloud-motion-{status}-{stage}'
+                      paths += [directory / 'cloud-source-census.json', directory / 'cloud-ownership-proof.json']
+              diagnostic = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'],
+                            'diagnosticOnly': True, 'files': {}}
+              for path in paths:
+                  if path.stat().st_size > 8 * 1024 * 1024:
+                      raise SystemExit(f'source diagnostic exceeds inspectable byte limit: {path}')
+                  data = path.read_bytes()
+                  diagnostic['files'][str(path.relative_to(root))] = {
+                      'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                      'content': json.loads(data)}
+              payload = json.dumps(diagnostic, sort_keys=True).encode()
+              print('MINECRAFT_SOURCE_DIAGNOSTICS_GZIP_BASE64 ' + base64.b64encode(gzip.compress(payload)).decode())
+
           raw = required[1].read_bytes()
           if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
               raise SystemExit('invalid framebuffer PNG')
