@@ -108,6 +108,8 @@ BLOCK 新增精确 previous-position 变体：四个源属性之后使用 previo
 
 `45a4bdb` 的两个 macOS GPU job 均成功。下一轮增加 POSITION_COLOR 精确 ABI：源属性 0/1，前帧位置／有效性 2/3，供原版闪电与龙死亡光芒共用。回放复现 smooth 顶点 alpha、源 ColorModulator 和原版雾的透明贡献；只在这类可见性依赖 Fog 的源 draw 捕获并冻结真实 40 字节 Fog，其他路径不增加该上传。闪电 seed 或状态类变化会分配新几何 generation，不能把重新随机生成的分支对应成连续变形；龙随机光芒按固定种子及完整 draw／顶点数量清单匹配，数量变化仍为 current-only。
 
+`45a4bdb` 的 macOS 26 原始 JUnit 为 96 producer + 13 first-person，109/109；新增无附件 writeDepth 与 writeDepth+bias 各 520 个原色覆盖像素，运动表面／XY／Z 错误均为零。该提交 Vanilla MetalFX fallback 客户端也已成功。新加的前帧偏移动态对照用原版实际旧帧 D32／颜色拟合屏幕深度平面，再以独立 GPU 当前表面点映射到旧平面；覆盖不同旋转／缩放的正交与透视姿态，沿用已有 3e-5 透视误差预算，并要求错误使用当前坡度的负例误差超过 3e-4。拟合器有独立 CPU 数值及退化／空覆盖反例；动态 GPU 对照仍待对应提交执行。
+
 原版 additive OIT 的 sampleColorForAccumulation 也以 alpha 预乘 RGB，所以所有 OIT_ACCUMULATE 的零 alpha 均不应覆盖运动。新增原版 OIT shader／真实零 absorbance 纹理对照，用实际 RGB 贡献判断 additive 可见性（其输出 alpha 固定为 0），验证实体与 POSITION_COLOR 的正、零贡献。真实客户端加入视觉闪电、普通／死亡龙及死亡 rays，继续要求实际 source、owner、匹配历史和编码证据；新增路径仍待对应 Actions 验收。
 
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
