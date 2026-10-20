@@ -1310,6 +1310,147 @@ final class MetalMotionProducerGpuTest {
         }
     }
 
+    static Stream<String> biasedPoseFixtures() {return Stream.of("orthographic","projective");}
+
+    @ParameterizedTest(name="previous raster bias across poses: {0}")
+    @MethodSource("biasedPoseFixtures")
+    void previousBiasMatchesActualOldRasterAcrossDifferentSourcePoses(String name) throws Exception {
+        boolean perspective=name.equals("projective");
+        var format=DefaultVertexFormat.ENTITY;
+        var source=RenderPipeline.builder().withLocation("motion_contract/biased_pose/"+name)
+                .withVertexShader("core/entity").withFragmentShader("core/entity").withVertexBinding(0,format)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withShaderDefine("EMISSIVE").withShaderDefine("NO_OVERLAY").withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true,2,3))
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA8_UNORM,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        ByteBuffer mesh=vertices(new Fixture(name,"core/entity",format,false,false,false,false),false);
+        for(int i=0;i<6;i++)mesh.putFloat(i*format.getVertexSize()+8,.5F+.1F*mesh.getFloat(i*format.getVertexSize()));
+        ByteBuffer oldPositions=ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder());
+        MetalPreviousVertexReplay.writePreviousPositions(MetalPreviousVertexHistory.extractPositions(format,java.util.List.of(mesh),6),oldPositions);oldPositions.flip();
+        Matrix4f[] views={new Matrix4f().translation(-.1F,.05F,perspective ? -2 : 0).rotateY(.35F).rotateZ(.55F).scale(.8F,1.2F,1),
+                new Matrix4f().translation(.15F,-.1F,perspective ? -1.7F : 0).rotateY(-.2F).rotateZ(-.3F).scale(1.3F,.7F,1)};
+        Matrix4f projection=perspective ? new Matrix4f().perspective(1.2F,(float)W/H,100,.1F,true) : new Matrix4f();
+        ByteBuffer[] dynamics=new ByteBuffer[2];
+        for(int frame=0;frame<2;frame++) {
+            dynamics[frame]=ByteBuffer.allocateDirect(160).order(ByteOrder.nativeOrder());views[frame].get(0,dynamics[frame]);
+            new Matrix4f().get(64,dynamics[frame]);for(int c=0;c<4;c++)dynamics[frame].putFloat(128+c*4,1);
+        }
+        Matrix4f oldMvp=new Matrix4f().scaling(1,-1,1).mul(projection).mul(views[0]);
+        ByteBuffer p=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());projection.get(0,p);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        new Matrix4f().scaling(1,-1,1).get(0,motion);oldMvp.get(64,motion);
+        ByteBuffer raster=ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        new MetalPreviousVertexReplay.RasterState(W,H,2,3).write(raster);raster.flip();
+        ByteBuffer fog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        var oracleVertex=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/biased_pose_vertex");
+        var oracleFragment=net.minecraft.resources.Identifier.fromNamespaceAndPath("metallum","oracle/biased_pose_fragment");
+        var oracle=RenderPipeline.builder().withLocation("motion_contract/biased_pose_point/"+name)
+                .withVertexShader(oracleVertex).withFragmentShader(oracleFragment).withVertexBinding(0,format)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL))
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("OracleRaster",UniformType.UNIFORM_BUFFER).build()).build();
+        device.precompilePipeline(oracle,MetalShaderSourceAdapters.overlay(java.util.Map.of(
+                oracleVertex,surfacePointVertexSource(),oracleFragment,surfacePointFragmentSource()),device.activeShaderSource()));
+        ByteBuffer pointMatrix=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());new Matrix4f(projection).mul(views[1]).get(0,pointMatrix);
+        int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        byte[][] colors=new byte[2][],depths=new byte[2][];
+        try(var vb=device.createBuffer(()->"biased pose mesh",GpuBuffer.USAGE_VERTEX,mesh);
+            var pb=device.createBuffer(()->"biased old positions",GpuBuffer.USAGE_VERTEX,oldPositions);
+            var d0=device.createBuffer(()->"old biased pose",GpuBuffer.USAGE_UNIFORM,dynamics[0]);
+            var d1=device.createBuffer(()->"current biased pose",GpuBuffer.USAGE_UNIFORM,dynamics[1]);
+            var pr=device.createBuffer(()->"biased projection",GpuBuffer.USAGE_UNIFORM,p);
+            var fo=device.createBuffer(()->"biased fog",GpuBuffer.USAGE_UNIFORM,fog);
+            var mo=device.createBuffer(()->"old biased source mapping",GpuBuffer.USAGE_UNIFORM,motion);
+            var ra=device.createBuffer(()->"old hardware bias",GpuBuffer.USAGE_UNIFORM,raster);
+            var op=device.createBuffer(()->"independent current point mapping",GpuBuffer.USAGE_UNIFORM,pointMatrix);
+            var sampled=texture("biased material",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var color=texture("original biased color",GpuFormat.RGBA8_UNORM,copy);
+            var scene=texture("original biased source Z",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var ownership=texture("biased private Z",GpuFormat.D32_FLOAT,copy);
+            var points=texture("independent biased surface point",GpuFormat.RGBA32_FLOAT,copy);
+            var flow=texture("biased pose XY",GpuFormat.RG16_FLOAT,copy);var valid=texture("biased pose validity",GpuFormat.R8_UNORM,copy);
+            var pair=texture("biased pose correspondence",GpuFormat.RG32_FLOAT,copy);
+            var sv=device.createTextureView(sampled);var cv=device.createTextureView(color);var sd=device.createTextureView(scene);
+            var od=device.createTextureView(ownership);var ov=device.createTextureView(points);
+            var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled,new Vector4f(1));
+            for(int frame=0;frame<2;frame++) {
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent original biased source frame")
+                        .withColorAttachment(cv,Optional.of(new Vector4f(0))).withDepthAttachment(sd,java.util.OptionalDouble.of(0)).build())) {
+                    pass.setPipeline(source);pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",(frame==0 ? d0 : d1).slice());
+                    pass.setUniform("Fog",fo.slice());pass.bindTexture("Sampler0",sv,sampler);pass.setVertexBuffer(0,vb.slice());pass.draw(6,1,0,0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();colors[frame]=readback(color);depths[frame]=readback(scene);
+            }
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Independent current surface point")
+                    .withColorAttachment(ov,Optional.of(new Vector4f(0))).build())) {
+                pass.setPipeline(oracle);pass.setUniform("OracleRaster",op.slice());pass.setVertexBuffer(0,vb.slice());pass.draw(6,1,0,0);
+            }
+            encoder.copyTextureToTexture(scene,ownership,0,0,0,0,0,W,H);
+            try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Actual previous biased source correspondence")
+                    .withColorAttachment(fv,Optional.of(new Vector4f(0))).withColorAttachment(vv,Optional.of(new Vector4f(0)))
+                    .withColorAttachment(zv,Optional.of(new Vector4f(-1))).withDepthAttachment(od).build())) {
+                pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
+                pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",d1.slice());
+                pass.setUniform("MetallumMotion",mo.slice());pass.setUniform("MetallumSurface",ra.slice());
+                pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("MetallumSourceDepth",sd,sampler);
+                pass.setVertexBuffer(0,vb.slice());pass.setVertexBuffer(1,pb.slice());pass.draw(6,1,0,0);
+            }
+            encoder.submit();device.waitForSubmittedGpuWork();
+            var before=fitRasterDepthPlane(colors[0],depths[0],W,H);var now=fitRasterDepthPlane(colors[1],depths[1],W,H);
+            byte[] mask=readback(valid),z=readback(pair),pointBytes=readback(points);
+            ByteBuffer zs=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder()),ps=ByteBuffer.wrap(pointBytes).order(ByteOrder.nativeOrder());
+            ByteBuffer currentZ=ByteBuffer.wrap(depths[1]).order(ByteOrder.nativeOrder());
+            int checked=0,wrong=0;double maxError=0,wrongCurrentSlopeError=0;
+            for(int pixel=0;pixel<W*H;pixel++)if(Byte.toUnsignedInt(mask[pixel])>127) {
+                checked++;assertEquals(1,ps.getFloat(pixel*16+12),0);
+                Vector4f oldPoint=oldMvp.transform(new Vector4f(ps.getFloat(pixel*16),ps.getFloat(pixel*16+4),ps.getFloat(pixel*16+8),1));
+                double oldX=(oldPoint.x/oldPoint.w+1)*W/2,oldY=(1-oldPoint.y/oldPoint.w)*H/2;
+                double expected=before.at(oldX,oldY);
+                double error=Math.max(Math.abs(zs.getFloat(pixel*8)-expected),Math.abs(zs.getFloat(pixel*8+4)-currentZ.getFloat(pixel*4)));
+                if(!Double.isFinite(error)||error>3e-5)wrong++;maxError=Math.max(maxError,error);
+                double geometric=oldPoint.z/oldPoint.w,unit=Math.scalb(1,Math.getExponent(geometric)-23);
+                double wrongBias=2*Math.max(Math.abs(now.xSlope()),Math.abs(now.ySlope()))+3*unit;
+                wrongCurrentSlopeError=Math.max(wrongCurrentSlopeError,Math.abs(geometric+wrongBias-expected));
+            }
+            Path dir=Path.of("build/agent-evidence/motion-producers/previous-raster-bias/"+name);Files.createDirectories(dir);
+            Files.write(dir.resolve("old-original.rgba8"),colors[0]);Files.write(dir.resolve("old-original.d32f"),depths[0]);
+            Files.write(dir.resolve("current-original.rgba8"),colors[1]);Files.write(dir.resolve("current-original.d32f"),depths[1]);
+            Files.write(dir.resolve("correspondence.rg32f"),z);Files.write(dir.resolve("surface-point.rgba32f"),pointBytes);
+            Files.writeString(dir.resolve("result.json"),"{\"checkedPixels\":"+checked+",\"wrongDepthPixels\":"+wrong
+                    +",\"maxDepthError\":"+maxError+",\"maxOldPlaneResidual\":"+before.maxResidual()
+                    +",\"wrongCurrentSlopeNegativeControlError\":"+wrongCurrentSlopeError+"}");
+            assertTrue(before.maxResidual()<3e-6);assertTrue(checked>40);assertEquals(0,wrong);
+            assertTrue(wrongCurrentSlopeError>3e-4,"The independent old raster must distinguish using the current slope");
+        }
+    }
+
+    record RasterDepthPlane(double xSlope,double ySlope,double constant,double maxResidual) {
+        double at(double x,double y) {return xSlope*x+ySlope*y+constant;}
+    }
+
+    /** Least-squares plane fitted only from original GPU color coverage and D32 readback. */
+    static RasterDepthPlane fitRasterDepthPlane(byte[] rgba,byte[] d32,int width,int height) {
+        ByteBuffer z=ByteBuffer.wrap(d32).order(ByteOrder.nativeOrder());
+        double mx=0,my=0,mz=0;int n=0;
+        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127) {n++;mx+=p%width+.5;my+=p/width+.5;mz+=z.getFloat(p*4);}
+        if(n<3)throw new IllegalArgumentException("Insufficient original raster samples");mx/=n;my/=n;mz/=n;
+        double xx=0,xy=0,yy=0,xz=0,yz=0;
+        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127) {
+            double x=p%width+.5-mx,y=p/width+.5-my,depth=z.getFloat(p*4)-mz;
+            xx+=x*x;xy+=x*y;yy+=y*y;xz+=x*depth;yz+=y*depth;
+        }
+        double determinant=xx*yy-xy*xy;if(!(determinant>0))throw new IllegalArgumentException("Degenerate original raster plane");
+        double a=(xz*yy-yz*xy)/determinant,b=(yz*xx-xz*xy)/determinant,c=mz-a*mx-b*my,residual=0;
+        for(int p=0;p<width*height;p++)if(Byte.toUnsignedInt(rgba[p*4+3])>127)
+            residual=Math.max(residual,Math.abs(a*(p%width+.5)+b*(p/width+.5)+c-z.getFloat(p*4)));
+        return new RasterDepthPlane(a,b,c,residual);
+    }
+
     @Test
     void blockMotionUsesPreviousAcceptedModelOffsetAgainstActualMinecraftFrames() throws Exception {
         var source=RenderPipeline.builder().withLocation("motion_contract/block_offset_history")
