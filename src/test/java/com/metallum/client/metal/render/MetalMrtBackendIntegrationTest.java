@@ -1963,7 +1963,9 @@ final class MetalMrtBackendIntegrationTest {
         MetalMotionDrawCoverage.beginScene();
         try {
             render(source,textures,null);
+            MetalMotionDrawCoverage.closeSourceObservation(new FrameSynthesisContract.FrameStamp(991,1));
             var first=MetalMotionDrawCoverage.sourceFrameManifest();
+            assertTrue(first.closed());
             assertEquals(991,first.frameId());assertFalse(first.linkageComplete());
             String key=MetalMotionProgramIdentity.of(source).key();
             assertEquals(1,first.programs().get(key).actualCalls());
@@ -1972,6 +1974,10 @@ final class MetalMrtBackendIntegrationTest {
             try {renderLoad(source,textures);}
             finally {MetalMotionDrawCoverage.endMotionReplay();}
             assertEquals(1,MetalMotionDrawCoverage.sourceFrameManifest().programs().get(key).actualCalls());
+            assertTrue(MetalMotionDrawCoverage.sourceFrameManifest().closed());
+            renderLoad(source,textures);
+            assertFalse(MetalMotionDrawCoverage.sourceFrameManifest().closed());
+            assertTrue(MetalMotionDrawCoverage.sourceFrameManifest().overflow());
         } finally {MetalMotionDrawCoverage.endScene();MetalMotionDrawCoverage.beginFrame();closeTextures(textures);}
     }
 

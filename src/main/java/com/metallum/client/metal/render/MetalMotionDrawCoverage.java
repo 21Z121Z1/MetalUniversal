@@ -16,6 +16,8 @@ public final class MetalMotionDrawCoverage {
     private static long ownedInvalid;
     private static final boolean VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
     private static final MetalMotionFrameManifest FRAME_MANIFEST=new MetalMotionFrameManifest();
+    private static MetalMotionFrameManifest.Snapshot lastSourceFrame=FRAME_MANIFEST.snapshot();
+    private static MetalUiDrawCoverage.Snapshot lastUiFrame=MetalUiDrawCoverage.snapshot();
     private static boolean scene;
     private static int motionReplayDepth;
     private static final Map<String, long[]> PIPELINES = new TreeMap<>();
@@ -42,6 +44,9 @@ public final class MetalMotionDrawCoverage {
 
     static void beginFrame() {
         scene = false;
+        if(FRAME_MANIFEST.collecting())lastSourceFrame=FRAME_MANIFEST.snapshot();
+        var ui=MetalUiDrawCoverage.snapshot();
+        if(ui.frameId()>0)lastUiFrame=ui;
         FRAME_MANIFEST.reset();
         MetalUiDrawCoverage.reset();
         motionReplayDepth = 0;
@@ -99,6 +104,12 @@ public final class MetalMotionDrawCoverage {
 
     static void bindSourceFrame(FrameSynthesisContract.FrameStamp stamp) {
         FRAME_MANIFEST.begin(stamp.frameId(),stamp.historyEpoch());
+    }
+
+    static void closeSourceObservation(FrameSynthesisContract.FrameStamp stamp) {
+        var current=FRAME_MANIFEST.snapshot();
+        if(current.frameId()!=stamp.frameId() || current.epoch()!=stamp.historyEpoch())return;
+        FRAME_MANIFEST.closeObservation();lastSourceFrame=FRAME_MANIFEST.snapshot();
     }
 
     static boolean sourceFrameLinked(FrameSynthesisContract.FrameStamp stamp) {
@@ -167,7 +178,9 @@ public final class MetalMotionDrawCoverage {
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
                 counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
-                snapshot(), MetalEntityMotionCapture.diagnostics(),FRAME_MANIFEST.snapshot(),MetalUiDrawCoverage.snapshot());
+                snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
+                MetalUiDrawCoverage.snapshot().frameId()==lastSourceFrame.frameId()
+                        ? MetalUiDrawCoverage.snapshot() : lastUiFrame);
     }
 
     static void sourceExecution(final @Nullable OitStage stage,

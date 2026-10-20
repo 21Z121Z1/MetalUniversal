@@ -946,7 +946,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             catch (IOException failure) { throw new IllegalStateException("Could not write pending source motion evidence", failure); }
             require(census.rawMotionValidation(), "Real draw coverage capture was not enabled");
             require(!census.programs().isEmpty(), "Source-program coverage is missing");
-            require(census.sourceFrame().collected() && census.sourceFrame().frameId()>0
+            require(census.sourceFrame().collected() && census.sourceFrame().closed() && census.sourceFrame().frameId()>0
                             && census.sourceFrame().epoch()>0 && !census.sourceFrame().programs().isEmpty(),
                     "Actual source frame has no independent backend draw inventory: "+census.sourceFrame());
             require(census.sourceFrame().programs().values().stream().anyMatch(row->row.actualCalls()>0),

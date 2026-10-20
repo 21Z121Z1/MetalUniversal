@@ -2848,8 +2848,11 @@ public final class MetalFxManager {
             // corresponding depth clear to issue here.
         }
         this.frameUsesUpscaledTarget = true;
-        if(sourceFrameStamp!=null && uiTarget.getColorTexture() instanceof MetalGpuTexture uiTexture)
-            MetalUiDrawCoverage.begin(sourceFrameStamp,uiTexture,frameGenerationEnabled && encoded);
+        if(sourceFrameStamp!=null) {
+            MetalMotionDrawCoverage.closeSourceObservation(sourceFrameStamp);
+            if(uiTarget.getColorTexture() instanceof MetalGpuTexture uiTexture)
+                MetalUiDrawCoverage.begin(sourceFrameStamp,uiTexture,frameGenerationEnabled && encoded);
+        }
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
             Matrix4f submittedCameraRelativeViewProjection =

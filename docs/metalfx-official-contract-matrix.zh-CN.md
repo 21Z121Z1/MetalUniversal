@@ -27,7 +27,7 @@
 | 透明与特殊材质 | source draw 真实状态、材质 reactive 与 previous validity 分离 | 单一运动不能表示多层混合；未知 pipeline／格式仍拒绝，reactive 不算完整 FG 对应 |
 | 粒子 | `MetalParticleBatchMotion`、粒子 ID、独立 Layer 事务；`MetalParticleQuadHistory` | 合并／拆分／重排按粒子 ID 对应；一个当前 draw 只能共享一致的旧投影、模型视图、材质／raster 状态和有效 uniform 输入。出生、发射数量变化及跨 draw 的歧义多发射保留无效顶点；实体／天气仍使用原有完整 manifest，失败提交不推进。任意自定义发射尚须实际入口证明 |
 | 天气／环境 | `WeatherEffectRendererMetalFxMixin`、`MetalWeatherMotion`、`MetalWeatherCorrespondence`、`CloudRendererMetalFxMixin` | 雨雪按实际上传 XYZ／UV、随机漂移、列身份和 sampler 重建旧纹理表面点，片元拒绝旧范围外历史；源顶点冻结、雨雪分层并随源提交推进，关闭捕获期间的新上传也使旧准备数据失效。云按真实 signed CloudFaces／CloudInfo 保留原 GPU 程序化表达式，冻结源绑定并以完整 cell／face 身份推进；重建先失效当前 CPU 描述，捕获停用期间替换退役 generation。剩余环境及前帧可见 ownership 仍未证明，不解除完整 FG 准入 |
-| 生物／方块实体 | staged CPU posed positions、所有者 generation、`MetalMotionFrameManifest` 后端逐帧清单 | 稳定程序 hash 区分相同 location 的 shader／blend／layout 变体；同一 source stamp／epoch 对照实际 draw、所有者 hook、成功 motion 编码；直接、批量、drawMultiple 与间接路径均计入。未知／未接入／间接命令对应、剩余渲染器与 Iris 语义继续拒绝，不由累计成功抵消 |
+| 生物／方块实体 | staged CPU posed positions、所有者 generation、`MetalMotionFrameManifest` 后端逐帧清单 | 稳定程序 hash 区分相同 location 的 shader／blend／layout 变体；同一 source stamp／epoch 对照实际 draw、所有者 hook、成功 motion 编码；结束源观察后才可准入，迟到源事件使证明失效；直接、批量、drawMultiple 与间接路径均计入。未知／未接入／间接命令对应、剩余渲染器与 Iris 语义继续拒绝，不由累计成功抵消 |
 | 手部 | 独立 HUD 覆盖、透明手部 current Z、前帧手部表面 | 无源深度的透明手部也不归入世界；缺历史明确反遮挡；真实客户端摆动质量仍需支持硬件 |
 | 线性颜色 | `MetalFxColorTransfer`：RGBA8 SDR→RGBA16F linear→Temporal→RGBA8 SDR | 显式 sRGB transfer 保留 alpha；独立 ramp 与 overshoot GPU 读回。未恢复 HDR 辐射、未迁移 tone map，不解除相应颜色门禁 |
 | scaler／FG 关联 | `compatibleLinkedTemporalScaler` | 线性 RGBA16F scaler 输出与 SDR RGBA8 FG 输入不兼容时使用已有 standalone 路径；不能伪报 linked |
