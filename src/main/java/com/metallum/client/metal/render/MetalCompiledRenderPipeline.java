@@ -92,7 +92,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     private final MetalDevice device;
     private final RenderPipeline info;
 
-    RenderPipeline sourcePipeline() { return info; }
+    // info is a backend-only layout reconstructed from SPIR-V. Its attribute
+    // names are synthetic and shader defines are absent; it cannot own motion semantics.
+    @Nullable private volatile RenderPipeline sourcePipeline;
+
+    @Nullable RenderPipeline sourcePipeline() { return sourcePipeline; }
+
+    void captureSourcePipeline(final RenderPipeline source) {
+        if (sourcePipeline != null && sourcePipeline != source) {
+            throw new IllegalStateException("A compiled pipeline cannot change source identity: " + info.getLocation());
+        }
+        sourcePipeline = source;
+    }
     private final String validationPipelineId;
     private final List<String> validationShaderIds;
     // Keep source identity, not borrowed function handles from a cache that reload can clear.

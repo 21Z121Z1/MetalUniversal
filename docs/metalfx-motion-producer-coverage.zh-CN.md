@@ -30,6 +30,8 @@
 - `CustomFeatureRenderer` 必须在取得 vertex builder 前激活所有者。`574a4a7` 的 Sodium 实机客户端清单显示 OIT entity 有 10 次 hook、0 次所有者，暴露了旧 callback 包围位置过晚；后续 CI 必须要求所有者、完整历史和实际运动编码，不能只验 hook 次数。
 - 新审计模型路径为附魔台、讲台书本、饰纹陶罐、潮涌核心的 shell/cage/wind/eye、头颅，以及水晶及其 ENTITY beam、经验球、自身模型与透明覆盖的潜影贝导弹、两种风弹。每个对象仍需完整 manifest，空讲台不算几何，未知状态／管线继续拒绝。
 - 增加实际 Minecraft `core/entity` 颜色着色器的独立光栅参考，检查世界 draw 的不同 model-view、源抖动及源投影覆写。客户端读回 `raw-source-motion/` 明确记录源提交、历史 epoch、有效像素、有限向量和当前 scaler 模式。
+- 原始 RenderPipeline 随各自的异步 pending compile 保存，在完成后附到 Metal 编译对象。SPIR-V 重建的后端布局只有 `attributeN` 属性且没有 defines，不能代替源管线。未关联来源的后端绘制保留在 `backend-only:` 清单中，并拒绝运动准入。GPU 回归覆盖同名不同 defines 的管线逆序完成，客户端验证真正的 PipelineCache 入口。
+- 手部覆盖深度从 `render3dHud` 实际清除的纹理复制，在该方法结束后保存为渲染尺寸的独立纹理。启用后处理时，主深度已混合世界／HUD，不能再当作手部遮罩。GPU 对照覆盖同尺寸和较大 HUD 目标、世界运动不被归零、源深度不变及手部消失；客户端导出世界／手部深度和分离像素统计。
 
 运动着色器改为插值齐次 current/previous clip，再在片元阶段除以 W、计算有效性。独立 GPU 对照使用原版颜色着色器的覆盖和 CPU 透视重心坐标，检查倾斜三角形、姿态与抖动、前帧部分越过相机的三种情况；同时要求旧的顶点 NDC 插值产生可检测误差。误差预算逐像素计入 RG16F 量化，另留 0.02 像素的运算误差，不对近相机的大向量套用无法满足的固定半精度阈值。新增用例需由对应提交的 Actions GPU 结果验收。
 

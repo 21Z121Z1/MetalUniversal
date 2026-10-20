@@ -391,6 +391,9 @@ public final class MetalFxManager {
     @Nullable private GpuTextureView objectMotionDepthView;
     @Nullable private MetalGpuTexture handMotionDepthTexture;
     @Nullable private GpuTextureView handMotionDepthView;
+    @Nullable private MetalGpuTexture handOverlayDepthTexture;
+    @Nullable private MetalGpuTexture frameHandDepthTexture;
+    private boolean handDepthSourceWasMain;
     @Nullable
     private MetalGpuTexture frameDepthTexture;
 
@@ -400,6 +403,8 @@ public final class MetalFxManager {
     public record RawMotionValidation(String sourceCommit, long frameId, long historyEpoch,
                                       int width, int height, long worldValidPixels, long handValidPixels,
                                       long finiteValidPixels, double maxMotionPixels, String scalerMode,
+                                      boolean handDepthSourceWasMain, long worldDepthPixels,
+                                      long handDepthPixels, long worldPixelsOutsideHand,
                                       boolean temporalQualityValidated, boolean frameGenerationQualityValidated) {}
 
     private record RawMotionRequest(Path output, java.util.concurrent.CompletableFuture<RawMotionValidation> result) {}
@@ -608,8 +613,8 @@ public final class MetalFxManager {
     }
 
     /**
-     * Preserves the completed world depth before Minecraft clears the main
-     * depth attachment for the first-person hand pass. The final scene color
+     * Preserves the completed world depth before Minecraft clears the actual
+     * HUD attachment and may integrate HUD depth into main. The final scene color
      * contains both phases, but the hand projection cannot replace the world
      * depth consumed by Temporal reconstruction.
      */
@@ -618,6 +623,33 @@ public final class MetalFxManager {
         if (manager != null) {
             manager.preserveWorldDepthBeforeHandInternal(renderer);
         }
+    }
+
+    /** The source is the texture actually cleared by render3dHud, including post-effect HUD targets. */
+    public static void captureFirstPersonDepth(final GameRenderer renderer, final @Nullable GpuTexture source) {
+        MetalFxManager manager = active;
+        if (manager == null || !manager.capturesMotion() || !manager.sceneFrame) return;
+        manager.frameHandDepthTexture = null;
+        if (source instanceof MetalGpuTexture depth && manager.handOverlayDepthTexture != null
+                && copyFirstPersonDepth(manager.device.commandEncoder(), depth, manager.handOverlayDepthTexture,
+                        manager.renderWidth, manager.renderHeight)) {
+            manager.frameHandDepthTexture = manager.handOverlayDepthTexture;
+            manager.handDepthSourceWasMain = source == renderer.mainRenderTarget().getDepthTexture();
+        } else {
+            manager.resetHistoryInternal("first-person depth snapshot incompatible");
+        }
+    }
+
+    static boolean copyFirstPersonDepth(final MetalCommandEncoder encoder, final MetalGpuTexture source,
+            final MetalGpuTexture destination, final int width, final int height) {
+        // A HUD target constructed at display resolution can be larger before its
+        // first resize. Its render viewport is still the scene-sized top-left area.
+        if (width <= 0 || height <= 0 || source.getFormat() != GpuFormat.D32_FLOAT
+                || destination.getFormat() != GpuFormat.D32_FLOAT
+                || source.getWidth(0) < width || source.getHeight(0) < height
+                || destination.getWidth(0) != width || destination.getHeight(0) != height) return false;
+        encoder.copyTextureToTexture(source, destination, 0, 0, 0, 0, 0, width, height);
+        return true;
     }
 
     /**
@@ -1315,6 +1347,7 @@ public final class MetalFxManager {
         MetalFxMotionTelemetry.beginFrame();
         motionEligibility.beginFrame();
         this.firstPersonMotionObserved = false;
+        this.frameHandDepthTexture = null;
         this.temporalScalerEncodeThisFrame = false;
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
@@ -2358,13 +2391,14 @@ public final class MetalFxManager {
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && handExactValidityTexture != null && reactiveTexture != null
-                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture candidateHandDepth
-                && candidateHandDepth.getWidth(0) == renderWidth
-                && candidateHandDepth.getHeight(0) == renderHeight) {
-            handDepth = candidateHandDepth;
-            // Vanilla clears the reversed-Z depth buffer right before the
-            // first-person pass, so at this point it contains only hand,
-            // held-item, and screen-effect coverage. Those pixels are
+                && frameHandDepthTexture != null
+                && frameHandDepthTexture.getWidth(0) == renderWidth
+                && frameHandDepthTexture.getHeight(0) == renderHeight) {
+            handDepth = frameHandDepthTexture;
+            // Snapshot of the actual render3dHud clear target, before GUI.
+            // Main can contain integrated world + HUD depth when post effects
+            // require consistent depth, so it cannot supply this mask. These
+            // hand, held-item, and screen-effect pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
             // Production folds this operation into the fused motion kernel.
@@ -2719,13 +2753,15 @@ public final class MetalFxManager {
         if (request == null) return;
         rawMotionRequest = null;
         if (!sceneFrame || !objectMotionInputsCleared || sourceFrameStamp == null || sourceFrameStampInvalidated
-                || objectMotionTexture == null || objectValidityTexture == null || handExactValidityTexture == null) {
+                || objectMotionTexture == null || objectValidityTexture == null || handExactValidityTexture == null
+                || frameDepthTexture == null || frameHandDepthTexture == null) {
             request.result().completeExceptionally(new IllegalStateException("Raw source motion inputs were not completed"));
             return;
         }
         var stamp = sourceFrameStamp;
         int width = renderWidth, height = renderHeight;
         String scaler = effectiveMode.name();
+        boolean handSourceWasMain = handDepthSourceWasMain;
         List<ValidationReadback> readbacks = new ArrayList<>();
         var released = new java.util.concurrent.atomic.AtomicBoolean();
         Runnable release = () -> {
@@ -2735,13 +2771,25 @@ public final class MetalFxManager {
             readbacks.add(validationReadback("object-motion", objectMotionTexture));
             readbacks.add(validationReadback("object-validity", objectValidityTexture));
             readbacks.add(validationReadback("hand-exact-validity", handExactValidityTexture));
+            readbacks.add(validationReadback("preserved-world-depth", frameDepthTexture));
+            readbacks.add(validationReadback("isolated-hand-depth", frameHandDepthTexture));
             Runnable finish = () -> {
                 if (released.get()) return;
                 try {
                     List<byte[]> bytes = readbacks.stream().map(MetalFxManager::readbackBytes).toList();
                     ByteBuffer vectors = ByteBuffer.wrap(bytes.get(0)).order(ByteOrder.nativeOrder());
+                    ByteBuffer worldDepth = ByteBuffer.wrap(bytes.get(3)).order(ByteOrder.nativeOrder());
+                    ByteBuffer handDepth = ByteBuffer.wrap(bytes.get(4)).order(ByteOrder.nativeOrder());
                     long world = 0, hand = 0, finite = 0; double max = 0;
+                    long worldDepthPixels = 0, handDepthPixels = 0, worldOutsideHand = 0;
                     for (int pixel = 0; pixel < width * height; pixel++) {
+                        float wd = worldDepth.getFloat(pixel * 4), hd = handDepth.getFloat(pixel * 4);
+                        if (!Float.isFinite(wd) || !Float.isFinite(hd) || wd < 0 || wd > 1 || hd < 0 || hd > 1) {
+                            throw new IllegalStateException("Invalid preserved world or isolated HUD depth");
+                        }
+                        if (wd > 0) worldDepthPixels++;
+                        if (hd > 0) handDepthPixels++;
+                        if (wd > 0 && hd == 0) worldOutsideHand++;
                         boolean worldValid = Byte.toUnsignedInt(bytes.get(1)[pixel]) > 127;
                         boolean handValid = Byte.toUnsignedInt(bytes.get(2)[pixel]) > 127;
                         if (worldValid) world++;
@@ -2756,10 +2804,11 @@ public final class MetalFxManager {
                         max = Math.max(max, Math.max(Math.abs(x) * width / 2, Math.abs(y) * height / 2));
                     }
                     var result = new RawMotionValidation(System.getProperty("metallum.validation.sourceCommit", "unknown"),
-                            stamp.frameId(), stamp.historyEpoch(), width, height, world, hand, finite, max, scaler, false, false);
+                            stamp.frameId(), stamp.historyEpoch(), width, height, world, hand, finite, max, scaler,
+                            handSourceWasMain, worldDepthPixels, handDepthPixels, worldOutsideHand, false, false);
                     Files.createDirectories(request.output());
                     for (int i = 0; i < readbacks.size(); i++) Files.write(request.output().resolve(readbacks.get(i).name()
-                            + (i == 0 ? ".rg16f" : ".r8")), bytes.get(i));
+                            + (i == 0 ? ".rg16f" : i < 3 ? ".r8" : ".d32f")), bytes.get(i));
                     Files.writeString(request.output().resolve("result.json"), new com.google.gson.GsonBuilder()
                             .setPrettyPrinting().create().toJson(result) + "\n");
                     request.result().complete(result);
@@ -4492,6 +4541,8 @@ public final class MetalFxManager {
                 && objectMotionDepthTexture.getWidth(0) == renderWidth && objectMotionDepthTexture.getHeight(0) == renderHeight
                 && handMotionDepthTexture != null && handMotionDepthView != null
                 && handMotionDepthTexture.getWidth(0) == renderWidth && handMotionDepthTexture.getHeight(0) == renderHeight
+                && handOverlayDepthTexture != null && handOverlayDepthTexture.getWidth(0) == renderWidth
+                && handOverlayDepthTexture.getHeight(0) == renderHeight
                 && disocclusionTexture != null && disocclusionTexture.getWidth(0) == renderWidth
                 && disocclusionTexture.getHeight(0) == renderHeight
                 && reactiveTexture != null && reactiveTexture.getWidth(0) == renderWidth
@@ -4574,6 +4625,10 @@ public final class MetalFxManager {
         handMotionDepthTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Hand Motion Ownership Depth", depthUsage, GpuFormat.D32_FLOAT, renderWidth, renderHeight, 1, 1);
         handMotionDepthView = RenderSystem.getDevice().createTextureView(handMotionDepthTexture);
+        handOverlayDepthTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
+                "MetalFX Isolated First-Person Coverage Depth",
+                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
+                GpuFormat.D32_FLOAT, renderWidth, renderHeight, 1, 1);
         return true;
     }
 
@@ -4718,7 +4773,9 @@ public final class MetalFxManager {
         objectMotionDepthView = handMotionDepthView = null;
         if (objectMotionDepthTexture != null) objectMotionDepthTexture.close();
         if (handMotionDepthTexture != null) handMotionDepthTexture.close();
+        if (handOverlayDepthTexture != null) handOverlayDepthTexture.close();
         objectMotionDepthTexture = handMotionDepthTexture = null;
+        handOverlayDepthTexture = frameHandDepthTexture = null;
         if (objectMotionView != null) objectMotionView.close();
         if (objectValidityView != null) objectValidityView.close();
         if (handExactValidityView != null) handExactValidityView.close();
@@ -4760,6 +4817,7 @@ public final class MetalFxManager {
                 + (handExactValidityTexture == null ? 0 : 1)
                 + (objectMotionDepthTexture == null ? 0 : 1)
                 + (handMotionDepthTexture == null ? 0 : 1)
+                + (handOverlayDepthTexture == null ? 0 : 1)
                 + (disocclusionTexture == null ? 0 : 1)
                 + (reactiveTexture == null ? 0 : 1)
                 + (cutoutReactiveTexture == null ? 0 : 1)

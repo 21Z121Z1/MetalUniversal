@@ -702,6 +702,7 @@ final class MetalDevice implements GpuDeviceBackend {
                     || !(frontendPipeline.backendRenderPipeline() instanceof MetalCompiledRenderPipeline compiled)) {
                 throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
             }
+            compiled.captureSourcePipeline(pipeline);
             this.compiledPipelines.put(pipeline, compiled);
             this.frontendPipelines.put(pipeline, frontendPipeline);
             return compiled;

@@ -8,7 +8,10 @@ import com.mojang.renderpearl.api.device.GpuBackend;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.frontend.FrontendGpuDevice;
+import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
@@ -25,6 +28,23 @@ public final class MetalBackend implements GpuBackend {
         ShaderSource effectiveSource = MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
         MetalDevice.captureShaderSource(effectiveSource);
         return effectiveSource;
+    }
+
+    /** Attaches the original frontend semantics after the matching async compile completes. */
+    public static void capturePipelineSource(final @Nullable CompiledRenderPipeline compiled, final RenderPipeline source) {
+        if (compiled instanceof FrontendRenderPipeline frontend
+                && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal) {
+            metal.captureSourcePipeline(source);
+        }
+    }
+
+    public static CompiledRenderPipeline.Pending preservePipelineSource(
+            final CompiledRenderPipeline.Pending pending, final RenderPipeline source) {
+        return () -> {
+            CompiledRenderPipeline compiled = pending.finishCompile();
+            capturePipelineSource(compiled, source);
+            return compiled;
+        };
     }
 
     @Override

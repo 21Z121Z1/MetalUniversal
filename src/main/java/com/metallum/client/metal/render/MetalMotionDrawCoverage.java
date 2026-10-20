@@ -63,9 +63,11 @@ public final class MetalMotionDrawCoverage {
     static void endScene() { scene = false; }
 
     /** Independent denominator from the production backend, including direct and unowned draws. */
-    static void actualDraw(final RenderPipeline pipeline, final int count) {
-        if (VALIDATION && scene && pipeline != null && count > 0) {
-            PIPELINES.computeIfAbsent(pipeline.getLocation().toString(), ignored -> new long[4])[0] += count;
+    static void actualDraw(final MetalCompiledRenderPipeline compiled, final int count) {
+        if (VALIDATION && scene && compiled != null && count > 0) {
+            RenderPipeline source = compiled.sourcePipeline();
+            String name = source == null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
+            PIPELINES.computeIfAbsent(name, ignored -> new long[4])[0] += count;
         }
     }
 

@@ -3,9 +3,15 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.MetalFxManager;
 import com.metallum.client.metal.render.MetalBackend;
 import com.metallum.client.metal.render.MetalPreviousVertexBridge;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Share;
+import com.llamalad7.mixinextras.sugar.ref.LocalRef;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
@@ -89,22 +95,31 @@ public abstract class GameRendererMetalFxMixin {
         );
     }
 
-    @Inject(
+    @WrapOperation(
             method = "render3dHud",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
-                    shift = At.Shift.BEFORE
+                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V"
             )
     )
-    private void metallum$preserveWorldDepthBeforeHand(
+    private void metallum$observeActualHandDepth(
+            final CommandEncoder encoder, final GpuTexture depth, final double clear,
+            final Operation<Void> original, @Share("metallumHandDepth") final LocalRef<GpuTexture> handDepth
+    ) {
+        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this);
+        original.call(encoder, depth, clear);
+        handDepth.set(depth);
+    }
+
+    @Inject(method = "render3dHud", at = @At("TAIL"))
+    private void metallum$snapshotCompletedHandDepth(
             final net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
             final net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
             final net.minecraft.client.renderer.state.OptionsRenderState optionsState,
             final boolean consistentDepthRequired,
-            final CallbackInfo ci
+            final CallbackInfo ci, @Share("metallumHandDepth") final LocalRef<GpuTexture> handDepth
     ) {
-        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this);
+        MetalFxManager.captureFirstPersonDepth((GameRenderer) (Object) this, handDepth.get());
     }
 
     @Inject(

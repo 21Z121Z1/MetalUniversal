@@ -761,7 +761,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static void verifyMotionSourceEntries(ClientGameTestContext context,
             TestSingleplayerContext singleplayer, Path output) {
         boolean previous = context.computeOnClient(client -> client.options.improvedTransparency().get());
+        var previousCamera = context.computeOnClient(client -> client.options.getCameraType());
         try {
+            context.runOnClient(client -> client.options.setCameraType(net.minecraft.client.CameraType.FIRST_PERSON));
             singleplayer.getServer().runCommand("tp @a 160.5 128 160.5 0 0");
             singleplayer.getServer().runCommand("difficulty normal");
             singleplayer.getServer().runCommand("summon minecraft:experience_orb 160.5 128 166 {NoGravity:1b,Value:1s}");
@@ -849,6 +851,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             require(raw.sourceCommit().equals(System.getProperty("metallum.ci.expectedSourceSha"))
                             && raw.frameId() > 0 && raw.historyEpoch() > 0 && raw.worldValidPixels() > 0
                             && raw.finiteValidPixels() >= raw.worldValidPixels() && raw.maxMotionPixels() > 0
+                            && raw.worldDepthPixels() > 0 && raw.handDepthPixels() > 0 && raw.worldPixelsOutsideHand() > 0
                             && !raw.temporalQualityValidated() && !raw.frameGenerationQualityValidated(),
                     "Real producer GPU motion readback failed or claimed unsupported quality: " + raw);
             report.addProperty("verified", true);
@@ -858,7 +861,10 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                     new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"); }
             catch (IOException failure) { throw new IllegalStateException("Could not write source motion evidence", failure); }
         } finally {
-            context.runOnClient(client -> client.options.improvedTransparency().set(previous));
+            context.runOnClient(client -> {
+                client.options.improvedTransparency().set(previous);
+                client.options.setCameraType(previousCamera);
+            });
         }
     }
 

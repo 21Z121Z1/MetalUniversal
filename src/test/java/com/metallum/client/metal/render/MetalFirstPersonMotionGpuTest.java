@@ -56,6 +56,72 @@ final class MetalFirstPersonMotionGpuTest {
         );
     }
 
+    static Stream<Boolean> handDepthSources() { return Stream.of(false, true); }
+
+    @ParameterizedTest(name = "separate post-effect HUD depth: {0}")
+    @MethodSource("handDepthSources")
+    void actualHudDepthSnapshotDoesNotClassifyRetainedWorldAsHand(boolean separateHudTarget) throws Exception {
+        int copyUsage = GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_COPY_DST;
+        int computeUsage = GpuTexture.USAGE_TEXTURE_BINDING | MetalGpuTexture.USAGE_SHADER_WRITE | copyUsage;
+        int sourceWidth = separateHudTarget ? W*2 : W, sourceHeight = separateHudTarget ? H*2 : H;
+        ByteBuffer hudBytes = ByteBuffer.allocateDirect(sourceWidth*sourceHeight*4).order(ByteOrder.nativeOrder());
+        ByteBuffer integratedBytes = ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
+        for (int y = 0; y < sourceHeight; y++) for (int x = 0; x < sourceWidth; x++) {
+            hudBytes.putFloat(x >= W/2 && x < W*3/4 && y >= H/2 && y < H*3/4 ? .8F : 0);
+        }
+        hudBytes.flip();
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+            integratedBytes.putFloat(x >= W/2 && x < W*3/4 && y >= H/2 && y < H*3/4 ? .8F : .2F);
+        }
+        integratedBytes.flip();
+        try (var actualHud = (MetalGpuTexture)device.createTexture("actual render3dHud target", copyUsage | GpuTexture.USAGE_RENDER_ATTACHMENT,
+                     GpuFormat.D32_FLOAT, sourceWidth, sourceHeight, 1, 1);
+             var main = texture("world plus integrated HUD", GpuFormat.D32_FLOAT, copyUsage);
+             var snapshot = texture("isolated hand depth snapshot", GpuFormat.D32_FLOAT, copyUsage | GpuTexture.USAGE_TEXTURE_BINDING);
+             var flow = texture("hand overlay motion", GpuFormat.RG16_FLOAT, computeUsage);
+             var valid = texture("hand overlay validity", GpuFormat.R8_UNORM, computeUsage);
+             var exact = texture("no exact hand producer", GpuFormat.R8_UNORM, computeUsage);
+             var reactive = texture("hand reactivity", GpuFormat.R8_UNORM, computeUsage)) {
+            encoder.writeToTexture(actualHud, hudBytes, 0, 0, 0, 0, sourceWidth, sourceHeight);
+            encoder.writeToTexture(main, integratedBytes, 0, 0, 0, 0, W, H);
+            assertFalse(MetalFxManager.copyFirstPersonDepth(encoder, actualHud, snapshot, W+1, H),
+                    "a snapshot with incompatible frame dimensions must fail closed");
+            assertTrue(MetalFxManager.copyFirstPersonDepth(encoder, actualHud, snapshot, W, H));
+            encoder.clearColorTexture(flow, new Vector4f(-.125F, .0625F, 0, 0));
+            encoder.clearColorTexture(valid, new Vector4f(1));
+            encoder.clearColorTexture(exact, new Vector4f(0));
+            encoder.clearColorTexture(reactive, new Vector4f(0));
+            assertTrue(encoder.encodeHandOverlayMotion(snapshot, flow, valid, exact, reactive, W, H, .8F));
+            encoder.submit(); device.waitForSubmittedGpuWork();
+            byte[] depth = readback(snapshot), mixed = readback(main), motion = readback(flow), mask = readback(valid), react = readback(reactive);
+            ByteBuffer depths = ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
+            ByteBuffer world = ByteBuffer.wrap(mixed).order(ByteOrder.nativeOrder());
+            ByteBuffer vectors = ByteBuffer.wrap(motion).order(ByteOrder.nativeOrder());
+            Path dir = Path.of("build/agent-evidence/motion-producers/isolated_hud_depth_"+separateHudTarget);
+            Files.createDirectories(dir);
+            Files.write(dir.resolve("isolated-hand.d32f"), depth); Files.write(dir.resolve("retained-world.d32f"), mixed);
+            Files.write(dir.resolve("motion.rg16f"), motion); Files.write(dir.resolve("reactive.r8"), react);
+            for (int p = 0; p < W*H; p++) {
+                int x = p%W, y = p/W;
+                boolean hand = x >= W/2 && x < W*3/4 && y >= H/2 && y < H*3/4;
+                assertEquals(hand ? .8F : 0, depths.getFloat(p*4), 0);
+                assertEquals(hand ? .8F : .2F, world.getFloat(p*4), 1e-7, "snapshot/overlay must leave integrated depth untouched");
+                assertEquals(hand ? 0 : -.125F, Float.float16ToFloat(vectors.getShort(p*4)), 0,
+                        "world pixels must retain their own motion, even when main has nonzero depth");
+                assertEquals(hand ? 0 : .0625F, Float.float16ToFloat(vectors.getShort(p*4+2)), 0);
+                assertEquals(255, Byte.toUnsignedInt(mask[p]));
+                assertEquals(hand ? 204 : 0, Byte.toUnsignedInt(react[p]), 1);
+            }
+            Files.writeString(dir.resolve("result.json"), "{\"width\":"+W+",\"height\":"+H
+                    +",\"separateHudTarget\":"+separateHudTarget+",\"handPixels\":"+(W/4*H/4)
+                    +",\"worldMotionPreserved\":true,\"sourceDepthUnchanged\":true}");
+            encoder.clearDepthTexture(actualHud, 0);
+            assertTrue(MetalFxManager.copyFirstPersonDepth(encoder, actualHud, snapshot, W, H));
+            encoder.submit(); device.waitForSubmittedGpuWork();
+            for (byte b : readback(snapshot)) assertEquals(0, b, "a disappearing hand must not retain coverage");
+        }
+    }
+
     @BeforeEach
     void setup() {
         ShaderSource sources = MetalShaderSourceAdapters.from((id, type) -> {
@@ -69,6 +135,39 @@ final class MetalFirstPersonMotionGpuTest {
                 "First-person projection history", MemorySegment.NULL);
         encoder = device.commandEncoder();
         MetalPreviousVertexHistory.reset();
+    }
+
+    @Test
+    void frontendPendingCompilesRetainTheirOwnOriginalPipelineSemantics() {
+        var resources = BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
+                .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
+        var snippet = RenderPipeline.builder().withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0, DefaultVertexFormat.ENTITY).withBindGroupLayout(resources)
+                .withColorTargetState(ColorTargetState.DEFAULT).withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").buildSnippet();
+        var first = RenderPipeline.builder(snippet).withLocation("source_contract/shared_location")
+                .withShaderDefine("ALPHA_CUTOUT", .1F).build();
+        var second = RenderPipeline.builder(snippet).withLocation("source_contract/shared_location")
+                .withShaderDefine("ALPHA_CUTOUT", .8F).withShaderDefine("APPLY_TEXTURE_MATRIX").build();
+        try (var builder = new com.mojang.renderpearl.frontend.shaders.PipelineBuilder(device)) {
+            var pendingFirst = MetalBackend.preservePipelineSource(
+                    builder.compilePipeline(first, device.activeShaderSource(), Runnable::run).join(), first);
+            var pendingSecond = MetalBackend.preservePipelineSource(
+                    builder.compilePipeline(second, device.activeShaderSource(), Runnable::run).join(), second);
+            // Reverse completion proves source identity belongs to the pending compile,
+            // rather than a global current-pipeline slot or a map keyed by location.
+            try (var b = pendingSecond.finishCompile(); var a = pendingFirst.finishCompile()) {
+                var backendA = (MetalCompiledRenderPipeline)((com.mojang.renderpearl.frontend.FrontendRenderPipeline)a).backendRenderPipeline();
+                var backendB = (MetalCompiledRenderPipeline)((com.mojang.renderpearl.frontend.FrontendRenderPipeline)b).backendRenderPipeline();
+                assertSame(first, backendA.sourcePipeline()); assertSame(second, backendB.sourcePipeline());
+                assertEquals(DefaultVertexFormat.ENTITY, backendA.sourcePipeline().getVertexFormatBinding(0));
+                assertEquals("0.1", backendA.sourcePipeline().getShaderDefines().values().get("ALPHA_CUTOUT"));
+                assertTrue(backendB.sourcePipeline().getShaderDefines().flags().contains("APPLY_TEXTURE_MATRIX"));
+                assertThrows(IllegalStateException.class, () -> backendA.captureSourcePipeline(second));
+                assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(backendA.sourcePipeline()));
+            }
+        }
     }
 
     @Test
