@@ -10,6 +10,7 @@ import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.feature.QuadParticleFeatureRenderer;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 import org.joml.Matrix4f;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -20,7 +21,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Exact source-frame identity for Minecraft 26.2 quad-particle staged draws.
+ * Exact source-frame identity for Minecraft 26.3 quad-particle staged draws.
  *
  * <p>QuadParticleRenderState intentionally stores only the final extracted quad pose, not the
  * particle object that produced it. QuadParticleFeatureRenderer then concatenates all particles of
@@ -29,8 +30,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * records that id in layer order, and the later feature group recreates Minecraft's layer batching
  * order before exact previous-position history is admitted.</p>
  *
- * <p>Layer identity and draw-plan changes allocate a fresh negative generation. Membership and
- * ordering changes retain the layer transaction and remap each quad by persistent particle ID.
+ * <p>Each actual Layer identity has an independent source transaction. Unrelated layers and group
+ * ordering cannot reset it. Membership changes remap each quad by persistent particle ID.
  * New or ambiguous emissions have invalid previous vertices, never another particle's history.</p>
  */
 public final class MetalParticleBatchMotion {
@@ -49,19 +50,13 @@ public final class MetalParticleBatchMotion {
         }
     }
 
-    record Signature(boolean translucent, List<LayerSignature> layers) {
-        Signature {
-            layers = List.copyOf(layers);
-        }
-    }
-
-    private record GroupState(Signature signature, long generation) {
+    private record LayerState(LayerSignature definition, long objectId, long generation) {
     }
 
     private record Extraction(QuadParticleRenderState state, long particleId) {
     }
 
-    private record DrawPlan(boolean attach, RenderPipeline pipeline, List<Long> particleIds) {
+    private record DrawPlan(RenderPipeline pipeline, List<Long> particleIds, MetalEntityMotionCapture.@Nullable Sample sample) {
     }
 
     private static final class LayerAccumulator {
@@ -85,18 +80,15 @@ public final class MetalParticleBatchMotion {
     }
 
     private static final class ActiveGroup {
-        final MetalEntityMotionCapture.Sample sample;
-        final int pendingIndex;
+        final List<Object> layers;
+        final List<MetalEntityMotionCapture.Sample> samples;
         final ArrayDeque<DrawPlan> drawPlans;
         boolean invalid;
 
-        ActiveGroup(
-                final MetalEntityMotionCapture.Sample sample,
-                final int pendingIndex,
-                final ArrayDeque<DrawPlan> drawPlans
-        ) {
-            this.sample = sample;
-            this.pendingIndex = pendingIndex;
+        ActiveGroup(final List<Object> layers, final List<MetalEntityMotionCapture.Sample> samples,
+                    final ArrayDeque<DrawPlan> drawPlans) {
+            this.layers = List.copyOf(layers);
+            this.samples = List.copyOf(samples);
             this.drawPlans = drawPlans;
         }
     }
@@ -110,10 +102,12 @@ public final class MetalParticleBatchMotion {
             new IdentityHashMap<>();
     private static final Set<QuadParticleRenderState> INVALID_STATES =
             Collections.newSetFromMap(new IdentityHashMap<>());
-    private static final ArrayList<GroupState> previousGroups = new ArrayList<>();
-    private static final ArrayList<GroupState> pendingGroups = new ArrayList<>();
+    private static final IdentityHashMap<Object, LayerState> previousLayers = new IdentityHashMap<>();
+    private static final IdentityHashMap<Object, LayerState> pendingLayers = new IdentityHashMap<>();
+    private static final Set<Object> invalidLayers = Collections.newSetFromMap(new IdentityHashMap<>());
 
     private static long nextGeneration = -1L;
+    private static long nextLayerObjectId = PARTICLE_OBJECT_ID_BASE;
     private static boolean frameOpen;
     private static ActiveGroup activeGroup;
 
@@ -133,7 +127,8 @@ public final class MetalParticleBatchMotion {
         MEMBERSHIP.clear();
         SUBMITTED_COUNTS.clear();
         INVALID_STATES.clear();
-        pendingGroups.clear();
+        pendingLayers.clear();
+        invalidLayers.clear();
         EXTRACTION.remove();
         activeGroup = null;
         frameOpen = true;
@@ -238,14 +233,14 @@ public final class MetalParticleBatchMotion {
             return;
         }
 
-        final int pendingIndex = pendingGroups.size();
+        if (submits.getFirst() == null) { rejectGroup(submits,"particle-submit-shape-changed"); return; }
         final boolean translucent = submits.getFirst().translucent();
         IdentityHashMap<SingleQuadParticle.Layer, LayerAccumulator> byIdentity = new IdentityHashMap<>();
         ArrayList<LayerAccumulator> orderedLayers = new ArrayList<>();
 
         for (QuadParticleFeatureRenderer.Submit submit : submits) {
             if (submit == null || submit.translucent() != translucent || submit.particles() == null) {
-                rejectGroup(pendingIndex, null, "particle-submit-shape-changed");
+                rejectGroup(submits, "particle-submit-shape-changed");
                 return;
             }
             QuadParticleRenderState state = submit.particles();
@@ -255,7 +250,7 @@ public final class MetalParticleBatchMotion {
             Integer submittedCount = SUBMITTED_COUNTS.get(state);
             if (INVALID_STATES.contains(state) || submittedCount == null
                     || submittedCount <= 0 || submittedCount != capturedCount(state)) {
-                rejectGroup(pendingIndex, null, "particle-membership-unproven");
+                rejectGroup(submits, "particle-membership-unproven");
                 return;
             }
             IdentityHashMap<SingleQuadParticle.Layer, List<Long>> stateLayers = MEMBERSHIP.get(state);
@@ -276,81 +271,57 @@ public final class MetalParticleBatchMotion {
             }
         }
 
-        ArrayList<LayerSignature> signatureLayers = new ArrayList<>();
-        ArrayDeque<DrawPlan> plans = new ArrayDeque<>();
+        // Validate the complete group before allocating any independent layer transaction.
         for (LayerAccumulator accumulator : orderedLayers) {
-            boolean attach = !accumulator.particleIds.isEmpty();
             RenderPipeline pipeline = accumulator.layer.pipeline();
-            if (pipeline == null) {
-                rejectGroup(pendingIndex, null, "particle-layer-pipeline-missing");
+            if (pipeline == null || (!accumulator.particleIds.isEmpty()
+                    && !MetalEntityMotionPipeline.supportsPreviousPositions(pipeline))) {
+                rejectGroup(submits,"particle-exact-pipeline-unsupported");
                 return;
             }
-            plans.addLast(new DrawPlan(attach, pipeline, List.copyOf(accumulator.particleIds)));
-            if (attach) {
-                if (!MetalEntityMotionPipeline.supportsPreviousPositions(pipeline)) {
-                    rejectGroup(pendingIndex, null,
-                            "particle-exact-pipeline-unsupported:" + pipeline.getShaders().get(ShaderType.VERTEX));
+        }
+        ArrayList<Object> layerOwners = new ArrayList<>();
+        ArrayList<MetalEntityMotionCapture.Sample> samples = new ArrayList<>();
+        ArrayDeque<DrawPlan> plans = new ArrayDeque<>();
+        for (LayerAccumulator accumulator : orderedLayers) {
+            RenderPipeline pipeline = accumulator.layer.pipeline();
+            MetalEntityMotionCapture.Sample sample = null;
+            if (!accumulator.particleIds.isEmpty()) {
+                sample = beginLayerBatch(accumulator.layer, accumulator.signature());
+                if (sample == null) {
+                    rejectGroup(submits,"particle-layer-transaction-invalid");
                     return;
                 }
-                signatureLayers.add(accumulator.signature());
+                layerOwners.add(accumulator.layer);
+                samples.add(sample);
+                if (sample.hasPrevious()) MetalFxManager.markExactParticleProducerCandidate(sample);
             }
+            // Empty retained Storage keys still append a Draw, but never own geometry/history.
+            plans.addLast(new DrawPlan(pipeline,List.copyOf(accumulator.particleIds),sample));
         }
-
-        Signature signature = new Signature(translucent, signatureLayers);
-        if (signature.layers().isEmpty()) {
-            // Vanilla can retain empty Storage keys after clear(). Preserve the feature-group slot
-            // without requiring a draw that emits no vertices.
-            pendingGroups.add(new GroupState(signature, 0L));
-            activeGroup = new ActiveGroup(null, pendingIndex, plans);
-            return;
-        }
-
-        MetalEntityMotionCapture.Sample sample = beginSignatureBatch(signature);
-        if (sample == null) {
-            rejectGroup(pendingIndex, null, "particle-batch-transaction-invalid");
-            return;
-        }
-        activeGroup = new ActiveGroup(sample, pendingIndex, plans);
-        if (sample.hasPrevious()) {
-            MetalFxManager.markExactParticleProducerCandidate(sample);
-        }
-        MetalEntityMotionCapture.beginParticleBatchBuild(sample);
+        activeGroup = new ActiveGroup(layerOwners,samples,plans);
     }
 
-    /** Used by tests and by the real feature-group path after its exact signature is assembled. */
-    static MetalEntityMotionCapture.Sample beginSignatureBatch(final Signature signature) {
-        if (!frameOpen || signature == null || signature.layers().isEmpty()) {
+    /** Layer identity is exactly the IdentityHashMap key used by Minecraft's real batching. */
+    static MetalEntityMotionCapture.@Nullable Sample beginLayerBatch(final Object owner, final LayerSignature signature) {
+        if (!frameOpen || owner == null || signature == null || signature.particleIds().isEmpty()
+                || invalidLayers.contains(owner)) return null;
+        LayerSignature definition = new LayerSignature(signature.translucent(),signature.textureAtlas(),
+                signature.pipelineLocation(),signature.vertexShader(),List.of());
+        LayerState previous = previousLayers.get(owner), pending = pendingLayers.get(owner);
+        if (pending != null && !pending.definition().equals(definition)) {
+            invalidateLayer(owner,"particle-layer-definition-changed-within-frame");
             return null;
         }
-        int ordinal = pendingGroups.size();
-        GroupState previous = ordinal < previousGroups.size() ? previousGroups.get(ordinal) : null;
-        boolean hasPrevious = previous != null
-                && previous.signature() != null
-                && previous.generation() < 0L
-                && sameLayerPlan(signature, previous.signature());
-        long generation = hasPrevious ? previous.generation() : allocateGeneration();
-        if (generation >= 0L) {
-            return null;
+        boolean hasPrevious = previous != null && previous.definition().equals(definition);
+        if (pending == null) {
+            pending = new LayerState(definition,previous == null ? allocateLayerObjectId() : previous.objectId(),
+                    hasPrevious ? previous.generation() : allocateGeneration());
+            pendingLayers.put(owner,pending);
         }
-        pendingGroups.add(new GroupState(signature, generation));
         Matrix4f identity = new Matrix4f();
-        return new MetalEntityMotionCapture.Sample(
-                particleObjectId(ordinal),
-                generation,
-                identity,
-                hasPrevious ? identity : null,
-                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER
-        );
-    }
-
-    private static boolean sameLayerPlan(final Signature a, final Signature b) {
-        if (a.translucent() != b.translucent() || a.layers().size() != b.layers().size()) return false;
-        for (int i = 0; i < a.layers().size(); i++) {
-            LayerSignature x = a.layers().get(i), y = b.layers().get(i);
-            if (x.translucent() != y.translucent() || !x.textureAtlas().equals(y.textureAtlas())
-                    || !x.pipelineLocation().equals(y.pipelineLocation()) || !x.vertexShader().equals(y.vertexShader())) return false;
-        }
-        return true;
+        return new MetalEntityMotionCapture.Sample(pending.objectId(),pending.generation(),identity,
+                hasPrevious ? identity : null,FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER);
     }
 
     /** Called from the StagedVertexBuffer append hook while this exact feature group is active. */
@@ -372,8 +343,11 @@ public final class MetalParticleBatchMotion {
             invalidateActive("particle-staged-abi-changed");
             return;
         }
-        if (plan.attach() && active.sample != null) {
-            MetalEntityMotionCapture.attachDraw(draw, plan.pipeline(), plan.particleIds());
+        MetalEntityMotionCapture.endModelBuild();
+        if (plan.sample() != null) {
+            MetalEntityMotionCapture.beginParticleBatchBuild(plan.sample());
+            try { MetalEntityMotionCapture.attachDraw(draw, plan.pipeline(), plan.particleIds()); }
+            finally { MetalEntityMotionCapture.endModelBuild(); }
         }
     }
 
@@ -392,30 +366,26 @@ public final class MetalParticleBatchMotion {
             return;
         }
         active.invalid = true;
-        if (active.pendingIndex >= 0 && active.pendingIndex < pendingGroups.size()) {
-            pendingGroups.set(active.pendingIndex, new GroupState(null, 0L));
-        }
-        if (active.sample != null) {
-            MetalEntityMotionCapture.failExactSample(active.sample, reason);
-        }
+        active.layers.forEach(layer -> invalidateLayer(layer,reason));
+        active.samples.forEach(sample -> MetalEntityMotionCapture.failExactSample(sample,reason));
         MetalFxManager.observeParticleMotion();
     }
 
-    private static void rejectGroup(
-            final int pendingIndex,
-            final MetalEntityMotionCapture.Sample sample,
-            final String reason
-    ) {
-        while (pendingGroups.size() < pendingIndex) {
-            pendingGroups.add(new GroupState(null, 0L));
+    static void invalidateLayer(final Object owner,final String reason) {
+        invalidLayers.add(owner);
+        LayerState removed = pendingLayers.remove(owner);
+        if (removed != null) {
+            Matrix4f identity = new Matrix4f();
+            MetalEntityMotionCapture.failExactSample(new MetalEntityMotionCapture.Sample(removed.objectId(),
+                    removed.generation(),identity,null,FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER),reason);
         }
-        if (pendingGroups.size() == pendingIndex) {
-            pendingGroups.add(new GroupState(null, 0L));
-        } else {
-            pendingGroups.set(pendingIndex, new GroupState(null, 0L));
-        }
-        if (sample != null) {
-            MetalEntityMotionCapture.failExactSample(sample, reason);
+    }
+
+    private static void rejectGroup(final List<QuadParticleFeatureRenderer.Submit> submits, final String reason) {
+        for (var submit : submits) if (submit != null && submit.particles() != null) {
+            for (var layer : submit.particles().layers()) if (layer != null && layer.translucent() == submit.translucent()) {
+                invalidateLayer(layer,reason);
+            }
         }
         MetalFxManager.observeParticleMotion();
     }
@@ -424,8 +394,8 @@ public final class MetalParticleBatchMotion {
         if (!frameOpen) {
             return;
         }
-        previousGroups.clear();
-        previousGroups.addAll(pendingGroups);
+        previousLayers.clear();
+        previousLayers.putAll(pendingLayers);
         clearTransient();
         frameOpen = false;
     }
@@ -440,8 +410,9 @@ public final class MetalParticleBatchMotion {
 
     static void reset() {
         boolean wasOpen = frameOpen;
-        previousGroups.clear();
-        pendingGroups.clear();
+        previousLayers.clear();
+        pendingLayers.clear();
+        invalidLayers.clear();
         MEMBERSHIP.clear();
         SUBMITTED_COUNTS.clear();
         INVALID_STATES.clear();
@@ -452,7 +423,8 @@ public final class MetalParticleBatchMotion {
     }
 
     private static void clearTransient() {
-        pendingGroups.clear();
+        pendingLayers.clear();
+        invalidLayers.clear();
         MEMBERSHIP.clear();
         SUBMITTED_COUNTS.clear();
         INVALID_STATES.clear();
@@ -466,7 +438,9 @@ public final class MetalParticleBatchMotion {
         return generation;
     }
 
-    private static long particleObjectId(final int ordinal) {
-        return PARTICLE_OBJECT_ID_BASE + (long) ordinal;
+    private static long allocateLayerObjectId() {
+        long id = nextLayerObjectId;
+        nextLayerObjectId = Math.addExact(nextLayerObjectId,1L);
+        return id;
     }
 }

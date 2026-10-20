@@ -87,6 +87,7 @@ final class MetalMotionProducerGpuTest {
         MetalFxManager.close();
         MetalPreviousVertexHistory.discardFrame();
         MetalPreviousVertexHistory.reset();
+        MetalParticleBatchMotion.reset();
         MetalEntityMotionPipeline.clear();
         if (device != null) device.close();
     }
@@ -424,24 +425,36 @@ final class MetalMotionProducerGpuTest {
                         .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
                         .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
                         .withUniform("Sampler2", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
-        var sample = new MetalEntityMotionCapture.Sample(991, -9, new Matrix4f(), new Matrix4f(),
-                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER);
+        Object layer = new Object(), unrelatedLayer = new Object();
         var format = DefaultVertexFormat.PARTICLE;
         float[] before = particleQuadPositions(.5F, -.55F), current = particleQuadPositions(-.65F, 0, .65F);
         MetalPreviousVertexHistory.reset();
+        MetalParticleBatchMotion.reset();
         try {
+            MetalPreviousVertexHistory.DrawToken token = null;
+            long acceptedId = 0, acceptedGeneration = 0;
             for (int frame = 0; frame < 2; frame++) {
+                MetalParticleBatchMotion.beginFrame();
+                if (frame == 1) MetalParticleBatchMotion.beginLayerBatch(unrelatedLayer,
+                        new MetalParticleBatchMotion.LayerSignature(false,"minecraft:blocks",source.getLocation().toString(),
+                                "minecraft:core/particle",java.util.List.of(91L)));
+                var ids = frame == 0 ? java.util.List.of(11L,22L) : java.util.List.of(22L,33L,11L);
+                var sample = MetalParticleBatchMotion.beginLayerBatch(layer,new MetalParticleBatchMotion.LayerSignature(
+                        false,"minecraft:particles",source.getLocation().toString(),"minecraft:core/particle",ids));
+                if (frame == 0) { acceptedId=sample.objectId(); acceptedGeneration=sample.generation(); }
+                else {
+                    assertTrue(sample.hasPrevious()); assertEquals(acceptedId,sample.objectId());
+                    assertEquals(acceptedGeneration,sample.generation(),"An unrelated layer must not reset the particle stream");
+                }
                 MetalPreviousVertexHistory.beginFrame();
-                var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
+                token = MetalPreviousVertexHistory.reserveDraw(sample, source);
                 float[] positions = frame == 0 ? before : current;
                 int quads = positions.length/12;
                 MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(source.getLocation().toString(),
                         format.getElements(), format.getVertexSize(), PrimitiveTopology.QUADS, quads*4, quads*6), positions);
-                MetalPreviousVertexHistory.stageParticleIdentities(token, frame == 0 ? java.util.List.of(11L,22L) : java.util.List.of(22L,33L,11L));
-                if (frame == 0) MetalPreviousVertexHistory.commitSubmittedFrame();
+                MetalPreviousVertexHistory.stageParticleIdentities(token, ids);
+                if (frame == 0) { MetalPreviousVertexHistory.commitSubmittedFrame(); MetalParticleBatchMotion.commitSubmittedFrame(); }
             }
-            var token = new MetalPreviousVertexHistory.DrawToken(new MetalPreviousVertexHistory.DrawKey(
-                    new MetalPreviousVertexHistory.ObjectKey(991,-9),0), source.getLocation().toString());
             float[] previous = MetalPreviousVertexHistory.matchedPreviousPositions(token);
             assertNotNull(previous);
             ByteBuffer mesh = ByteBuffer.allocateDirect(12*format.getVertexSize()).order(ByteOrder.nativeOrder());
