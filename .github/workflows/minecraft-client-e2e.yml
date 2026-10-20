@@ -88,6 +88,36 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Select current SDK for the Metal 3 client
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          mkdir -p build/agent-evidence
+          {
+            echo "source=$METALLUM_SOURCE_SHA"
+            echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun swiftc --version
+          } | tee build/agent-evidence/metal3-client-toolchain.txt
+          # The common dylib contains availability-gated Metal 4 declarations
+          # even when this macOS 15 client executes the maintained Metal 3 path.
+          cat > "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift" <<'SWIFT'
+          import Metal
+          @available(macOS 26.0, *)
+          func requireNativeDeclarations(_ compiler: any MTL4Compiler, _ buffer: any MTL4CommandBuffer) {
+              let control: InlineArray<2, UInt32> = [1, 2]
+              _ = control[0]
+              _ = compiler
+              _ = buffer
+          }
+          SWIFT
+          xcrun --sdk macosx swiftc -typecheck -target arm64-apple-macosx14.0 \
+            "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift"
       - name: Record exact-head environment
         run: |
           set -euo pipefail
