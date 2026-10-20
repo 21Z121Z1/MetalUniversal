@@ -1575,12 +1575,13 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             enc.setRenderPipelineState(pipelineHandle);
             pipelineDirty = false;
 
-            MemorySegment depthState = compiledPipeline.getDepthStencilState();
-            if (MetalNativeBridge.isNullHandle(depthState)) {
+            boolean hasDepthAttachment = depthFormat != MTLPixelFormat.Invalid;
+            MemorySegment depthState = hasDepthAttachment ? compiledPipeline.getDepthStencilState() : MemorySegment.NULL;
+            if (hasDepthAttachment && MetalNativeBridge.isNullHandle(depthState)) {
                 throw new IllegalStateException("Native depth state is unavailable");
             }
             enc.setDepthStencilState(depthState);
-            if (hasAttachment && compiledPipeline.hasDepthStencilState()) {
+            if (hasDepthAttachment && compiledPipeline.hasDepthStencilState()) {
                 enc.setDepthBias(
                         compiledPipeline.depthBiasConstant(),
                         compiledPipeline.depthBiasScaleFactor(),

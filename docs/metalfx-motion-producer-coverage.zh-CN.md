@@ -88,6 +88,8 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 
 V4 能力位新增源深度策略，Java 要求完整能力 15；旧模块保守回退。V4 诊断不再调用会覆盖 world ownership 的旧手部写入。QA 增加 private world depth 读回并逐像素核对源策略、双域历史及 presentation depth。新增 7 项原生合成、8 项实际源绘制顺序、3 项自身深度偏移／透视对照，另要求真实 see-through 标签有所有者和 exact 编码；这些新增场景仍待对应 Actions 执行，不能先宣称深度偏移与完整 producer 已经验收。
 
+`8a41e77` 的 macOS 26 为 70/98。34 项 V4 合成均通过；20 项材质用例因参考深度纹理遗漏 TEXTURE_BINDING 而提前失败，需补齐测试资源声明后重跑。顺序对照中七项的表面选择和 Z 差异均为零，XY 差异是 RG16F 在边界的半精度量化（约 0.002／0.004 像素），新对照改为沿用既有透视 oracle 的 binary16 预算，并先用独立 CPU 校准及错误方向／零运动负对照验证该预算。剩下一项揭示真实后端问题：pass 没有深度附件时仍绑定管线的深度测试状态，源颜色没有画出，运动回放却认为覆盖存在。后端改为无深度附件时明确绑定 nil depth state，同时清除 depth bias；原颜色覆盖断言继续保留，需后续 GPU 验收。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
