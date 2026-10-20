@@ -2061,6 +2061,39 @@ final class MetalMrtBackendIntegrationTest {
         } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
     }
 
+    @Test
+    void rasterStorageImageWritesAreObservedWhenUiIsNotAColorAttachment() throws Exception {
+        fragmentShaders.put("ui_image_store","""
+                #version 450
+                layout(binding=0,rgba8) writeonly uniform image2D uiStore;
+                layout(location=0) out vec4 color;
+                void main() { imageStore(uiStore,ivec2(gl_FragCoord.xy),vec4(.75,0,0,.25)); color=vec4(0,1,0,1); }
+                """);
+        var attachments=createTextures(List.of(GpuFormat.RGBA8_UNORM),"non-ui-attachment");
+        try(var ui=(MetalGpuTexture)device.createTexture("ui-storage-output",
+                GpuTexture.USAGE_RENDER_ATTACHMENT|GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_SRC
+                        |MetalGpuTexture.USAGE_SHADER_WRITE,GpuFormat.RGBA8_UNORM,WIDTH,HEIGHT,1,1);
+            var uiView=new MetalGpuTextureView(ui,0,1)) {
+            MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(995,3),ui,true);
+            encoder.clearColorTexture(ui,new Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            try(var pass=createPass(attachments,null,false)) {
+                pass.pass().setPipeline(pipeline("ui_image_store",List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL));
+                pass.pass().bindStorageImage("uiStore",uiView);pass.pass().draw(3,1,0,0);
+                encoder.submitRenderPass();encoder.submit();device.waitForSubmittedGpuWork();
+            }
+            var pixels=readback(ui);
+            for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+            var proof=MetalUiDrawCoverage.snapshot();assertTrue(proof.programs().isEmpty(),"UI was not an FBO color attachment");
+            assertEquals(1,proof.content().potentialShaderWrites());assertFalse(proof.content().premultipliedClearOnlyProven());
+            encoder.clearColorTexture(ui,new Vector4f(0));var cleared=readback(ui);
+            for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)));
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            ui.close();assertFalse(MetalUiDrawCoverage.observing());
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+        } finally {MetalUiDrawCoverage.reset();closeTextures(attachments);}
+    }
+
     private void runPerSlotClearLoadStoreBlendAndWriteMask() {
         String clearShaderName = "mrt_per_slot_clear";
         fragmentShaders.put(clearShaderName, """

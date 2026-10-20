@@ -21,12 +21,12 @@ public final class MetalUiDrawCoverage {
     static void begin(FrameSynthesisContract.FrameStamp source,MetalGpuTexture texture,boolean sceneSeparated) {
         reset();stamp=source;target=texture;separated=sceneSeparated;
     }
-    static boolean observing() {return stamp!=null && target!=null;}
+    static boolean observing() {return stamp!=null && target!=null && !target.isClosed();}
     static void contentInvalidated(MetalGpuTexture texture) {
         if(texture==target && stamp!=null)CONTENT.invalidate("texture-content-invalidated");
     }
     static void clearProof(MetalGpuTexture texture,org.joml.Vector4fc clear,boolean full) {
-        if(texture==target && stamp!=null && clear!=null)CONTENT.clear(clear.x(),clear.y(),clear.z(),clear.w(),full,
+        if(texture==target && stamp!=null && clear!=null && !texture.isClosed())CONTENT.clear(clear.x(),clear.y(),clear.z(),clear.w(),full,
                 texture.getFormat()==com.mojang.renderpearl.api.GpuFormat.RGBA8_UNORM);
     }
     static void potentialShaderWrite(MetalGpuTexture texture) {

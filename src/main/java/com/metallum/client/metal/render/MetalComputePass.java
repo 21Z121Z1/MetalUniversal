@@ -249,10 +249,14 @@ final class MetalComputePass implements AutoCloseable {
     }
 
     private void observePotentialTextureWrites() {
-        if(!MetalUiDrawCoverage.observing())return;
         // Binding metadata does not certify read-only image access. Observe at
         // every dispatch, including bindings established before a later clear.
-        boundTextureResources.values().stream().distinct().forEach(MetalUiDrawCoverage::potentialShaderWrite);
+        boundTextureResources.values().stream().distinct().forEach(texture->{
+            // A shader store must retire the whole-clear cache even when UI
+            // diagnostics are disabled, or the next equal clear can be lost.
+            texture.markContentsDirty();
+            MetalUiDrawCoverage.potentialShaderWrite(texture);
+        });
     }
 
     static void validateBindingIndex(final int index, final int limit, final String kind) {

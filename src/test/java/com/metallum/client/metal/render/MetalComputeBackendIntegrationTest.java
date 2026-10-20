@@ -468,6 +468,13 @@ final class MetalComputeBackendIntegrationTest {
                 assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
                 for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)),
                         "Independent raw pixels reject the non-premultiplied imageStore");
+                assertFalse(target.clearIsRedundant(new Vector4f(0),null),
+                        "An encoded shader store cannot retain its old whole-clear cache");
+                encoder.clearColorTexture(target,new Vector4f(0));
+                var cleared=readbackTexture(target,0,WIDTH,HEIGHT);
+                for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)),
+                        "The equal clear after imageStore must really erase every channel");
+                assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
             }
             assertEquals(2,MetalUiDrawCoverage.snapshot().content().potentialShaderWrites());
             assertFalse(MetalUiDrawCoverage.snapshot().premultipliedProven());

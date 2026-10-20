@@ -861,10 +861,13 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private void observeDraw(int calls,boolean indirect) {
         MetalMotionDrawCoverage.actualDraw(compiledPipeline,calls,indirect);
         MetalUiDrawCoverage.actualDraw(compiledPipeline,colorTextures,calls,indirect);
-        if(MetalUiDrawCoverage.observing() && (!storageImages.isEmpty() || !resolvedStorageImages.isEmpty())) {
+        if(!storageImages.isEmpty() || !resolvedStorageImages.isEmpty()) {
             var possibleWrites=new java.util.HashSet<>(resolvedStorageImages.values());
             for(var view:storageImages.values())if(view!=null && view.texture() instanceof MetalGpuTexture texture)possibleWrites.add(texture);
-            possibleWrites.forEach(MetalUiDrawCoverage::potentialShaderWrite);
+            possibleWrites.forEach(texture->{
+                texture.markContentsDirty();
+                MetalUiDrawCoverage.potentialShaderWrite(texture);
+            });
         }
     }
 
