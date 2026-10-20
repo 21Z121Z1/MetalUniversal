@@ -123,6 +123,7 @@ tasks.test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
 	exclude "**/MetalMotionProducerGpuTest.class"
+	exclude "**/MetalFirstPersonMotionGpuTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 	exclude "**/MetalIrisTargetsIntegrationTest.class"
 	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"

@@ -91,6 +91,14 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
 
+    /** Actual source bindings, captured before another draw can replace this pass's state. */
+    MetalPreviousVertexReplay.@Nullable SourceDrawInputs motionDrawInputs() {
+        GpuBufferSlice projection = this.uniforms.get("Projection");
+        GpuBufferSlice transforms = this.uniforms.get("DynamicTransforms");
+        return projection == null || transforms == null ? null
+                : new MetalPreviousVertexReplay.SourceDrawInputs(projection, transforms, this.depthTexture);
+    }
+
     /**
      * Prepares the live terrain encoder for the visibility producer. Kept as a
      * render-pass method so the allocation-free no-trace mixin can invoke the

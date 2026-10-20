@@ -9,6 +9,7 @@ import com.mojang.renderpearl.api.vertex.VertexFormatElement;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
+import org.joml.Matrix4f;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -20,7 +21,7 @@ import java.util.Map;
 /**
  * Transactional history of the actual CPU-generated positions submitted by a staged draw.
  *
- * <p>Minecraft 26.2 keeps staged-draw vertex slices alive until freeVertexData during upload.
+ * <p>Minecraft 26.3 keeps staged-draw vertex slices alive until freeVertexData during upload.
  * Capturing only Position at that boundary gives the next successful source frame the exact
  * already-posed vertices without reimplementing living animation, boat paddles, or other CPU
  * deformation.</p>
@@ -59,7 +60,25 @@ final class MetalPreviousVertexHistory {
         }
     }
 
-    record Snapshot(Signature signature, float[] positions) {
+    /** CPU copies of the actual source draw's uniforms, before shader translation's clip-Y flip. */
+    record DrawTransform(Matrix4f projection, Matrix4f modelView) {
+        DrawTransform {
+            projection = new Matrix4f(projection);
+            modelView = new Matrix4f(modelView);
+        }
+
+        @Override
+        public Matrix4f projection() { return new Matrix4f(projection); }
+
+        @Override
+        public Matrix4f modelView() { return new Matrix4f(modelView); }
+
+        boolean finite() {
+            return MetalFxMath.isFinite(projection) && MetalFxMath.isFinite(modelView);
+        }
+    }
+
+    record Snapshot(Signature signature, float[] positions, @Nullable DrawTransform transform) {
         Snapshot {
             positions = positions.clone();
         }
@@ -70,7 +89,7 @@ final class MetalPreviousVertexHistory {
         }
 
         Snapshot copy() {
-            return new Snapshot(signature, positions);
+            return new Snapshot(signature, positions, transform);
         }
     }
 
@@ -173,8 +192,38 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            PENDING.put(token.key(), new Snapshot(signature, positions));
+            PENDING.put(token.key(), new Snapshot(signature, positions, null));
         }
+    }
+
+    /** Attaches uniforms to the same pending draw/geometry transaction, never a separate history. */
+    static void stageDrawTransform(final @Nullable DrawToken token, final @Nullable DrawTransform transform) {
+        Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
+        if (snapshot != null) {
+            PENDING.put(token.key(), new Snapshot(snapshot.signature(), snapshot.positions(),
+                    transform != null && transform.finite() ? transform : null));
+        }
+    }
+
+    static @Nullable DrawTransform currentDrawTransform(final @Nullable DrawToken token) {
+        Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
+        return snapshot == null ? null : snapshot.transform();
+    }
+
+    /** A hand needs every draw's uniforms as well as its complete previous vertex manifest. */
+    static @Nullable DrawTransform matchedPreviousDrawTransform(final @Nullable DrawToken token) {
+        if (token == null || !objectManifestMatches(token.key().object())) {
+            return null;
+        }
+        ObjectKey object = token.key().object();
+        for (int ordinal = 0; ordinal < CURRENT_DRAW_COUNTS.get(object); ordinal++) {
+            DrawKey key = new DrawKey(object, ordinal);
+            if (PENDING.get(key).transform() == null || PREVIOUS.get(key).transform() == null) {
+                return null;
+            }
+        }
+        Snapshot snapshot = PREVIOUS.get(token.key());
+        return snapshot == null ? null : snapshot.transform();
     }
 
     /** Returns history only when every staged draw of the owning object has an exact match. */

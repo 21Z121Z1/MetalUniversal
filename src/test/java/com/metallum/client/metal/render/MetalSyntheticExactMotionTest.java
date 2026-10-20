@@ -97,7 +97,8 @@ final class MetalSyntheticExactMotionTest {
         assertNotNull(matched);
         assertTrue(matched.hasPrevious(), "Geometry continuity is retained independently");
         assertFalse(MetalExactMotionCoverage.complete(), "Unproven projection must not admit interpolation");
-        assertEquals(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE, MetalExactMotionCoverage.firstFailureReason());
+        assertEquals(null, MetalExactMotionCoverage.firstFailureReason(),
+                "A candidate is no longer unconditionally failed; actual per-draw proof is still required");
         MetalSyntheticExactMotion.endFirstPerson();
     }
 }

@@ -2,6 +2,8 @@
 
 > 实现代码提交：`ae4d8fdaf9486e9910e475870a1d0a754290da04`。本轮云端可运行验收已完成；Temporal/FG 真实质量和物理显示时序受实际设备能力阻塞。后续报告提交只改变文档，不改变此实现的可执行输入。
 
+> 2026-10-20 后续变更：手部独立 HUD projection / per-draw model-view 已与 staged 顶点接入同一历史事务。本文下方“尚未支持”的手部条目仅描述上述历史提交；现行实现见[时序放大契约](metalfx-temporal-upscaling.md)，新提交的 Actions 证据见 [PR #90](https://github.com/21Z121Z1/MetalUniversal/pull/90)。物理 Temporal/FG 质量仍需支持相应能力的设备验证。
+
 基线为 `97e53a76592963f7ee866e28fd222798abe798a1`，Minecraft 26.3；本轮首先完成[专项研究](metalfx-closure-study.zh-CN.md)，再选定坐标、深度、历史和实际能力回退目标。更广的同类项目搜索及原生批调用研究见[渲染器研究](renderer-reference-study.zh-CN.md)。本轮未复制外部源文件，未合并主线、发布或强推；工作保留在 [PR #90](https://github.com/21Z121Z1/MetalUniversal/pull/90)。
 
 ## 研究如何改变实现

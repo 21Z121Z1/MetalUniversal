@@ -66,8 +66,6 @@ public final class MetalSyntheticExactMotion {
             final InteractionHand hand,
             final ItemStack itemStack
     ) {
-        // Geometry identity is useful history, but the hand uses a separate HUD projection.
-        // Do not turn matched vertices into an exact-motion receipt without that projection.
         if (!frameOpen || hand == null || itemStack == null || Boolean.TRUE.equals(FIRST_PERSON_ACTIVE.get())) {
             MetalFxManager.observeFirstPersonMotion();
             return null;
@@ -121,8 +119,9 @@ public final class MetalSyntheticExactMotion {
         );
         MetalEntityMotionCapture.attachState(state, sample);
         MetalEntityMotionCapture.requireExactState(state);
-        MetalEntityMotionCapture.failExactSample(sample, PROJECTION_HISTORY_UNAVAILABLE);
-        MetalFxManager.observeFirstPersonMotion();
+        // A candidate is not a receipt. Complete geometry + per-draw HUD matrices and actual replay
+        // encoding must all succeed before this hand can contribute REAL_MOTION coverage.
+        MetalFxManager.markExactFirstPersonProducerCandidate(sample);
         MetalEntityMotionCapture.beginEntitySubmission(state);
         FIRST_PERSON_ACTIVE.set(Boolean.TRUE);
         return sample;

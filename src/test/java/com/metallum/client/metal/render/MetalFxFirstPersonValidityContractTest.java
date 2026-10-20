@@ -27,10 +27,11 @@ final class MetalFxFirstPersonValidityContractTest {
         assertTrue(manager.contains("private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;"));
         assertTrue(manager.contains("motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);"));
 
-        assertTrue(synthetic.contains("MetalEntityMotionCapture.failExactSample(sample, PROJECTION_HISTORY_UNAVAILABLE);"));
+        assertTrue(synthetic.contains("MetalFxManager.markExactFirstPersonProducerCandidate(sample);"));
         assertTrue(synthetic.contains("MetalFxManager.observeFirstPersonMotion();"));
         assertTrue(manager.contains("MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);"));
-        assertFalse(synthetic.contains("markExactFirstPersonProducerCandidate"));
+        assertTrue(manager.contains("MetalPreviousVertexReplay.captureHandTransform(previousVertexToken, sourceInputs)"));
+        assertTrue(manager.contains("MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())"));
         assertTrue(manager.contains("pass.setUniform(\"Projection\", replay.projection());"));
 
         assertTrue(encoder.contains("metallum_metalfx_encode_v3_available()"));

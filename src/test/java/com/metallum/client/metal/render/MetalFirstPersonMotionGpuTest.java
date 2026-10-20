@@ -1,0 +1,323 @@
+package com.metallum.client.metal.render;
+
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.*;
+import com.mojang.renderpearl.api.textures.*;
+import net.minecraft.client.renderer.StagedVertexBuffer;
+import org.joml.Matrix4f;
+import org.joml.Vector4f;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/** Actual source-pass bindings -> transactional hand history -> packaged shader -> GPU readback. */
+@EnabledOnOs(OS.MAC)
+final class MetalFirstPersonMotionGpuTest {
+    private static final int W = 64, H = 48, UNIFORM_OFFSET = 256;
+    private MetalDevice device;
+    private MetalCommandEncoder encoder;
+
+    record Fixture(String name, String shader, float oldFov, float fov, boolean cameraLocked,
+                   boolean deformed, boolean alphaHole, boolean previousBehind, float side) {}
+
+    static Stream<Fixture> fixtures() {
+        return Stream.of(
+                new Fixture("hand_camera_locked_world_turn", "core/entity", 75, 75, true, false, false, false, .1F),
+                new Fixture("hand_swing_and_bob", "core/entity", 75, 75, false, true, false, false, .1F),
+                new Fixture("hand_independent_hud_fov", "core/entity", 55, 95, false, false, false, false, .1F),
+                new Fixture("hand_layered_item_model_view", "core/item", 75, 75, false, false, false, false, .1F),
+                new Fixture("off_hand_swing", "core/item", 75, 75, false, true, false, false, -.1F),
+                new Fixture("hand_cutout_hole", "core/entity", 75, 75, false, false, true, false, .1F),
+                new Fixture("hand_previous_behind_camera", "core/entity", 75, 75, false, false, false, true, .1F)
+        );
+    }
+
+    @BeforeEach
+    void setup() {
+        ShaderSource sources = MetalShaderSourceAdapters.from((id, type) -> {
+            String resource = "assets/" + id.getNamespace() + "/shaders/" + id.getPath()
+                    + (type == ShaderType.VERTEX ? ".vsh" : ".fsh");
+            try { return MetalMotionShaderCompilationTest.expandIncludes(resource, new HashSet<>()); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        });
+        device = new MetalDevice(sources, new GpuDebugOptions(2, true, true, true),
+                MetalNativeBridge.metallum_create_system_default_device(), MemorySegment.NULL,
+                "First-person projection history", MemorySegment.NULL);
+        encoder = device.commandEncoder();
+        MetalPreviousVertexHistory.reset();
+    }
+
+    @AfterEach
+    void cleanup() {
+        MetalPreviousVertexHistory.discardFrame();
+        MetalPreviousVertexHistory.reset();
+        MetalEntityMotionPipeline.clear();
+        if (device != null) device.close();
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("fixtures")
+    void sourceHudHistoryMatchesIndependentRasterFrames(Fixture f) throws Exception {
+        var source = RenderPipeline.builder().withLocation("hand_contract/" + f.name())
+                .withVertexShader(f.shader()).withFragmentShader(f.shader())
+                .withVertexBinding(0, DefaultVertexFormat.ENTITY)
+                .withBindGroupLayout(BindGroupLayout.builder()
+                        .withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build())
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withShaderDefine("ALPHA_CUTOUT", .5F).build();
+        var pipeline = MetalEntityMotionPipeline.forPreviousPositions(source);
+        var sample = new MetalEntityMotionCapture.Sample(f.side() > 0 ? 101 : 102, -7,
+                new Matrix4f(), new Matrix4f(), FrameSynthesisContract.ProducerDomain.FIRST_PERSON);
+        Matrix4f oldProjection = projection(f.oldFov()), projection = projection(f.fov());
+        Matrix4f oldView = f.cameraLocked() ? new Matrix4f().rotateY(.23F)
+                : new Matrix4f().translate(-.04F, .06F, 0).rotateZ(.08F);
+        Matrix4f view = f.cameraLocked() ? new Matrix4f().rotateY(-.31F)
+                : new Matrix4f().translate(.03F, -.02F, 0).rotateZ(-.06F);
+        if (f.previousBehind()) oldView.rotateY((float)Math.PI);
+        ByteBuffer oldVertices = vertices(f, true, oldView), vertices = vertices(f, false, view);
+        float[] oldPositions = positions(oldVertices), currentPositions = positions(vertices);
+        ByteBuffer indices = ByteBuffer.allocateDirect(6*Short.BYTES).order(ByteOrder.nativeOrder());
+        for (short i = 0; i < 6; i++) indices.putShort(i);
+        indices.flip();
+        try (GpuBuffer previousVertices = device.createBuffer(() -> "previous posed hand", GpuBuffer.USAGE_VERTEX, oldVertices);
+             GpuBuffer currentVertices = device.createBuffer(() -> "current posed hand", GpuBuffer.USAGE_VERTEX, vertices);
+             GpuBuffer index = device.createBuffer(() -> "hand indices", GpuBuffer.USAGE_INDEX, indices);
+             GpuBuffer previousPositions = positionBuffer(oldPositions);
+             GpuBuffer oldPr = projectionBuffer(oldProjection);
+             GpuBuffer pr = projectionBuffer(projection);
+             GpuBuffer oldDynamic = dynamicBuffer(oldView);
+             GpuBuffer dynamic = dynamicBuffer(view);
+             GpuBuffer oldMotion = motionBuffer(MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()),
+                     MetalMotionContract.minecraftToMetalFxClip(new Matrix4f(oldProjection).mul(oldView)));
+             GpuBuffer currentMotion = motionBuffer(MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()),
+                     MetalMotionContract.minecraftToMetalFxClip(new Matrix4f(projection).mul(view)));
+             MetalGpuTexture sampled = texture("hand texture", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_TEXTURE_BINDING);
+             MetalGpuTexture flow = texture("hand flow", GpuFormat.RG16_FLOAT, GpuTexture.USAGE_COPY_SRC);
+             MetalGpuTexture valid = texture("dedicated hand validity", GpuFormat.R8_UNORM, GpuTexture.USAGE_COPY_SRC);
+             MetalGpuTexture depth = texture("independent HUD depth", GpuFormat.D32_FLOAT, 0);
+             var sampledView = device.createTextureView(sampled);
+             var flowView = device.createTextureView(flow);
+             var validView = device.createTextureView(valid);
+             var depthView = device.createTextureView(depth);
+             var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE,
+                     FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty())) {
+            encoder.clearColorTexture(sampled, new Vector4f(1, 1, 1, f.alphaHole() ? 0 : 1));
+            // Rasterize each real source frame with its own projection/model-view, independently
+            // of the history-derived motion matrices. Capture exactly the bound source slices.
+            byte[][] sourceMasks = new byte[2][];
+            MetalPreviousVertexHistory.DrawToken token = null;
+            for (int frame = 0; frame < 2; frame++) {
+                MetalPreviousVertexHistory.beginFrame();
+                token = MetalPreviousVertexHistory.reserveDraw(sample, source);
+                var format = source.getVertexFormatBinding(0);
+                MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(
+                        source.getLocation().toString(), format.getElements(), format.getVertexSize(),
+                        PrimitiveTopology.TRIANGLES, 6, 6), frame == 0 ? oldPositions : currentPositions);
+                var descriptor = RenderPassDescriptor.builder(() -> "Independent HUD source raster")
+                        .withColorAttachment(flowView, Optional.of(new Vector4f()))
+                        .withColorAttachment(validView, Optional.of(new Vector4f()))
+                        .withDepthAttachment(depthView, OptionalDouble.of(0))
+                        .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build();
+                try (MetalRenderPass pass = encoder.createRenderPass(descriptor)) {
+                    pass.setPipeline(pipeline);
+                    pass.setUniform("Projection", (frame == 0 ? oldPr : pr).slice(UNIFORM_OFFSET, 64));
+                    pass.setUniform("DynamicTransforms", (frame == 0 ? oldDynamic : dynamic).slice(UNIFORM_OFFSET, 256));
+                    pass.setUniform("MetallumMotion", (frame == 0 ? oldMotion : currentMotion).slice());
+                    pass.bindTexture("Sampler0", sampledView, sampler);
+                    pass.setVertexBuffer(0, (frame == 0 ? previousVertices : currentVertices).slice());
+                    pass.setVertexBuffer(1, previousPositions.slice());
+                    pass.setIndexBuffer(index, IndexType.SHORT);
+                    pass.drawIndexed(6, 1, 0, 0, 0);
+                    var inputs = MetalPreviousVertexReplay.sourceDrawInputs(pass);
+                    assertNotNull(inputs);
+                    assertSame(depthView, inputs.depth(), "Hand replay must retain the source HUD depth attachment");
+                    assertTrue(MetalPreviousVertexReplay.captureHandTransform(token, inputs));
+                }
+                encoder.submit(); device.waitForSubmittedGpuWork();
+                sourceMasks[frame] = readback(valid);
+                if (frame == 0) MetalPreviousVertexHistory.commitSubmittedFrame();
+            }
+            var hand = MetalPreviousVertexReplay.handTransforms(token);
+            assertNotNull(hand);
+            var executeInfo = new StagedVertexBuffer.ExecuteInfo(currentVertices, index, IndexType.SHORT, 0, 0, 6,
+                    PrimitiveTopology.TRIANGLES);
+            var replay = MetalPreviousVertexReplay.plan(source, executeInfo, token);
+            assertNotNull(replay);
+            assertArrayEquals(oldPositions, replay.previousPositions());
+            // Later screen effects overwrite the same mutable ProjectionMatrixBuffer. The queued
+            // hand must still rasterize with its captured source projection, not this world FOV.
+            ByteBuffer replacement = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+            projection(35).get(0, replacement);
+            encoder.writeToBuffer(pr.slice(UNIFORM_OFFSET, 64), replacement);
+            try (GpuBuffer replayPr = projectionBuffer(hand.currentProjection());
+                 GpuBuffer replayMotion = motionBuffer(hand.currentUnjitteredFromRaster(), hand.previousFromPosition());
+                 GpuBuffer replayPositions = positionBuffer(replay.previousPositions());
+                 MetalRenderPass pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Exact hand replay from history")
+                         .withColorAttachment(flowView, Optional.of(new Vector4f()))
+                         .withColorAttachment(validView, Optional.of(new Vector4f()))
+                         .withDepthAttachment(depthView)
+                         .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
+                pass.setPipeline(pipeline);
+                pass.setUniform("Projection", replayPr.slice(UNIFORM_OFFSET, 64));
+                pass.setUniform("DynamicTransforms", dynamic.slice(UNIFORM_OFFSET, 256));
+                pass.setUniform("MetallumMotion", replayMotion.slice());
+                pass.bindTexture("Sampler0", sampledView, sampler);
+                pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                pass.setVertexBuffer(1, replayPositions.slice());
+                pass.setIndexBuffer(index, IndexType.SHORT);
+                pass.drawIndexed(6, 1, 0, replay.replayBaseVertex(), 0);
+                encoder.submitRenderPass(); encoder.submit(); device.waitForSubmittedGpuWork();
+            }
+            byte[] mask = readback(valid), vectors = readback(flow);
+            double[] before = centroid(sourceMasks[0]), after = centroid(sourceMasks[1]);
+            int count = 0; double x = 0, y = 0, maxMotion = 0;
+            ByteBuffer values = ByteBuffer.wrap(vectors).order(ByteOrder.nativeOrder());
+            for (int pixel = 0; pixel < W*H; pixel++) if (Byte.toUnsignedInt(mask[pixel]) > 127) {
+                float vx = Float.float16ToFloat(values.getShort(pixel*4))*W/2;
+                float vy = Float.float16ToFloat(values.getShort(pixel*4+2))*H/2;
+                assertTrue(Float.isFinite(vx) && Float.isFinite(vy));
+                x += vx; y += vy; maxMotion = Math.max(maxMotion, Math.max(Math.abs(vx), Math.abs(vy))); count++;
+            }
+            if (count > 0) { x /= count; y /= count; }
+            Path dir = Path.of("build/agent-evidence/motion-producers/" + f.name()); Files.createDirectories(dir);
+            Files.write(dir.resolve("previous-validity.r8"), sourceMasks[0]);
+            Files.write(dir.resolve("source-current-validity.r8"), sourceMasks[1]);
+            Files.write(dir.resolve("current-validity.r8"), mask); Files.write(dir.resolve("motion.rg16f"), vectors);
+            Files.writeString(dir.resolve("result.json"), "{\"fixture\":\"" + f.name() + "\",\"width\":" + W
+                    + ",\"height\":" + H + ",\"coveredPixels\":" + count + ",\"motionPixels\":[" + x + "," + y
+                    + "],\"rasterDisplacementPixels\":[" + (before[0]-after[0]) + "," + (before[1]-after[1])
+                    + "],\"maxMotionPixels\":" + maxMotion + ",\"sourceUniformOffset\":" + UNIFORM_OFFSET + "}");
+            if (f.alphaHole() || f.previousBehind()) assertEquals(0, count);
+            else {
+                assertArrayEquals(sourceMasks[1], mask, "Replay must preserve the source HUD projection and coverage");
+                assertTrue(count > 100 && before[2] > 100);
+                assertEquals(before[0]-after[0], x, .6, "Current-to-previous X agrees with independent source raster");
+                assertEquals(before[1]-after[1], y, .6, "Current-to-previous Y agrees with shipping compiler raster orientation");
+                if (f.cameraLocked()) assertEquals(0, maxMotion, 1E-3, "World camera turn cannot invent hand motion");
+                else assertTrue(maxMotion > 1, "Swing/FOV/model-view motion must not silently collapse to zero");
+            }
+        }
+    }
+
+    @Test
+    void sourceUniformCaptureRejectsPrivateClosedMalformedAndNonFiniteBackings() {
+        try (GpuBuffer valid = projectionBuffer(projection(75));
+             GpuBuffer privateBuffer = device.createBuffer(() -> "GPU-only uniform", GpuBuffer.USAGE_UNIFORM, 64)) {
+            var good = new MetalPreviousVertexReplay.SourceDrawInputs(valid.slice(UNIFORM_OFFSET, 64), valid.slice(UNIFORM_OFFSET, 64), null);
+            var source = RenderPipeline.builder().withLocation("hand_contract/admission").withVertexShader("core/entity")
+                    .withFragmentShader("core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY).build();
+            MetalPreviousVertexHistory.beginFrame();
+            var sample = new MetalEntityMotionCapture.Sample(101, -1, new Matrix4f(), new Matrix4f());
+            var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
+            var format = source.getVertexFormatBinding(0);
+            MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(source.getLocation().toString(),
+                    format.getElements(), format.getVertexSize(), PrimitiveTopology.TRIANGLES, 1, 3), new float[]{0,0,-1});
+            assertTrue(MetalPreviousVertexReplay.captureHandTransform(token, good));
+            for (GpuBufferSlice bad : List.of(privateBuffer.slice(), valid.slice(0, 64), valid.slice(UNIFORM_OFFSET, 63),
+                    new GpuBufferSlice(valid, Long.MAX_VALUE, 64), new GpuBufferSlice(valid, -1, 64))) {
+                assertFalse(MetalPreviousVertexReplay.captureHandTransform(token,
+                        new MetalPreviousVertexReplay.SourceDrawInputs(bad, good.dynamicTransforms(), null)));
+                assertNull(MetalPreviousVertexHistory.currentDrawTransform(token));
+            }
+            valid.close();
+            assertFalse(MetalPreviousVertexReplay.captureHandTransform(token, good));
+            assertFalse(MetalPreviousVertexReplay.captureHandTransform(token, null));
+        }
+    }
+
+    private GpuBuffer projectionBuffer(Matrix4f matrix) {
+        ByteBuffer bytes = ByteBuffer.allocateDirect(512).order(ByteOrder.nativeOrder());
+        new Matrix4f().m00(Float.NaN).get(0, bytes); matrix.get(UNIFORM_OFFSET, bytes);
+        return device.createBuffer(() -> "source projection with slice offset", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST, bytes);
+    }
+
+    private GpuBuffer dynamicBuffer(Matrix4f matrix) {
+        GpuBuffer buffer = device.createBuffer(() -> "mapped source DynamicTransforms", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, 512);
+        try (var mapped = buffer.slice(UNIFORM_OFFSET, 256).map(false, true)) {
+            ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder()); matrix.get(0, bytes);
+            new Matrix4f().get(64, bytes); for (int i = 0; i < 4; i++) bytes.putFloat(128+i*4, 1);
+        }
+        return buffer;
+    }
+
+    private GpuBuffer positionBuffer(float[] positions) {
+        ByteBuffer bytes = ByteBuffer.allocateDirect(positions.length*4).order(ByteOrder.nativeOrder());
+        for (float position : positions) bytes.putFloat(position); bytes.flip();
+        return device.createBuffer(() -> "previous hand positions", GpuBuffer.USAGE_VERTEX, bytes);
+    }
+
+    private GpuBuffer motionBuffer(Matrix4f current, Matrix4f previous) {
+        ByteBuffer bytes = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder()); current.get(0, bytes); previous.get(64, bytes);
+        return device.createBuffer(() -> "hand motion uniforms", GpuBuffer.USAGE_UNIFORM, bytes);
+    }
+
+    private MetalGpuTexture texture(String name, GpuFormat format, int usage) {
+        return (MetalGpuTexture) device.createTexture(name, usage | GpuTexture.USAGE_RENDER_ATTACHMENT, format, W, H, 1, 1);
+    }
+
+    private static Matrix4f projection(float fov) {
+        return new Matrix4f().perspective((float)Math.toRadians(fov), (float)W/H, 100, .05F, true);
+    }
+
+    private static ByteBuffer vertices(Fixture f, boolean previous, Matrix4f modelView) {
+        float[][] xy = {{-.4F,-.4F},{.4F,-.4F},{-.4F,.4F},{-.4F,.4F},{.4F,-.4F},{.4F,.4F}};
+        var format = DefaultVertexFormat.ENTITY; int stride = format.getVertexSize();
+        ByteBuffer bytes = ByteBuffer.allocateDirect(6*stride).order(ByteOrder.nativeOrder());
+        for (int i = 0; i < 6; i++) {
+            float x = xy[i][0] + f.side(), y = xy[i][1];
+            if (previous && f.deformed()) { x = x*.85F-.12F; y = y*1.1F+.07F; }
+            Vector4f point = new Vector4f(x, y, -1, 1);
+            if (f.cameraLocked()) point.mul(new Matrix4f(modelView).invert());
+            int p = i*stride+format.getElement("Position").offset();
+            bytes.putFloat(p,point.x).putFloat(p+4,point.y).putFloat(p+8,point.z);
+            bytes.putInt(i*stride+format.getElement("Color").offset(), 0xFFFFFFFF);
+        }
+        return bytes;
+    }
+
+    private static float[] positions(ByteBuffer vertices) {
+        return MetalPreviousVertexHistory.extractPositions(DefaultVertexFormat.ENTITY, List.of(vertices), 6);
+    }
+
+    private byte[] readback(MetalGpuTexture texture) {
+        int size = W*H*texture.pixelSize();
+        try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(() -> "hand motion readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size)) {
+            encoder.copyTextureToBuffer(texture, buffer, 0, () -> {}, 0); encoder.submit(); device.waitForSubmittedGpuWork();
+            byte[] bytes = new byte[size]; buffer.currentStorage().get(0, bytes); return bytes;
+        }
+    }
+
+    private static double[] centroid(byte[] mask) {
+        double x = 0, y = 0, count = 0;
+        for (int p = 0; p < mask.length; p++) if (Byte.toUnsignedInt(mask[p]) > 127) { x += p%W+.5; y += p/W+.5; count++; }
+        return count == 0 ? new double[]{0,0,0} : new double[]{x/count,y/count,count};
+    }
+}

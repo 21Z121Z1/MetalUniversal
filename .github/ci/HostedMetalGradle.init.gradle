@@ -160,6 +160,7 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+            "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
@@ -170,7 +171,8 @@ gradle.projectsEvaluated {
     configureHostedTest(
         "hostedMetalMotionProducerTest",
         "Runs actual packaged previous-position shaders and verifies raster-space displacement.",
-        ["com.metallum.client.metal.render.MetalMotionProducerGpuTest"]
+        ["com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+         "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
     )
 
     def promotedProperties = [

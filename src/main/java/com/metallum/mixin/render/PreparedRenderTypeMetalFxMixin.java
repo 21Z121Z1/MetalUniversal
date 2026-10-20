@@ -23,7 +23,7 @@ public abstract class PreparedRenderTypeMetalFxMixin {
     ) {
         MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.takeExecute(executeInfo);
         if (sample != null) {
-            MetalFxManager.drawEntityMotion((PreparedRenderType) (Object) this, executeInfo, sample);
+            MetalFxManager.drawEntityMotion((PreparedRenderType) (Object) this, executeInfo, sample, renderPass);
         }
     }
 }

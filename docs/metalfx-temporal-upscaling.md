@@ -31,11 +31,21 @@ stays unchanged. Applying another Y flip in the motion kernel would be wrong.
 
 Object-motion replays retain the actual source draw's same-frame projection
 slice rather than binding whichever projection a later HUD pass left global.
-First-person staged vertices still lack their own previous HUD projection and
-model-view history. That producer is explicitly rejected for interpolation;
-Temporal uses zero hand motion with reactive protection. The dedicated native
-exact-hand kernel input remains testable, but is not proof of a connected game
-hand producer.
+First-person draws capture their actual bound HUD projection and ModelViewMat
+from live CPU-written Metal uniforms. These immutable matrices share the draw
+token, complete material manifest, and successful source-frame commit with the
+posed vertex history. The hand replay uses the previous HUD projection times
+the previous per-draw model-view; its current correction is only the compiler's
+clip-Y conversion, since HUD rendering is unjittered. It retains the source HUD
+depth attachment and copies the captured current projection into frame-owned
+memory, so later screen effects cannot replace it. Both hands retain independent
+content-sensitive generations.
+
+Missing geometry or matrices, changed item/topology, first appearance, reload,
+and reset keep the hand at zero motion with reactive protection. A complete
+candidate becomes real motion only after every matching replay was encoded.
+This connects the hand producer; hosted shader/readback tests do not establish
+physical MetalFX reconstruction or frame-interpolation visual quality.
 
 The motion compute pass combines:
 

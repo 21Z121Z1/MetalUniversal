@@ -398,6 +398,7 @@ public final class MetalFxManager {
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
             GpuBufferSlice projection,
+            @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             MetalPreviousVertexHistory.DrawToken previousVertexToken
     ) {
@@ -408,6 +409,7 @@ public final class MetalFxManager {
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
             GpuBufferSlice projection,
+            @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
             GpuBufferSlice currentVertexBuffer,
@@ -823,10 +825,8 @@ public final class MetalFxManager {
     }
 
     /**
-     * Records the first-person fallback for this source frame. Previous staged
-     * vertices alone do not prove the separate HUD projection and model-view
-     * history. Temporal uses zero hand motion plus reactivity; interpolation
-     * stays rejected until that per-draw projection history is available.
+     * Records an unowned/unsupported first-person fallback. Exact candidates instead need matched
+     * staged vertices, the independent per-draw HUD transform, and successful replay encoding.
      */
     public static void observeFirstPersonMotion() {
         MetalFxManager manager = active;
@@ -871,11 +871,12 @@ public final class MetalFxManager {
     public static void drawEntityMotion(
             final PreparedRenderType prepared,
             final StagedVertexBuffer.ExecuteInfo executeInfo,
-            final MetalEntityMotionCapture.Sample sample
+            final MetalEntityMotionCapture.Sample sample,
+            final RenderPass sourcePass
     ) {
         MetalFxManager manager = active;
         if (manager != null) {
-            manager.drawEntityMotionInternal(prepared, executeInfo, sample);
+            manager.drawEntityMotionInternal(prepared, executeInfo, sample, sourcePass);
         }
     }
 
@@ -1768,6 +1769,15 @@ public final class MetalFxManager {
         }
     }
 
+    static void markExactFirstPersonProducerCandidate(final MetalEntityMotionCapture.Sample sample) {
+        MetalFxManager manager = active;
+        if (manager != null && sample != null) {
+            manager.firstPersonMotionObserved = true;
+            manager.observeProducer(FrameSynthesisContract.ProducerDomain.FIRST_PERSON, 1);
+            manager.markExactProducerCandidate(FrameSynthesisContract.ProducerDomain.FIRST_PERSON, sample);
+        }
+    }
+
     static void recordMotionProducerEncoded(
             final MetalEntityMotionCapture.Sample sample
     ) {
@@ -1811,12 +1821,18 @@ public final class MetalFxManager {
     private void drawEntityMotionInternal(
             final PreparedRenderType prepared,
             final StagedVertexBuffer.ExecuteInfo executeInfo,
-            final MetalEntityMotionCapture.Sample sample
+            final MetalEntityMotionCapture.Sample sample,
+            final RenderPass sourcePass
     ) {
         // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
         MetalPreviousVertexHistory.DrawToken previousVertexToken =
                 MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
-        if (sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON) {
+        var sourceInputs = MetalPreviousVertexReplay.sourceDrawInputs(sourcePass);
+        boolean firstPerson = sample.domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
+        // Prime matrices on first appearance and history-reset frames too, in the same pending
+        // transaction as the posed vertices captured during staging. No source submission, no commit.
+        if (firstPerson && !MetalPreviousVertexReplay.captureHandTransform(previousVertexToken, sourceInputs)) {
+            MetalEntityMotionCapture.failExactSample(sample, MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
             MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
             return;
         }
@@ -1847,7 +1863,7 @@ public final class MetalFxManager {
             return;
         }
 
-        GpuBufferSlice projection = RenderSystem.getProjectionMatrixBuffer();
+        GpuBufferSlice projection = sourceInputs == null ? null : sourceInputs.projection();
         if (projection == null) {
             MetalEntityMotionCapture.recordMotionDrawSkip("source-projection-unavailable");
             return;
@@ -1857,8 +1873,9 @@ public final class MetalFxManager {
         objectMotionReplays.add(new ObjectMotionReplay(
                 prepared,
                 executeInfo,
-                prepared.dynamicTransforms(),
+                sourceInputs.dynamicTransforms(),
                 projection,
+                sourceInputs.depth(),
                 sample,
                 previousVertexToken
         ));
@@ -1883,33 +1900,46 @@ public final class MetalFxManager {
         Matrix4f currentUnjitteredFromRaster =
                 new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
         MetalMotionContract.minecraftToMetalFxClip(currentUnjitteredFromRaster);
-        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
-            replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform"));
-            return;
-        }
-
         List<PreparedObjectMotionReplay> preparedReplays = new ArrayList<>(replays.size());
         for (ObjectMotionReplay replay : replays) {
             PreparedRenderType prepared = replay.prepared();
             StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
             boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
             boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
+            boolean firstPerson = replay.sample().domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
+            if (!firstPerson && !MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
+                MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform");
+                continue;
+            }
             MetalPreviousVertexReplay.Plan exactPlan = exactMotionSupported
-                    && MetalFxMath.isFinite(previousCameraRelativeViewProjection)
+                    && (firstPerson || MetalFxMath.isFinite(previousCameraRelativeViewProjection))
                     ? MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
             boolean exactPreviousPositions = exactPlan != null;
+            var handTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken()) : null;
+            if (firstPerson && (handTransforms == null || !exactPreviousPositions || replay.sourceDepth() == null)) {
+                String reason = handTransforms == null ? MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE
+                        : !exactPreviousPositions ? "first-person-previous-vertices-unavailable" : "first-person-depth-unavailable";
+                MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
+                MetalEntityMotionCapture.recordMotionDrawSkip(reason);
+                continue;
+            }
             if (!exactPreviousPositions && !rootMotionSupported) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("exact-plan-unavailable");
                 continue;
             }
-            Matrix4f previousFromRaster = exactPreviousPositions
-                    ? new Matrix4f(previousCameraRelativeViewProjection)
-                    : new Matrix4f(previousViewProjection)
-                            .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
-                            .mul(inverseCurrentViewProjection);
-            MetalMotionContract.minecraftToMetalFxClip(previousFromRaster);
+            Matrix4f previousFromRaster;
+            if (firstPerson) {
+                previousFromRaster = handTransforms.previousFromPosition();
+            } else {
+                previousFromRaster = exactPreviousPositions
+                        ? new Matrix4f(previousCameraRelativeViewProjection)
+                        : new Matrix4f(previousViewProjection)
+                                .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
+                                .mul(inverseCurrentViewProjection);
+                MetalMotionContract.minecraftToMetalFxClip(previousFromRaster);
+            }
             if (!MetalFxMath.isFinite(previousFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-previous-transform");
                 continue;
@@ -1940,16 +1970,28 @@ public final class MetalFxManager {
             try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                     .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
                 ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                currentUnjitteredFromRaster.get(0, bytes);
+                (firstPerson ? handTransforms.currentUnjitteredFromRaster() : currentUnjitteredFromRaster).get(0, bytes);
                 previousFromRaster.get(64, bytes);
                 motionUniform = mapped.slice();
             }
             MetalFxMotionTelemetry.recordGpuUpload(128L);
+            GpuBufferSlice replayProjection = replay.projection();
+            if (firstPerson) {
+                // ProjectionMatrixBuffer can be overwritten by later HUD/effect phases. Replay a
+                // frame-owned copy of the source matrix instead of a mutable global UBO backing.
+                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                        .allocateGpuMapped(64L, 256L, GpuBuffer.USAGE_UNIFORM)) {
+                    handTransforms.currentProjection().get(0, mapped.data().order(ByteOrder.nativeOrder()));
+                    replayProjection = mapped.slice();
+                }
+                MetalFxMotionTelemetry.recordGpuUpload(64L);
+            }
             preparedReplays.add(new PreparedObjectMotionReplay(
                     prepared,
                     executeInfo,
                     replay.dynamicTransforms(),
-                    replay.projection(),
+                    replayProjection,
+                    replay.sourceDepth(),
                     replay.sample(),
                     motionUniform,
                     currentVertexBuffer,
@@ -1994,16 +2036,22 @@ public final class MetalFxManager {
         }
         objectMotionInputsCleared = true;
 
-        if (!firstPersonReplays.isEmpty()) {
+        if (firstPersonReplays.isEmpty()) return;
+        // consistentDepthRequired uses GameRenderer.hud3DTarget, independently of main world depth.
+        var handDepthGroups = new java.util.LinkedHashMap<GpuTextureView, List<PreparedObjectMotionReplay>>();
+        for (PreparedObjectMotionReplay replay : firstPersonReplays) {
+            handDepthGroups.computeIfAbsent(replay.sourceDepth(), ignored -> new ArrayList<>()).add(replay);
+        }
+        for (var group : handDepthGroups.entrySet()) {
             RenderPassDescriptor handDescriptor = RenderPassDescriptor
                     .builder(() -> "Metallum batched first-person exact motion")
                     .withColorAttachment(objectMotionView)
                     .withColorAttachment(handExactValidityView)
-                    .withDepthAttachment(depthView)
+                    .withDepthAttachment(group.getKey())
                     .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight))
                     .build();
             try (MetalRenderPass pass = encoder.createRenderPass(handDescriptor)) {
-                encodePreparedMotionReplays(pass, firstPersonReplays);
+                encodePreparedMotionReplays(pass, group.getValue());
             }
         }
     }
