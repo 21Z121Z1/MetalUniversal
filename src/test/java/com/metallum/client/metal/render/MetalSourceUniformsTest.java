@@ -60,6 +60,19 @@ final class MetalSourceUniformsTest {
     }
 
     @Test
+    void fogUsesTheActualFortyByteMinecraftBindingAndOwnsItsBytes() {
+        assertEquals(net.minecraft.client.renderer.fog.FogRenderer.FOG_UBO_SIZE,MetalSourceUniforms.FOG_BYTES);
+        byte[] fog=new byte[40];for(int offset=0;offset<40;offset+=4)bytes(fog).putFloat(offset,offset+1);
+        byte[] original=fog.clone();var captured=MetalSourceUniforms.decode(dynamic(1),null,fog);assertNotNull(captured);
+        java.util.Arrays.fill(fog,(byte)0);ByteBuffer output=ByteBuffer.allocate(40);captured.writeFog(output);
+        assertTrue(captured.hasFog());assertArrayEquals(original,output.array());
+        assertNull(MetalSourceUniforms.decode(dynamic(1),null,new byte[39]));
+        bytes(original).putFloat(16,Float.NaN);assertNull(MetalSourceUniforms.decode(dynamic(1),null,original));
+        var absent=MetalSourceUniforms.decode(dynamic(1),null);assertFalse(absent.hasFog());
+        assertThrows(IllegalStateException.class,()->absent.writeFog(ByteBuffer.allocate(40)));
+    }
+
+    @Test
     void blockPreviousPositionsUseTheAcceptedOffsetAndNeverTheCurrentOrFailedOffset() {
         var source=RenderPipeline.builder().withLocation("test/block_offset_history")
                 .withVertexShader("core/block").withFragmentShader("core/block").withVertexBinding(0,DefaultVertexFormat.BLOCK)

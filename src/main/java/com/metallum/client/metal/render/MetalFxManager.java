@@ -190,7 +190,12 @@ public final class MetalFxManager {
     private final FrameSynthesisReceiptTracker frameSynthesisReceipts =
             new FrameSynthesisReceiptTracker();
     private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
-    private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
+    record EntityMotionGeneration(long generation,Class<?> stateClass,long geometryDiscontinuity) {
+        boolean matches(EntityRenderState state) {
+            return stateClass==state.getClass() && geometryDiscontinuity==MetalFxMotionEligibility.geometryDiscontinuity(state);
+        }
+    }
+    private final Map<Entity, EntityMotionGeneration> entityGenerations = new IdentityHashMap<>();
     private final Map<BlockEntity, Long> blockEntityGenerations = new IdentityHashMap<>();
     private final Map<PistonMovingBlockEntity, PistonMotionGeneration> pistonGenerations = new IdentityHashMap<>();
     private long nextEntityGeneration = 1L;
@@ -441,6 +446,7 @@ public final class MetalFxManager {
             GpuBufferSlice dynamicTransforms,
             GpuBufferSlice projection,
             @Nullable GpuBufferSlice globals,
+            @Nullable GpuBufferSlice fog,
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
@@ -1877,7 +1883,13 @@ public final class MetalFxManager {
             return;
         }
         UUID uuid = entity.getUUID();
-        long generation = entityGenerations.computeIfAbsent(entity, ignored -> nextEntityGeneration++);
+        long discontinuity=MetalFxMotionEligibility.geometryDiscontinuity(state);
+        var geometry=entityGenerations.get(entity);
+        if(geometry==null || !geometry.matches(state)) {
+            geometry=new EntityMotionGeneration(nextEntityGeneration++,state.getClass(),discontinuity);
+            entityGenerations.put(entity,geometry);
+        }
+        long generation=geometry.generation();
         long objectId = uuid.getMostSignificantBits() ^ Long.rotateLeft(uuid.getLeastSignificantBits(), 1);
         MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(objectId, generation);
         Matrix4f currentObject = MetalEntityObjectPose.compose(state);
@@ -1958,6 +1970,11 @@ public final class MetalFxManager {
         MetalSourceUniforms uniforms = MetalPreviousVertexHistory.currentSourceUniforms(previousVertexToken);
         if (uniforms == null) {
             MetalEntityMotionCapture.recordMotionDrawSkip("source-uniform-snapshot-unavailable");
+            return;
+        }
+        if (MetalEntityMotionPipeline.requiresFogSnapshot(prepared.pipeline()) && !uniforms.hasFog()) {
+            MetalEntityMotionCapture.failExactSample(sample,"source-fog-snapshot-unavailable");
+            MetalEntityMotionCapture.recordMotionDrawSkip("source-fog-snapshot-unavailable");
             return;
         }
         // Exact previous-position selection is intentionally deferred until flush. At that point all
@@ -2102,7 +2119,7 @@ public final class MetalFxManager {
             }
             // Every source binding is immutable at replay time, including root/invalid paths.
             // The source buffer object may already have been rewritten or orphaned since its draw.
-            GpuBufferSlice replayProjection, replayDynamic, replayGlobals = null;
+            GpuBufferSlice replayProjection, replayDynamic, replayGlobals = null,replayFog=null;
             var currentTransform = MetalPreviousVertexHistory.currentDrawTransform(replay.previousVertexToken());
             if (currentTransform == null) continue;
             try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
@@ -2122,14 +2139,22 @@ public final class MetalFxManager {
                     replayGlobals=mapped.slice();
                 }
             }
+            if(replay.uniforms().hasFog()) {
+                try(GpuBufferSlice.MappedView mapped=encoder.transientMemory()
+                        .allocateGpuMapped(MetalSourceUniforms.FOG_BYTES,256L,GpuBuffer.USAGE_UNIFORM)) {
+                    replay.uniforms().writeFog(mapped.data());replayFog=mapped.slice();
+                }
+            }
             MetalFxMotionTelemetry.recordGpuUpload(64L+MetalSourceUniforms.DYNAMIC_BYTES
-                    +(replayGlobals == null ? 0 : MetalSourceUniforms.GLOBAL_BYTES));
+                    +(replayGlobals == null ? 0 : MetalSourceUniforms.GLOBAL_BYTES)
+                    +(replayFog == null ? 0 : MetalSourceUniforms.FOG_BYTES));
             preparedReplays.add(new PreparedObjectMotionReplay(
                     prepared,
                     executeInfo,
                     replayDynamic,
                     replayProjection,
                     replayGlobals,
+                    replayFog,
                     replay.sourceDepth(),
                     replay.sample(),
                     motionUniform,
@@ -2256,6 +2281,7 @@ public final class MetalFxManager {
                 pass.setUniform("Projection", replay.projection());
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
                 if (replay.globals() != null) pass.setUniform("Globals", replay.globals());
+                if (replay.fog() != null) pass.setUniform("Fog",replay.fog());
                 pass.setUniform("MetallumMotion", replay.motionUniform());
                 if (replay.rasterUniform() != null) pass.setUniform("MetallumSurface",replay.rasterUniform());
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());

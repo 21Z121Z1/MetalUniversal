@@ -63,7 +63,8 @@ final class MetalMotionProducerGpuTest {
                 new Fixture("entity_cutout_hole", "core/entity", DefaultVertexFormat.ENTITY, true, false, true, false),
                 new Fixture("particle_previous_sprite", "core/particle", DefaultVertexFormat.PARTICLE, false, false, false, false),
                 new Fixture("particle_alpha_hole", "core/particle", DefaultVertexFormat.PARTICLE, false, false, true, false),
-                new Fixture("leash_previous_vertices", "core/rendertype_leash", DefaultVertexFormat.POSITION_COLOR_LIGHTMAP, false, true, false, false)
+                new Fixture("leash_previous_vertices", "core/rendertype_leash", DefaultVertexFormat.POSITION_COLOR_LIGHTMAP, false, true, false, false),
+                new Fixture("lightning_previous_geometry", "core/rendertype_lightning", DefaultVertexFormat.POSITION_COLOR, false, true, false, false)
         );
     }
 
@@ -98,6 +99,7 @@ final class MetalMotionProducerGpuTest {
         var resources = BindGroupLayout.builder()
                 .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER)
                 .withUniform("Projection", UniformType.UNIFORM_BUFFER)
+                .withUniform("Fog",UniformType.UNIFORM_BUFFER)
                 .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER).build();
         var source = RenderPipeline.builder().withLocation("motion_contract/" + f.name())
                 .withVertexShader(f.source()).withFragmentShader(f.source())
@@ -125,12 +127,15 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer motion = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()).get(0, motion);
         MetalMotionContract.minecraftToMetalFxClip(new Matrix4f().m33(f.behind() ? -1 : 1)).get(64, motion);
+        ByteBuffer fog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());
+        fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
         try (GpuBuffer cv = device.createBuffer(() -> "current posed", GpuBuffer.USAGE_VERTEX, current);
              GpuBuffer pv = device.createBuffer(() -> "previous posed", GpuBuffer.USAGE_VERTEX, previous);
              GpuBuffer pp = device.createBuffer(() -> "previous position stream", GpuBuffer.USAGE_VERTEX, previousPositions);
              GpuBuffer du = device.createBuffer(() -> "DynamicTransforms", GpuBuffer.USAGE_UNIFORM, dynamic);
              GpuBuffer pr = device.createBuffer(() -> "Projection", GpuBuffer.USAGE_UNIFORM, projection);
              GpuBuffer mo = device.createBuffer(() -> "MetallumMotion", GpuBuffer.USAGE_UNIFORM, motion);
+             GpuBuffer fo = device.createBuffer(() -> "source geometry fog",GpuBuffer.USAGE_UNIFORM,fog);
              MetalGpuTexture sampled = texture("visibility", GpuFormat.RGBA8_UNORM, GpuTexture.USAGE_TEXTURE_BINDING);
              MetalGpuTexture flow = texture("motion", GpuFormat.RG16_FLOAT, GpuTexture.USAGE_COPY_SRC);
              MetalGpuTexture valid = texture("validity", GpuFormat.R8_UNORM, GpuTexture.USAGE_COPY_SRC);
@@ -151,6 +156,7 @@ final class MetalMotionProducerGpuTest {
                 pass.setUniform("Projection", pr.slice());
                 pass.setUniform("DynamicTransforms", du.slice());
                 pass.setUniform("MetallumMotion", mo.slice());
+                pass.setUniform("Fog",fo.slice());
                 pass.bindTexture("Sampler0", sampledView, sampler);
                 pass.setVertexBuffer(0, (frame == 0 ? pv : cv).slice());
                 pass.setVertexBuffer(1, pp.slice());
@@ -993,14 +999,18 @@ final class MetalMotionProducerGpuTest {
                 "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth",
                 "entity_negative_slope_depth_bias_self", "entity_projective_slope_depth_bias_self",
                 "block_cutout_after_vertex_alpha", "block_cutout_after_modulator", "block_alpha_composite_zero",
-                "block_opaque_zero_alpha", "block_visible_offset_and_alpha");
+                "block_opaque_zero_alpha", "block_visible_offset_and_alpha",
+                "lightning_visible", "lightning_vertex_zero_alpha", "lightning_modulator_zero",
+                "lightning_fully_fogged", "lightning_fog_partial", "lightning_oit_additive_zero_alpha",
+                "lightning_oit_additive_visible", "entity_oit_additive_zero_alpha", "entity_oit_additive_visible");
     }
 
     @ParameterizedTest(name = "actual material visibility: {0}")
     @MethodSource("materialVisibilityFixtures")
     void materialMotionMatchesActualMinecraftColorAndFragmentSurvival(String name) throws Exception {
         boolean item=name.startsWith("item_"), special=name.contains("special"), glint=name.contains("glint");
-        boolean block=name.startsWith("block_");
+        boolean block=name.startsWith("block_"),lightning=name.startsWith("lightning_");
+        boolean oitAdditive=name.contains("oit_additive");
         boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
         boolean blended=!name.equals("zero_alpha_opaque")&&!name.equals("block_opaque_zero_alpha"), perFace=name.equals("per_face_dissolve");
         boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
@@ -1030,9 +1040,14 @@ final class MetalMotionProducerGpuTest {
             case "block_alpha_composite_zero" -> {vertexAlpha=0;visible=false;}
             case "block_opaque_zero_alpha" -> {vertexAlpha=0;expectedAlpha=0;}
             case "block_visible_offset_and_alpha" -> {vertexAlpha=.6F;modAlpha=.5F;cutout=.1F;expectedAlpha=.3F;}
+            case "lightning_vertex_zero_alpha", "lightning_oit_additive_zero_alpha", "entity_oit_additive_zero_alpha" -> {vertexAlpha=0;visible=false;}
+            case "lightning_oit_additive_visible", "entity_oit_additive_visible" -> expectedAlpha=0;
+            case "lightning_modulator_zero" -> {modAlpha=0;visible=false;}
+            case "lightning_fully_fogged" -> {expectedAlpha=0;visible=false;}
+            case "lightning_fog_partial" -> expectedAlpha=1-(float)Math.sqrt(.4F*.4F*2+.5F*.5F);
         }
-        var format=block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
-        String shader=block ? "core/block" : item ? "core/item" : "core/entity";
+        var format=lightning ? DefaultVertexFormat.POSITION_COLOR : block ? DefaultVertexFormat.BLOCK : special ? DefaultVertexFormat.ENTITY_GLINT_SPECIAL : DefaultVertexFormat.ENTITY;
+        String shader=lightning ? "core/rendertype_lightning" : block ? "core/block" : item ? "core/item" : "core/entity";
         float offsetX=name.equals("block_visible_offset_and_alpha") ? .125F : 0;
         float offsetY=name.equals("block_visible_offset_and_alpha") ? -.05F : 0;
         float offsetZ=name.equals("block_visible_offset_and_alpha") ? -.1F : 0;
@@ -1041,6 +1056,7 @@ final class MetalMotionProducerGpuTest {
                 .withUniform("Lighting",UniformType.UNIFORM_BUFFER).withUniform("Globals",UniformType.UNIFORM_BUFFER)
                 .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("Sampler1",UniformType.COMBINED_IMAGE_SAMPLER)
                 .withUniform("Sampler2",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("GlintSampler",UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("DepthBoundsSampler",UniformType.COMBINED_IMAGE_SAMPLER).withUniform("Coeff0",UniformType.COMBINED_IMAGE_SAMPLER)
                 .withUniform("DissolveMaskSampler",UniformType.COMBINED_IMAGE_SAMPLER).build();
         var builder=RenderPipeline.builder().withLocation("motion_contract/material_source/"+name)
                 .withVertexShader(shader).withFragmentShader(shader).withVertexBinding(0,format).withBindGroupLayout(resources)
@@ -1054,20 +1070,22 @@ final class MetalMotionProducerGpuTest {
         if(matrix)builder.withShaderDefine("APPLY_TEXTURE_MATRIX");
         if(perFace)builder.withShaderDefine("PER_FACE_LIGHTING");
         if(name.contains("additive"))builder.withShaderDefine("OIT_ADDITIVE");
+        if(oitAdditive)builder.withShaderDefine("OIT").withShaderDefine("OIT_ACCUMULATE")
+                .withShaderDefine("OIT_COEFF_COUNT",4).withShaderDefine("OIT_WAVELET_RANK",1);
         if(cutout>=0)builder.withShaderDefine("ALPHA_CUTOUT",cutout);
         // The independent oracle stores actual source RGBA without blending and source fragment survival in D32.
         // The motion variant separately receives the intended color blend semantics.
         var original=builder.build();
         var intended=builder.withLocation("motion_contract/material_motion/"+name)
                 .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,biased,slopeBias,constantBias))
-                .withColorTargetState(0,new ColorTargetState(blended ? Optional.of(BlendFunction.TRANSLUCENT) : Optional.empty(),
+                .withColorTargetState(0,new ColorTargetState(blended ? Optional.of(oitAdditive ? BlendFunction.ADDITIVE : BlendFunction.TRANSLUCENT) : Optional.empty(),
                         GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL)).build();
         var f=new Fixture(name,shader,format,false,false,false,false);
         ByteBuffer mesh=vertices(f,false);
         for(int i=0;i<6;i++) {
             int base=i*format.getVertexSize();
             mesh.putInt(base+format.getElement("Color").offset(),0x00FFFFFF|Math.round(vertexAlpha*255)<<24);
-            int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);
+            if(format.getElement("UV0")!=null) {int uv=base+format.getElement("UV0").offset();mesh.putFloat(uv,.25F).putFloat(uv+4,.5F);}
             if(format.getElement("Normal")!=null)mesh.put(base+format.getElement("Normal").offset()+2,(byte)127);
             if(sloped)mesh.putFloat(base+8,.5F+.1F*mesh.getFloat(base));
             if(special) {int extra=base+format.getElement("UV3").offset();mesh.putFloat(extra,.5F).putFloat(extra+4,.5F);}
@@ -1085,6 +1103,8 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());projectionMatrix.get(0,projection);
         ByteBuffer fog=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        if(name.equals("lightning_fully_fogged"))fog.putFloat(16,0).putFloat(20,.1F);
+        if(name.equals("lightning_fog_partial"))fog.putFloat(16,0).putFloat(20,1);
         ByteBuffer lighting=ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());lighting.putFloat(8,1).putFloat(24,1);
         ByteBuffer globals=ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());globals.putFloat(12,.6F).putFloat(32,W).putFloat(36,H);
         ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
@@ -1105,6 +1125,8 @@ final class MetalMotionProducerGpuTest {
             var sampled=texture("material alpha",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING|copy);
             var white=texture("actual lightmap overlay glint",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
             var dissolveMask=texture("actual dissolve mask",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var bounds=texture("actual OIT depth bounds",GpuFormat.RGBA32_FLOAT,GpuTexture.USAGE_TEXTURE_BINDING);
+            var coefficients=texture("actual OIT zero absorbance",GpuFormat.RGBA32_FLOAT,GpuTexture.USAGE_TEXTURE_BINDING);
             var color=texture("actual source color",GpuFormat.RGBA32_FLOAT,copy);
             var survival=texture("source fragment survival",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
             var ownership=texture("private motion depth",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
@@ -1112,10 +1134,12 @@ final class MetalMotionProducerGpuTest {
             var valid=texture("material ownership",GpuFormat.R8_UNORM,copy|GpuTexture.USAGE_TEXTURE_BINDING);
             var pair=texture("material depth correspondence",GpuFormat.RG32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
             var sv=device.createTextureView(sampled);var wv=device.createTextureView(white);var dv=device.createTextureView(dissolveMask);
+            var bv=device.createTextureView(bounds);var av=device.createTextureView(coefficients);
             var cv=device.createTextureView(color);var sd=device.createTextureView(survival);var od=device.createTextureView(ownership);
             var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
             var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
             encoder.clearColorTexture(white,new Vector4f(1));encoder.clearColorTexture(dissolveMask,new Vector4f(1,1,1,maskAlpha));
+            encoder.clearColorTexture(bounds,new Vector4f(0,100,0,0));encoder.clearColorTexture(coefficients,new Vector4f(0));
             if(matrix) {
                 ByteBuffer pattern=ByteBuffer.allocateDirect(W*H*4).order(ByteOrder.nativeOrder());
                 for(int y=0;y<H;y++)for(int x=0;x<W;x++)pattern.putInt(x<W/2 ? 0x00FFFFFF : -1);pattern.flip();
@@ -1134,6 +1158,7 @@ final class MetalMotionProducerGpuTest {
                     pass.setUniform("Fog",fo.slice());pass.setUniform("Lighting",li.slice());pass.setUniform("Globals",gl.slice());
                     pass.bindTexture("Sampler0",sv,sampler);pass.bindTexture("Sampler1",wv,sampler);pass.bindTexture("Sampler2",wv,sampler);
                     pass.bindTexture("GlintSampler",wv,sampler);pass.bindTexture("DissolveMaskSampler",dv,sampler);
+                    pass.bindTexture("DepthBoundsSampler",bv,sampler);pass.bindTexture("Coeff0",av,sampler);
                     pass.setVertexBuffer(0,vb.slice());
                     if(phase==1) {pass.setUniform("MetallumMotion",mo.slice());pass.setVertexBuffer(1,pb.slice());}
                     if(phase==1 && biased)pass.setUniform("MetallumSurface",ra.slice());
@@ -1146,9 +1171,11 @@ final class MetalMotionProducerGpuTest {
             ByteBuffer reference=ByteBuffer.wrap(rgba).order(ByteOrder.nativeOrder()),survived=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
             ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder()),depths=ByteBuffer.wrap(z).order(ByteOrder.nativeOrder());
             int count=0,mismatches=0,wrongAlpha=0,wrongTag=0,wrongMotion=0,wrongDepth=0;
-            boolean reactive=glint||dissolve||matrix;
+            boolean reactive=glint||dissolve||matrix||lightning;
             for(int p=0;p<W*H;p++) {
-                boolean contributes=survived.getFloat(p*4)>0 && (!blended || reference.getFloat(p*16+12)>0);
+                boolean contributes=survived.getFloat(p*4)>0 && (!blended || (oitAdditive
+                        ? reference.getFloat(p*16)>0 || reference.getFloat(p*16+4)>0 || reference.getFloat(p*16+8)>0
+                        : reference.getFloat(p*16+12)>0));
                 if(contributes!=(Byte.toUnsignedInt(mask[p])>31))mismatches++;
                 if(!contributes)continue;
                 count++;

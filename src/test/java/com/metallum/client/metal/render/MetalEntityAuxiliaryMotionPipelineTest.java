@@ -95,6 +95,19 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void lightningAndDragonRaysUseExactPositionColorAndFrozenFog() {
+        var source=pipeline("core/rendertype_lightning",DefaultVertexFormat.POSITION_COLOR);
+        assertFalse(MetalEntityMotionPipeline.supports(source));
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(source));
+        assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
+        var exact=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertEquals("core/lightning_previous_motion",exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals(DefaultVertexFormat.POSITION_COLOR,exact.getVertexFormatBinding(0));
+        assertTrue(exact.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(pipeline("core/rendertype_lightning",DefaultVertexFormat.ENTITY)));
+    }
+
+    @Test
     void specialGlintAndDissolveRetainTheirExactOriginalLayouts() {
         for (var source : java.util.List.of(net.minecraft.client.renderer.RenderPipelines.ITEM_CUTOUT_GLINT_SPECIAL,
                 net.minecraft.client.renderer.RenderPipelines.ITEM_TRANSLUCENT_GLINT_SPECIAL,
