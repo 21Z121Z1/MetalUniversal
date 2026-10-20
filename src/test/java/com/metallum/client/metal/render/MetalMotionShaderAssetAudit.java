@@ -67,7 +67,7 @@ final class MetalMotionShaderAssetAudit {
     }
 
     private static Map<String,Object> assets(Path jar) throws Exception {
-        var assets=new TreeMap<String,Object>();long total=0;
+        var assets=new TreeMap<String,Object>();var sourceText=new TreeMap<String,String>();long total=0;
         var imports=java.util.regex.Pattern.compile("(?m)^\\s*#(?:include|moj_import)\\s+<([a-z0-9_./:-]+)>\\s*$");
         try(var zip=new ZipFile(jar.toFile())) {
             var entries=zip.entries();
@@ -81,12 +81,45 @@ final class MetalMotionShaderAssetAudit {
                 total+=bytes.length;
                 if(bytes.length>1024*1024 || total>16L*1024*1024)throw new IOException("Canonical shader audit byte limit exceeded");
                 String text=new String(bytes,StandardCharsets.UTF_8);var matcher=imports.matcher(text);
+                sourceText.put(name,text);
                 var dependencies=new ArrayList<String>();while(matcher.find())dependencies.add(matcher.group(1));
                 assets.put(name,Map.of("bytes",bytes.length,"sha256",HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
                         "imports",dependencies,"locationMacros",text.contains("__FILE__") || text.contains("__LINE__")));
             }
         }
+        for(var source:sourceText.entrySet()) {
+            @SuppressWarnings("unchecked") var raw=(Map<String,Object>)assets.get(source.getKey());
+            var description=new LinkedHashMap<>(raw);
+            try {
+                String expanded=expand(source.getKey(),sourceText,imports,new java.util.HashSet<>());
+                byte[] bytes=expanded.getBytes(StandardCharsets.UTF_8);
+                if(bytes.length>1024*1024)throw new IOException("expanded-shader-byte-limit");
+                description.put("expandedSha256",HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)));
+                description.put("expandedBytes",bytes.length);
+                description.put("expandedStatus","exact-angle-import-expansion");
+            } catch(IOException unsupported) {description.put("expandedStatus",unsupported.getMessage());}
+            assets.put(source.getKey(),description);
+        }
         return assets;
+    }
+
+    private static String expand(String path,Map<String,String> sources,java.util.regex.Pattern imports,
+                                 java.util.Set<String> active) throws IOException {
+        if(active.size()>=64 || !active.add(path))throw new IOException("recursive-or-deep-import");
+        try {
+            String source=sources.get(path);if(source==null)throw new IOException("noncanonical-import");
+            var matcher=imports.matcher(source);var expanded=new StringBuilder();int end=0;
+            while(matcher.find()) {
+                String[] id=matcher.group(1).split(":",2);
+                String namespace=id.length==2 ? id[0] : "minecraft",name=id.length==2 ? id[1] : id[0];
+                String dependency=expand("assets/"+namespace+"/shaders/include/"+name,sources,imports,active);
+                if((long)expanded.length()+matcher.start()-end+dependency.length()+1>1024*1024)
+                    throw new IOException("expanded-shader-byte-limit");
+                expanded.append(source,end,matcher.start()).append(dependency).append('\n');end=matcher.end();
+            }
+            if((long)expanded.length()+source.length()-end>1024*1024)throw new IOException("expanded-shader-byte-limit");
+            return expanded.append(source,end,source.length()).toString();
+        } finally {active.remove(path);}
     }
 
     private static String digest(Path path,String algorithm) throws Exception {
