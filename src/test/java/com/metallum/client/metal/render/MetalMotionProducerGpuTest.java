@@ -991,6 +991,7 @@ final class MetalMotionProducerGpuTest {
                 "entity_additive_cutout", "item_additive_flag_does_not_clamp", "zero_alpha_blended", "zero_alpha_opaque",
                 "entity_texture_matrix_visibility", "item_ignores_entity_texture_matrix", "per_face_dissolve",
                 "entity_glint_zero_modulator", "entity_depth_bias_self", "entity_slope_depth_bias_self", "entity_projective_self_depth",
+                "entity_negative_slope_depth_bias_self", "entity_projective_slope_depth_bias_self",
                 "block_cutout_after_vertex_alpha", "block_cutout_after_modulator", "block_alpha_composite_zero",
                 "block_opaque_zero_alpha", "block_visible_offset_and_alpha");
     }
@@ -1003,7 +1004,9 @@ final class MetalMotionProducerGpuTest {
         boolean dissolve=name.contains("dissolve"), matrix=name.contains("texture_matrix");
         boolean blended=!name.equals("zero_alpha_opaque")&&!name.equals("block_opaque_zero_alpha"), perFace=name.equals("per_face_dissolve");
         boolean biased=name.contains("depth_bias"), sloped=name.contains("slope_depth_bias");
-        boolean projective=name.equals("entity_projective_self_depth");
+        boolean projective=name.contains("projective");
+        float slopeBias=sloped ? name.contains("negative") ? -2 : 2 : 0;
+        float constantBias=biased ? name.contains("negative") ? -10 : 3 : 0;
         float texAlpha=1, vertexAlpha=1, modAlpha=1, maskAlpha=.5F, cutout=-1, expectedAlpha=1;
         boolean visible=true;
         switch(name) {
@@ -1043,7 +1046,7 @@ final class MetalMotionProducerGpuTest {
                 .withVertexShader(shader).withFragmentShader(shader).withVertexBinding(0,format).withBindGroupLayout(resources)
                 .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").withShaderDefine("NO_CARDINAL_LIGHTING")
                 .withCull(false).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true,sloped ? 2 : 0,biased ? 3 : 0))
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,true,slopeBias,constantBias))
                 .withColorTargetState(0,new ColorTargetState(Optional.empty(),GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL));
         if(glint)builder.withShaderDefine("GLINT");
         if(special)builder.withShaderDefine("GLINT_SPECIAL");
@@ -1056,7 +1059,7 @@ final class MetalMotionProducerGpuTest {
         // The motion variant separately receives the intended color blend semantics.
         var original=builder.build();
         var intended=builder.withLocation("motion_contract/material_motion/"+name)
-                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,biased,sloped ? 2 : 0,biased ? 3 : 0))
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL,biased,slopeBias,constantBias))
                 .withColorTargetState(0,new ColorTargetState(blended ? Optional.of(BlendFunction.TRANSLUCENT) : Optional.empty(),
                         GpuFormat.RGBA32_FLOAT,ColorTargetState.WRITE_ALL)).build();
         var f=new Fixture(name,shader,format,false,false,false,false);
@@ -1088,6 +1091,8 @@ final class MetalMotionProducerGpuTest {
         new Matrix4f().scaling(1,-1,1).get(0,motion);
         new Matrix4f().scaling(1,-1,1).mul(projectionMatrix).mul(modelView).get(64,motion);
         int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        ByteBuffer raster=ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        new MetalPreviousVertexReplay.RasterState(W,H,slopeBias,constantBias).write(raster);raster.flip();
         try(var vb=device.createBuffer(()->"actual material mesh",GpuBuffer.USAGE_VERTEX,mesh);
             var pb=device.createBuffer(()->"previous material positions",GpuBuffer.USAGE_VERTEX,old);
             var du=device.createBuffer(()->"material dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
@@ -1096,15 +1101,16 @@ final class MetalMotionProducerGpuTest {
             var li=device.createBuffer(()->"material lighting",GpuBuffer.USAGE_UNIFORM,lighting);
             var gl=device.createBuffer(()->"actual glint globals",GpuBuffer.USAGE_UNIFORM,globals);
             var mo=device.createBuffer(()->"material motion",GpuBuffer.USAGE_UNIFORM,motion);
+            var ra=device.createBuffer(()->"actual previous raster bias",GpuBuffer.USAGE_UNIFORM,raster);
             var sampled=texture("material alpha",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING|copy);
             var white=texture("actual lightmap overlay glint",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
             var dissolveMask=texture("actual dissolve mask",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
             var color=texture("actual source color",GpuFormat.RGBA32_FLOAT,copy);
             var survival=texture("source fragment survival",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
-            var ownership=texture("private motion depth",GpuFormat.D32_FLOAT,copy);
-            var flow=texture("material XY",GpuFormat.RG16_FLOAT,copy);
-            var valid=texture("material ownership",GpuFormat.R8_UNORM,copy);
-            var pair=texture("material depth correspondence",GpuFormat.RG32_FLOAT,copy);
+            var ownership=texture("private motion depth",GpuFormat.D32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var flow=texture("material XY",GpuFormat.RG16_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var valid=texture("material ownership",GpuFormat.R8_UNORM,copy|GpuTexture.USAGE_TEXTURE_BINDING);
+            var pair=texture("material depth correspondence",GpuFormat.RG32_FLOAT,copy|GpuTexture.USAGE_TEXTURE_BINDING);
             var sv=device.createTextureView(sampled);var wv=device.createTextureView(white);var dv=device.createTextureView(dissolveMask);
             var cv=device.createTextureView(color);var sd=device.createTextureView(survival);var od=device.createTextureView(ownership);
             var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
@@ -1130,6 +1136,7 @@ final class MetalMotionProducerGpuTest {
                     pass.bindTexture("GlintSampler",wv,sampler);pass.bindTexture("DissolveMaskSampler",dv,sampler);
                     pass.setVertexBuffer(0,vb.slice());
                     if(phase==1) {pass.setUniform("MetallumMotion",mo.slice());pass.setVertexBuffer(1,pb.slice());}
+                    if(phase==1 && biased)pass.setUniform("MetallumSurface",ra.slice());
                     if(phase==1)pass.bindTexture("MetallumSourceDepth",sd,sampler);
                     pass.draw(6,1,0,0);
                 }
@@ -1150,7 +1157,7 @@ final class MetalMotionProducerGpuTest {
                 if(!Float.isFinite(alpha)||Math.abs(alpha-expectedAlpha)>1e-5)wrongAlpha++;
                 if(Byte.toUnsignedInt(mask[p])!=(reactive ? 191 : 255))wrongTag++;
                 if(!Float.isFinite(x)||!Float.isFinite(y)||Math.abs(x)>1e-6||Math.abs(y)>1e-6)wrongMotion++;
-                float expectedBefore=projective||block ? survived.getFloat(p*4) : sloped ? .5F+.1F*(2F*(p%W+.5F)/W-1) : .5F;
+                float expectedBefore=survived.getFloat(p*4);
                 float expectedNow=survived.getFloat(p*4);
                 if(!Float.isFinite(before)||!Float.isFinite(now)||Math.abs(before-expectedBefore)>3e-6||Math.abs(now-expectedNow)>3e-6)wrongDepth++;
             }
@@ -1164,8 +1171,57 @@ final class MetalMotionProducerGpuTest {
             assertEquals(0,wrongAlpha,"Independent original material alpha");
             assertEquals(0,wrongTag,"Reactive material tags must preserve exact geometry");
             assertEquals(0,wrongMotion,"An unchanged exact surface must retain zero XY");
-            assertEquals(0,wrongDepth,"The extra special-glint attribute must not alias previous XYZ/validity");
+            assertEquals(0,wrongDepth,"Unchanged geometry must reproduce actual original raster Z including depth bias");
             if(visible)assertTrue(count>100);else assertEquals(0,count);
+            if(sloped && !projective)assertStationaryBiasedSurfaceHistory(survival,ownership,flow,valid,pair,depth,dir);
+        }
+    }
+
+    /** A real biased source raster must survive the native previous-surface rejection test. */
+    private void assertStationaryBiasedSurfaceHistory(MetalGpuTexture scene,MetalGpuTexture ownership,
+            MetalGpuTexture source,MetalGpuTexture valid,MetalGpuTexture pair,byte[] actualDepth,Path dir) throws Exception {
+        int input=GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
+        int output=input|MetalGpuTexture.USAGE_SHADER_WRITE;
+        int probe=(H/2)*W+W/2;
+        MetalNativeBridge.metallum_metalfx_set_reactive_tuning(0,0,0,0,0,1,0);
+        try(var oldWorld=texture("actual accepted biased D32",GpuFormat.R32_FLOAT,input);
+            var oldHud=texture("no previous HUD",GpuFormat.R32_FLOAT,input);
+            var noHand=texture("no HUD ownership",GpuFormat.R8_UNORM,input);
+            var merged=texture("biased history XY",GpuFormat.RG16_FLOAT,output);
+            var reactive=texture("biased history reactive",GpuFormat.R8_UNORM,output);
+            var camera=texture("biased history camera",GpuFormat.RG16_FLOAT,output);
+            var disocclusion=texture("biased history rejection",GpuFormat.R8_UNORM,output);
+            var nextWorld=texture("biased next world",GpuFormat.R32_FLOAT,output);
+            var presented=texture("biased presentation",GpuFormat.R32_FLOAT,output);
+            var nextHud=texture("biased next HUD",GpuFormat.R32_FLOAT,output)) {
+            ByteBuffer old=ByteBuffer.allocateDirect(actualDepth.length).order(ByteOrder.nativeOrder());old.put(actualDepth).flip();
+            encoder.writeToTexture(oldWorld,old,0,0,0,0,W,H);
+            writeFloatTexture(oldHud,0);encoder.clearColorTexture(noHand,new Vector4f(0));
+            int[] rejected=new int[2];
+            for(int control=0;control<2;control++) {
+                if(control==1) {
+                    ByteBuffer wrong=ByteBuffer.allocateDirect(W*H*8).order(ByteOrder.nativeOrder());
+                    ByteBuffer raster=ByteBuffer.wrap(actualDepth).order(ByteOrder.nativeOrder());
+                    for(int p=0;p<W*H;p++) {
+                        // Independent mesh plane, intentionally omitting the source's raster bias.
+                        float geometric=.5F+.1F*(2F*(p%W+.5F)/W-1);
+                        wrong.putFloat(geometric).putFloat(raster.getFloat(p*4));
+                    }
+                    wrong.flip();encoder.writeToTexture(pair,wrong,0,0,0,0,W,H);
+                }
+                assertTrue(encoder.resolveSurfaceMotionV4(scene,ownership,null,source,valid,noHand,pair,oldWorld,oldHud,
+                        merged,reactive,camera,disocclusion,nextWorld,presented,nextHud,
+                        new Matrix4f(),new Matrix4f(),new Matrix4f(),new Vector2f(),new Vector2f(),.8F,W,H,true,true,false,true));
+                encoder.submit();device.waitForSubmittedGpuWork();
+                byte[] result=readback(disocclusion);rejected[control]=Byte.toUnsignedInt(result[probe]);
+                Files.write(dir.resolve(control==0 ? "actual-biased-history-disocclusion.r8" : "unbiased-negative-control-disocclusion.r8"),result);
+            }
+            Files.writeString(dir.resolve("history-result.json"),"{\"actualRasterHistoryRejection\":"+rejected[0]
+                    +",\"unbiasedNegativeControlRejection\":"+rejected[1]+",\"depthDilationEnabled\":false}");
+            assertEquals(0,rejected[0],"An unchanged biased surface must retain its accepted history");
+            assertEquals(255,rejected[1],"The oracle must catch the original uncorrected previous-Z regression");
+        } finally {
+            MetalNativeBridge.metallum_metalfx_set_reactive_tuning(0,0,0,0,0,1,1);
         }
     }
 

@@ -138,6 +138,24 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void previousBiasUniformAndOverlayRasterBiasFollowActualAttachmentPresence() {
+        var source=RenderPipeline.builder().withLocation("test/biased_overlay")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withDepthStencilState(new com.mojang.renderpearl.api.pipeline.DepthStencilState(
+                        com.mojang.renderpearl.api.pipeline.CompareOp.ALWAYS_PASS,false,2,-10)).build();
+        var attached=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,true);
+        var detached=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source,false);
+        assertTrue(attached.getShaderDefines().flags().contains("METALLUM_PREVIOUS_DEPTH_BIAS"));
+        assertEquals(2,attached.getDepthStencilState().depthBiasScaleFactor());
+        assertEquals(-10,attached.getDepthStencilState().depthBiasConstant());
+        assertFalse(detached.getShaderDefines().flags().contains("METALLUM_PREVIOUS_DEPTH_BIAS"));
+        assertEquals(0,detached.getDepthStencilState().depthBiasScaleFactor());
+        assertEquals(0,detached.getDepthStencilState().depthBiasConstant());
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
         RenderPipeline replacement = RenderPipeline.builder().withLocation("test/replacement")
                 .withVertexShader(Identifier.fromNamespaceAndPath("another_pack", "core/entity"))

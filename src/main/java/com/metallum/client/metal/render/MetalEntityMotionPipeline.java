@@ -107,8 +107,16 @@ final class MetalEntityMotionPipeline {
     private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
     private static final BindGroupLayout SOURCE_DEPTH = BindGroupLayout.builder()
             .withUniform("MetallumSourceDepth",UniformType.COMBINED_IMAGE_SAMPLER).build();
+    private static final BindGroupLayout PREVIOUS_RASTER = BindGroupLayout.builder()
+            .withUniform("MetallumSurface",UniformType.UNIFORM_BUFFER).build();
 
     private MetalEntityMotionPipeline() {
+    }
+
+    static boolean usesPreviousDepthBias(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        var depth=source.getDepthStencilState();
+        return depthAttachmentPresent && depth!=null
+                && (depth.depthBiasScaleFactor()!=0 || depth.depthBiasConstant()!=0);
     }
 
     private static boolean auditedShaders(final RenderPipeline source) {
@@ -393,6 +401,9 @@ final class MetalEntityMotionPipeline {
         });
         if (depthCorrespondence) {
             builder.withShaderDefine("METALLUM_MOTION_DEPTH").withColorTargetState(2, DEPTH_TARGET);
+            if (usesPreviousDepthBias(source,depthAttachmentPresent)) {
+                builder.withBindGroupLayout(PREVIOUS_RASTER).withShaderDefine("METALLUM_PREVIOUS_DEPTH_BIAS");
+            }
             if (testsSourceDepth(source,depthAttachmentPresent)) {
                 builder.withBindGroupLayout(SOURCE_DEPTH)
                         .withShaderDefine("METALLUM_TEST_SOURCE_DEPTH")
@@ -413,7 +424,9 @@ final class MetalEntityMotionPipeline {
         DepthStencilState sourceDepth = source.getDepthStencilState();
         if (depthCorrespondence && overridesPrivateDepth(source,depthAttachmentPresent)) {
             // A source overlay ignores scene Z. Keep its raster Z in our private attachment.
-            builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,true));
+            builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,true,
+                    depthAttachmentPresent && sourceDepth!=null ? sourceDepth.depthBiasScaleFactor() : 0,
+                    depthAttachmentPresent && sourceDepth!=null ? sourceDepth.depthBiasConstant() : 0));
         } else if (sourceDepth != null) {
             builder.withDepthStencilState(new DepthStencilState(
                     sourceDepth.depthTest(),

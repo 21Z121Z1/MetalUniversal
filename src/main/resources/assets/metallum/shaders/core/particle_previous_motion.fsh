@@ -13,6 +13,9 @@ layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
 
 void main() {
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     // Match vanilla particle.fsh visibility: texture * vertexColor * ColorModulator, alpha < 0.1
     // discarded. Lightmap alpha is 1 for the particle vertex-color path, so only RGB lighting is
     // intentionally irrelevant to the binary coverage decision here.
@@ -20,7 +23,9 @@ void main() {
     if (alpha < 0.1) {
         discard;
     }
+#ifndef METALLUM_PREVIOUS_DEPTH_BIAS
     MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     metallumMotionTarget = metallumSample.motion;
     metallumValidityTarget = metallumExportValidity(metallumSample);
 }

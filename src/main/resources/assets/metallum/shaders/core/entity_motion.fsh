@@ -19,6 +19,9 @@ layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
 
 void main() {
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     // Keeps Color active in the reduced vertex shader so UV0 retains the
     // entity format's attribute 2. Vertex color is normalized and therefore
     // cannot satisfy this guard; it has no coverage effect.
@@ -48,7 +51,9 @@ void main() {
     // occlude another producer's flow in the private motion depth buffer.
     if (alpha <= 0.0) discard;
 #endif
+#ifndef METALLUM_PREVIOUS_DEPTH_BIAS
     MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     metallumMotionTarget = metallumSample.motion;
     metallumValidityTarget = metallumExportValidity(metallumSample);
 }

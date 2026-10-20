@@ -70,6 +70,9 @@ final class MetalMotionShaderCompilationTest {
                 List<String> overlayDefines=new ArrayList<>(depthDefines);
                 overlayDefines.add("METALLUM_MOTION_OVERLAY");
                 cases.add(Arguments.of(name,overlayDefines));
+                List<String> biasDefines=new ArrayList<>(depthDefines);
+                biasDefines.add("METALLUM_PREVIOUS_DEPTH_BIAS");
+                cases.add(Arguments.of(name,biasDefines));
             }
         }
         return cases.stream();

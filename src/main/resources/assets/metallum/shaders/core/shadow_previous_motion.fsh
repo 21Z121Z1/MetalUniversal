@@ -13,6 +13,9 @@ layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
 
 void main() {
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     // Minecraft's entity shadow is a translucent textured quad. Pixels with exactly zero sampled
     // coverage do not contribute to the source color, so they must not overwrite scene motion.
     // Semitransparent texels do contribute and receive the same exact geometric motion.
@@ -22,7 +25,9 @@ void main() {
     if (!(coverage > 0.0)) {
         discard;
     }
+#ifndef METALLUM_PREVIOUS_DEPTH_BIAS
     MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     metallumMotionTarget = metallumSample.motion;
     metallumValidityTarget = metallumExportValidity(metallumSample);
 }

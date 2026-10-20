@@ -31,9 +31,35 @@ final class MetalPreviousVertexReplay {
         }
     }
 
+    /** Actual hardware raster state, after any producer depth-convention conversion. */
+    record RasterState(int viewportWidth, int viewportHeight, float slopeBias, float constantBias) {
+        static final RasterState UNBIASED = new RasterState(0, 0, 0, 0);
+
+        boolean biased() { return slopeBias != 0 || constantBias != 0; }
+
+        boolean reconstructible() {
+            // D32's constant-bias unit depends on the primitive's maximum depth exponent.
+            // A fragment exponent approximation has <= 2^-23 absolute unit error in [0,1].
+            // Bound its contribution below the existing 3e-6 correspondence error budget.
+            return !biased() || (viewportWidth > 0 && viewportHeight > 0
+                    && Float.isFinite(slopeBias) && Float.isFinite(constantBias)
+                    && Math.abs(constantBias) <= 16);
+        }
+
+        void write(ByteBuffer target) {
+            target.order(ByteOrder.nativeOrder()).putFloat(viewportWidth).putFloat(viewportHeight)
+                    .putFloat(slopeBias).putFloat(constantBias);
+        }
+    }
+
     /** Immutable bindings of the draw that actually executed, including OIT's selected pipeline. */
     record SourceState(RenderPipeline pipeline, Map<String, TextureViewAndSampler> textures,
-                       RenderPass.@Nullable RenderArea scissor, boolean depthAttachmentPresent) {
+                       RenderPass.@Nullable RenderArea scissor, boolean depthAttachmentPresent,
+                       RasterState raster) {
+        SourceState(RenderPipeline pipeline,Map<String,TextureViewAndSampler> textures,
+                    RenderPass.@Nullable RenderArea scissor,boolean depthAttachmentPresent) {
+            this(pipeline,textures,scissor,depthAttachmentPresent,RasterState.UNBIASED);
+        }
         SourceState(RenderPipeline pipeline,Map<String,TextureViewAndSampler> textures,RenderPass.@Nullable RenderArea scissor) {
             this(pipeline,textures,scissor,true);
         }
@@ -138,7 +164,7 @@ final class MetalPreviousVertexReplay {
                     view.baseMipLevel(), view.mipLevels(), sampler.getAddressModeU(), sampler.getAddressModeV(),
                     sampler.getMinFilter(), sampler.getMagFilter(), sampler.getMaxAnisotropy(), sampler.getMaxLod()));
         }
-        return new MetalPreviousVertexHistory.SurfaceIdentity(state.pipeline(), textures,state.depthAttachmentPresent());
+        return new MetalPreviousVertexHistory.SurfaceIdentity(state.pipeline(), textures,state.depthAttachmentPresent(),state.raster());
     }
 
     private static @Nullable Matrix4f sourceUniformMatrix(final @Nullable GpuBufferSlice slice) {
