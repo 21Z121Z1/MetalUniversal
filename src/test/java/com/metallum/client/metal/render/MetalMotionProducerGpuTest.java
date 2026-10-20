@@ -200,7 +200,9 @@ final class MetalMotionProducerGpuTest {
                 "world_revealed_after_hand", "history_reset", "camera_reprojection", "standard_z", "standard_z_hand",
                 "previous_raster_jitter", "hud_ignores_world_jitter", "center_occluder_beats_dilation",
                 "invalid_camera_keeps_object", "preserved_reactive", "compatible_depth_neighbor",
-                "nearest_transparent_surface");
+                "nearest_transparent_surface", "reactive_material_keeps_correspondence",
+                "hand_without_source_depth", "invalid_hand_without_source_depth",
+                "standard_z_hand_without_source_depth", "actual_hand_occludes_transparent_hand");
     }
 
     @ParameterizedTest(name = "surface resolve: {0}")
@@ -214,7 +216,8 @@ final class MetalMotionProducerGpuTest {
         float previousWorld=.6F, previousHand=0, worldMask=1, handMask=0, baseReactive=0;
         float motionX=-.125F, motionY=.0625F, expectedX=motionX, expectedY=motionY;
         boolean history=true, reversed=true, reject=false, invalid=false, preserve=false;
-        boolean hasHand=false;
+        boolean hasHand=false, reactiveMaterial=false;
+        Float expectedHandOverride=null;
         boolean oldCenterOccluder=false, oldNeighborMatch=false, jitterProbe=false;
         Matrix4f current=new Matrix4f(), inverse=new Matrix4f(), previous=new Matrix4f();
         Vector2f jitter=new Vector2f(), oldJitter=new Vector2f();
@@ -251,6 +254,20 @@ final class MetalMotionProducerGpuTest {
             case "preserved_reactive" -> { preserve=true; baseReactive=.4F; }
             case "compatible_depth_neighbor" -> { previousWorld=.3F; oldNeighborMatch=true; }
             case "nearest_transparent_surface" -> { sceneZ=.1F; ownershipZ=currentZ=.4F; }
+            case "reactive_material_keeps_correspondence" -> { worldMask=.75F; reactiveMaterial=true; }
+            case "hand_without_source_depth", "invalid_hand_without_source_depth" -> {
+                currentZ=.85F; handMask=1; previousHand=beforeZ; hasHand=true;
+                previousWorld=.95F; expectedHandOverride=.85F;
+                if (name.startsWith("invalid_")) { handMask=.25F; beforeZ=-1; reject=invalid=true; }
+            }
+            case "standard_z_hand_without_source_depth" -> {
+                reversed=false; hasHand=true; handZ=previousHand=1; sceneZ=ownershipZ=.8F;
+                currentZ=.15F; previousHand=beforeZ=.4F; handMask=1; expectedHandOverride=.15F;
+            }
+            case "actual_hand_occludes_transparent_hand" -> {
+                handZ=.95F; currentZ=.85F; handMask=1; previousHand=beforeZ; hasHand=true;
+                reject=invalid=true;
+            }
         }
         if (invalid) { expectedX=expectedY=0; }
         if (jitterProbe) MetalNativeBridge.metallum_metalfx_set_reactive_tuning(0, 0, 0, 0, 0, 1, 0);
@@ -305,16 +322,17 @@ final class MetalMotionProducerGpuTest {
             assertEquals(expectedX,x,1e-4,"Exact source XY or camera XY must survive the common resolve");
             assertEquals(expectedY,y,1e-4);
             assertEquals(reject ? 255 : 0,Byte.toUnsignedInt(d[probe]),"Only the matching previous surface can supply history");
-            float expectedReactive=reject ? 1 : hasHand ? .8F : preserve ? baseReactive : 0;
+            float expectedReactive=reject || reactiveMaterial ? 1 : hasHand ? .8F : preserve ? baseReactive : 0;
             assertEquals(expectedReactive*255,Byte.toUnsignedInt(r[probe]),1);
             float expectedWorld=reversed ? Math.max(sceneZ,ownershipZ) : Math.min(sceneZ,ownershipZ);
             ByteBuffer worldValues=ByteBuffer.wrap(world).order(ByteOrder.nativeOrder());
             ByteBuffer handValues=ByteBuffer.wrap(hand).order(ByteOrder.nativeOrder());
             ByteBuffer compositeValues=ByteBuffer.wrap(composite).order(ByteOrder.nativeOrder());
+            float expectedHand=expectedHandOverride == null ? handZ : expectedHandOverride;
             for(int p=0;p<W*H;p++) {
                 assertEquals(expectedWorld,worldValues.getFloat(p*4),0);
-                assertEquals(handZ,handValues.getFloat(p*4),0);
-                assertEquals(hasHand ? handZ : expectedWorld,compositeValues.getFloat(p*4),0);
+                assertEquals(expectedHand,handValues.getFloat(p*4),0);
+                assertEquals(hasHand ? expectedHand : expectedWorld,compositeValues.getFloat(p*4),0);
                 assertTrue(Float.isFinite(Float.float16ToFloat(flow.getShort(p*4)))
                         && Float.isFinite(Float.float16ToFloat(flow.getShort(p*4+2))));
             }

@@ -56,6 +56,7 @@ final class MetalMotionShaderCompilationTest {
                 cases.add(Arguments.of(name, defines));
                 List<String> depthDefines = new ArrayList<>(defines);
                 depthDefines.add("METALLUM_MOTION_DEPTH");
+                depthDefines.add("METALLUM_REACTIVE_MATERIAL");
                 if (name.endsWith("previous_motion.vsh")) depthDefines.add("METALLUM_PREVIOUS_VALIDITY");
                 cases.add(Arguments.of(name, depthDefines));
             }

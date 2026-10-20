@@ -1502,7 +1502,8 @@ public final class MetalNativeBridge {
     public static boolean supportsSurfaceMotionV4(final MemorySegment device) {
         if (surfaceMotionV4Supports == null || surfaceMotionV4Resolve == null || preparedTemporalEncode == null) return false;
         try {
-            return (int)surfaceMotionV4Supports.invokeExact(segment(device)) != 0;
+            int capabilities = (int)surfaceMotionV4Supports.invokeExact(segment(device));
+            return (capabilities & 7) == 7;
         } catch (Throwable failure) { throw bridgeFailure("metallum_metalfx_supports_surface_motion_v4",failure); }
     }
 

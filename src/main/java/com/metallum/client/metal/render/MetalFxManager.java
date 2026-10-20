@@ -2905,16 +2905,24 @@ public final class MetalFxManager {
                         if (Byte.toUnsignedInt(bytes.get(8)[pixel]) > 127) disoccluded++;
                         float presentedZ = presentation.getFloat(pixel*4), worldZ = nextWorld.getFloat(pixel*4);
                         float hudZ = nextHand.getFloat(pixel*4);
+                        int worldMask = Byte.toUnsignedInt(bytes.get(1)[pixel]), handMask = Byte.toUnsignedInt(bytes.get(2)[pixel]);
+                        boolean handOwned = handMask > 31;
+                        float handSurfaceZ = surfaceDepth.getFloat(pixel*8+4);
+                        if (handOwned && (!Float.isFinite(handSurfaceZ) || handSurfaceZ < 0 || handSurfaceZ > 1)) {
+                            throw new IllegalStateException("Owned HUD surface has no current depth");
+                        }
+                        boolean handCovered = hd > 0.0000001F || handOwned;
+                        float expectedHandZ = handOwned ? (hd > 0.0000001F ? Math.max(hd, handSurfaceZ) : handSurfaceZ)
+                                : hd > 0.0000001F ? hd : 0;
                         if (!Float.isFinite(presentedZ) || !Float.isFinite(worldZ) || !Float.isFinite(hudZ)
                                 || presentedZ < 0 || presentedZ > 1 || worldZ < 0 || worldZ > 1 || hudZ < 0 || hudZ > 1
-                                || hudZ != (hd > 0.0000001F ? hd : 0)
-                                || presentedZ != (hd > 0.0000001F ? hd : worldZ)) {
+                                || hudZ != expectedHandZ
+                                || presentedZ != (handCovered ? expectedHandZ : worldZ)) {
                             throw new IllegalStateException("Resolved depth does not match independent world/HUD layers");
                         }
-                        if (hd > 0.0000001F) presentationHand++;
+                        if (handCovered) presentationHand++;
                         boolean worldValid = Byte.toUnsignedInt(bytes.get(1)[pixel]) > 127;
                         boolean handValid = Byte.toUnsignedInt(bytes.get(2)[pixel]) > 127;
-                        int worldMask = Byte.toUnsignedInt(bytes.get(1)[pixel]), handMask = Byte.toUnsignedInt(bytes.get(2)[pixel]);
                         int selectedMask = handMask > 31 ? handMask : worldMask;
                         if (selectedMask > 31) {
                             float previousZ = surfaceDepth.getFloat(pixel*8), currentZ = surfaceDepth.getFloat(pixel*8+4);

@@ -5973,12 +5973,20 @@ func motionSurfaceResolveV4MslSource() -> String {
       uint2 extent = uint2(u.viewport.xy);
       if (any(pixel >= extent)) return;
       bool reversed = u.flags.w != 0u;
+      float worldMask = worldValidity.read(pixel).r, handMask = hudValidity.read(pixel).r;
+      float2 pair = correspondence.read(pixel).rg;
       float sceneZ = sceneDepth.read(pixel).r, ownershipZ = worldOwnershipDepth.read(pixel).r;
       bool worldDepthValid = surfaceDepth(sceneZ) && surfaceDepth(ownershipZ);
       float worldZ = worldDepthValid ? (reversed ? max(sceneZ,ownershipZ) : min(sceneZ,ownershipZ)) : (reversed ? 0.0 : 1.0);
       float farZ = reversed ? 0.0 : 1.0;
       float handZ = u.options.z != 0u ? hudDepth.read(pixel).r : farZ;
-      bool handCovered = surfaceHud(handZ,reversed);
+      bool actualHandCovered = surfaceHud(handZ,reversed);
+      bool ownsHand = isfinite(handMask) && handMask > 0.125;
+      bool handPairDepthValid = ownsHand && surfaceDepth(pair.y);
+      if (handPairDepthValid) handZ = actualHandCovered ? (reversed ? max(handZ,pair.y) : min(handZ,pair.y)) : pair.y;
+      // Transparent HUD draws may contribute color without writing the source HUD depth.
+      // Their explicit replay coverage/current Z still belongs to the independent HUD domain.
+      bool handCovered = actualHandCovered || ownsHand;
       nextWorldDepth.write(float4(worldZ,0.0,0.0,0.0),pixel);
       nextHudDepth.write(float4(handCovered ? handZ : farZ,0.0,0.0,0.0),pixel);
       presentationDepth.write(float4(handCovered ? handZ : worldZ,0.0,0.0,0.0),pixel);
@@ -6000,11 +6008,9 @@ func motionSurfaceResolveV4MslSource() -> String {
         }
         reactive=max(reactive,boundary ? u.params.x : min(u.params.x,clamp(gradient*4.0,0.0,1.0)));
       }
-      float worldMask = worldValidity.read(pixel).r;
-      float mask = handCovered ? hudValidity.read(pixel).r : worldMask;
+      float mask = handCovered ? handMask : worldMask;
       bool owned = handCovered || (isfinite(worldMask) && worldMask > 0.125);
       bool validOwned = owned && isfinite(mask) && mask > 0.5;
-      float2 pair = correspondence.read(pixel).rg;
       float2 selected = float2(0.0), cameraMotion = float2(0.0);
       float expectedZ = -1.0, disocclusion = 0.0;
       bool skyCurrent = !owned && u.flags.y != 0u && reversed && surfaceDepth(sceneZ) && sceneZ <= 0.00001;
@@ -6033,7 +6039,11 @@ func motionSurfaceResolveV4MslSource() -> String {
         float visibleZ = handCovered ? handZ : worldZ;
         validOwned = validOwned && (handCovered || worldDepthValid) && surfaceDepth(pair.x) && surfaceDepth(pair.y)
             && all(isfinite(selected)) && all(abs(selected) <= float2(32.0)) && !closerSurface(visibleZ,pair.y,reversed);
-        if (validOwned) expectedZ = pair.x;
+        if (validOwned) {
+          expectedZ = pair.x;
+          // R8=0.75: exact geometric correspondence with animated/reactive color.
+          if (mask < 0.9) reactive=1.0;
+        }
         else { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
         if (handCovered) reactive=max(reactive,u.params.z);
       } else {
@@ -6109,7 +6119,8 @@ private func ensureSurfaceMotionV4Pipeline(_ device: MTLDevice) -> MTLComputePip
 
 @_cdecl("metallum_metalfx_supports_surface_motion_v4")
 public func metallumMetalFxSupportsSurfaceMotionV4(_ device: MTLDevice) -> Int32 {
-    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 1
+    // Capability bits: base surface resolve, reactive material tag, explicit HUD ownership.
+    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 7
 }
 
 @_cdecl("metallum_metalfx_resolve_motion_v4")

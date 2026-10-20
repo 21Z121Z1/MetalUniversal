@@ -49,7 +49,13 @@ float metallumExportValidity(MetallumMotionSample motion) {
 #ifdef METALLUM_MOTION_DEPTH
     metallumDepthTarget = vec2(motion.validity > 0.5 ? motion.previousDepth : -1.0, gl_FragCoord.z);
     // Distinguish owned-but-invalid history from untouched background.
-    return motion.validity > 0.5 ? 1.0 : 0.25;
+    if (motion.validity <= 0.5) return 0.25;
+#ifdef METALLUM_REACTIVE_MATERIAL
+    // Geometry remains exact while color changes independently of its surface.
+    return 0.75;
+#else
+    return 1.0;
+#endif
 #else
     return motion.validity;
 #endif

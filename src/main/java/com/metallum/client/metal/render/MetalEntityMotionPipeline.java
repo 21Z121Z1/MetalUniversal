@@ -333,6 +333,10 @@ final class MetalEntityMotionPipeline {
         });
         if (depthCorrespondence) {
             builder.withShaderDefine("METALLUM_MOTION_DEPTH").withColorTargetState(2, DEPTH_TARGET);
+            if (source.getShaderDefines().flags().stream().anyMatch(flag -> flag.equals("GLINT")
+                    || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))) {
+                builder.withShaderDefine("METALLUM_REACTIVE_MATERIAL");
+            }
         }
         boolean alphaComposite = source.getColorTargetStates().stream().filter(java.util.Objects::nonNull)
                 .anyMatch(target -> target.blendFunction().map(blend -> blend.color().sourceFactor() == BlendFactor.SRC_ALPHA).orElse(false))

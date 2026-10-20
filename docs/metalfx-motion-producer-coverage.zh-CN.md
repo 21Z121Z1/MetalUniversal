@@ -60,6 +60,8 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 
 遮挡检查使用表面自身 previous Z，不把动态物体或手部当作世界相机重投影。世界对应点还检查前帧 HUD 覆盖；中心更近的遮挡物不能被邻域 dilation 抹掉。世界深度查找补偿前后 raster jitter，HUD 保持独立无抖动域。已拥有但无效的像素输出零运动、完整 reactive 和反遮挡，不能回退成看似有效的世界运动。有限性检查使用禁用 fast-math 的内核。
 
+透明手部可能只写颜色而不写原版 HUD 深度。V4 合成同时使用真实回放的手部所有权和 current Z：独立 HUD 深度有值时取较近表面，否则保留该手部自己的 Z，不能归入世界域。无效历史也保留当前 HUD 覆盖。R8≈0.75 表示几何对应准确、材质颜色需要 reactive；GLINT、APPLY_TEXTURE_MATRIX 和之后准入的 DISSOLVE 变体保持 XY/Z，但合成输出完整 reactive。它不等同于无效几何的 R8≈0.25。原生能力返回按位声明这两项语义，缺少能力的旧模块不能进入 prepared Temporal/FG。新增五项 GPU 场景覆盖无源 HUD 深度、无效历史、标准 Z、真实 HUD 遮挡和材质 reactive；尚待这一提交的 Actions 执行。
+
 新增 GPU 对照覆盖接近相机的物体、前帧／当前遮挡、无前帧表面、明确无效所有权、NaN／越界 Z、非有限运动、手部独立深度、手部移开、reset、相机运动、标准／反向 Z、jitter 域、dilation 和透明最近表面。真实客户端读回增加合成 XY／reactive／disocclusion、下帧双域深度和 presentation depth，逐像素验证有限性与 HUD／世界选择。`6aa3448` 的 macOS 15／26 附件均为 47/47 GPU 通过，22 项新增 V4 场景的运动与遮挡预期全部匹配；Swift／MSL 已经实际编译和执行。真实客户端的 V4 合成读回仍待该提交的运行完成。
 
 ## 首次出现与历史不连续
@@ -78,7 +80,9 @@ V4 将 RG32F 前帧／当前 Z 接到独立的原生运动合成入口。它不�
 
 ## 后续目标与完成条件
 
-阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理；这些用例尚待后续 Actions 执行，不能用 GLSL 编译通过代替可见性验收。
+阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
+
+`200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。
 
 | 目标 | 需要的证据 |
 | --- | --- |
