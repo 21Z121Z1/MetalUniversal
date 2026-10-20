@@ -239,6 +239,11 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
     jvmArgs.add("-Dmetallum.iris.semantic=${frameCampaign ? trialProducer == 'iris' : !noOptionalRenderMods && !sodiumOnly}")
     jvmArgs.add("-Dmetallum.ci.metalfxProfile=${metalFxProfile}")
+    if (providers.gradleProperty('stationaryFramebufferScene').orElse('false').get().toBoolean()) {
+        // Exercise the fixed source time/camera handshake on hosted Metal 3
+        // without requesting physical-only Metal 4 activation or acceptance.
+        jvmArgs.add('-Dmetallum.ci.p1StationaryFramebufferCapture=true')
+    }
     jvmArgs.add("-Dmetallum.metalfx.mode=${metalFxProfile == 'off' ? 'OFF' : 'TEMPORAL'}")
     jvmArgs.add("-Dmetallum.metalfx.frameGeneration=${metalFxProfile != 'off'}")
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")

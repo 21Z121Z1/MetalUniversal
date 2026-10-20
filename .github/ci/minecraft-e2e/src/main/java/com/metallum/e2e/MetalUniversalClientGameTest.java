@@ -12,6 +12,8 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.level.gamerules.GameRules;
@@ -34,6 +36,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -43,7 +46,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private static final String RENDER_CONTRACT_RUNTIME =
             "com.metallum.client.validation.contract.RenderContractRuntime";
     private static final int METAL_CAPTURE_SAMPLES = 8;
-    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v1";
+    private static final String P1_FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v2";
+    private static final long P1_FRAMEBUFFER_GAME_TIME = 6000L;
     private static final int P1_FRAMEBUFFER_X = 832;
     private static final int P1_FRAMEBUFFER_Y = 128;
     private static final int P1_FRAMEBUFFER_Z = 496;
@@ -228,6 +232,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             List<CaptureSample> samples = new ArrayList<>();
             boolean p1SceneFrozen = false;
             try {
+                JsonArray cameraSamples = new JsonArray();
                 if (p1FramebufferScenario) {
                     boolean serverFrozen = singleplayer.getServer().computeOnServer(server -> {
                         server.overworld().tickRateManager().setFrozen(true);
@@ -244,9 +249,36 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         return false;
                     });
                     require(clientFrozen, "P1 client simulation did not freeze for the stationary framebuffer samples");
+                    long serverGameTime = singleplayer.getServer().computeOnServer(server -> {
+                        var level = server.overworld();
+                        ((ServerLevelData) level.getLevelData()).setGameTime(P1_FRAMEBUFFER_GAME_TIME);
+                        server.getPlayerList().broadcastAll(
+                                new ClientboundSetTimePacket(P1_FRAMEBUFFER_GAME_TIME, Map.of()), level.dimension());
+                        return level.getGameTime();
+                    });
+                    require(serverGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 server game time was not pinned for the stationary framebuffer samples");
+                    context.waitFor(client -> client.level != null
+                            && client.level.getGameTime() == P1_FRAMEBUFFER_GAME_TIME);
+                    long clientGameTime = context.computeOnClient(client -> client.level.getGameTime());
+                    require(clientGameTime == P1_FRAMEBUFFER_GAME_TIME,
+                            "P1 client did not receive the fixed server game time before framebuffer sampling");
                     worldEvidence.addProperty("simulationFrozenDuringFramebufferCapture", true);
                     worldEvidence.addProperty("serverSimulationFrozenDuringFramebufferCapture", serverFrozen);
                     worldEvidence.addProperty("clientSimulationFrozenDuringFramebufferCapture", clientFrozen);
+                    worldEvidence.addProperty("p1FixedGameTime", P1_FRAMEBUFFER_GAME_TIME);
+                    worldEvidence.addProperty("serverGameTimeAtCapture", serverGameTime);
+                    worldEvidence.addProperty("clientGameTimeAtCapture", clientGameTime);
+                    context.waitTicks(20);
+                    context.computeOnClient(client -> {
+                        client.gui.hud.getChat().clearMessages(false);
+                        client.gui.hud.clearTitles();
+                        client.gui.hud.resetTitleTimes();
+                        return null;
+                    });
+                    worldEvidence.addProperty("clientPresentationWarmupTicks", 20);
+                    worldEvidence.addProperty("transientHudMessagesCleared", true);
+                    worldEvidence.add("cameraSamples", cameraSamples);
                 }
 
                 for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
@@ -274,10 +306,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         waypoint.addProperty("pitch", 25);
                         waypoints.add(waypoint);
                     } else {
-                        context.computeOnClient(client -> {
-                            pinVignette(client.getCameraEntity());
-                            return null;
-                        });
+                        JsonObject cameraSample = lockAndDescribeP1Camera(context, frameId);
+                        validateP1CameraSample(cameraSample, frameId);
+                        cameraSamples.add(cameraSample);
                     }
 
                     RenderContractSnapshot before = renderContractSnapshot();
@@ -1113,6 +1144,48 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         if (!condition) {
             throw new IllegalStateException(message);
         }
+    }
+
+    private static JsonObject lockAndDescribeP1Camera(ClientGameTestContext context, long frameId) {
+        return context.computeOnClient(client -> {
+            // A frozen Level still processes MouseHandler input on each render tick.
+            // Release the captured mouse before fixing both current and interpolated
+            // camera rotation so host pointer movement cannot change the sample.
+            client.mouseHandler.releaseMouse();
+            Entity cameraEntity = client.getCameraEntity();
+            require(cameraEntity != null, "P1 framebuffer capture has no camera entity");
+            cameraEntity.setYRot(P1_FRAMEBUFFER_YAW);
+            cameraEntity.setXRot(P1_FRAMEBUFFER_PITCH);
+            cameraEntity.setOldPosAndRot();
+            pinVignette(cameraEntity);
+
+            JsonObject sample = new JsonObject();
+            sample.addProperty("frameId", frameId);
+            sample.addProperty("x", cameraEntity.getX());
+            sample.addProperty("y", cameraEntity.getY());
+            sample.addProperty("z", cameraEntity.getZ());
+            sample.addProperty("yaw", cameraEntity.getYRot());
+            sample.addProperty("pitch", cameraEntity.getXRot());
+            sample.addProperty("gameTime", client.level.getGameTime());
+            sample.addProperty("mouseGrabbed", client.mouseHandler.isMouseGrabbed());
+            return sample;
+        });
+    }
+
+    private static void validateP1CameraSample(JsonObject sample, long frameId) {
+        require(sample.get("frameId").getAsLong() == frameId,
+                "P1 camera evidence has the wrong frame id: " + sample);
+        require(Math.abs(sample.get("x").getAsDouble() - P1_FRAMEBUFFER_X) < 1
+                        && Math.abs(sample.get("y").getAsDouble() - P1_FRAMEBUFFER_Y) < 1
+                        && Math.abs(sample.get("z").getAsDouble() - P1_FRAMEBUFFER_Z) < 1,
+                "P1 camera position drifted before frame " + frameId + ": " + sample);
+        require(Float.compare(sample.get("yaw").getAsFloat(), P1_FRAMEBUFFER_YAW) == 0
+                        && Float.compare(sample.get("pitch").getAsFloat(), P1_FRAMEBUFFER_PITCH) == 0,
+                "P1 camera orientation drifted before frame " + frameId + ": " + sample);
+        require(sample.get("gameTime").getAsLong() == P1_FRAMEBUFFER_GAME_TIME,
+                "P1 game time drifted before frame " + frameId + ": " + sample);
+        require(!sample.get("mouseGrabbed").getAsBoolean(),
+                "P1 mouse input remained captured before frame " + frameId + ": " + sample);
     }
 
     private static void pinVignette(Entity cameraEntity) {

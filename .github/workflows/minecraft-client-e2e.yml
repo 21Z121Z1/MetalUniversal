@@ -29,13 +29,14 @@ env:
 
 jobs:
   minecraft-client-e2e:
-    name: "${{ matrix.metalfx == 'requested-temporal' && format('MetalFX client fallback ({0})', matrix.renderer) || format('Minecraft client E2E ({0}, {1})', matrix.renderer, matrix.transport) }}"
+    name: "${{ matrix.scene == 'stationary' && 'Stationary time and camera receipts (Metal 3)' || matrix.metalfx == 'requested-temporal' && format('MetalFX client fallback ({0})', matrix.renderer) || format('Minecraft client E2E ({0}, {1})', matrix.renderer, matrix.transport) }}"
     strategy:
       fail-fast: false
       matrix:
         transport: [baseline, candidate, default]
         renderer: [vanilla, sodium]
         metalfx: [off]
+        scene: [moving]
         include:
           - renderer: vanilla
             no_optional_mods: 'true'
@@ -46,19 +47,29 @@ jobs:
           - renderer: vanilla
             transport: default
             metalfx: requested-temporal
+            scene: moving
             no_optional_mods: 'true'
             sodium_only: 'false'
           - renderer: sodium
             transport: default
             metalfx: requested-temporal
+            scene: moving
             no_optional_mods: 'false'
             sodium_only: 'true'
-    runs-on: macos-26
+          - renderer: vanilla
+            transport: default
+            metalfx: off
+            scene: stationary
+            runner: macos-15
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+    runs-on: ${{ matrix.runner || 'macos-26' }}
     timeout-minutes: 30
     env:
       METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
       METALLUM_E2E_TRANSPORT: ${{ matrix.transport }}
       METALLUM_E2E_METALFX: ${{ matrix.metalfx }}
+      METALLUM_E2E_SCENE: ${{ matrix.scene }}
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
@@ -113,6 +124,7 @@ jobs:
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
             -PtransportProfile=${{ matrix.transport }} \
             -PmetalFxProfile=${{ matrix.metalfx }} \
+            -PstationaryFramebufferScene=${{ matrix.scene == 'stationary' }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
@@ -167,6 +179,12 @@ jobs:
                   or runtime.get('worldLoaded') is not True
                   or runtime.get('chunksRendered') is not True):
               raise SystemExit(f'production client did not render the requested lane: {runtime}')
+
+          if os.environ['METALLUM_E2E_SCENE'] == 'stationary':
+              sys.path.insert(0, 'scripts/agent')
+              from check_metal4_main_e2e_pair import stationary_scene
+              scene = stationary_scene(runtime)
+              print('verified stationary time and camera receipts:', json.dumps(scene, sort_keys=True))
 
           optimization = json.loads((root / 'optimization-evidence.json').read_text(encoding='utf-8'))
           if optimization.get('profile') != os.environ['METALLUM_E2E_TRANSPORT'] or optimization.get('verified') is not True:
@@ -239,7 +257,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-${{ matrix.metalfx == 'requested-temporal' && 'metalfx-requested-temporal-' || '' }}e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-${{ matrix.metalfx == 'requested-temporal' && 'metalfx-requested-temporal-' || '' }}${{ matrix.scene == 'stationary' && 'stationary-' || '' }}e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             .github/ci/minecraft-e2e/build/evidence/

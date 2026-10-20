@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import tempfile
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
 UNRECORDED = "unrecorded"
-FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v1"
+FRAMEBUFFER_SCENARIO = "p1-stationary-framebuffer-equivalence-v2"
+FRAMEBUFFER_GAME_TIME = 6000
+FRAMEBUFFER_WIDTH = 854
+FRAMEBUFFER_HEIGHT = 480
+FRAMEBUFFER_BYTES = FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 4
 FRAMEBUFFER_SAMPLE_COUNT = 8
 
 
@@ -55,41 +60,80 @@ def identity(data: dict[str, Any]) -> tuple[str, str, str] | None:
     return source, jar, dylib
 
 
-def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[str, Any]]:
-    runtime = load(evidence_root / "runtime-evidence.json")
+def stationary_scene(runtime: dict[str, Any]) -> dict[str, Any]:
     world = runtime.get("world")
     if not isinstance(world, dict):
-        raise ValueError(f"runtime evidence has no world identity: {evidence_root}")
-    if world.get("framebufferEquivalenceScenario") != FRAMEBUFFER_SCENARIO:
-        raise ValueError(
-            "runtime evidence did not use the stationary P1 framebuffer scenario "
-            f"{FRAMEBUFFER_SCENARIO!r}: {world.get('framebufferEquivalenceScenario')!r}"
-        )
-    if runtime.get("minecraft") != "26.3" or world.get("minecraftVersion") != "26.3":
-        raise ValueError("P1 framebuffer evidence must come from Minecraft 26.3")
-    if runtime.get("worldLoaded") is not True or runtime.get("chunksRendered") is not True:
-        raise ValueError("P1 framebuffer evidence did not load and render a world")
+        raise ValueError("runtime evidence has no world identity")
+    if (
+        runtime.get("minecraft") != "26.3"
+        or world.get("minecraftVersion") != "26.3"
+        or world.get("framebufferEquivalenceScenario") != FRAMEBUFFER_SCENARIO
+        or runtime.get("worldLoaded") is not True
+        or runtime.get("chunksRendered") is not True
+    ):
+        raise ValueError(f"runtime evidence does not prove the fixed Minecraft 26.3 P1 scene: {evidence_root}")
     if (
         world.get("simulationFrozenDuringFramebufferCapture") is not True
         or world.get("serverSimulationFrozenDuringFramebufferCapture") is not True
         or world.get("clientSimulationFrozenDuringFramebufferCapture") is not True
     ):
-        raise ValueError("P1 stationary framebuffer scene did not prove both simulations frozen")
-    expected_game_rules = {
+        raise ValueError(f"P1 world and client simulation were not frozen: {evidence_root}")
+    expected_rules = {
         "advance_time": False,
         "advance_weather": False,
         "random_tick_speed": 0,
         "spawn_mobs": False,
     }
-    if world.get("p1GameRules") != expected_game_rules:
-        raise ValueError(
-            "P1 stationary framebuffer scene has unexpected or unverified Minecraft 26.3 gamerules: "
-            f"{world.get('p1GameRules')!r}"
-        )
+    if world.get("p1GameRules") != expected_rules:
+        raise ValueError(f"P1 gamerules differ from the fixed scene contract: {world.get('p1GameRules')!r}")
+    if (
+        world.get("p1FixedGameTime") != FRAMEBUFFER_GAME_TIME
+        or world.get("serverGameTimeAtCapture") != FRAMEBUFFER_GAME_TIME
+        or world.get("clientGameTimeAtCapture") != FRAMEBUFFER_GAME_TIME
+    ):
+        raise ValueError("P1 server/client game time is not pinned to the fixed framebuffer scene value")
 
     waypoints = world.get("waypoints")
     if not isinstance(waypoints, list) or len(waypoints) != 1:
-        raise ValueError(f"stationary framebuffer scenario needs exactly one camera pose: {waypoints!r}")
+        raise ValueError(f"P1 scene must have exactly one fixed camera waypoint: {waypoints!r}")
+    waypoint = waypoints[0]
+    expected_waypoint = {
+        "frameId": 1,
+        "x": 832,
+        "y": 128,
+        "z": 496,
+        "yaw": -65.0,
+        "pitch": 25.0,
+    }
+    if waypoint != expected_waypoint:
+        raise ValueError(f"P1 camera waypoint differs from the fixed scene contract: {waypoint!r}")
+
+    camera_samples = world.get("cameraSamples")
+    if not isinstance(camera_samples, list) or len(camera_samples) != FRAMEBUFFER_SAMPLE_COUNT:
+        raise ValueError(f"P1 camera evidence needs {FRAMEBUFFER_SAMPLE_COUNT} per-frame poses")
+    pose_fields = ("x", "y", "z", "yaw", "pitch")
+    normalized_camera_samples = []
+    for frame_id, sample in enumerate(camera_samples, start=1):
+        if not isinstance(sample, dict) or sample.get("frameId") != frame_id:
+            raise ValueError(f"P1 camera sample sequence is incomplete at frame {frame_id}")
+        if sample.get("mouseGrabbed") is not False:
+            raise ValueError(f"P1 camera mouse input remained grabbed at frame {frame_id}")
+        pose = {field: sample.get(field) for field in pose_fields}
+        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in pose.values()):
+            raise ValueError(f"P1 camera sample has invalid pose at frame {frame_id}: {sample!r}")
+        if abs(pose["x"] - 832) >= 1 or abs(pose["y"] - 128) >= 1 or abs(pose["z"] - 496) >= 1:
+            raise ValueError(f"P1 camera position drifted at frame {frame_id}: {pose!r}")
+        if pose["yaw"] != -65.0 or pose["pitch"] != 25.0:
+            raise ValueError(f"P1 camera orientation drifted at frame {frame_id}: {pose!r}")
+        if sample.get("gameTime") != FRAMEBUFFER_GAME_TIME:
+            raise ValueError(f"P1 game time drifted at frame {frame_id}: {sample!r}")
+        normalized_camera_samples.append({
+            "frameId": frame_id,
+            **pose,
+            "gameTime": FRAMEBUFFER_GAME_TIME,
+            "mouseGrabbed": False,
+        })
+
     scene = {
         "minecraft": runtime.get("minecraft"),
         "sodiumLoaded": runtime.get("sodiumLoaded"),
@@ -103,10 +147,21 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         "simulationFrozenDuringFramebufferCapture": world.get("simulationFrozenDuringFramebufferCapture"),
         "serverSimulationFrozenDuringFramebufferCapture": world.get("serverSimulationFrozenDuringFramebufferCapture"),
         "clientSimulationFrozenDuringFramebufferCapture": world.get("clientSimulationFrozenDuringFramebufferCapture"),
+        "p1FixedGameTime": world.get("p1FixedGameTime"),
+        "serverGameTimeAtCapture": world.get("serverGameTimeAtCapture"),
+        "clientGameTimeAtCapture": world.get("clientGameTimeAtCapture"),
         "p1GameRules": world.get("p1GameRules"),
         "waypoints": waypoints,
+        "cameraSamples": normalized_camera_samples,
         "replaySourceSnapshotSha256": world.get("replaySourceSnapshotSha256"),
     }
+
+    return scene
+
+
+def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[str, Any]]:
+    runtime = load(evidence_root / "runtime-evidence.json")
+    scene = stationary_scene(runtime)
 
     contract_root = evidence_root / "metal-framebuffer" / "render-contract"
     results = load(contract_root / "results.json")
@@ -121,7 +176,7 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
     payloads: dict[int, bytes] = {}
     for capture in captures:
         if not isinstance(capture, dict):
-            raise ValueError("render-contract capture entry is not an object")
+            raise ValueError("framebuffer capture entry is not an object")
         frame_id = capture.get("frameId")
         if not isinstance(frame_id, int) or frame_id in payloads:
             raise ValueError(f"invalid or duplicate framebuffer frame id: {frame_id!r}")
@@ -136,8 +191,8 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         capture_format = resource.get("captureFormat")
         if (
             resource.get("semanticName") != "final-drawable"
-            or resource.get("width") != 854
-            or resource.get("height") != 480
+            or resource.get("width") != FRAMEBUFFER_WIDTH
+            or resource.get("height") != FRAMEBUFFER_HEIGHT
             or not isinstance(capture_format, dict)
             or capture_format.get("name") != "RGBA8_UNORM"
         ):
@@ -151,12 +206,12 @@ def framebuffer_payloads(evidence_root: Path) -> tuple[dict[int, bytes], dict[st
         except ValueError as exc:
             raise ValueError(f"frame {frame_id} payload escapes its evidence directory") from exc
         raw = raw_path.read_bytes()
-        if len(raw) != 854 * 480 * 4:
+        if len(raw) != FRAMEBUFFER_BYTES:
             raise ValueError(f"frame {frame_id} raw payload has unexpected size {len(raw)}")
         payloads[frame_id] = raw
 
     if set(payloads) != set(range(1, FRAMEBUFFER_SAMPLE_COUNT + 1)):
-        raise ValueError(f"stationary P1 captures must have frame ids 1..{FRAMEBUFFER_SAMPLE_COUNT}")
+        raise ValueError(f"P1 framebuffer captures must have frame ids 1..{FRAMEBUFFER_SAMPLE_COUNT}")
     return payloads, scene
 
 
@@ -433,6 +488,15 @@ def self_test() -> None:
                         "spawn_mobs": False,
                     },
                     "waypoints": [{"frameId": 1, "x": 832, "y": 128, "z": 496, "yaw": -65, "pitch": 25}],
+                    "p1FixedGameTime": FRAMEBUFFER_GAME_TIME,
+                    "serverGameTimeAtCapture": FRAMEBUFFER_GAME_TIME,
+                    "clientGameTimeAtCapture": FRAMEBUFFER_GAME_TIME,
+                    "cameraSamples": [
+                        {"frameId": frame_id, "x": 832.0, "y": 128.0, "z": 496.0,
+                         "yaw": -65.0, "pitch": 25.0, "mouseGrabbed": False,
+                         "gameTime": FRAMEBUFFER_GAME_TIME}
+                        for frame_id in range(1, FRAMEBUFFER_SAMPLE_COUNT + 1)
+                    ],
                 },
             }), encoding="utf-8")
             captures = []
@@ -463,6 +527,50 @@ def self_test() -> None:
         candidate_path.write_text(json.dumps(make_evidence("candidate", ids)), encoding="utf-8")
         result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
         assert code == 0 and result["state"] == "pass" and result["checks"]["framebuffer_equivalence"], result
+
+        runtime_path = candidate_root / "runtime-evidence.json"
+        pristine_runtime = runtime_path.read_text(encoding="utf-8")
+        for defect, expected_reason in (
+            ("client-time", "game time is not pinned"),
+            ("sample-time", "game time drifted"),
+            ("missing-camera", "per-frame poses"),
+            ("camera-sequence", "sample sequence is incomplete"),
+            ("camera-rotation", "orientation drifted"),
+            ("camera-nonfinite", "invalid pose"),
+            ("grabbed-mouse", "mouse input remained grabbed"),
+        ):
+            runtime = json.loads(pristine_runtime)
+            world = runtime["world"]
+            if defect == "client-time":
+                world["clientGameTimeAtCapture"] += 1
+            elif defect == "sample-time":
+                world["cameraSamples"][3]["gameTime"] += 1
+            elif defect == "missing-camera":
+                del world["cameraSamples"]
+            elif defect == "camera-sequence":
+                world["cameraSamples"][3]["frameId"] = 5
+            elif defect == "camera-rotation":
+                world["cameraSamples"][3]["yaw"] += 1
+            elif defect == "camera-nonfinite":
+                world["cameraSamples"][3]["x"] = float("nan")
+            else:
+                world["cameraSamples"][3]["mouseGrabbed"] = True
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+            result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
+            assert code == 2 and expected_reason in result["reason"], (defect, result)
+        runtime_path.write_text(pristine_runtime, encoding="utf-8")
+
+        # Keep canonical RGBA acceptance: an alpha-only difference remains a
+        # rejected pixel difference even on an opaque presentation surface.
+        alpha_path = candidate_root / "metal-framebuffer/render-contract/frames/frame-000001/actual.bin"
+        original_pixels = alpha_path.read_bytes()
+        altered_pixels = bytearray(original_pixels)
+        altered_pixels[3] ^= 0x7F
+        alpha_path.write_bytes(altered_pixels)
+        result, code = evaluate(baseline_path, candidate_path, baseline_root, candidate_root)
+        assert code == 3 and result["framebufferEquivalence"]["firstDivergentFrame"] == 1, result
+        assert result["framebufferEquivalence"]["frames"][0]["firstDifference"]["channel"] == "a", result
+        alpha_path.write_bytes(original_pixels)
 
         wrong = make_evidence("candidate", ("4" * 40, jar, dylib))
         candidate_path.write_text(json.dumps(wrong), encoding="utf-8")
