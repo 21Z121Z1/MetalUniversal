@@ -71,13 +71,13 @@ def stationary_scene(runtime: dict[str, Any]) -> dict[str, Any]:
         or runtime.get("worldLoaded") is not True
         or runtime.get("chunksRendered") is not True
     ):
-        raise ValueError(f"runtime evidence does not prove the fixed Minecraft 26.3 P1 scene: {evidence_root}")
+        raise ValueError("runtime evidence does not prove the fixed Minecraft 26.3 P1 scene")
     if (
         world.get("simulationFrozenDuringFramebufferCapture") is not True
         or world.get("serverSimulationFrozenDuringFramebufferCapture") is not True
         or world.get("clientSimulationFrozenDuringFramebufferCapture") is not True
     ):
-        raise ValueError(f"P1 world and client simulation were not frozen: {evidence_root}")
+        raise ValueError("P1 world and client simulation were not frozen")
     expected_rules = {
         "advance_time": False,
         "advance_weather": False,
@@ -531,6 +531,9 @@ def self_test() -> None:
         runtime_path = candidate_root / "runtime-evidence.json"
         pristine_runtime = runtime_path.read_text(encoding="utf-8")
         for defect, expected_reason in (
+            ("scene-version", "fixed Minecraft 26.3 P1 scene"),
+            ("unloaded-world", "fixed Minecraft 26.3 P1 scene"),
+            ("unfrozen-client", "simulation were not frozen"),
             ("client-time", "game time is not pinned"),
             ("sample-time", "game time drifted"),
             ("missing-camera", "per-frame poses"),
@@ -541,7 +544,13 @@ def self_test() -> None:
         ):
             runtime = json.loads(pristine_runtime)
             world = runtime["world"]
-            if defect == "client-time":
+            if defect == "scene-version":
+                world["minecraftVersion"] = "26.2"
+            elif defect == "unloaded-world":
+                runtime["worldLoaded"] = False
+            elif defect == "unfrozen-client":
+                world["clientSimulationFrozenDuringFramebufferCapture"] = False
+            elif defect == "client-time":
                 world["clientGameTimeAtCapture"] += 1
             elif defect == "sample-time":
                 world["cameraSamples"][3]["gameTime"] += 1
