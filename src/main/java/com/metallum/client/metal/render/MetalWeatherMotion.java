@@ -88,11 +88,13 @@ public final class MetalWeatherMotion {
     /** Called at the actual mesh upload while Minecraft still owns the source CPU bytes. */
     public static void prepare(Object renderer,WeatherRenderState state,ByteBuffer vertices,
             Map<WeatherEffectRenderer.ColumnInstance,Rates> rates) {
-        if(!collecting())return;
         // A new upload replaces both source ranges even if its metadata is incomplete.
-        // Never replay bytes left over from a formerly valid mesh.
-        layer(renderer,Kind.RAIN).prepared=null;
-        layer(renderer,Kind.SNOW).prepared=null;
+        // This also applies while capture is disabled: re-enabling must not
+        // replay bytes from before an unobserved upload. Do not allocate an
+        // owner merely to invalidate a renderer that has never been captured.
+        var existing=LAYERS.get(renderer);
+        if(existing!=null)for(var layer:existing)layer.prepared=null;
+        if(!collecting())return;
         int total=state.rainColumns.size()+state.snowColumns.size();
         int stride=DefaultVertexFormat.PARTICLE.getVertexSize();
         if((long)total*4*stride>vertices.remaining())return;

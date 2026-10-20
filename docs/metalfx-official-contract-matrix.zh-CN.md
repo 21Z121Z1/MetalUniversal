@@ -26,12 +26,12 @@
 | 遮挡 | V4 surface resolver 与 `MetalMotionContractValidation` | previous 表面 Z、前帧 HUD 遮挡、标准／反向 Z、中心遮挡、无效对应不得回退为相机运动 |
 | 透明与特殊材质 | source draw 真实状态、材质 reactive 与 previous validity 分离 | 单一运动不能表示多层混合；未知 pipeline／格式仍拒绝，reactive 不算完整 FG 对应 |
 | 粒子 | `MetalParticleBatchMotion`、粒子 ID、独立 Layer 事务 | 出生／死亡／排序与失败提交；跨 group 分区改变及任意自定义发射仍需完整 manifest |
-| 天气／环境 | `WeatherEffectRendererMetalFxMixin`、`CloudRendererMetalFxMixin`、receipt | 观察入口不代表精确逐顶点历史；环境动画及缺失 producer 继续阻止完整 FG 准入 |
+| 天气／环境 | `WeatherEffectRendererMetalFxMixin`、`MetalWeatherMotion`、`MetalWeatherCorrespondence`、`CloudRendererMetalFxMixin` | 雨雪按实际上传 XYZ／UV、随机漂移、列身份和 sampler 重建旧纹理表面点，片元拒绝旧范围外历史；源顶点冻结、雨雪分层并随源提交推进，关闭捕获期间的新上传也使旧准备数据失效。云和剩余环境动画仍未证明，不解除完整 FG 准入 |
 | 生物／方块实体 | staged CPU posed positions、所有者 generation、完整 draw manifest | 现有可审计模型已接入；未知／剩余渲染器、Iris／模组语义保持未证明 |
 | 手部 | 独立 HUD 覆盖、透明手部 current Z、前帧手部表面 | 无源深度的透明手部也不归入世界；缺历史明确反遮挡；真实客户端摆动质量仍需支持硬件 |
 | 线性颜色 | `MetalFxColorTransfer`：RGBA8 SDR→RGBA16F linear→Temporal→RGBA8 SDR | 显式 sRGB transfer 保留 alpha；独立 ramp 与 overshoot GPU 读回。未恢复 HDR 辐射、未迁移 tone map，不解除相应颜色门禁 |
 | scaler／FG 关联 | `compatibleLinkedTemporalScaler` | 线性 RGBA16F scaler 输出与 SDR RGBA8 FG 输入不兼容时使用已有 standalone 路径；不能伪报 linked |
-| 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring；`RenderContractRuntime` 诊断 owner | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放；opt-in 记录操作与 start／close 共享锁，避免断开世界时 buffer 换 backing 访问已关闭记录器 |
+| 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring；`RenderContractRuntime` 诊断 owner | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放；opt-in 记录操作与 start／close 共享锁；关闭前撤下 owner，终结写入失败也尝试两者清理、保留异常并维持失败门禁；GameTest 在世界断开之前结束记录 scope。真实客户端仍需准确提交验证 |
 | GPU 同步 | 公共 render pass、encoder fence、Metal4 barrier；present worker completion | 转换 pass 与 native scaler 处于同一公共编码事务；实际 Metal3/4 执行需按对应路径收据区分 |
 | 插帧节奏与相机 | `MetalFrameGenerationLifecycle`、`MetalFramePacing`、`Perspective.fromProjection`、present worker | 从实际对称有限 reversed-Z 投影提取 FOV／near／far／aspect，拒绝猜测相机参数；保留真实源帧 deltaTime 秒、源提交身份、generated/real 顺序、丢帧／迟到回退；真实显示节拍和延迟需要物理显示器 |
 | UI 合成 | `uiTarget` 与 scene 分离、`isUITextureComposited=false` | 完整 GUI 混合集合尚未证明 premultiplied；保持颜色／生产者准入失败关闭 |

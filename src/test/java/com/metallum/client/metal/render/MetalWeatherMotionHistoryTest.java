@@ -96,6 +96,26 @@ final class MetalWeatherMotionHistoryTest {
     }
 
     @Test
+    void uploadWhileDisabledInvalidatesPreparedBytesBeforeCaptureCanBeEnabledAgain() {
+        Object renderer=new Object();var rain=MetalWeatherMotion.Kind.RAIN;var snow=MetalWeatherMotion.Kind.SNOW;
+        boolean enabled=MetalEntityMotionCapture.isEnabled();
+        try {
+            stage(renderer,rain,1);stage(renderer,snow,1);
+            assertNotNull(MetalWeatherMotion.sample(renderer,rain));assertNotNull(MetalWeatherMotion.sample(renderer,snow));
+            MetalEntityMotionCapture.setEnabled(false);
+            assertFalse(MetalWeatherMotion.collecting());
+            // This is a real replacement upload whose bytes/rates were not
+            // observed. Keeping either old prepared range would invent source geometry.
+            MetalWeatherMotion.prepare(renderer,new net.minecraft.client.renderer.state.level.WeatherRenderState(),
+                    java.nio.ByteBuffer.allocate(0),java.util.Map.of());
+            MetalEntityMotionCapture.setEnabled(true);
+            assertNull(MetalWeatherMotion.sample(renderer,rain));assertNull(MetalWeatherMotion.sample(renderer,snow));
+            stage(renderer,rain,2);
+            assertNotNull(MetalWeatherMotion.sample(renderer,rain),"Only a newly observed upload can restore a prepared source");
+        } finally {MetalEntityMotionCapture.setEnabled(enabled);}
+    }
+
+    @Test
     void cameraCellUsesAFiniteDegenerateQuadWithoutChangingOtherWeatherDirections() {
         float[] x=new float[1024],z=new float[1024];
         for(int row=0;row<32;row++)for(int column=0;column<32;column++) {
