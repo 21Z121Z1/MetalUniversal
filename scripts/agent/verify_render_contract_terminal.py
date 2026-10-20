@@ -26,7 +26,7 @@ def check(manifest: dict, results: dict, source: str, captures: int) -> dict:
         require(type(document.get("schemaVersion")) is int and document["schemaVersion"] == 1,
                 f"{label} schema is unsupported")
         require(document.get("gitCommit") == source, f"{label} belongs to another source")
-        require(document.get("status") == "passed", f"{label} is not terminal passed")
+        require(document.get("status") == "passed", f"{label} is not terminal passed: status={document.get('status')!r}, complete={document.get('manifestComplete')!r}, dropped={document.get('droppedEvents')!r}, forced={document.get('forcedClosedPassCount')!r}, invalid={document.get('invalidPassReferenceCount')!r}, reason={document.get('manifestFailureReason')!r}")
     require(isinstance(manifest.get("runId"), str) and bool(manifest["runId"])
             and manifest["runId"] == results.get("runId"), "capture and trace run identities differ")
     require(manifest.get("manifestComplete") is True, "manifest is not complete after close")
@@ -43,9 +43,11 @@ def check(manifest: dict, results: dict, source: str, captures: int) -> dict:
     require(manifest.get("openPasses") == [], "open pass payload is missing or nonempty")
     require(integer(manifest.get("producerCount")), "producer count is missing")
     limits = manifest.get("limits", {})
+    require(isinstance(limits, dict), "manifest limits are malformed")
     require(integer(limits.get("maxProducers")) and manifest["producerCount"] <= limits["maxProducers"],
             "producer count exceeds its declared budget")
     storage = manifest.get("storageBudget", {})
+    require(isinstance(storage, dict), "manifest storage proof is malformed")
     require(storage.get("exceeded") is False, "manifest storage budget proof is missing or failed")
     require(integer(storage.get("artifactBytes")) and integer(storage.get("maxBytes"))
             and storage["artifactBytes"] <= storage["maxBytes"], "manifest storage counters are invalid")
