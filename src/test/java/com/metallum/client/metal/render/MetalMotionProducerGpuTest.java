@@ -85,6 +85,8 @@ final class MetalMotionProducerGpuTest {
     @AfterEach
     void cleanup() {
         MetalFxManager.close();
+        MetalPreviousVertexHistory.discardFrame();
+        MetalPreviousVertexHistory.reset();
         MetalEntityMotionPipeline.clear();
         if (device != null) device.close();
     }
@@ -327,6 +329,89 @@ final class MetalMotionProducerGpuTest {
     private void writeFloatPixel(MetalGpuTexture texture,int x,int y,float value) {
         ByteBuffer bytes=ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).putFloat(value);
         bytes.flip(); encoder.writeToTexture(texture,bytes,0,0,x,y,1,1);
+    }
+
+    static Stream<Fixture> currentOwnershipFixtures() {
+        return Stream.of(
+                new Fixture("entity_first_appearance","core/entity",DefaultVertexFormat.ENTITY,true,false,false,false),
+                new Fixture("entity_discarded_first_appearance","core/entity",DefaultVertexFormat.ENTITY,true,false,true,false),
+                new Fixture("particle_first_appearance","core/particle",DefaultVertexFormat.PARTICLE,false,false,false,false),
+                new Fixture("leash_first_appearance","core/rendertype_leash",DefaultVertexFormat.POSITION_COLOR_LIGHTMAP,false,false,false,false));
+    }
+
+    @ParameterizedTest(name = "current ownership: {0}")
+    @MethodSource("currentOwnershipFixtures")
+    void currentGeometryWithoutHistoryWritesOwnershipAndDepthWithoutInventingMotion(Fixture f) throws Exception {
+        var sourceBuilder=RenderPipeline.builder().withLocation("motion_contract/"+f.name())
+                .withVertexShader(f.source()).withFragmentShader(f.source()).withVertexBinding(0,f.format())
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build());
+        if(f.alphaCutout()) sourceBuilder.withShaderDefine("ALPHA_CUTOUT",.5F);
+        var source=sourceBuilder.build();
+        var sample=new MetalEntityMotionCapture.Sample(808,-22,new Matrix4f(),null);
+        ByteBuffer vertices=vertices(f,false), indices=ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());
+        for(short i=0;i<6;i++) indices.putShort(i); indices.flip();
+        float[] positions=MetalPreviousVertexHistory.extractPositions(f.format(),java.util.List.of(vertices),6);
+        MetalPreviousVertexHistory.beginFrame();
+        var token=MetalPreviousVertexHistory.reserveDraw(sample,source);
+        MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                f.format().getElements(),f.format().getVertexSize(),PrimitiveTopology.TRIANGLES,6,6),positions);
+        MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
+        assertNull(MetalPreviousVertexHistory.matchedPreviousPositions(token));
+        assertNull(MetalPreviousVertexReplay.worldTransforms(token));
+        var transforms=MetalPreviousVertexReplay.currentOnlyTransforms(token,false); assertNotNull(transforms);
+        ByteBuffer dynamic=ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
+        new Matrix4f().get(0,dynamic); new Matrix4f().get(64,dynamic);
+        for(int i=0;i<4;i++) dynamic.putFloat(128+i*4,1);
+        ByteBuffer projection=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()); new Matrix4f().get(0,projection);
+        ByteBuffer motion=ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
+        transforms.currentUnjitteredFromRaster().get(0,motion); transforms.previousFromPosition().get(64,motion);
+        try(var current=device.createBuffer(()->"new source geometry",GpuBuffer.USAGE_VERTEX,vertices);
+            var index=device.createBuffer(()->"new source indices",GpuBuffer.USAGE_INDEX,indices);
+            var du=device.createBuffer(()->"source dynamic",GpuBuffer.USAGE_UNIFORM,dynamic);
+            var pr=device.createBuffer(()->"source projection",GpuBuffer.USAGE_UNIFORM,projection);
+            var mo=device.createBuffer(()->"explicit invalid history",GpuBuffer.USAGE_UNIFORM,motion);
+            var sampled=texture("current source material",GpuFormat.RGBA8_UNORM,GpuTexture.USAGE_TEXTURE_BINDING);
+            var flow=texture("current source XY",GpuFormat.RG16_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var valid=texture("current source ownership",GpuFormat.R8_UNORM,GpuTexture.USAGE_COPY_SRC);
+            var pair=texture("current source depth",GpuFormat.RG32_FLOAT,GpuTexture.USAGE_COPY_SRC);
+            var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty());
+            var sampledView=device.createTextureView(sampled);var flowView=device.createTextureView(flow);
+            var validView=device.createTextureView(valid);var pairView=device.createTextureView(pair)) {
+            var info=new net.minecraft.client.renderer.StagedVertexBuffer.ExecuteInfo(current,index,IndexType.SHORT,0,0,6,PrimitiveTopology.TRIANGLES);
+            var plan=MetalPreviousVertexReplay.currentOnlyPlan(source,info,token); assertNotNull(plan);
+            ByteBuffer history=ByteBuffer.allocateDirect(6*16).order(ByteOrder.nativeOrder());
+            assertFalse(MetalPreviousVertexReplay.writePreviousPositions(plan.previousPositions(),history)); history.flip();
+            try(var previous=device.createBuffer(()->"finite invalid vertex history",GpuBuffer.USAGE_VERTEX,history)) {
+                encoder.clearColorTexture(sampled,new Vector4f(1,1,1,f.alphaHole()?0:1));
+                try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Owned current surface without history")
+                        .withColorAttachment(flowView,Optional.of(new Vector4f(0)))
+                        .withColorAttachment(validView,Optional.of(new Vector4f(0)))
+                        .withColorAttachment(pairView,Optional.of(new Vector4f(-1)))
+                        .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                    pass.setPipeline(MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source));
+                    pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("MetallumMotion",mo.slice());
+                    pass.bindTexture("Sampler0",sampledView,sampler);pass.setVertexBuffer(0,plan.currentVertexBuffer());
+                    pass.setVertexBuffer(1,previous.slice());pass.setIndexBuffer(index,IndexType.SHORT);pass.drawIndexed(6,1,0,plan.replayBaseVertex(),0);
+                }
+                encoder.submit();device.waitForSubmittedGpuWork();
+                byte[] mask=readback(valid), xy=readback(flow), depth=readback(pair);
+                ByteBuffer pairs=ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
+                ByteBuffer vectors=ByteBuffer.wrap(xy).order(ByteOrder.nativeOrder());int covered=0;
+                for(int p=0;p<W*H;p++) {
+                    int value=Byte.toUnsignedInt(mask[p]);
+                    if(value>0) {covered++;assertEquals(64,value,1);assertEquals(-1,pairs.getFloat(p*8),0);assertEquals(.5F,pairs.getFloat(p*8+4),1e-6);}
+                    else {assertEquals(-1,pairs.getFloat(p*8),0);assertEquals(-1,pairs.getFloat(p*8+4),0);}
+                    assertEquals(0,Float.float16ToFloat(vectors.getShort(p*4)),0);assertEquals(0,Float.float16ToFloat(vectors.getShort(p*4+2)),0);
+                }
+                Path dir=Path.of("build/agent-evidence/motion-producers/current-ownership/"+f.name());Files.createDirectories(dir);
+                Files.write(dir.resolve("ownership.r8"),mask);Files.write(dir.resolve("motion.rg16f"),xy);Files.write(dir.resolve("correspondence.rg32f"),depth);
+                Files.writeString(dir.resolve("result.json"),"{\"ownedInvalidPixels\":"+covered+",\"historyInvented\":false}");
+                if(f.alphaHole())assertEquals(0,covered);else assertTrue(covered>100);
+            }
+        }
     }
 
     @Test

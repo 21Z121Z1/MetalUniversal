@@ -167,6 +167,28 @@ final class MetalPreviousVertexReplay {
         return new DrawTransforms(current.projection(), correction, previousFromPosition);
     }
 
+    /** Replays only current visibility. A zero previous clip W explicitly rejects every history sample. */
+    static @Nullable DrawTransforms currentOnlyTransforms(final MetalPreviousVertexHistory.DrawToken token,
+                                                         final boolean firstPerson) {
+        var current = MetalPreviousVertexHistory.currentDrawTransform(token);
+        if (current == null || MetalPreviousVertexHistory.currentVertexCount(token) <= 0) return null;
+        Matrix4f correction = firstPerson ? new Matrix4f()
+                : current.unjitteredProjection().mul(current.projection().invert());
+        MetalMotionContract.minecraftToMetalFxClip(correction);
+        if (!MetalFxMath.isFinite(correction)) return null;
+        return new DrawTransforms(current.projection(), correction, new Matrix4f().zero());
+    }
+
+    static @Nullable Plan currentOnlyPlan(final RenderPipeline source,
+            final StagedVertexBuffer.ExecuteInfo executeInfo, final MetalPreviousVertexHistory.DrawToken token) {
+        if (!MetalEntityMotionPipeline.supportsPreviousPositions(source)) return null;
+        int count = MetalPreviousVertexHistory.currentVertexCount(token);
+        if (count <= 0 || count > Integer.MAX_VALUE/3) return null;
+        float[] invalidPositions = new float[count*3];
+        java.util.Arrays.fill(invalidPositions, Float.NaN); // CPU sentinel; upload writes finite XYZ and validity=0.
+        return planPositions(source, executeInfo, invalidPositions);
+    }
+
     static @Nullable Plan plan(
             final RenderPipeline source,
             final StagedVertexBuffer.ExecuteInfo executeInfo,
@@ -179,6 +201,13 @@ final class MetalPreviousVertexReplay {
         if (previousPositions == null || previousPositions.length < 3 || previousPositions.length % 3 != 0) {
             return null;
         }
+
+        return planPositions(source, executeInfo, previousPositions);
+    }
+
+    private static @Nullable Plan planPositions(final RenderPipeline source,
+            final StagedVertexBuffer.ExecuteInfo executeInfo, final float[] previousPositions) {
+        if (executeInfo == null) return null;
 
         int sourceStride = source.getVertexFormatBinding(0).getVertexSize();
         long vertexCount = previousPositions.length / 3L;

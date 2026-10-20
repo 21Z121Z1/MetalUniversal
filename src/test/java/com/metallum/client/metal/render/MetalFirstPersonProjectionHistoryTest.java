@@ -182,6 +182,35 @@ final class MetalFirstPersonProjectionHistoryTest {
     }
 
     @Test
+    void firstAppearanceRetainsCurrentProjectionButCannotInventPreviousVisibility() {
+        MetalPreviousVertexHistory.beginFrame();
+        Matrix4f projection=hud(92);
+        var token=stage(MAIN,POINT,projection,new Matrix4f().rotateX(.2F));
+        assertNull(MetalPreviousVertexReplay.handTransforms(token));
+        var current=MetalPreviousVertexReplay.currentOnlyTransforms(token,true);
+        assertNotNull(current);
+        assertTrue(current.currentProjection().equals(projection,0));
+        assertTrue(current.currentUnjitteredFromRaster().equals(
+                MetalMotionContract.minecraftToMetalFxClip(new Matrix4f()),0));
+        assertEquals(0,new Vector4f(POINT).mul(current.previousFromPosition()).w,0);
+        assertEquals(1,MetalPreviousVertexHistory.currentVertexCount(token));
+        MetalPreviousVertexHistory.discardFrame();
+        assertNull(MetalPreviousVertexReplay.currentOnlyTransforms(token,true));
+        assertEquals(0,MetalPreviousVertexHistory.currentVertexCount(token));
+    }
+
+    @Test
+    void currentOwnershipStillRequiresFiniteSourceUniformsAndCurrentGeometry() {
+        MetalPreviousVertexHistory.beginFrame();
+        var token=stage(MAIN,POINT,hud(70).m00(Float.NaN),new Matrix4f());
+        assertNull(MetalPreviousVertexReplay.currentOnlyTransforms(token,true));
+        MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(hud(70),new Matrix4f()));
+        assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(token,true));
+        var uncaptured=MetalPreviousVertexHistory.reserveDraw(MAIN,PIPELINE);
+        assertNull(MetalPreviousVertexReplay.currentOnlyTransforms(uncaptured,true));
+    }
+
+    @Test
     void completeHistoryStillNeedsEveryDrawToActuallyEncode() {
         MetalPreviousVertexHistory.beginFrame();
         stage(MAIN, POINT, hud(70), new Matrix4f()); stage(MAIN, POINT, hud(70), new Matrix4f());

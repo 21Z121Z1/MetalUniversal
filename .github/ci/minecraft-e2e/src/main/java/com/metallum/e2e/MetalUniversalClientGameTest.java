@@ -829,6 +829,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             catch (IOException failure) { throw new IllegalStateException("Could not write pending source motion evidence", failure); }
             require(census.rawMotionValidation(), "Real draw coverage capture was not enabled");
             require(!census.programs().isEmpty(), "Source-program coverage is missing");
+            require(census.programs().values().stream().anyMatch(row -> row.encodedDisocclusionDraws() > 0),
+                    "New/reset source geometry never encoded explicit invalid-history ownership");
             for (String suffix : new String[]{"opaque_particle", "oit_depth_bounds_particle", "oit_transmittance_particle", "oit_accumulate_particle"}) {
                 var rows = census.pipelines().entrySet().stream().filter(row -> row.getValue().actualDraws() > 0
                         && row.getKey().endsWith("/" + suffix)).toList();

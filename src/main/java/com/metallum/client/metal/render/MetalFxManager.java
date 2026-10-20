@@ -445,6 +445,7 @@ public final class MetalFxManager {
             GpuBufferSlice currentVertexBuffer,
             @Nullable GpuBufferSlice previousPositionBuffer,
             MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,
+            boolean ownedInvalid,
             int replayBaseVertex
     ) {
     }
@@ -1791,6 +1792,13 @@ public final class MetalFxManager {
         }
     }
 
+    private void observeReactiveProducer(final FrameSynthesisContract.ProducerDomain domain, final int samples) {
+        if (capturesMotion() && sourceFrameStamp != null && !sourceFrameStampInvalidated
+                && frameSynthesisReceipts.matches(sourceFrameStamp)) {
+            frameSynthesisReceipts.observeReactive(domain, samples);
+        }
+    }
+
     private void observeUnsupportedProducer(
             final FrameSynthesisContract.ProducerDomain domain,
             final String reason
@@ -1919,14 +1927,6 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("motion-inputs-unprepared");
             return;
         }
-        if (historyReset) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("history-reset");
-            return;
-        }
-        if (!sample.hasPrevious()) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("no-previous-object-state");
-            return;
-        }
         if (objectMotionView == null || objectValidityView == null || handExactValidityView == null) {
             MetalEntityMotionCapture.recordMotionDrawSkip("attachments-unavailable");
             return;
@@ -1992,40 +1992,46 @@ public final class MetalFxManager {
             boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
             boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
             boolean firstPerson = replay.sample().domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON;
-            if (!MetalPreviousVertexHistory.matchingSurfaceManifest(replay.previousVertexToken())) {
-                MetalEntityMotionCapture.failExactSample(replay.sample(), "source-material-history-unavailable");
-                MetalEntityMotionCapture.recordMotionDrawSkip("source-material-history-unavailable");
-                continue;
-            }
+            boolean surfaceMatches = MetalPreviousVertexHistory.matchingSurfaceManifest(replay.previousVertexToken());
+            boolean ownedInvalid = historyReset || !replay.sample().hasPrevious() || !surfaceMatches;
             if (!firstPerson && !MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform");
                 continue;
             }
-            MetalPreviousVertexReplay.Plan exactPlan = exactMotionSupported
+            MetalPreviousVertexReplay.Plan exactPlan = !ownedInvalid && exactMotionSupported
                     ? MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
-            boolean exactPreviousPositions = exactPlan != null;
             var drawTransforms = firstPerson ? MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())
-                    : exactPreviousPositions ? MetalPreviousVertexReplay.worldTransforms(replay.previousVertexToken()) : null;
-            if (exactPreviousPositions && drawTransforms == null) {
-                MetalEntityMotionCapture.failExactSample(replay.sample(), MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
-                MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);
+                    : exactPlan != null ? MetalPreviousVertexReplay.worldTransforms(replay.previousVertexToken()) : null;
+            ownedInvalid |= exactMotionSupported && (exactPlan == null || drawTransforms == null);
+            ownedInvalid |= firstPerson && !exactMotionSupported;
+            if (firstPerson && replay.sourceDepth() == null) {
+                MetalEntityMotionCapture.failExactSample(replay.sample(), "first-person-depth-unavailable");
+                MetalEntityMotionCapture.recordMotionDrawSkip("first-person-depth-unavailable");
                 continue;
             }
-            if (firstPerson && (drawTransforms == null || !exactPreviousPositions || replay.sourceDepth() == null)) {
-                String reason = drawTransforms == null ? MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE
-                        : !exactPreviousPositions ? "first-person-previous-vertices-unavailable" : "first-person-depth-unavailable";
+            if (ownedInvalid) {
+                String reason = !surfaceMatches ? "source-material-history-unavailable"
+                        : "source-history-unavailable-current-ownership-only";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);
-                MetalEntityMotionCapture.recordMotionDrawSkip(reason);
-                continue;
+                exactPlan = exactMotionSupported ? MetalPreviousVertexReplay.currentOnlyPlan(
+                        prepared.pipeline(), executeInfo, replay.previousVertexToken()) : null;
+                drawTransforms = MetalPreviousVertexReplay.currentOnlyTransforms(replay.previousVertexToken(), firstPerson);
+                if (drawTransforms == null || (exactMotionSupported && exactPlan == null)) {
+                    MetalEntityMotionCapture.recordMotionDrawSkip("current-ownership-plan-unavailable");
+                    continue;
+                }
             }
+            boolean exactPreviousPositions = exactPlan != null;
             if (!exactPreviousPositions && !rootMotionSupported) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("exact-plan-unavailable");
                 continue;
             }
             Matrix4f previousFromRaster;
-            if (exactPreviousPositions) {
+            if (ownedInvalid) {
+                previousFromRaster = new Matrix4f().zero();
+            } else if (exactPreviousPositions) {
                 previousFromRaster = drawTransforms.previousFromPosition();
             } else {
                 previousFromRaster = new Matrix4f(previousViewProjection)
@@ -2051,7 +2057,7 @@ public final class MetalFxManager {
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                         .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
                     ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                    if (!MetalPreviousVertexReplay.writePreviousPositions(previousPositions, bytes)) {
+                    if (!MetalPreviousVertexReplay.writePreviousPositions(previousPositions, bytes) && !ownedInvalid) {
                         MetalEntityMotionCapture.failExactSample(replay.sample(),
                             "particle-emission-has-no-unambiguous-previous-vertices");
                     }
@@ -2064,13 +2070,13 @@ public final class MetalFxManager {
             try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                     .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
                 ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-                (exactPreviousPositions ? drawTransforms.currentUnjitteredFromRaster() : currentUnjitteredFromRaster).get(0, bytes);
+                (drawTransforms != null ? drawTransforms.currentUnjitteredFromRaster() : currentUnjitteredFromRaster).get(0, bytes);
                 previousFromRaster.get(64, bytes);
                 motionUniform = mapped.slice();
             }
             MetalFxMotionTelemetry.recordGpuUpload(128L);
             GpuBufferSlice replayProjection = replay.projection();
-            if (exactPreviousPositions) {
+            if (drawTransforms != null) {
                 // ProjectionMatrixBuffer can be overwritten by later HUD/effect phases. Replay a
                 // frame-owned copy of the source matrix instead of a mutable global UBO backing.
                 try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
@@ -2090,7 +2096,8 @@ public final class MetalFxManager {
                     motionUniform,
                     currentVertexBuffer,
                     previousPositionBuffer,
-                    exactPreviousPositions ? replay.previousVertexToken() : null,
+                    exactPreviousPositions && !ownedInvalid ? replay.previousVertexToken() : null,
+                    ownedInvalid,
                     replayBaseVertex
             ));
         }
@@ -2196,12 +2203,17 @@ public final class MetalFxManager {
                         replay.replayBaseVertex(),
                         0
                 );
-                if (exactPreviousPositions) {
+                if (replay.exactPreviousVertexToken() != null) {
                     MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
                 }
-                recordMotionProducerEncoded(replay.sample());
-                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
-                MetalMotionDrawCoverage.encoded(replay.sample(), prepared.pipeline());
+                if (replay.ownedInvalid()) {
+                    observeReactiveProducer(replay.sample().domain(), 1);
+                    MetalMotionDrawCoverage.ownedInvalidEncoded(replay.sample(), prepared.pipeline());
+                } else {
+                    recordMotionProducerEncoded(replay.sample());
+                    MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
+                    MetalMotionDrawCoverage.encoded(replay.sample(), prepared.pipeline());
+                }
             }
         } finally {
             MetalMotionDrawCoverage.endMotionReplay();

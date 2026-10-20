@@ -10,8 +10,10 @@ import java.util.TreeMap;
 public final class MetalMotionDrawCoverage {
     public record Snapshot(long sourceDraws, long ownedColorDraws, long unownedColorDraws,
                            long depthBoundsDraws, long transmittanceDraws, long accumulateDraws,
-                           long duplicateColorDraws, long queuedReplays, long encodedReplays) {}
+                           long duplicateColorDraws, long queuedReplays, long encodedReplays,
+                           long encodedDisocclusionReplays) {}
     private static long source, owned, unowned, depthBounds, transmittance, accumulate, duplicates, queued, encoded;
+    private static long ownedInvalid;
     private static final boolean VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
     private static boolean scene;
     private static int motionReplayDepth;
@@ -24,12 +26,13 @@ public final class MetalMotionDrawCoverage {
     private static final Map<String, long[]> OWNERS = new TreeMap<>();
 
     public record PipelineCounts(long actualDraws, long hookedExecutions, long ownedColorExecutions,
-                                 long encodedMotionDraws, long internalMotionReplays) {}
+                                 long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws) {}
     public record OwnerCounts(long capturedStates, long sourceColorDraws, long matchingGeometryDraws,
-                              long matchingTransformDraws, long matchingSurfaceDraws, long encodedMotionDraws) {}
+                              long matchingTransformDraws, long matchingSurfaceDraws, long encodedMotionDraws,
+                              long encodedDisocclusionDraws) {}
     public record ProgramCounts(MetalMotionProgramIdentity.@Nullable Description source,
                                 long actualDraws, long hookedExecutions, long ownedColorExecutions,
-                                long encodedMotionDraws, long internalMotionReplays) {}
+                                long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws) {}
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
                          Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture) {}
@@ -41,6 +44,7 @@ public final class MetalMotionDrawCoverage {
         motionReplayDepth = 0;
         FRAME_OWNER_CLASSES.clear();
         source = owned = unowned = depthBounds = transmittance = accumulate = duplicates = queued = encoded = 0;
+        ownedInvalid = 0;
     }
 
     static void attachOwner(final Object state, final MetalEntityMotionCapture.Sample sample) {
@@ -52,13 +56,13 @@ public final class MetalMotionDrawCoverage {
                     .entityType.builtInRegistryHolder().key().identifier() + "]";
         }
         FRAME_OWNER_CLASSES.put(new OwnerKey(sample.domain(), sample.objectId(), sample.generation()), name);
-        OWNERS.computeIfAbsent(name, ignored -> new long[6])[0]++;
+        OWNERS.computeIfAbsent(name, ignored -> new long[7])[0]++;
     }
 
     private static long[] ownerCounts(final MetalEntityMotionCapture.Sample sample) {
         String name = FRAME_OWNER_CLASSES.getOrDefault(new OwnerKey(sample.domain(), sample.objectId(), sample.generation()),
                 "domain:" + sample.domain());
-        return OWNERS.computeIfAbsent(name, ignored -> new long[6]);
+        return OWNERS.computeIfAbsent(name, ignored -> new long[7]);
     }
 
     static void stagedHistory(final MetalEntityMotionCapture.Sample sample, final MetalPreviousVertexHistory.DrawToken token) {
@@ -80,7 +84,7 @@ public final class MetalMotionDrawCoverage {
     private static void countProgram(final RenderPipeline pipeline, final int counter, final long count) {
         var identity = PROGRAM_IDENTITIES.computeIfAbsent(pipeline, MetalMotionProgramIdentity::of);
         PROGRAM_DESCRIPTIONS.putIfAbsent(identity.key(), identity.source());
-        PROGRAMS.computeIfAbsent(identity.key(), ignored -> new long[5])[counter] += count;
+        PROGRAMS.computeIfAbsent(identity.key(), ignored -> new long[6])[counter] += count;
     }
 
     /** Independent denominator from the production backend, including direct and unowned draws. */
@@ -89,8 +93,8 @@ public final class MetalMotionDrawCoverage {
             RenderPipeline source = compiled.sourcePipeline();
             String name = source == null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
             int counter = motionReplayDepth > 0 ? 4 : 0;
-            PIPELINES.computeIfAbsent(name, ignored -> new long[5])[counter] += count;
-            if (source == null) PROGRAMS.computeIfAbsent(name, ignored -> new long[5])[counter] += count;
+            PIPELINES.computeIfAbsent(name, ignored -> new long[6])[counter] += count;
+            if (source == null) PROGRAMS.computeIfAbsent(name, ignored -> new long[6])[counter] += count;
             else countProgram(source, counter, count);
         }
     }
@@ -98,7 +102,7 @@ public final class MetalMotionDrawCoverage {
     static void hookedDraw(final MetalPreviousVertexReplay.@Nullable SourceState state, final @Nullable OitStage stage,
                            final MetalEntityMotionCapture.@Nullable Sample sample) {
         if (VALIDATION && scene && state != null) {
-            long[] counts = PIPELINES.computeIfAbsent(state.pipeline().getLocation().toString(), ignored -> new long[5]);
+            long[] counts = PIPELINES.computeIfAbsent(state.pipeline().getLocation().toString(), ignored -> new long[6]);
             counts[1]++;
             countProgram(state.pipeline(), 1, 1);
             if ((stage == null || stage == OitStage.ACCUMULATE) && sample != null) {
@@ -111,12 +115,12 @@ public final class MetalMotionDrawCoverage {
 
     public static Census census() {
         Map<String, PipelineCounts> copy = new TreeMap<>();
-        PIPELINES.forEach((name, counts) -> copy.put(name, new PipelineCounts(counts[0], counts[1], counts[2], counts[3], counts[4])));
+        PIPELINES.forEach((name, counts) -> copy.put(name, new PipelineCounts(counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         Map<String, OwnerCounts> owners = new TreeMap<>();
-        OWNERS.forEach((name, counts) -> owners.put(name, new OwnerCounts(counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
+        OWNERS.forEach((name, counts) -> owners.put(name, new OwnerCounts(counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6])));
         Map<String, ProgramCounts> programs = new TreeMap<>();
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
-                counts[0], counts[1], counts[2], counts[3], counts[4])));
+                counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics());
     }
@@ -138,12 +142,21 @@ public final class MetalMotionDrawCoverage {
         encoded++;
         if (VALIDATION) {
             ownerCounts(sample)[5]++;
-            PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[5])[3]++;
+            PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[6])[3]++;
             countProgram(source, 3, 1);
         }
     }
 
+    static void ownedInvalidEncoded(final MetalEntityMotionCapture.Sample sample, final RenderPipeline source) {
+        ownedInvalid++;
+        if (VALIDATION) {
+            ownerCounts(sample)[6]++;
+            PIPELINES.computeIfAbsent(source.getLocation().toString(), ignored -> new long[6])[5]++;
+            countProgram(source, 5, 1);
+        }
+    }
+
     public static Snapshot snapshot() {
-        return new Snapshot(source, owned, unowned, depthBounds, transmittance, accumulate, duplicates, queued, encoded);
+        return new Snapshot(source, owned, unowned, depthBounds, transmittance, accumulate, duplicates, queued, encoded, ownedInvalid);
     }
 }

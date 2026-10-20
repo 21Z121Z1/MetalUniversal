@@ -266,6 +266,13 @@ final class MetalPreviousVertexHistory {
         return snapshot == null ? null : snapshot.transform();
     }
 
+    /** Current ownership does not require a previous manifest, but must have captured real geometry. */
+    static int currentVertexCount(final @Nullable DrawToken token) {
+        Snapshot snapshot = frameOpen && token != null ? PENDING.get(token.key()) : null;
+        return snapshot == null || !snapshot.signature().pipelineKey().equals(token.pipelineKey())
+                ? 0 : snapshot.signature().vertexCount();
+    }
+
     /** A hand needs every draw's uniforms as well as its complete previous vertex manifest. */
     static @Nullable DrawTransform matchedPreviousDrawTransform(final @Nullable DrawToken token) {
         if (token == null || !objectManifestMatches(token.key().object())) {
