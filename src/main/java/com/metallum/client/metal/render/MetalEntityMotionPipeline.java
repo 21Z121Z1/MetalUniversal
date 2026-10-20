@@ -429,7 +429,6 @@ final class MetalEntityMotionPipeline {
                 builder.withVertexBinding(slot, source.getVertexFormatBinding(slot));
             }
         }
-        if(previousFamily==PreviousFamily.CLOUD)builder.withVertexBinding(0,DefaultVertexFormat.POSITION_COLOR);
         if (previousPositions) {
             builder.withVertexBinding(1,previousCoverage ? PREVIOUS_COVERAGE_FORMAT
                     : depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);

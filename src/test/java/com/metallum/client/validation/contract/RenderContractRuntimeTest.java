@@ -14,6 +14,20 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 final class RenderContractRuntimeTest {
     @Test
+    void successfulClosePublishesACompleteOnDiskTraceAndTerminalSnapshot() throws Exception {
+        String enabled=System.getProperty("metallum.renderContract.enabled");
+        Path output=Files.createTempDirectory("render-contract-close-success-");
+        try {
+            System.setProperty("metallum.renderContract.enabled","true");RenderContractRuntime.start(output,"close-success");
+            completedCapture();assertTrue(RenderContractRuntime.completionGatePassed());RenderContractRuntime.close();
+            assertFalse(RenderContractRuntime.enabled());assertTrue(RenderContractRuntime.snapshot().ready());
+            assertTrue(RenderContractRuntime.snapshot().status().equals("passed"));
+            var manifest=com.google.gson.JsonParser.parseString(Files.readString(output.resolve("render-contract/pass-manifest.json"))).getAsJsonObject();
+            assertTrue(manifest.get("manifestComplete").getAsBoolean());assertTrue(manifest.get("status").getAsString().equals("passed"));
+        } finally {RenderContractRuntime.close();restoreProperty("metallum.renderContract.enabled",enabled);}
+    }
+
+    @Test
     void failedFinalTraceWriteDetachesClosedRecorderAndKeepsFailureVisible() throws Exception {
         String enabled=System.getProperty("metallum.renderContract.enabled");
         Path output=Files.createTempDirectory("render-contract-close-trace-io-");

@@ -448,6 +448,7 @@ public final class MetalFxManager {
             GpuBufferSlice projection,
             @Nullable GpuBufferSlice globals,
             @Nullable GpuBufferSlice fog,
+            Map<String,GpuBufferSlice> sourceUniforms,
             @Nullable GpuTextureView sourceDepth,
             MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
@@ -961,6 +962,12 @@ public final class MetalFxManager {
         MetalFxManager manager=active;
         if(manager==null || !manager.capturesMotion() || vertices.length==0)return null;
         return MetalPreviousVertexReplay.freezeSourceVertices(manager.device.commandEncoder(),vertices);
+    }
+
+    static @Nullable GpuBufferSlice freezeMotionSourceBuffer(final byte[] bytes,final int usage) {
+        MetalFxManager manager=active;
+        if(manager==null || !manager.capturesMotion() || bytes.length==0)return null;
+        return MetalPreviousVertexReplay.freezeSourceBuffer(manager.device.commandEncoder(),bytes,usage);
     }
 
     /** Flushes queued object-motion draws before Minecraft releases their staged buffers. */
@@ -2194,6 +2201,7 @@ public final class MetalFxManager {
                     replayProjection,
                     replayGlobals,
                     replayFog,
+                    exactPreviousPositions ? exactPlan.sourceUniforms() : Map.of(),
                     replay.sourceDepth(),
                     replay.sample(),
                     motionUniform,
@@ -2325,6 +2333,7 @@ public final class MetalFxManager {
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
                 if (replay.globals() != null) pass.setUniform("Globals", replay.globals());
                 if (replay.fog() != null) pass.setUniform("Fog",replay.fog());
+                replay.sourceUniforms().forEach(pass::setUniform);
                 pass.setUniform("MetallumMotion", replay.motionUniform());
                 if (replay.rasterUniform() != null) pass.setUniform("MetallumSurface",replay.rasterUniform());
                 pass.setVertexBuffer(0, replay.currentVertexBuffer());

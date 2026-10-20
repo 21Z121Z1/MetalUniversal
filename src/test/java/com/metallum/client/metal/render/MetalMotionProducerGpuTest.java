@@ -205,7 +205,7 @@ final class MetalMotionProducerGpuTest {
 
     static Stream<String> cloudFixtures() {
         return Stream.of("0","1","2","3","4","5","16","17","18","19","20","21","fully_fogged","zero_alpha","birth",
-                "negative_cell","positive_odd");
+                "negative_cell","positive_odd","frozen_source_rewrite");
     }
 
     @ParameterizedTest(name="actual procedural cloud: {0}")
@@ -225,7 +225,6 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer old=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());MetalPreviousVertexReplay.writePreviousPositions(previous,old);old.flip();
         ByteBuffer faceBytes=ByteBuffer.allocateDirect(3).put(faces);faceBytes.flip();
         ByteBuffer cloudInfo=ByteBuffer.allocateDirect(44).order(ByteOrder.nativeOrder()).put(info);cloudInfo.flip();
-        ByteBuffer vertices=ByteBuffer.allocateDirect(mesh.vertices().length).order(ByteOrder.nativeOrder()).put(mesh.vertices());vertices.flip();
         ByteBuffer indices=ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());for(short i:new short[]{0,1,2,2,3,0})indices.putShort(i);indices.flip();
         var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
                 .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
@@ -247,8 +246,7 @@ final class MetalMotionProducerGpuTest {
         ByteBuffer fog=ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder());fog.putFloat(36,fogged ? 1 : 20);
         int copy=GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST;
         try(var fb=device.createBuffer(()->"original signed cloud faces",GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE,faceBytes);
-            var ci=device.createBuffer(()->"actual original cloud info",GpuBuffer.USAGE_UNIFORM,cloudInfo);
-            var vb=device.createBuffer(()->"decoded source cloud vertices",GpuBuffer.USAGE_VERTEX,vertices);
+            var ci=device.createBuffer(()->"actual original cloud info",GpuBuffer.USAGE_UNIFORM|GpuBuffer.USAGE_MAP_WRITE,cloudInfo);
             var pb=device.createBuffer(()->"old matching cloud face",GpuBuffer.USAGE_VERTEX,old);
             var ib=device.createBuffer(()->"actual cloud quad indices",GpuBuffer.USAGE_INDEX,indices);
             var du=device.createBuffer(()->"cloud dynamic transform",GpuBuffer.USAGE_UNIFORM,dynamic);
@@ -263,7 +261,19 @@ final class MetalMotionProducerGpuTest {
             var cv=device.createTextureView(color);var sd=device.createTextureView(scene);var od=device.createTextureView(ownership);
             var fv=device.createTextureView(flow);var vv=device.createTextureView(valid);var zv=device.createTextureView(pair);
             var sampler=device.createSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,java.util.OptionalDouble.empty())) {
+            var frozenInfo=ci.slice();var frozenFaces=fb.slice();
             for(int phase=0;phase<2;phase++) {
+                if(phase==1) {
+                    if(name.equals("frozen_source_rewrite")) {encoder.submit();device.waitForSubmittedGpuWork();}
+                    frozenInfo=MetalPreviousVertexReplay.freezeSourceBuffer(encoder,info,GpuBuffer.USAGE_UNIFORM);
+                    frozenFaces=MetalPreviousVertexReplay.freezeSourceBuffer(encoder,faces,GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE);
+                    if(name.equals("frozen_source_rewrite")) {
+                        ByteBuffer changed=ByteBuffer.allocateDirect(44).order(ByteOrder.nativeOrder()).put(info);changed.putFloat(16,1000);changed.flip();
+                        encoder.writeToBuffer(ci.slice(),changed);
+                        ByteBuffer changedFaces=ByteBuffer.allocateDirect(3).put(new byte[]{50,50,4});changedFaces.flip();
+                        encoder.writeToBuffer(fb.slice(),changedFaces);ci.close();fb.close();
+                    }
+                }
                 var descriptor=RenderPassDescriptor.builder(()->"Original procedural cloud versus decoded replay")
                         .withColorAttachment(phase==0 ? cv : fv,Optional.of(new Vector4f(0)))
                         .withDepthAttachment(phase==0 ? sd : od,java.util.OptionalDouble.of(0));
@@ -271,9 +281,11 @@ final class MetalMotionProducerGpuTest {
                 try(var pass=encoder.createRenderPass(descriptor.build())) {
                     pass.setPipeline(phase==0 ? original : MetalEntityMotionPipeline.forPreviousPositionsWithDepth(intended));
                     pass.setUniform("Projection",pr.slice());pass.setUniform("DynamicTransforms",du.slice());pass.setUniform("Fog",fo.slice());
-                    if(phase==0) {pass.setUniform("CloudInfo",ci.slice());pass.setUniform("CloudFaces",fb.slice());pass.setVertexBuffer(0,null);}
+                    pass.setUniform("CloudInfo",phase==0 ? ci.slice() : frozenInfo);
+                    pass.setUniform("CloudFaces",phase==0 ? fb.slice() : frozenFaces);pass.setVertexBuffer(0,null);
+                    if(phase==0) {pass.setVertexBuffer(1,null);}
                     else {pass.setUniform("MetallumMotion",mo.slice());pass.bindTexture("MetallumSourceDepth",sd,sampler);
-                        pass.setVertexBuffer(0,vb.slice());pass.setVertexBuffer(1,pb.slice());}
+                        pass.setVertexBuffer(1,pb.slice());}
                     pass.setIndexBuffer(ib,IndexType.SHORT);pass.drawIndexed(6,1,0,0,0);
                 }
             }

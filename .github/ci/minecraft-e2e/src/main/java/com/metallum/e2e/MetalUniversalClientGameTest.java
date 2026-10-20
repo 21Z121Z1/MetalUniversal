@@ -335,10 +335,24 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 verifyMotionSourceEntries(context, singleplayer, evidenceDir);
             }
 
-            RenderContractSnapshot contractSnapshot = renderContractSnapshot();
             // Resource identity events are emitted by the render owner. Retire its
             // recorder there too, before any subsequent frame can orphan a buffer.
-            context.runOnClient(client -> closeRenderContract());
+            RenderContractSnapshot contractSnapshot = context.computeOnClient(client -> {
+                closeRenderContract();
+                return renderContractSnapshot();
+            });
+            Path tracePath=metalCaptureRoot.resolve("render-contract/pass-manifest.json");
+            try {
+                JsonObject trace=JsonParser.parseString(Files.readString(tracePath)).getAsJsonObject();
+                require(contractSnapshot.ready() && contractSnapshot.status().equals("passed")
+                                && contractSnapshot.manifestFinalized()
+                                && trace.get("manifestComplete").getAsBoolean()
+                                && trace.get("status").getAsString().equals("passed")
+                                && trace.get("droppedEvents").getAsInt()==0
+                                && trace.get("forcedClosedPassCount").getAsInt()==0
+                                && trace.get("invalidPassReferenceCount").getAsInt()==0,
+                        "Render contract did not publish a complete terminal trace: "+contractSnapshot+"; file="+tracePath);
+            } catch(IOException failure) {throw new IllegalStateException("Cannot read the final render trace "+tracePath,failure);}
 
             Path windowScreenshot = context.takeScreenshot(SCREENSHOT_NAME);
             require(Files.isRegularFile(windowScreenshot),
@@ -643,6 +657,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             return new RenderContractSnapshot(
                     (boolean) snapshotClass.getMethod("enabled").invoke(snapshot),
                     (String) snapshotClass.getMethod("status").invoke(snapshot),
+                    (boolean) snapshotClass.getMethod("ready").invoke(snapshot),
+                    (boolean) snapshotClass.getMethod("manifestFinalized").invoke(snapshot),
                     (int) snapshotClass.getMethod("requestedCaptures").invoke(snapshot),
                     (int) snapshotClass.getMethod("completedCaptures").invoke(snapshot),
                     (int) snapshotClass.getMethod("failedCaptures").invoke(snapshot),
@@ -1199,6 +1215,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
 
         try {
             JsonObject report = JsonParser.parseString(json).getAsJsonObject();
+            report.addProperty("renderContractStatus",contractSnapshot.status());
+            report.addProperty("renderContractReady",contractSnapshot.ready());
+            report.addProperty("renderContractManifestFinalized",contractSnapshot.manifestFinalized());
             report.add("world", worldEvidence);
             Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n", StandardCharsets.UTF_8);
         } catch (IOException exception) {
@@ -1228,6 +1247,8 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
     private record RenderContractSnapshot(
             boolean enabled,
             String status,
+            boolean ready,
+            boolean manifestFinalized,
             int requestedCaptures,
             int completedCaptures,
             int failedCaptures,

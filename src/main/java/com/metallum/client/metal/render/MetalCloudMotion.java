@@ -20,7 +20,8 @@ public final class MetalCloudMotion {
     private static long nextObjectId=0x434C4F5500000000L,nextGeneration=-0x434C4F5544L,nextFaceId;
     private static boolean frameOpen;
     private static final Map<Object,Layer> LAYERS=new IdentityHashMap<>();
-    private static final Map<MetalPreviousVertexHistory.DrawToken,GpuBufferSlice> DRAWS=new HashMap<>();
+    private record CloudReplay(GpuBufferSlice vertices,Map<String,GpuBufferSlice> sourceUniforms) {}
+    private static final Map<MetalPreviousVertexHistory.DrawToken,CloudReplay> DRAWS=new HashMap<>();
     private static final class CloudOwner {}
     private static final class Layer {
         final long objectId=++nextObjectId;
@@ -96,13 +97,17 @@ public final class MetalCloudMotion {
         var token=MetalPreviousVertexHistory.reserveDraw(sample,source.pipeline());
         if(token==null){unsupported(source,stage);return;}
         var frozen=MetalFxManager.freezeMotionVertices(mesh.vertices());
-        if(frozen==null) {MetalEntityMotionCapture.failExactSample(sample,"cloud-source-snapshot-unavailable");unsupported(source,stage);return;}
+        var frozenInfo=MetalFxManager.freezeMotionSourceBuffer(bytes,GpuBuffer.USAGE_UNIFORM);
+        var frozenFaces=MetalFxManager.freezeMotionSourceBuffer(layer.faces,GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER|GpuBuffer.USAGE_MAP_WRITE);
+        if(frozen==null || frozenInfo==null || frozenFaces==null) {
+            MetalEntityMotionCapture.failExactSample(sample,"cloud-source-snapshot-unavailable");unsupported(source,stage);return;
+        }
         var ids=identities(renderer,mesh.faceKeys());
         var format=DefaultVertexFormat.POSITION_COLOR;
         MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),format.getElements(),
                 format.getVertexSize(),PrimitiveTopology.QUADS,mesh.faceKeys().size()*4,count),mesh.positions());
         MetalPreviousVertexHistory.stageQuadIdentities(token,new ArrayList<>(ids.values()));
-        DRAWS.put(token,frozen);sourceSubmitted(renderer,ids);
+        DRAWS.put(token,new CloudReplay(frozen,Map.of("CloudInfo",frozenInfo,"CloudFaces",frozenFaces)));sourceSubmitted(renderer,ids);
         var draw=new StagedVertexBuffer.ExecuteInfo(frozen.buffer(),geometry.indices(),geometry.indexType(),0,0,count,PrimitiveTopology.QUADS);
         MetalFxManager.drawDirectMotion(draw,sample,token,stage,pass,MetalCloudMotion::plan);
         MetalPreviousVertexReplay.flushAfterSourcePass(pass);
@@ -129,10 +134,10 @@ public final class MetalCloudMotion {
         MetalFxManager.observeReactiveParticlesWeather(1);MetalFxManager.observeParticleMotion();
     }
     private static MetalPreviousVertexReplay.@Nullable Plan plan(MetalPreviousVertexHistory.DrawToken token,boolean previous) {
-        var vertices=DRAWS.get(token);if(vertices==null)return null;
+        var draw=DRAWS.get(token);if(draw==null)return null;
         float[] positions=previous ? MetalPreviousVertexHistory.matchedPreviousPositions(token) : new float[MetalPreviousVertexHistory.currentVertexCount(token)*3];
         if(positions==null)return null;
         if(!previous)java.util.Arrays.fill(positions,Float.NaN);
-        return new MetalPreviousVertexReplay.Plan(vertices,0,positions);
+        return new MetalPreviousVertexReplay.Plan(draw.vertices(),0,positions,null,draw.sourceUniforms());
     }
 }

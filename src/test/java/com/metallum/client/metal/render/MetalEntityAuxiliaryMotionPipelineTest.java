@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -147,7 +148,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
             assertFalse(MetalEntityMotionPipeline.supports(source));
             assertTrue(MetalEntityMotionPipeline.requiresFogSnapshot(source));
             var replay=MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
-            assertEquals(DefaultVertexFormat.POSITION_COLOR,replay.getVertexFormatBinding(0));
+            assertNull(replay.getVertexFormatBinding(0),
+                    "Current raster positions must retain the original procedural CloudFaces expression");
             assertEquals("core/cloud_previous_motion",replay.getShaders().get(ShaderType.VERTEX).getPath());
             assertTrue(replay.getShaderDefines().flags().contains("METALLUM_REACTIVE_MATERIAL"));
             assertFalse(MetalEntityMotionPipeline.usesSurfaceTexture(source,"Sampler0"));

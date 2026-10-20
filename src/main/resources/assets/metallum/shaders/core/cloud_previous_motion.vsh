@@ -4,12 +4,17 @@
 #include <minecraft:dynamictransforms.glsl>
 #include <minecraft:projection.glsl>
 
-// Binding 0 is decoded from the actual CloudFaces/CloudInfo source draw.
-layout(location = 0) in vec3 Position;
-layout(location = 1) in vec4 Color;
-layout(location = 2) in vec3 PreviousPosition;
+// Preserve the original GPU expression. Baking current positions on the CPU
+// changes floating-point contraction and can fail the exact source-depth test.
+layout(std140) uniform CloudInfo {
+    vec4 CloudColor;
+    vec3 CloudOffset;
+    vec3 CellSize;
+};
+uniform isamplerBuffer CloudFaces;
+layout(location = 0) in vec3 PreviousPosition;
 #ifdef METALLUM_PREVIOUS_VALIDITY
-layout(location = 3) in float PreviousValidity;
+layout(location = 1) in float PreviousValidity;
 #endif
 layout(std140) uniform MetallumMotion {
     mat4 CurrentUnjitteredFromRaster;
@@ -19,10 +24,27 @@ layout(std140) uniform MetallumMotion {
 layout(location = 2) out float metallumCloudAlpha;
 layout(location = 3) out float metallumCloudDistance;
 
+vec3 cloudVertex(int index) {
+    vec3 pos=vec3(0);
+    pos.x=float((0xF03CC3 >> index)&1);
+    pos.y=float((0x6666F0 >> index)&1);
+    pos.z=float((0xC3F066 >> index)&1);
+    return pos;
+}
+
 void main() {
-    vec4 rasterClip=ProjMat*ModelViewMat*vec4(Position,1.0);
+    int quadVertex=gl_VertexIndex%4;
+    int index=(gl_VertexIndex/4)*3;
+    int cellX=texelFetch(CloudFaces,index).r;
+    int cellZ=texelFetch(CloudFaces,index+1).r;
+    int flags=texelFetch(CloudFaces,index+2).r;
+    cellX=(cellX<<1)|((flags&128)>>7);
+    cellZ=(cellZ<<1)|((flags&64)>>6);
+    vec3 faceVertex=cloudVertex((flags&7)*4+((flags&16)!=0 ? 3-quadVertex : quadVertex));
+    vec3 pos=(faceVertex*CellSize)+(vec3(cellX,0,cellZ)*CellSize)+CloudOffset;
+    vec4 rasterClip=ProjMat*ModelViewMat*vec4(pos,1.0);
     gl_Position=rasterClip;
     metallumSetClipHistory(CurrentUnjitteredFromRaster*rasterClip,PreviousFromRaster*vec4(PreviousPosition,1.0));
-    metallumCloudAlpha=Color.a;
-    metallumCloudDistance=length(Position);
+    metallumCloudAlpha=CloudColor.a;
+    metallumCloudDistance=length(pos);
 }

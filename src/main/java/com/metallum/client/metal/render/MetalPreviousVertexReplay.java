@@ -95,12 +95,17 @@ final class MetalPreviousVertexReplay {
         public Matrix4f previousFromPosition() { return new Matrix4f(previousFromPosition); }
     }
 
-    record Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage) {
+    record Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage,
+                Map<String,GpuBufferSlice> sourceUniforms) {
         Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions) {
             this(currentVertexBuffer,replayBaseVertex,previousPositions,null);
         }
+        Plan(GpuBufferSlice currentVertexBuffer,int replayBaseVertex,float[] previousPositions,float @Nullable [] previousCoverage) {
+            this(currentVertexBuffer,replayBaseVertex,previousPositions,previousCoverage,Map.of());
+        }
         Plan {
             previousPositions = previousPositions.clone();
+            sourceUniforms=Map.copyOf(sourceUniforms);
             if(previousCoverage!=null && previousCoverage.length!=previousPositions.length/3*2)
                 throw new IllegalArgumentException("Previous coverage does not match the vertex stream");
             previousCoverage=previousCoverage==null ? null : previousCoverage.clone();
@@ -117,9 +122,14 @@ final class MetalPreviousVertexReplay {
     }
 
     static GpuBufferSlice freezeSourceVertices(final MetalCommandEncoder encoder,final byte[] vertices) {
-        if(vertices.length==0)throw new IllegalArgumentException("Empty source vertex snapshot");
-        try(GpuBufferSlice.MappedView mapped=encoder.transientMemory().allocateGpuMapped(vertices.length,16L,GpuBuffer.USAGE_VERTEX)) {
-            mapped.data().put(vertices);MetalFxMotionTelemetry.recordGpuUpload(vertices.length);return mapped.slice();
+        return freezeSourceBuffer(encoder,vertices,GpuBuffer.USAGE_VERTEX);
+    }
+
+    static GpuBufferSlice freezeSourceBuffer(final MetalCommandEncoder encoder,final byte[] bytes,final int usage) {
+        if(bytes.length==0)throw new IllegalArgumentException("Empty source buffer snapshot");
+        long alignment=usage==GpuBuffer.USAGE_VERTEX ? 16L : 256L;
+        try(GpuBufferSlice.MappedView mapped=encoder.transientMemory().allocateGpuMapped(bytes.length,alignment,usage)) {
+            mapped.data().put(bytes);MetalFxMotionTelemetry.recordGpuUpload(bytes.length);return mapped.slice();
         }
     }
 
