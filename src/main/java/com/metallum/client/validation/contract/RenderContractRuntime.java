@@ -10,7 +10,13 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-/** Process-local bridge from renderer code into the opt-in contract recorder. */
+/**
+ * Process-local bridge from renderer code into the opt-in contract recorder.
+ * Recorder operations share the start/close monitor: a borrowed recorder or
+ * capture service must finish its operation before either can be closed.
+ * The enabled/observing queries remain cheap opt-in checks; operations recheck
+ * the actual owner while holding this lifetime monitor.
+ */
 public final class RenderContractRuntime {
     private static volatile RenderTraceRecorder recorder;
     private static volatile FileValidationCaptureService captureService;
@@ -33,7 +39,7 @@ public final class RenderContractRuntime {
                 && Boolean.parseBoolean(System.getProperty("metallum.renderContract.enabled", "false"));
     }
 
-    public static boolean producerDetailsCaptured() {
+    public static synchronized boolean producerDetailsCaptured() {
         RenderTraceRecorder current = recorder;
         return current != null && current.producerDetailsCaptured();
     }
@@ -72,7 +78,7 @@ public final class RenderContractRuntime {
         }
     }
 
-    public static void beginFrame(final long frameId) {
+    public static synchronized void beginFrame(final long frameId) {
         currentFrameId = frameId;
         RenderTraceRecorder current = recorder;
         if (current != null) {
@@ -80,7 +86,7 @@ public final class RenderContractRuntime {
         }
     }
 
-    public static void endFrame(final long frameId) {
+    public static synchronized void endFrame(final long frameId) {
         RenderTraceRecorder current = recorder;
         if (current != null) {
             current.endFrame(frameId);
@@ -118,7 +124,7 @@ public final class RenderContractRuntime {
         return capture;
     }
 
-    public static long beginRenderPass(
+    public static synchronized long beginRenderPass(
             final String semanticPassId,
             final PassType type,
             final List<AttachmentBindingRecord> colorAttachments,
@@ -145,33 +151,33 @@ public final class RenderContractRuntime {
         );
     }
 
-    public static void updatePipeline(final long passToken, final String pipelineId) {
+    public static synchronized void updatePipeline(final long passToken, final String pipelineId) {
         RenderTraceRecorder current = recorder;
         if (current != null && passToken >= 0L) {
             current.updatePipeline(passToken, pipelineId);
         }
     }
 
-    public static void updateShaders(final long passToken, final List<String> shaderIds) {
+    public static synchronized void updateShaders(final long passToken, final List<String> shaderIds) {
         RenderTraceRecorder current = recorder;
         if (current != null && passToken >= 0L) {
             current.updateShaders(passToken, shaderIds);
         }
     }
 
-    public static void updateScissor(final long passToken, final ScissorRecord scissor) {
+    public static synchronized void updateScissor(final long passToken, final ScissorRecord scissor) {
         RenderTraceRecorder current = recorder;
         if (current != null && passToken >= 0L) {
             current.updateScissor(passToken, scissor);
         }
     }
 
-    public static TraceIdentity traceIdentity(final long passToken) {
+    public static synchronized TraceIdentity traceIdentity(final long passToken) {
         RenderTraceRecorder current = recorder;
         return current == null || passToken < 0L ? null : current.traceIdentity(passToken);
     }
 
-    public static CapturePoint capturePointForPass(
+    public static synchronized CapturePoint capturePointForPass(
             final long passToken,
             final CapturePointKind kind,
             final int producerIndex
@@ -192,7 +198,7 @@ public final class RenderContractRuntime {
         );
     }
 
-    public static void recordProducer(
+    public static synchronized void recordProducer(
             final long passToken,
             final ProducerType producerType,
             final String pipelineId,
@@ -213,7 +219,7 @@ public final class RenderContractRuntime {
         }
     }
 
-    public static void endPass(final long passToken) {
+    public static synchronized void endPass(final long passToken) {
         RenderTraceRecorder current = recorder;
         if (current != null && passToken >= 0L) {
             current.endPass(passToken);
@@ -221,7 +227,7 @@ public final class RenderContractRuntime {
     }
 
     /** Records a logical transfer/resolve/mipmap/present operation without imposing a native encoder shape. */
-    public static void recordTransfer(
+    public static synchronized void recordTransfer(
             final PassType passType,
             final String semanticPassId,
             final ProducerType producerType,
@@ -264,7 +270,7 @@ public final class RenderContractRuntime {
         endPass(token);
     }
 
-    public static ResourceIdentity identifyResource(
+    public static synchronized ResourceIdentity identifyResource(
             final String semanticName,
             final long runtimeId,
             final String debugId,
@@ -298,7 +304,7 @@ public final class RenderContractRuntime {
      * Observes a renderer-owned allocation identity. The recorder must not
      * invent a generation for a production Metal resource.
      */
-    public static ResourceIdentity identifyAllocation(
+    public static synchronized ResourceIdentity identifyAllocation(
             final String semanticName,
             final long allocationId,
             final long generation,
@@ -331,14 +337,14 @@ public final class RenderContractRuntime {
     }
 
     /** Ends all contract identities associated with a released backend allocation. */
-    public static void invalidateResourceAllocations(final long runtimeId, final String debugId) {
+    public static synchronized void invalidateResourceAllocations(final long runtimeId, final String debugId) {
         RenderTraceRecorder current = recorder;
         if (current != null && runtimeId > 0L) {
             current.invalidateResourceAllocations(runtimeId, debugId);
         }
     }
 
-    public static void recordReadback(
+    public static synchronized void recordReadback(
             final CapturePoint point,
             final String semanticName,
             final long runtimeId,
@@ -374,7 +380,7 @@ public final class RenderContractRuntime {
         );
     }
 
-    public static void requestReadbacks(
+    public static synchronized void requestReadbacks(
             final CapturePoint point,
             final List<ReadbackRequest> readbacks,
             final List<ExpectationSpec> expectations
@@ -408,7 +414,7 @@ public final class RenderContractRuntime {
         service.requestCapture(point, probes, expectations == null ? List.of() : expectations);
     }
 
-    public static void recordReadbacks(
+    public static synchronized void recordReadbacks(
             final CapturePoint point,
             final List<ReadbackData> readbacks,
             final List<ExpectationSpec> expectations

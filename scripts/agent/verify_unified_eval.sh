@@ -52,6 +52,8 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.FramePacingPolicyTest \
   --tests com.metallum.client.metal.render.MetalBufferUploadTest \
   --tests com.metallum.client.metal.render.MetalMslDiskCacheTest \
+  --tests com.metallum.client.metal.render.MetalHalfTargetOracleTest \
+  --tests com.metallum.client.metal.render.MetalRasterDepthPlaneOracleTest \
   --tests com.metallum.client.metal.render.MetalSurfaceFrameStateTest \
   --tests com.metallum.client.metal.render.MetalSubmissionBackpressureTest \
   --tests com.metallum.client.metal.render.TerrainIcbSubmissionTest \
@@ -72,6 +74,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
+  --tests com.metallum.client.validation.contract.RenderContractRuntimeTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 
 echo "Unified evaluation static verification: PASS"
