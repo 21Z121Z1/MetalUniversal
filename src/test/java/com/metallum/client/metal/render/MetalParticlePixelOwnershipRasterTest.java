@@ -187,7 +187,7 @@ final class MetalParticlePixelOwnershipRasterTest {
             for(int i=resources.size()-1;i>=0;i--)resources.get(i).close();
             long closed=textures.stream().filter(MetalGpuTexture::isClosed).count();assertEquals(textures.size(),closed);
             evidence.put("textureAllocations",textures.size());evidence.put("closedTextures",closed);evidence.put("peakLogicalTextureBytes",peakLogicalBytes);
-            long buffers=resources.stream().filter(r->r instanceof MetalGpuBuffer).count(),closedBuffers=resources.stream().filter(r->r instanceof MetalGpuBuffer b && b.isClosed()).count();assertEquals(buffers,closedBuffers);assertEquals(readbackAllocations,readbacksClosed);
+            long buffers=resources.stream().filter(r->r instanceof MetalGpuBuffer).count(),closedBuffers=resources.stream().filter(r->r instanceof MetalGpuBuffer gpuBufferResource && gpuBufferResource.isClosed()).count();assertEquals(buffers,closedBuffers);assertEquals(readbackAllocations,readbacksClosed);
             evidence.put("bufferAllocations",buffers);evidence.put("closedBuffers",closedBuffers);evidence.put("readbackAllocations",readbackAllocations);evidence.put("closedReadbacks",readbacksClosed);evidence.put("peakSingleReadbackBytes",peakReadbackBytes);
             evidence.put("historyPairLogicalBytesAtCurrentResolution",MetalParticlePixelOwnershipPrototype.bytes(w,h));evidence.put("timings",timings);
             evidence.put("timingBoundary","Bounded offscreen command-buffer GPU timestamps and CPU encoding/wait samples; unavailable GPU timestamps are null, not zero-cost. No FPS, presentation or Temporal quality claim.");
