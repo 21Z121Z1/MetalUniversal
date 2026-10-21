@@ -63,6 +63,36 @@ final class MetalParticlePartialAlphaHistoryTest {
             assertEquals(value==255,alpha.fullSourceInputs());MetalPreviousVertexHistory.discardFrame();
         }
     }
+    @Test void ordinaryPartialGuardPreservesTheExistingOitZeroInputPolicy() throws ReflectiveOperationException {
+        com.mojang.renderpearl.api.pipeline.RenderPipeline oit=null;
+        for(var field:net.minecraft.client.renderer.RenderPipelines.class.getDeclaredFields()) {
+            if(!java.lang.reflect.Modifier.isStatic(field.getModifiers()) || field.getType()!=com.mojang.renderpearl.api.pipeline.RenderPipeline.class)continue;
+            field.setAccessible(true);var pipeline=(com.mojang.renderpearl.api.pipeline.RenderPipeline)field.get(null);
+            if(pipeline!=null && pipeline.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/particle")
+                    && pipeline.getShaderDefines().flags().contains("OIT_ACCUMULATE")) {oit=pipeline;break;}
+        }
+        assertNotNull(oit,"The pinned client's actual OIT particle pipeline must exist");
+        assertEquals("minecraft:pipeline/oit_accumulate_particle",oit.getLocation().toString());
+        for(int oldAlpha:new int[]{0,26,255})for(float oldModulator:new float[]{0,.1F,1}) {
+            MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();
+            var c=new MetalParticlePartialAlphaCases.Case("oit_unchanged",false,oldAlpha,oldAlpha,oldModulator,255,1,255,MetalParticlePartialAlphaCases.Groups.SINGLE,false);
+            var old=MetalPreviousVertexHistory.reserveDraw(owner,oit);capture(old,oit,List.of(11L),MetalParticlePartialAlphaCases.mesh(c,List.of(11L),0),oldModulator);
+            MetalPreviousVertexHistory.commitSubmittedFrame();MetalPreviousVertexHistory.beginFrame();
+            var current=MetalPreviousVertexHistory.reserveDraw(owner,oit);capture(current,oit,List.of(11L),MetalParticlePartialAlphaCases.mesh(c,List.of(11L),1),1);
+            var positions=MetalPreviousVertexReplay.previousPositionsForSource(oit,current);
+            if(oldAlpha==0 || oldModulator==0)assertNull(positions);else assertNotNull(positions);
+            MetalPreviousVertexHistory.discardFrame();
+        }
+        var unknown=com.mojang.renderpearl.api.pipeline.RenderPipeline.builder().withLocation("test/unknown_oit_particle")
+                .withVertexShader("core/particle").withFragmentShader("core/particle").withShaderDefine("OIT_ACCUMULATE")
+                .withVertexBinding(0,DefaultVertexFormat.PARTICLE).withPrimitiveTopology(PrimitiveTopology.QUADS).build();
+        MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();
+        var c=new MetalParticlePartialAlphaCases.Case("unknown_oit",false,26,26,1,255,1,255,MetalParticlePartialAlphaCases.Groups.SINGLE,false);
+        var old=MetalPreviousVertexHistory.reserveDraw(owner,unknown);capture(old,unknown,List.of(11L),MetalParticlePartialAlphaCases.mesh(c,List.of(11L),0),1);
+        MetalPreviousVertexHistory.commitSubmittedFrame();MetalPreviousVertexHistory.beginFrame();
+        var current=MetalPreviousVertexHistory.reserveDraw(owner,unknown);capture(current,unknown,List.of(11L),MetalParticlePartialAlphaCases.mesh(c,List.of(11L),1),1);
+        assertNull(MetalPreviousVertexReplay.previousPositionsForSource(unknown,current),"An OIT flag on an unknown source cannot bypass the ordinary partial-input rejection");
+    }
     @Test void aPartialVertexOnlyInTheSecondFreedSliceKeepsItsBoundsAndAcceptedUniformWitness() {
         var c=cases().get(13);var p=MetalParticlePartialAlphaCases.pipeline(false);var format=DefaultVertexFormat.PARTICLE;
         MetalPreviousVertexHistory.beginFrame();var old=MetalPreviousVertexHistory.reserveDraw(owner,p);

@@ -326,7 +326,14 @@ final class MetalPreviousVertexReplay {
         }
         if (shader.equals("core/particle")) {
             var alpha=MetalPreviousVertexHistory.matchedPreviousParticleAlpha(token);
-            if(alpha==null || !alpha.fullSourceInputs() || !MetalPreviousVertexHistory.isUnitParticleModulator(previous)
+            if("minecraft".equals(source.getLocation().getNamespace())
+                    && java.util.Set.of("pipeline/oit_depth_bounds_particle","pipeline/oit_transmittance_particle",
+                            "pipeline/oit_accumulate_particle").contains(source.getLocation().getPath())
+                    && source.getShaderDefines().flags().stream().anyMatch(flag->flag.startsWith("OIT_"))) {
+                // This round audits ordinary particle cutout only. Preserve OIT's existing
+                // zero-input rejection; its partial/sampled visibility remains unproven.
+                if(previous==null || previous.colorModulator().w<=0 || alpha==null || alpha.min()==0)return null;
+            } else if(alpha==null || !alpha.fullSourceInputs() || !MetalPreviousVertexHistory.isUnitParticleModulator(previous)
                     || !MetalPreviousVertexHistory.isUnitParticleModulator(MetalPreviousVertexHistory.currentSourceUniforms(token))) {
                 // Without old sampled-alpha proof, partial source inputs are current-only even
                 // when vertex*modulator alone exceeds cutout. Any old source in a merged draw

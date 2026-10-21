@@ -92,6 +92,7 @@ final class MetalParticlePartialAlphaCases {
                 var depth=p.getDepthStencilState();assertNotNull(depth);
                 assertEquals(CompareOp.GREATER_THAN_OR_EQUAL,depth.depthTest());assertTrue(depth.writeDepth());
                 assertEquals(0,depth.depthBiasScaleFactor());assertEquals(0,depth.depthBiasConstant());
+                assertTrue(p.getShaderDefines().flags().stream().noneMatch(flag->flag.startsWith("OIT_")));
                 return p;
             }
         } catch(ReflectiveOperationException e) {throw new AssertionError(e);}
