@@ -289,6 +289,33 @@ jobs:
           print('verified MetalFX runtime:', json.dumps(fx, sort_keys=True))
 
           if fx['profile'] == 'requested-temporal':
+              lifecycle_path = root / 'metalfx-lifecycle-evidence.json'
+              lifecycle = json.loads(lifecycle_path.read_text(encoding='utf-8'))
+              lease = lifecycle.get('shaderLibraryReload', {})
+              if (lifecycle.get('sourceCommit') != os.environ['METALLUM_SOURCE_SHA']
+                      or lifecycle.get('verified') is not True
+                      or lifecycle.get('canonicalDrawAfterReload') is not True
+                      or lifecycle.get('sourceAdmissionGranted') is not False
+                      or lease.get('ownerType') != 'net.minecraft.client.renderer.ShaderManager$Configs'
+                      or any(lease.get(key) is not True for key in
+                             ('retirementRequestedDuringBorrow', 'oldOwnerClosedAfterCompile', 'compiledSuccessfully'))
+                      or lease.get('sourceAdmissionGranted') is not False):
+                  raise SystemExit(f'actual Configs reload lease was not verified: {lifecycle}')
+              old_generation, new_generation = lease.get('oldGeneration'), lease.get('newGeneration')
+              if (type(old_generation) is not int or type(new_generation) is not int
+                      or min(old_generation, new_generation) <= 0 or old_generation == new_generation
+                      or type(lease.get('nativeCallbacks')) is not int or lease['nativeCallbacks'] <= 0):
+                  raise SystemExit(f'missing actual native callback or generation transition: {lease}')
+              states = lifecycle.get('states', {})
+              if (states.get('paused', {}).get('shaderLibraryGeneration') != old_generation
+                      or states.get('reloadedWhilePaused', {}).get('shaderLibraryGeneration') != new_generation
+                      or states.get('resumed', {}).get('shaderLibraryGeneration') != new_generation
+                      or any(state.get('sourceShaderInputsProven') is not True for state in states.values())):
+                  raise SystemExit(f'lifecycle states do not belong to the verified shader generations: {states}')
+              print('verified actual Configs reload lease:', json.dumps(lifecycle, sort_keys=True))
+              print('lifecycle artifact:', lifecycle_path.name, lifecycle_path.stat().st_size,
+                    hashlib.sha256(lifecycle_path.read_bytes()).hexdigest())
+
               # Retain the exact existing diagnostics in a second inspectable
               # channel. A passed scene is not a complete producer/UI admission.
               import base64

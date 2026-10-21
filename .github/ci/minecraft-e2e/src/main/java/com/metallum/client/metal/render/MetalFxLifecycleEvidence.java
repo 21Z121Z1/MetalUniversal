@@ -99,6 +99,7 @@ final class MetalFxLifecycleEvidence {
             }
             try {
                 Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(Map.of(
+                        "sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local-unrecorded"),
                         "verified", true, "states", states, "shaderLibraryReload",shaderLibraryReload,
                         "canonicalDrawAfterReload",true,"sourceAdmissionGranted",false,
                         "boundary", "real client settings/pause/history transitions; Temporal/FG quality requires supported hardware")) + "\n");
