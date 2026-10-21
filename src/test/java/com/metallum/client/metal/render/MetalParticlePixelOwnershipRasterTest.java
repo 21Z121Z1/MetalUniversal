@@ -165,12 +165,13 @@ final class MetalParticlePixelOwnershipRasterTest {
                     byte[] accepted=resolve(surface,transaction,scene,false);int valid=count(accepted);
                     boolean reject=scene.equals("occluded_same_z") || scene.equals("generation") || scene.equals("unknown_identity") || scene.equals("alias_identity") || scene.equals("source_lease_unknown") || scene.equals("foreign_depth") || recover&&frame<=2 || reset&&frame==1;
                     assertEquals(reject?0:visible,valid,"Pixel owner/generation/depth must ALL match: "+scene+" frame "+frame);
-                    if(scene.startsWith("cost_"))for(int measured=0;measured<8;measured++)assertEquals(visible,count(resolve(surface,transaction,scene,false)));
+                    assertProofPixels(accepted,raw,!reject);
+                    if(scene.startsWith("cost_"))for(int measured=0;measured<8;measured++){byte[] warm=resolve(surface,transaction,scene,false);assertEquals(visible,count(warm));assertProofPixels(warm,raw,true);}
                     int unsafe=-1;
                     if(frame==1 && List.of("occluded_same_z","generation","foreign_depth").contains(scene)) {
-                        unsafe=count(resolve(surface,transaction,scene,true));assertEquals(visible,unsafe,"Removing only the relevant pixel guard must expose false acceptance");
+                        byte[] control=resolve(surface,transaction,scene,true);unsafe=count(control);assertEquals(visible,unsafe,"Removing only the relevant pixel guard must expose false acceptance");assertProofPixels(control,raw,true);
                     }
-                    results.add(Map.of("frame",frame,"visiblePixels",visible,"acceptedPixels",valid,"expectedReject",reject,"onlyRelevantGuardRemovedAccepted",unsafe,"oldSlotAvailable",transaction.previous!=null,"width",w,"height",h));
+                    results.add(Map.of("frame",frame,"visiblePixels",visible,"acceptedPixels",valid,"expectedReject",reject,"onlyRelevantGuardRemovedAccepted",unsafe,"oldSlotAvailable",transaction.previous!=null,"width",w,"height",h,"acceptedMaskFingerprint",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(accepted))));
                 }
                 // These callback states are attached to the real instrumented GPU submission.
                 assertEquals(MetalParticlePixelOwnershipPrototype.History.State.COMPLETE,transaction.state);
@@ -351,6 +352,11 @@ final class MetalParticlePixelOwnershipRasterTest {
         encoder.submit();device.waitForSubmittedGpuWork();var row=new LinkedHashMap<String,Object>();row.put("kind",kind);row.put("cpuEncodeNs",encoded);row.put("cpuSubmitWaitNs",System.nanoTime()-waitStart);row.put("gpuNs",Double.isFinite(gpu[0])?gpu[0]:null);row.put("width",w);row.put("height",h);timings.add(row);
     }
     private static int count(byte[] mask){int n=0;for(byte v:mask){assertTrue(v==0||Byte.toUnsignedInt(v)==255);if(v!=0)n++;}return n;}
+    private void assertProofPixels(byte[] mask,byte[] independentSource,boolean acceptCovered){
+        assertEquals(w*h,mask.length);int wrong=0;
+        for(int p=0;p<mask.length;p++){boolean covered=Byte.toUnsignedInt(independentSource[p*4])==255||Byte.toUnsignedInt(independentSource[p*4+1])==255;int expected=acceptCovered&&covered?255:0;if(Byte.toUnsignedInt(mask[p])!=expected)wrong++;}
+        assertEquals(0,wrong,"Every acceptance pixel must match the independent original-color coverage, not merely its count");
+    }
     private MetalGpuTexture texture(String name,GpuFormat format,int width,int height){
         var t=(MetalGpuTexture)device.createTexture(name,GpuTexture.USAGE_RENDER_ATTACHMENT|GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_SRC|GpuTexture.USAGE_COPY_DST,format,width,height,1,1);
         textures.add(t);resources.add(t);logicalBytes.put(t,(long)width*height*t.pixelSize());long live=logicalBytes.entrySet().stream().filter(e->!e.getKey().isClosed()).mapToLong(Map.Entry::getValue).sum();peakLogicalBytes=Math.max(peakLogicalBytes,live);return t;
