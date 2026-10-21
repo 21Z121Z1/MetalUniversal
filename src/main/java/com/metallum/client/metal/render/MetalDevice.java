@@ -371,7 +371,12 @@ final class MetalDevice implements GpuDeviceBackend {
     public static void captureShaderSource(final ShaderSource shaderSource) {
         MetalDevice device = current;
         if (device != null) {
+            ShaderSource previous=device.activeShaderSource;
+            if(previous==shaderSource)return;
             device.activeShaderSource = shaderSource;
+            // These backend-owned lazy pipelines are outside Minecraft's frontend cache.
+            // Retire their old source generation even when MetalFX is disabled.
+            if(previous!=null)device.clearPipelineCache();
         }
     }
 
@@ -687,7 +692,8 @@ final class MetalDevice implements GpuDeviceBackend {
             try {
                 if (rasterStorage) {
                     if (this.rasterStorageCompiler == null) this.rasterStorageCompiler = new StorageRasterPipelineCompiler(this);
-                    frontend = this.rasterStorageCompiler.compile(pipeline, compilationSource);
+                    frontend = MetalShaderSourceAdapters.compileWithLibrary(compilationSource,
+                            ()->this.rasterStorageCompiler.compile(pipeline,compilationSource));
                 } else {
                     frontend = this.pipelineBuilder.compilePipeline(pipeline, compilationSource, Runnable::run)
                             .join().finishCompile();
@@ -704,7 +710,8 @@ final class MetalDevice implements GpuDeviceBackend {
                 throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
             }
             compiled.captureSourcePipeline(pipeline);
-            compiled.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
+            compiled.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource),
+                    MetalShaderSourceAdapters.libraryProof(compilationSource));
             compiled.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
             this.compiledPipelines.put(pipeline, compiled);
             this.frontendPipelines.put(pipeline, frontendPipeline);

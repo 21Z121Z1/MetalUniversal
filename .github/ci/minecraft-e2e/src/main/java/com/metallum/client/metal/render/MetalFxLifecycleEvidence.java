@@ -76,9 +76,7 @@ final class MetalFxLifecycleEvidence {
             states.put("paused", paused);
             // LoadingOverlay pauses singleplayer too. Reload while already paused
             // so pause/resume invalidation cannot accidentally hide a missing reload hook.
-            var reload = context.computeOnClient(client -> client.reloadResourcePacks());
-            context.waitFor(client -> reload.isDone(), 600);
-            reload.join();
+            var shaderLibraryReload=MetalShaderReloadLeaseEvidence.reload(context);
             context.waitFor(client -> client.gui.overlay() == null && client.isPaused(), 100);
             var pausedReload = snapshot(context);
             states.put("reloadedWhilePaused", pausedReload);
@@ -88,6 +86,8 @@ final class MetalFxLifecycleEvidence {
             context.waitFor(client -> !client.isPaused()
                     && MetalFxManager.scalingStatus().historyEpoch() > pausedReload.historyEpoch(), 100);
             states.put("resumed", snapshot(context));
+            long reloadedGeneration=((Number)shaderLibraryReload.get("newGeneration")).longValue();
+            context.waitFor(client->MetalShaderReloadLeaseEvidence.canonicalSourceDrawObserved(reloadedGeneration),100);
             for (var entry : states.entrySet()) {
                 var s = entry.getValue();
                 require(!s.runtimeDisabled() && !s.frameGenerationEnabled() && s.frameGenerationQueued() == 0,
@@ -95,7 +95,8 @@ final class MetalFxLifecycleEvidence {
             }
             try {
                 Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(Map.of(
-                        "verified", true, "states", states,
+                        "verified", true, "states", states, "shaderLibraryReload",shaderLibraryReload,
+                        "canonicalDrawAfterReload",true,"sourceAdmissionGranted",false,
                         "boundary", "real client settings/pause/history transitions; Temporal/FG quality requires supported hardware")) + "\n");
             } catch (IOException failure) { throw new IllegalStateException("Could not write lifecycle evidence", failure); }
         } finally {

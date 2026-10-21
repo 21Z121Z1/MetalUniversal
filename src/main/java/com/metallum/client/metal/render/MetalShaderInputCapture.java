@@ -35,7 +35,7 @@ final class MetalShaderInputCapture {
     private void record(Map<String,Input> target,String key,ByteBuffer content) {
         if(finished!=null)throw new IllegalStateException("Shader input capture already finished");
         if(content.remaining()>MAX_SOURCE_BYTES) {reject("shader-input-byte-limit");return;}
-        var input=new Input(content.remaining(),sha256(content));
+        var input=fingerprint(content);
         Input previous=target.get(key);
         if(previous!=null) {
             if(!previous.equals(input))reject("shader-input-changed-during-compile");
@@ -57,7 +57,7 @@ final class MetalShaderInputCapture {
             String identity="shaders="+shaders+"\nincludes="+includes+"\nfailure="+failure;
             finished=new Snapshot(sha256(ByteBuffer.wrap(identity.getBytes(StandardCharsets.UTF_8))),
                     Map.copyOf(shaders),Map.copyOf(includes),failure==null && !shaders.isEmpty(),false,
-                    failure==null ? "canonical-shader-and-include-content-not-yet-verified" : failure);
+                    failure==null ? "compile-input-fingerprints-only" : failure);
         }
         return finished;
     }
@@ -65,5 +65,10 @@ final class MetalShaderInputCapture {
     private static String sha256(ByteBuffer bytes) {
         try {var hash=MessageDigest.getInstance("SHA-256");hash.update(bytes);return HexFormat.of().formatHex(hash.digest());}
         catch(NoSuchAlgorithmException impossible) {throw new AssertionError(impossible);}
+    }
+
+    static Input fingerprint(ByteBuffer bytes) {
+        if(bytes.remaining()>MAX_SOURCE_BYTES)throw new IllegalArgumentException("shader-input-byte-limit");
+        return new Input(bytes.remaining(),sha256(bytes.duplicate()));
     }
 }

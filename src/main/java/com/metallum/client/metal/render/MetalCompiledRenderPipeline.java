@@ -97,12 +97,29 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     // names are synthetic and shader defines are absent; it cannot own motion semantics.
     @Nullable private volatile RenderPipeline sourcePipeline;
     private volatile MetalShaderInputCapture.@Nullable Snapshot shaderInputs;
+    private volatile MetalCanonicalShaderReference.@Nullable Match shaderInputMatch;
+    private volatile @Nullable MetalShaderLibraryProof shaderInputOwner;
 
     MetalShaderInputCapture.@Nullable Snapshot shaderInputs() {return shaderInputs;}
-    void captureShaderInputs(MetalShaderInputCapture.@Nullable Snapshot inputs) {
+    MetalCanonicalShaderReference.Match shaderInputMatch() {
+        var owner=shaderInputOwner;
+        if(owner!=null && !owner.canonicalOpen())return new MetalCanonicalShaderReference.Match(false,owner.reason(),0,0);
+        var match=shaderInputMatch;
+        return match==null ? MetalCanonicalShaderReference.CURRENT.verify(null,Set.of()) : match;
+    }
+    long shaderInputLibraryGeneration() {var owner=shaderInputOwner;return owner==null ? 0 : owner.generation();}
+    @Nullable MetalShaderLibraryProof shaderInputOwner() {return shaderInputOwner;}
+    void captureShaderInputs(MetalShaderInputCapture.@Nullable Snapshot inputs,@Nullable MetalShaderLibraryProof owner) {
         if(inputs==null)return;
+        RenderPipeline source=sourcePipeline;
+        if(source==null)throw new IllegalStateException("Compile inputs require their original source pipeline");
         if(shaderInputs!=null && !shaderInputs.equals(inputs))
             throw new IllegalStateException("A compiled pipeline cannot change shader input identity: "+info.getLocation());
+        if(shaderInputs!=null && shaderInputOwner!=owner)throw new IllegalStateException("A compiled pipeline cannot borrow another shader library proof");
+        var expected=source.getShaders().entrySet().stream().map(entry->entry.getKey().name()+":"+entry.getValue())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        shaderInputMatch=owner==null ? MetalCanonicalShaderReference.CURRENT.verify(inputs,expected) : owner.verify(inputs,expected);
+        shaderInputOwner=owner;
         shaderInputs=inputs;
     }
 

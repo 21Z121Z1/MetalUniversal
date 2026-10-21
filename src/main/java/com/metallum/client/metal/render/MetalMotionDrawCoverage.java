@@ -25,7 +25,7 @@ public final class MetalMotionDrawCoverage {
     private static final Map<String, MetalMotionProgramIdentity.Description> PROGRAM_DESCRIPTIONS = new TreeMap<>();
     private static final Map<String, long[]> PROGRAMS = new TreeMap<>();
     private static final Map<String,Map<String,String>> PROGRAM_INPUT_PROVIDERS=new TreeMap<>();
-    private static final Map<String,Map<String,MetalShaderInputCapture.Snapshot>> PROGRAM_INPUTS=new TreeMap<>();
+    private static final Map<String,Map<String,ShaderCompilation>> PROGRAM_INPUTS=new TreeMap<>();
     private static final java.util.Set<String> PROGRAM_INPUT_OVERFLOW=new java.util.HashSet<>();
     private record OwnerKey(FrameSynthesisContract.ProducerDomain domain, long id, long generation) {}
     private static final Map<OwnerKey, String> FRAME_OWNER_CLASSES = new java.util.HashMap<>();
@@ -36,7 +36,10 @@ public final class MetalMotionDrawCoverage {
     public record OwnerCounts(long capturedStates, long sourceColorDraws, long matchingGeometryDraws,
                               long matchingTransformDraws, long matchingSurfaceDraws, long encodedMotionDraws,
                               long encodedDisocclusionDraws) {}
-    public record ShaderInputs(Map<String,MetalShaderInputCapture.Snapshot> observedCompiles,boolean overflow) {}
+    private record ShaderCompilation(MetalShaderInputCapture.Snapshot inputs,MetalCanonicalShaderReference.Match canonicalMatch,long libraryGeneration) {}
+    public record ShaderProof(MetalCanonicalShaderReference.Match canonicalMatch,long libraryGeneration) {}
+    public record ShaderInputs(Map<String,MetalShaderInputCapture.Snapshot> observedCompiles,
+                               Map<String,ShaderProof> canonicalProofs,boolean overflow) {}
     public record ProgramCounts(MetalMotionProgramIdentity.@Nullable Description source,
                                 long actualDraws, long hookedExecutions, long ownedColorExecutions,
                                 long encodedMotionDraws, long internalMotionReplays, long encodedDisocclusionDraws,
@@ -159,7 +162,7 @@ public final class MetalMotionDrawCoverage {
                     String key=programIdentity(source).key();
                     var variants=PROGRAM_INPUTS.computeIfAbsent(key,ignored->new TreeMap<>());
                     if(variants.containsKey(inputs.contentSha256()) || variants.size()<4)
-                        variants.put(inputs.contentSha256(),inputs);
+                        variants.put(inputs.contentSha256(),new ShaderCompilation(inputs,compiled.shaderInputMatch(),compiled.shaderInputLibraryGeneration()));
                     else PROGRAM_INPUT_OVERFLOW.add(key);
                     if(variants.containsKey(inputs.contentSha256()))PROGRAM_INPUT_PROVIDERS.computeIfAbsent(key,ignored->new TreeMap<>())
                             .put(inputs.contentSha256(),compiled.shaderInputProviderType());
@@ -195,11 +198,20 @@ public final class MetalMotionDrawCoverage {
         Map<String, ProgramCounts> programs = new TreeMap<>();
         PROGRAMS.forEach((key, counts) -> programs.put(key, new ProgramCounts(PROGRAM_DESCRIPTIONS.get(key),
                 counts[0], counts[1], counts[2], counts[3], counts[4], counts[5],
-                new ShaderInputs(Map.copyOf(PROGRAM_INPUTS.getOrDefault(key,Map.of())),PROGRAM_INPUT_OVERFLOW.contains(key)))));
+                shaderInputsFor(key))));
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
                 MetalUiDrawCoverage.forSourceFrame(lastSourceFrame.frameId(),lastSourceFrame.epoch(),
                         MetalUiDrawCoverage.snapshot(),lastUiFrame),inputProviders());
+    }
+
+    private static ShaderInputs shaderInputsFor(String key) {
+        var inputs=new TreeMap<String,MetalShaderInputCapture.Snapshot>();
+        var proofs=new TreeMap<String,ShaderProof>();
+        PROGRAM_INPUTS.getOrDefault(key,Map.of()).forEach((identity,read)->{
+            inputs.put(identity,read.inputs());proofs.put(identity,new ShaderProof(read.canonicalMatch(),read.libraryGeneration()));
+        });
+        return new ShaderInputs(Map.copyOf(inputs),Map.copyOf(proofs),PROGRAM_INPUT_OVERFLOW.contains(key));
     }
 
     private static Map<String,Map<String,String>> inputProviders() {

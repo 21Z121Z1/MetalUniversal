@@ -1,0 +1,938 @@
+{
+  "schemaVersion": 1,
+  "minecraftVersion": "26.3",
+  "clientJarSha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
+  "clientJarBytes": 41483720,
+  "metadataSha256": "d2cf8f0192f03a01bb48f2ff2d6dc1ba389ce9768499945417102202158c108f",
+  "evidence": {
+    "sourceCommit": "f369891abd4dfd1f2f79033b999706a8a5687a8e",
+    "jobUrl": "https://github.com/21Z121Z1/MetalUniversal/actions/runs/39517964746/job/118954579296",
+    "method": "Hashes of existing Loom client bytes matching pinned Mojang metadata. No GLSL bodies, no new downloads, no complete motion/UI/FG admission."
+  },
+  "assets": {
+    "assets/minecraft/shaders/core/animate_sprite.vsh": {
+      "bytes": 725,
+      "sha256": "0475cc3b1906af35371bbbf6f4f808eda8f8eacc0df6c56d24f3354eed6fdb3b",
+      "imports": [
+        "minecraft:animation_sprite.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "fae40d3f909cde887b2b8e745ce892b257f90069d7af3d3358e56379c56f8872",
+      "expandedBytes": 930,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/animate_sprite_blit.fsh": {
+      "bytes": 320,
+      "sha256": "55d0d883bd6506054e0a037902ded6df7139382d4bfe69b7911772b5700b7ae3",
+      "imports": [
+        "minecraft:animation_sprite.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "a9259e8437e4d547447732aaf08ec9e402998ba024c05dd59df53a3cd5bfb696",
+      "expandedBytes": 525,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/animate_sprite_interpolate.fsh": {
+      "bytes": 533,
+      "sha256": "307561a222112dfb7046cb4f8191dc812f3982b6a5e61676dbb9032e2e2d0af8",
+      "imports": [
+        "minecraft:animation_sprite.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "abe8ae81c40cd12295dcd127c4c9c2b6be6ea32c6ee4b17c605a996aeec1f615",
+      "expandedBytes": 738,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/blit_depth.fsh": {
+      "bytes": 203,
+      "sha256": "9250fd8bb71bed7e031c79e6813dec675747f1af917077a3ce1149cf5c3e78d7",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "9250fd8bb71bed7e031c79e6813dec675747f1af917077a3ce1149cf5c3e78d7",
+      "expandedBytes": 203,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/blit_screen.fsh": {
+      "bytes": 240,
+      "sha256": "8d01499c27529b99c95d1fc9f2e5e319ccc144c03992b37745e785e8a91e0e25",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "8d01499c27529b99c95d1fc9f2e5e319ccc144c03992b37745e785e8a91e0e25",
+      "expandedBytes": 240,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/block.fsh": {
+      "bytes": 1207,
+      "sha256": "bb8c8bbbae9227219e68ea3f0dab4ef6586c1dd4f745cab16c635c1553ed2ca9",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "9a5a5a6e9c47f618d7c845e148b5ebd280492701e856d058fc047d85594b2cb6",
+      "expandedBytes": 13368,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/block.vsh": {
+      "bytes": 1012,
+      "sha256": "3c2508a469916fa10c37d1e368b7de8e7505e289bb87c2134aaaf5fed992a9ea",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "1080c78c002064237f5dee77fcb546c8b5bceb6569e8514043d578a41eaad85b",
+      "expandedBytes": 3310,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/clouds.fsh": {
+      "bytes": 735,
+      "sha256": "98ed038991d16691b4fda45a82436025fa54d90f11840dd6ce42b8359bf76588",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "f92c14974fc45a1f6da1df6a3d57318464268fd36278939036e4cdb7c1b15f05",
+      "expandedBytes": 12708,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/clouds.vsh": {
+      "bytes": 2876,
+      "sha256": "8bdfe295d20d11c9c8136ecc4b0269ddf28e8ce2423b019b4f121feb9704f234",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "339c4320858ae8ee0da5656de7c5f5f0019e0d98f99e606d6aac0f3a61aa8508",
+      "expandedBytes": 4971,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/debug_point.vsh": {
+      "bytes": 479,
+      "sha256": "d542e1c7437181c6b27dd59cc40b7605b4aaf8e4db52edb2ee8e6a4707a92b29",
+      "imports": [
+        "minecraft:globals.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "7123033acabe2f3ebf2f47bb5c3ea653186fa2d34b086b110d7e94ab02c05e6a",
+      "expandedBytes": 1220,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/entity.fsh": {
+      "bytes": 2631,
+      "sha256": "b349430785b693e8635765b7804034e28c3e6ec0e91f21fb9c224b4e226a90fa",
+      "imports": [
+        "minecraft:globals.glsl",
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "abf1a566b323223f0277b9a2417964951ed327ba349dda4f6128970dd454084c",
+      "expandedBytes": 15021,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/entity.vsh": {
+      "bytes": 2322,
+      "sha256": "17d9e367130a9e7350487fb476e2ccf90e0e43dda46361cb29d445c5e8aa2f93",
+      "imports": [
+        "minecraft:light.glsl",
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "80918c5542e01486ab0576d1ea16588294245b7fed96a0be3bc626981f26486e",
+      "expandedBytes": 5457,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/glint.fsh": {
+      "bytes": 774,
+      "sha256": "c15e7d6f86435de757a759a9863b015cd538597f8f00ba6807d70c70a312f942",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:globals.glsl",
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "b2d2f549cd15da6f519b2e8d4b0836aac5e1ab0799efb9c2025f86711965846c",
+      "expandedBytes": 2770,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/glint.vsh": {
+      "bytes": 676,
+      "sha256": "9e596caa95db73e4f03ba18c6c192ea3cadd061eabc1ab450ab7990e9fee5e82",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "8fda98029cde75f4bc6d3542f11c9146a0927551b1605948c670f2d0faf0a579",
+      "expandedBytes": 2771,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/gui.fsh": {
+      "bytes": 549,
+      "sha256": "b018346d9e12b110a59e4d125fcbbf196fbfa65e54d3ddb6992e9b10689dd1ac",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "b018346d9e12b110a59e4d125fcbbf196fbfa65e54d3ddb6992e9b10689dd1ac",
+      "expandedBytes": 549,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/gui.vsh": {
+      "bytes": 632,
+      "sha256": "d9f887f8f5019ac4dbfcc04693d28827eacf57dcd940451fd7e2e8d5032d693b",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "d9f887f8f5019ac4dbfcc04693d28827eacf57dcd940451fd7e2e8d5032d693b",
+      "expandedBytes": 632,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/integrate_depth.fsh": {
+      "bytes": 297,
+      "sha256": "f41fa0c5b0fbfec75ba19350ab13464ebcb569c61aa54d49100f04bc59bf3bb5",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "f41fa0c5b0fbfec75ba19350ab13464ebcb569c61aa54d49100f04bc59bf3bb5",
+      "expandedBytes": 297,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/item.fsh": {
+      "bytes": 1943,
+      "sha256": "fe75ae09610add034d2578dff26ad4e95e75625253d7f7275d076da15ecc92c4",
+      "imports": [
+        "minecraft:globals.glsl",
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "88ebb38f82579657e56cc2d2ae24451f5aeca63c5ad472e7d110c9ffadf0cd76",
+      "expandedBytes": 14333,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/item.vsh": {
+      "bytes": 1696,
+      "sha256": "e93b1d107401135ba2c9f709f381a7d78a98321c64cc1bebddd6bfd7ef9306ef",
+      "imports": [
+        "minecraft:light.glsl",
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "e1eef46c66c6a4864812ea6e0b07835f4f687ac115d5b24c7e7d77313e94bca6",
+      "expandedBytes": 4830,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/lightmap.fsh": {
+      "bytes": 2194,
+      "sha256": "360d9dd915b69682e56636b0e1b1d8da2bd5fea315bd081e12117de12600c928",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "360d9dd915b69682e56636b0e1b1d8da2bd5fea315bd081e12117de12600c928",
+      "expandedBytes": 2194,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/oit_composite.fsh": {
+      "bytes": 1304,
+      "sha256": "c58f1d9953aeb26d79deaef9c21bb82d522a386a02d48f0953dfb938459f97ff",
+      "imports": [
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "bcc43e831013573120ae4d982544865740ad5fa166dd1871666c1da40f474f73",
+      "expandedBytes": 11695,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/oit_depth_bounds_cull.fsh": {
+      "bytes": 843,
+      "sha256": "c5866e8104be7d82e292a4366efeec0958272646143e505990cb27ba2f22511d",
+      "imports": [
+        "minecraft:oit_common.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "881302c46b7e344af972fe095dac2cce26bdd07b0b1fe6c00685b97aa11eb22f",
+      "expandedBytes": 2392,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/panorama.fsh": {
+      "bytes": 242,
+      "sha256": "98b484be8e7be0c987911baccf6b451dc9bc8a481a49c7d3071246151839f9f1",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "98b484be8e7be0c987911baccf6b451dc9bc8a481a49c7d3071246151839f9f1",
+      "expandedBytes": 242,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/panorama.vsh": {
+      "bytes": 336,
+      "sha256": "07790aab24e9c98bb8f5d34aee979e0622a090561a18598f7efb16c3033ca3f8",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "07e9c7d2a63842fe072d45a0a9dcff2018bfa0ff86477c21f2955e0efbf69992",
+      "expandedBytes": 849,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/particle.fsh": {
+      "bytes": 1161,
+      "sha256": "8a5bfb706fea404b739edb982bd3eeabbd7d64fd2c75987f0ef5021d16f1ee1c",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "550b701ff69eb392a3102c118868a1f7afdd3f8a395593fe09a31c2c7bd751bd",
+      "expandedBytes": 13322,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/particle.vsh": {
+      "bytes": 885,
+      "sha256": "ac1752f8f4020d484c8529a59868949fb4f64fff522a61a5b88dc1f7bd8adb5d",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "76994348d0cb1bdc40c08e8b8eaba01525e9ad56c1b54cac89986ce6320462a8",
+      "expandedBytes": 3183,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position.fsh": {
+      "bytes": 507,
+      "sha256": "6f5daf69682e2a72685a95c7075d89e67ae924d1e948ab3f8ecf4ea39d5fcbaa",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "4ed589a9bcbae8b9fb89c0173376263f1f0bfc610f945994eba0ce829fac20ad",
+      "expandedBytes": 2275,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position.vsh": {
+      "bytes": 546,
+      "sha256": "3c822e788e0040b19963a04e9d0b21ccdef5fb21de4bbae93d8701a3222c578f",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "b0e2d9ceeb757f8dfec58c6c415792489852873fd7a93368ebf821408d7442f4",
+      "expandedBytes": 2641,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_color.fsh": {
+      "bytes": 669,
+      "sha256": "9bb40dbfd5ea3f1d3a9f65f68c7f042dede1233481093c62506780a9e9d01ab8",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "f6fbdad99bcaea1e9fa68278066c992ebcaceac183a413460babfd8525baed56",
+      "expandedBytes": 11248,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_color.vsh": {
+      "bytes": 374,
+      "sha256": "5b293a25c66ec134caed9cacb6c2c6e9272078cb6f83d0aad0624cb36b20b143",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "4669d031c2441ddc225160fd751291aa21f8af12817de1eabaabc9efc5a43a28",
+      "expandedBytes": 887,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_tex.fsh": {
+      "bytes": 375,
+      "sha256": "33d26139d3b29a9e5cda59733da4d427875081560cd8b27b5d896107a70dc2e1",
+      "imports": [
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "ec6f2902c026f0ea8a5a07aacb2ae6e28d45612cc732eb4a0e0ff962322f3692",
+      "expandedBytes": 561,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_tex.vsh": {
+      "bytes": 366,
+      "sha256": "38035f5c225f5d2a1feebbd16c4c2204379ebd555e44306c6481e19a81061761",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "6524ef8e2488c083402de587867b97ebeb5c211e106eb271399eb19b8d8a8d6d",
+      "expandedBytes": 879,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_tex_color.fsh": {
+      "bytes": 649,
+      "sha256": "598daa2518ddc018438107cd7e2eb0375b4c083f5c00152662b03c5e0ac8b7ff",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "598daa2518ddc018438107cd7e2eb0375b4c083f5c00152662b03c5e0ac8b7ff",
+      "expandedBytes": 649,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/position_tex_color.vsh": {
+      "bytes": 728,
+      "sha256": "98df7a3e71c56e710e3957015c22501524f9cf6a8ce92bbca5f46b901e25ff6d",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "98df7a3e71c56e710e3957015c22501524f9cf6a8ce92bbca5f46b901e25ff6d",
+      "expandedBytes": 728,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_beacon_beam.fsh": {
+      "bytes": 1048,
+      "sha256": "91c0c0238bdd6a8fe1fc178e9d05a8730905087a6095e45ed5efd218de9c38a1",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "d8ffe14e076c309acdb148a3c44bbdb782694a741ad4b22711b7b43994d8bab0",
+      "expandedBytes": 13209,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_beacon_beam.vsh": {
+      "bytes": 470,
+      "sha256": "3d97af0e3c4c0844b11363f578558758281e208daca44d7171dbbbba7da11de8",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "7f1bd8a62017c07a9534495097317483976e2817b0dbf25555237e77ae888446",
+      "expandedBytes": 983,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_crumbling.fsh": {
+      "bytes": 1221,
+      "sha256": "348aaa9390841fed7f0778bcd1ac3c7389a6bc772abfff42496b862c5b7ab718",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "320d4d2b174f8ed23fe117984855f2219c6fc34a49fac1b9fd734f362a9f9c3a",
+      "expandedBytes": 13382,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_crumbling.vsh": {
+      "bytes": 781,
+      "sha256": "6a3b7ead5eea3db57b7ebfeaedfe185d0853bee577b28daca0b8cb60fe358963",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "65ce67b281137643880520b9df1f2a6018a1d1c024b4e025937267f0c586028b",
+      "expandedBytes": 2876,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_end_portal.fsh": {
+      "bytes": 2087,
+      "sha256": "52ca2dfaf15143bb6b78b42b62094d8a851dcd65eb5c47e3eef5fd70be6c2e88",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:matrix.glsl",
+        "minecraft:globals.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "9b93a20e79bdd206ebf352aa2e43fe899a2fe21bb4dab6b091af46137feca965",
+      "expandedBytes": 4067,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_end_portal.vsh": {
+      "bytes": 640,
+      "sha256": "14bfebae29e412e62008be4b6e7dfe72ddd44af8246fb80c7033766675704794",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "c9ef49968d5a11e3c8d815131f7b9bca3294e22fddddfc92a03adaca9a8c96fc",
+      "expandedBytes": 2735,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_entity_shadow.fsh": {
+      "bytes": 1142,
+      "sha256": "e541ad16ee697172e0fb05462da459445f9edc1e1b425a24b0607abfbafb7616",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "906fa12ac15f4d0a341f72bbc774f7e64c8b4af93a995ccc7d07fb6e46b9380e",
+      "expandedBytes": 13303,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_entity_shadow.vsh": {
+      "bytes": 746,
+      "sha256": "c35eb8508499184e7e4f23cf25d70086e10afdbbaccb8032160ebfb8011145e7",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "e941c89c970a304f3aebc36cf0dd015b6ae24eb77d4ce0c886a3efe7821cdf67",
+      "expandedBytes": 2841,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_leash.fsh": {
+      "bytes": 508,
+      "sha256": "d8ac02b41f534622f68060fb2542dca76ab2dee8cce26348825081f1ee473645",
+      "imports": [
+        "minecraft:fog.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "9924aeb66c4911d5d6e451cfb20325184e0756018ddf20806f97598f036e60a2",
+      "expandedBytes": 2087,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_leash.vsh": {
+      "bytes": 811,
+      "sha256": "594119ea797fa9fbf6e3da96ff4b4ad6fed58bfa8f771b2a302df8c3ec227242",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "f70cf9c165d58149edea23bba7c92ae8c0dd6dbe0b1b994a3ec0c2476571d9f2",
+      "expandedBytes": 3109,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_lightning.fsh": {
+      "bytes": 917,
+      "sha256": "b29fbe7820230ccb4161fa714a4d740dc545faea85ed0b58e1606273a370cb36",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "256e97ebfa119b3edbcd49ba5d3102292de4e755dc6ee1a893265ec2072a5f36",
+      "expandedBytes": 13078,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_lightning.vsh": {
+      "bytes": 650,
+      "sha256": "909166a59fe269a2c2ef0128b9a439ae8922553f1c017b911ecdafb7cc9dc5c9",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "b5f5a478887944ed574f449d138c0e62694ebc51af6729804f2fb552529b3666",
+      "expandedBytes": 2745,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_lines.fsh": {
+      "bytes": 1013,
+      "sha256": "3d93a9bf025790d8417183caef8c40fadbf183c236a8186879a1bdb4b027d5d0",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "e567d3728cdf7dda617ffaaed340d592ac22e80b40c7ae4239f91056cc5fed3d",
+      "expandedBytes": 13174,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_lines.vsh": {
+      "bytes": 1653,
+      "sha256": "58403e1bb1f1a17ac52f381240a70f6a932f37afcb1a09c8b950bcc84a8cefa4",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:globals.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "c20821471de7202c2702550510fe4b76fb1060fd56b75c2e150726aa691a18ca",
+      "expandedBytes": 3976,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_outline.fsh": {
+      "bytes": 455,
+      "sha256": "42663931d5de9becf2d4f5fce53b9890959c05fef70fb27c59fb2a7f318e61f3",
+      "imports": [
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "5a3b332a172347784242bd0c341037b4a059b3bd7717a51c7e6ebfaeccd3e43f",
+      "expandedBytes": 641,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_outline.vsh": {
+      "bytes": 470,
+      "sha256": "3d97af0e3c4c0844b11363f578558758281e208daca44d7171dbbbba7da11de8",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "7f1bd8a62017c07a9534495097317483976e2817b0dbf25555237e77ae888446",
+      "expandedBytes": 983,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_water_mask.fsh": {
+      "bytes": 201,
+      "sha256": "ad7e6c01fde66d8fc8468e0cfb1881adf07b89991c346828637fb8f59f6a2539",
+      "imports": [
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "a8582547166ab5006f69831b2f2dde556dacb9bb0b2a70d41f35091996c66f23",
+      "expandedBytes": 387,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/rendertype_water_mask.vsh": {
+      "bytes": 268,
+      "sha256": "b25cc87762c7173bd26f307d5c29a863cb9ba24ec37175ed79d8b798f17a233b",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "4ab84003dcd114874d6706bd424981e48416f32e42537831b22b26968f33a2bc",
+      "expandedBytes": 781,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/screenquad.vsh": {
+      "bytes": 292,
+      "sha256": "b47ff78239a84617b6b90246f9d6164516d492b7e3abbe391b02221b41aee68c",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "b47ff78239a84617b6b90246f9d6164516d492b7e3abbe391b02221b41aee68c",
+      "expandedBytes": 292,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/sky.fsh": {
+      "bytes": 455,
+      "sha256": "e677b2df88e9e697a6aa33800d865e456cf8ea05e16f513628d8e702092d8501",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "0da12778c0bc84947a5a291472149334bb0f296d6e3087c5d3ac796cb51b7665",
+      "expandedBytes": 2223,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/sky.vsh": {
+      "bytes": 546,
+      "sha256": "3c822e788e0040b19963a04e9d0b21ccdef5fb21de4bbae93d8701a3222c578f",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "b0e2d9ceeb757f8dfec58c6c415792489852873fd7a93368ebf821408d7442f4",
+      "expandedBytes": 2641,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/stars.fsh": {
+      "bytes": 201,
+      "sha256": "ad7e6c01fde66d8fc8468e0cfb1881adf07b89991c346828637fb8f59f6a2539",
+      "imports": [
+        "minecraft:dynamictransforms.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "a8582547166ab5006f69831b2f2dde556dacb9bb0b2a70d41f35091996c66f23",
+      "expandedBytes": 387,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/stars.vsh": {
+      "bytes": 268,
+      "sha256": "b25cc87762c7173bd26f307d5c29a863cb9ba24ec37175ed79d8b798f17a233b",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "4ab84003dcd114874d6706bd424981e48416f32e42537831b22b26968f33a2bc",
+      "expandedBytes": 781,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/terrain.fsh": {
+      "bytes": 1597,
+      "sha256": "e440d13f0c3c3aa0ae584a7e006410e4318922c5bc3c94a7a1be28b89b221bf9",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:globals.glsl",
+        "minecraft:texture_sampling.glsl",
+        "minecraft:oit.glsl",
+        "minecraft:terrainglobals.glsl",
+        "minecraft:chunksection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "b6e0554a8eb873ed1ff3b06be3f136c809e884c45c506d7cf4b56d141721c75f",
+      "expandedBytes": 16680,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/terrain.vsh": {
+      "bytes": 1529,
+      "sha256": "001120e03dd7b9d690d3c98a1563334497c465f79ce14dc557d3d4caa02299a0",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:globals.glsl",
+        "minecraft:projection.glsl",
+        "minecraft:sample_lightmap.glsl",
+        "minecraft:terrainglobals.glsl",
+        "minecraft:chunksection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "d0687c0ad83a74a1110829e2e2a8e146714376563777b18ede2519e512824921",
+      "expandedBytes": 4136,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/text.fsh": {
+      "bytes": 1532,
+      "sha256": "08a3b585cf52e39b66e2689132b6a996d81446e9cc6ab1eab73bbcca38186d43",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "120d70d91dae625a72e0b1a7b99ab2b2b4135bdea8d99a29fa759a63a19d7d46",
+      "expandedBytes": 13693,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/text.vsh": {
+      "bytes": 1141,
+      "sha256": "c5aab3569c07200a3d24c40f6ed2a5716b6694acd015b81e763398b7ff3ddc1f",
+      "imports": [
+        "minecraft:fog.glsl",
+        "minecraft:sample_lightmap.glsl",
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "f3fa62c831bb9f2ba0273a6f75e09f84eb40be99cb6f8ba7d996c4cba06c5513",
+      "expandedBytes": 3439,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/world_border.fsh": {
+      "bytes": 712,
+      "sha256": "6e82c987e5ab909e410971fe6c26941157f89dc54cbe6503e3f3f252615af626",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:oit.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "94b2da0a692c4e6caaf8c4ea1790f6794799ced431028bfae35c56882b9a3197",
+      "expandedBytes": 11291,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/core/world_border.vsh": {
+      "bytes": 434,
+      "sha256": "18cdeb21f0255ead694070e323b0bc4e18e399d200bfaf366a0514bc2dacfcfc",
+      "imports": [
+        "minecraft:dynamictransforms.glsl",
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "245d3a2079978e89a2648b01356592aa197e4e45976ceda629abd4c6e8a175b5",
+      "expandedBytes": 947,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/animation_sprite.glsl": {
+      "bytes": 248,
+      "sha256": "2b3d3099ed31c627c0c04ab2c8b741298c99e35afca0f7a69104add6d9e9af2b",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "2b3d3099ed31c627c0c04ab2c8b741298c99e35afca0f7a69104add6d9e9af2b",
+      "expandedBytes": 248,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/chunksection.glsl": {
+      "bytes": 174,
+      "sha256": "8bcd0bc9365f6d5cf44254a27247737ed88637b9a917ebf9a574ab8fdd9af4ae",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "8bcd0bc9365f6d5cf44254a27247737ed88637b9a917ebf9a574ab8fdd9af4ae",
+      "expandedBytes": 174,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/dynamictransforms.glsl": {
+      "bytes": 230,
+      "sha256": "13db01aebd7ceeabf7769b1d60d0d5691f88072f302350ca2499f5d962237c7a",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "13db01aebd7ceeabf7769b1d60d0d5691f88072f302350ca2499f5d962237c7a",
+      "expandedBytes": 230,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/fog.glsl": {
+      "bytes": 1610,
+      "sha256": "c96edf62b3dca66b2dc314516b0cd74f2e12fbe7514342e28a5440ad8dfc49be",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "c96edf62b3dca66b2dc314516b0cd74f2e12fbe7514342e28a5440ad8dfc49be",
+      "expandedBytes": 1610,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/globals.glsl": {
+      "bytes": 260,
+      "sha256": "85784f154ace14501ff33310a69b48e6d01f3af30b52444ce6192b9049be1060",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "85784f154ace14501ff33310a69b48e6d01f3af30b52444ce6192b9049be1060",
+      "expandedBytes": 260,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/light.glsl": {
+      "bytes": 866,
+      "sha256": "57364b31f9a361aba051e38a9a36e87890ab39798d88aadad0620d6768bc0401",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "57364b31f9a361aba051e38a9a36e87890ab39798d88aadad0620d6768bc0401",
+      "expandedBytes": 866,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/matrix.glsl": {
+      "bytes": 203,
+      "sha256": "63d7aa5d4f5ca34d10550d597b3534b6e5719ac0da6acf6c6a93b2ee3b8f2d08",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "63d7aa5d4f5ca34d10550d597b3534b6e5719ac0da6acf6c6a93b2ee3b8f2d08",
+      "expandedBytes": 203,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit.glsl": {
+      "bytes": 947,
+      "sha256": "d90c5f454fffff35e81673b9806531d468d9597557a2bf7d9e37ed5cd7c18989",
+      "imports": [
+        "minecraft:oit_common.glsl",
+        "minecraft:oit_depth_sample.glsl",
+        "minecraft:oit_depth_bounds.glsl",
+        "minecraft:oit_add_transmittance.glsl",
+        "minecraft:oit_sample.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "259c1bf6af599fe3c7abb5d697a42f452ff69cad813dd834de91bec54f160d9d",
+      "expandedBytes": 10421,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit_add_transmittance.glsl": {
+      "bytes": 1997,
+      "sha256": "79f5b662a4550428757bac08b9e725dae775d9efc73416b96940009c8ae2a8f4",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "79f5b662a4550428757bac08b9e725dae775d9efc73416b96940009c8ae2a8f4",
+      "expandedBytes": 1997,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit_common.glsl": {
+      "bytes": 1261,
+      "sha256": "bd5f404aea0c8b75f32471e763332fdfa81a30106dfd1318a3fec0a82e1c7720",
+      "imports": [
+        "minecraft:projection.glsl"
+      ],
+      "locationMacros": false,
+      "expandedSha256": "35490b4233f93610afedf817568861d8b0401a8c3fec4440f10185fefa019f85",
+      "expandedBytes": 1586,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit_depth_bounds.glsl": {
+      "bytes": 486,
+      "sha256": "892f076e405e784f44da5f1a59c4aedeffe45b6a1b56ef733ff515c3218c4a04",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "892f076e405e784f44da5f1a59c4aedeffe45b6a1b56ef733ff515c3218c4a04",
+      "expandedBytes": 486,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit_depth_sample.glsl": {
+      "bytes": 1546,
+      "sha256": "fcf65ad828e0a079652096ceea20da9367ef38c53d77e88da74a7f00718e8b90",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "fcf65ad828e0a079652096ceea20da9367ef38c53d77e88da74a7f00718e8b90",
+      "expandedBytes": 1546,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/oit_sample.glsl": {
+      "bytes": 4094,
+      "sha256": "92c2735235ac4c7122230baeac027b24784d0d2d4cc0b3740c2ca97855832b90",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "92c2735235ac4c7122230baeac027b24784d0d2d4cc0b3740c2ca97855832b90",
+      "expandedBytes": 4094,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/projection.glsl": {
+      "bytes": 362,
+      "sha256": "54ad58fcd6b3811992a9432628dba49900b2d9d33e075424224b0e7f0603818e",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "54ad58fcd6b3811992a9432628dba49900b2d9d33e075424224b0e7f0603818e",
+      "expandedBytes": 362,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/sample_lightmap.glsl": {
+      "bytes": 243,
+      "sha256": "a9304edbf7f4cae659177dc47b813a5b8a715c9cb3e4a16214273a871eb508e9",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "a9304edbf7f4cae659177dc47b813a5b8a715c9cb3e4a16214273a871eb508e9",
+      "expandedBytes": 243,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/terrainglobals.glsl": {
+      "bytes": 174,
+      "sha256": "92fce71e096e2bab975c192b0b52c433a1fe2694c13259e2d4654bde3814aac9",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "92fce71e096e2bab975c192b0b52c433a1fe2694c13259e2d4654bde3814aac9",
+      "expandedBytes": 174,
+      "expandedStatus": "exact-angle-import-expansion"
+    },
+    "assets/minecraft/shaders/include/texture_sampling.glsl": {
+      "bytes": 2654,
+      "sha256": "ffd52a2ed71dc43f83295c71ba7648e20b5b81d3ae43b8d64b027b1881c55c7b",
+      "imports": [],
+      "locationMacros": false,
+      "expandedSha256": "ffd52a2ed71dc43f83295c71ba7648e20b5b81d3ae43b8d64b027b1881c55c7b",
+      "expandedBytes": 2654,
+      "expandedStatus": "exact-angle-import-expansion"
+    }
+  }
+}

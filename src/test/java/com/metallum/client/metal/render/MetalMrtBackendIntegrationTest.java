@@ -730,7 +730,10 @@ final class MetalMrtBackendIntegrationTest {
                     layout(location=0) out vec4 color;
                     void main() { color = vec4(0.0, 1.0, 0.0, 1.0); }
                     """);
-            device.clearPipelineCache();
+            MetalDevice.captureShaderSource(MetalShaderSourceAdapters.from((identifier,type)->{
+                String shaderName=identifier.getPath().substring(identifier.getPath().lastIndexOf('/')+1);
+                return type==ShaderType.VERTEX ? vertexShaders.getOrDefault(shaderName,VERTEX_SHADER) : fragmentShaders.get(shaderName);
+            }));
             render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
             ByteBuffer after = readback(texture);
             assertByteNear(after.get(0), 0, "replacement shader red");

@@ -30,9 +30,8 @@ public final class MetalBackend implements GpuBackend {
         return effectiveSource;
     }
 
-    /** Prepares an owned provider without publishing it as the live backend library. */
     public static ShaderSource prepareShaderSource(final ShaderSource shaderSource) {
-        return MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
+        return MetalShaderSourceAdapters.prepareLibrary(shaderSource);
     }
 
     /** Attaches the original frontend semantics after the matching async compile completes. */
@@ -52,6 +51,11 @@ public final class MetalBackend implements GpuBackend {
         return MetalShaderSourceAdapters.captureCompileInputs(source);
     }
 
+    public static java.util.concurrent.Executor captureCompileExecutor(
+            final ShaderSource source,final java.util.concurrent.Executor executor) {
+        return MetalShaderSourceAdapters.compilationExecutor(source,executor);
+    }
+
     public static CompiledRenderPipeline.Pending preservePipelineSource(
             final CompiledRenderPipeline.Pending pending,final RenderPipeline source,
             final @Nullable ShaderSource compilationSource) {
@@ -60,7 +64,8 @@ public final class MetalBackend implements GpuBackend {
             capturePipelineSource(compiled, source);
             if(compilationSource!=null && compiled instanceof FrontendRenderPipeline frontend
                     && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal) {
-                metal.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
+                metal.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource),
+                        MetalShaderSourceAdapters.libraryProof(compilationSource));
                 metal.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
             }
             return compiled;

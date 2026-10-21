@@ -20,7 +20,7 @@ public abstract class PipelineBuilderMetalSourceMixin {
             final RenderPipeline pipeline, final ShaderSource source, final Executor executor,
             final Operation<CompletableFuture<CompiledRenderPipeline.Pending>> original) {
         ShaderSource compilationSource=MetalBackend.captureCompileInputs(source);
-        return original.call(pipeline, compilationSource, executor)
+        return original.call(pipeline, compilationSource, MetalBackend.captureCompileExecutor(compilationSource,executor))
                 .thenApply(pending -> MetalBackend.preservePipelineSource(pending,pipeline,compilationSource));
     }
 }

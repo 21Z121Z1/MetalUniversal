@@ -19,8 +19,9 @@ public abstract class ShaderManagerMetalSourceMixin {
     @ModifyArg(method = "apply", at = @At(value = "INVOKE",
             target = "Lcom/mojang/blaze3d/pipeline/PipelineCache;<init>(Lcom/mojang/renderpearl/api/device/GpuDevice;Lcom/mojang/renderpearl/api/pipeline/ShaderSource;)V"), index = 1)
     private ShaderSource metallum$rememberLiveShaderLibrary(final ShaderSource source) {
-        metallum$pendingLibrary = source;
-        return source;
+        ShaderSource prepared=MetalBackend.prepareShaderSource(source);
+        metallum$pendingLibrary=prepared;
+        return prepared;
     }
 
     @Inject(method = "apply", at = @At("TAIL"))

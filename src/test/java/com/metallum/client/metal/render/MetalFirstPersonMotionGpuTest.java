@@ -171,6 +171,8 @@ final class MetalFirstPersonMotionGpuTest {
                 assertTrue(firstRead.consistent());assertTrue(secondRead.consistent());
                 assertNotEquals(firstRead.contentSha256(),secondRead.contentSha256());
                 assertFalse(firstRead.sourceAdmissionGranted());assertFalse(secondRead.sourceAdmissionGranted());
+                assertTrue(backendA.shaderInputMatch().canonicalInputsMatch(),backendA.shaderInputMatch().reason());
+                assertFalse(backendB.shaderInputMatch().canonicalInputsMatch(),"A same-ID source change is not a canonical input");
                 assertSame(first, backendA.sourcePipeline()); assertSame(second, backendB.sourcePipeline());
                 assertEquals(DefaultVertexFormat.ENTITY, backendA.sourcePipeline().getVertexFormatBinding(0));
                 assertEquals("0.1", backendA.sourcePipeline().getShaderDefines().values().get("ALPHA_CUTOUT"));
@@ -179,6 +181,11 @@ final class MetalFirstPersonMotionGpuTest {
                 assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(backendA.sourcePipeline()));
             }
         }
+    }
+
+    @Test
+    void actualCanonicalRawLibraryCompilesThroughThePinnedIncludeCallbacks() {
+        MetalShaderSourceLibraryTest.verifyCanonicalRawLibraryWithInitializedDevice();
     }
 
     @Test
