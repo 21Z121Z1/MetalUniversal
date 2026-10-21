@@ -27,6 +27,9 @@ final class MetalShaderSourceLibraryTest {
             var compile=MetalBackend.captureCompileInputs(source);
             var pipeline=RenderPipeline.builder().withLocation("source_contract/raw_source_library")
                     .withVertexShader(ENTITY).withFragmentShader(ENTITY)
+                    .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES)
+                    .withColorTargetState(com.mojang.renderpearl.api.pipeline.ColorTargetState.DEFAULT)
+                    .withCull(false)
                     .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").build();
             for(var stage:new ShaderType[]{ShaderType.VERTEX,ShaderType.FRAGMENT}) {
                 String glsl=compile.getShader(ENTITY,stage);assertNotNull(glsl);
