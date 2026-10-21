@@ -75,7 +75,17 @@ final class MetalShaderReloadLeaseEvidence {
                 if(compiled.isDone())compiled.join();
                 throw new IllegalStateException("Actual native include callback did not start");
             }
-            var reloading=context.computeOnClient(client->client.reloadResourcePacks());
+            var reloading=new CompletableFuture<Void>();
+            // Submit from this test thread without waiting for the client callback to return:
+            // a warm reload can reach the blocked close while reloadResourcePacks is still on stack.
+            var client=net.minecraft.client.Minecraft.getInstance();
+            client.execute(()->{
+                try {
+                    client.reloadResourcePacks().whenComplete((ignored,failure)->{
+                        if(failure==null)reloading.complete(null);else reloading.completeExceptionally(failure);
+                    });
+                } catch(Throwable failure) {reloading.completeExceptionally(failure);}
+            });
             try {
                 long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
                 // The render thread will wait in close; poll the owner's volatile state from this test thread.
