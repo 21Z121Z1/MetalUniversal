@@ -325,6 +325,11 @@ final class MetalPreviousVertexReplay {
             // texture/vertex discard, other elements and complete visibility remain unproven.
             return null;
         }
+        if (shader.equals("core/particle") && !MetalPreviousVertexHistory.hasNoZeroPreviousParticleAlpha(token)) {
+            // Current alpha cannot certify an accepted old particle. Zero or missing captured
+            // alpha reuses current-only ownership; nonzero alpha is not full visibility proof.
+            return null;
+        }
         float[] positions=MetalPreviousVertexHistory.matchedPreviousPositions(token);
         if(positions==null)return null;
         if(shader.equals("core/block")) {

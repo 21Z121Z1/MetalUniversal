@@ -72,6 +72,20 @@ final class MetalParticleQuadHistoryTest {
         assertEquals(11, match.positions()[0]);
     }
 
+    @Test void mergedProofRetainsEveryMatchedSourceInIdOrderAndCannotBeMutated() {
+        record Alpha(int value) {}
+        var a = new Alpha(0); var b = new Alpha(255);
+        var before = List.of(new MetalParticleQuadHistory.Batch<>(List.of(1L), new float[12], a),
+                new MetalParticleQuadHistory.Batch<>(List.of(2L), new float[12], b));
+        for (var ids : List.of(List.of(2L, 1L), List.of(1L, 2L))) {
+            var current = List.of(new MetalParticleQuadHistory.Batch<>(ids, new float[24], b));
+            var match = MetalParticleQuadHistory.remap(before, current, (fresh, old) -> true, (x, y) -> true)
+                    .getFirst().orElseThrow();
+            assertEquals(ids.getFirst() == 2L ? List.of(b, a) : List.of(a, b), match.previousSources());
+            assertThrows(UnsupportedOperationException.class, () -> match.previousSources().clear());
+        }
+    }
+
     private static MetalParticleQuadHistory.Batch<Proof> batch(Proof proof, long[] ids, float... values) {
         float[] positions = new float[ids.length * 12];
         for (int i = 0; i < ids.length; i++) Arrays.fill(positions, i * 12, (i + 1) * 12, values[i]);

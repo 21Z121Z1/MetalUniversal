@@ -138,6 +138,10 @@ ordinary staged 的 canonical ENTITY／ITEM／BLOCK／PARTICLE 增加一项必�
 
 对照使用原版颜色 shader 绘制同 Z 蓝色背景及 alpha 0→1／1→1 红色前景；ENTITY／ITEM 的纹理 cutout 先于 modulator，故零颜色贡献场景明确采用实际 alpha blending，不能把 opaque 写入误认成 discard。测试从真实 pass 冻结同 owner、generation、geometry、material 的源 uniform，执行 packaged motion MRT 和 native V4，另显式模拟仅移除上述 guard 的错误准入。GPU 与 CPU 事务结果必须绑定各自新 SHA；测试存在不等于验收通过，准确结果见当前整合 PR 的逐项证据。
 
+普通 staged PARTICLE 另冻结原版 `DefaultVertexFormat.PARTICLE` 的实际 packed `Color.a` 必要拒绝证据，与 Position 一起在 `freeVertexData` 释放真实切片前捕获；不保留源内存，也不从当前颜色补旧证据。旧 batch 含零 alpha 顶点或缺少这项捕获时，整个对应 draw 使用上述 current-only 路径。粒子 ID 跨 batch 合并／重排时，从复制旧几何的同一次匹配保留所有旧来源，并汇总其拒绝证据；不能只沿用一个代表 draw 的 alpha。证据随同一个源提交事务推进，失败／丢弃不推进；成功 current-only 源提交后的连续可见帧可恢复原有 exact 条件。
+
+该项先在 `75abf4c7` 复现：[双 macOS 原始运行](https://github.com/21Z121Z1/MetalUniversal/actions/runs/39564277833) 各 196 项中 7 项失败。真实 QUADS、固定 modulator=1／材质／位置／UV／索引与同 Z 蓝背景下，原版 particle shader 的旧红贡献为零，当前 768 像素却被标 exact 并被 V4 接受；分开的旧 A=0、B=255 合并成交换 ID 的当前 draw 时，A 的 384 像素同样误接收。修复控制保留真实分片捕获、覆盖源内存后释放、提交／丢弃／恢复、两种合并 ID 顺序与仅移除新 guard 的负例。新 SHA 的测试结果仍须独立核对。此 guard 对含零顶点的部分可见 draw 也保守拒绝；非零顶点不等于前帧可见，纹理内容／版本的现有跟踪保持独立，部分 alpha／cutout、同深度其他 element 和完整 previous-visible 仍未准入。其他 shader family 不据此扩展。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。

@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -14,8 +15,8 @@ final class MetalParticleQuadHistory {
         @Override public float[] positions() { return positions.clone(); }
     }
 
-    record Match<T>(float[] positions, T previousProof) {
-        Match { positions = positions.clone(); }
+    record Match<T>(float[] positions, T previousProof, List<T> previousSources) {
+        Match { positions = positions.clone(); previousSources = List.copyOf(previousSources); }
         @Override public float[] positions() { return positions.clone(); }
     }
 
@@ -34,6 +35,9 @@ final class MetalParticleQuadHistory {
             java.util.Arrays.fill(positions, Float.NaN);
             Map<Long, Integer> occurrences = new HashMap<>();
             T reference = null;
+            // Geometry and necessary visibility inputs must come from the same matched
+            // sources. A single representative cannot describe a merged draw's alpha.
+            Map<Integer, T> sources = new LinkedHashMap<>();
             boolean rejected = false;
             for (int quad = 0; quad < batch.ids.size(); quad++) {
                 long id = batch.ids.get(quad);
@@ -50,9 +54,11 @@ final class MetalParticleQuadHistory {
                     break;
                 }
                 reference = candidate;
+                sources.putIfAbsent(source.batch, candidate);
                 System.arraycopy(source.source.positions, source.offset * 12, positions, quad * 12, 12);
             }
-            result.add(rejected || reference == null ? Optional.empty() : Optional.of(new Match<>(positions, reference)));
+            result.add(rejected || reference == null ? Optional.empty()
+                    : Optional.of(new Match<>(positions, reference, new ArrayList<>(sources.values()))));
         }
         return List.copyOf(result);
     }

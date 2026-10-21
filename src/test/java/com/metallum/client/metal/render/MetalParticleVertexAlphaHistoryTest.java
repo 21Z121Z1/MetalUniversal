@@ -62,7 +62,16 @@ final class MetalParticleVertexAlphaHistoryTest {
         assertEquals(.25F, raw[0]); assertEquals(-.75F, raw[12]);
         assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(merged));
         assertNull(MetalPreviousVertexReplay.previousPositionsForSource(source, merged),
-                "B is the first remapped reference; A's accepted zero alpha must still reject the merged draw");
+                "A's accepted zero alpha must reject the merged draw regardless of the representative source");
+    }
+
+    @Test void mergingForwardIdsCannotBorrowTheFinalPositiveReference() {
+        previousTwo(0);
+        MetalPreviousVertexHistory.beginFrame(); var merged = stage(List.of(11L, 22L), true, 255, true);
+        assertNotNull(MetalPreviousVertexHistory.matchedPreviousPositions(merged));
+        assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(merged));
+        assertNull(MetalPreviousVertexReplay.previousPositionsForSource(source, merged),
+                "The final representative B is positive; A's independent old evidence must still reject the draw");
     }
 
     @Test void separateSwappedIdsPreserveBButCannotGiveItsHistoryToA() {

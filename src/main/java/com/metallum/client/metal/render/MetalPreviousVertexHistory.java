@@ -22,7 +22,7 @@ import java.util.Map;
  * Transactional history of the actual CPU-generated positions submitted by a staged draw.
  *
  * <p>Minecraft 26.3 keeps staged-draw vertex slices alive until freeVertexData during upload.
- * Capturing only Position at that boundary gives the next successful source frame the exact
+ * Capturing Position at that boundary gives the next successful source frame the exact
  * already-posed vertices without reimplementing living animation, boat paddles, or other CPU
  * deformation.</p>
  *
@@ -114,17 +114,21 @@ final class MetalPreviousVertexHistory {
                            com.mojang.renderpearl.api.textures.FilterMode magFilter,
                            int anisotropy, java.util.OptionalDouble maxLod) {}
 
+    /** Necessary rejection evidence only; nonzero vertex alpha does not prove previous visibility. */
+    private enum ParticleAlpha { NO_ZERO_VERTEX, ZERO_VERTEX_PRESENT }
+
     private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
                             @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds,
-                            @Nullable MetalSourceUniforms sourceUniforms, boolean particleBatch) {
+                            @Nullable MetalSourceUniforms sourceUniforms, boolean particleBatch,
+                            @Nullable ParticleAlpha particleAlpha) {
         Snapshot withTransform(final @Nullable DrawTransform value) {
-            return new Snapshot(signature, positions, value, surface, particleIds,sourceUniforms,particleBatch);
+            return new Snapshot(signature, positions, value, surface, particleIds,sourceUniforms,particleBatch,particleAlpha);
         }
         Snapshot withSurface(final @Nullable SurfaceIdentity value) {
-            return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms,particleBatch);
+            return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms,particleBatch,particleAlpha);
         }
         Snapshot withSourceUniforms(final @Nullable MetalSourceUniforms value) {
-            return new Snapshot(signature,positions,transform,surface,particleIds,value,particleBatch);
+            return new Snapshot(signature,positions,transform,surface,particleIds,value,particleBatch,particleAlpha);
         }
     }
 
@@ -211,12 +215,15 @@ final class MetalPreviousVertexHistory {
                 vertexCount,
                 indexCount
         );
-        stageSnapshot(token, signature, positions);
+        // Freeze the actual packed alpha before freeVertexData releases these slices. Never
+        // reconstruct old evidence from the current upload, nor retain the source allocation.
+        ParticleAlpha alpha = captureParticleAlpha(format, buffers);
+        stagePending(token.key(), new Snapshot(signature, new Positions(positions), null, null, null, null, false, alpha));
         if (measure) {
             long positionBytes = Math.multiplyExact((long) vertexCount, 3L * Float.BYTES);
             MetalFxMotionTelemetry.recordHistoryCapture(
                     vertexCount,
-                    positionBytes,
+                    positionBytes + (alpha == null ? 0L : vertexCount),
                     positionBytes,
                     System.nanoTime() - cpuStartNanos
             );
@@ -230,7 +237,7 @@ final class MetalPreviousVertexHistory {
     ) {
         if (frameOpen && token != null && signature != null && positions != null
                 && positions.length == signature.vertexCount() * 3) {
-            stagePending(token.key(), new Snapshot(signature, new Positions(positions), null, null, null,null,false));
+            stagePending(token.key(), new Snapshot(signature, new Positions(positions), null, null, null,null,false,null));
         } else if (frameOpen && token != null) {
             PENDING.remove(token.key());
             PARTICLE_MATCHES.remove(token.key().object());
@@ -263,7 +270,7 @@ final class MetalPreviousVertexHistory {
             return;
         }
         stagePending(token.key(), new Snapshot(s, snapshot.positions(), snapshot.transform(), snapshot.surface(),
-                List.copyOf(ids),snapshot.sourceUniforms(),positiveOnly));
+                List.copyOf(ids),snapshot.sourceUniforms(),positiveOnly,snapshot.particleAlpha()));
     }
 
     /** Attaches uniforms to the same pending draw/geometry transaction, never a separate history. */
@@ -298,6 +305,11 @@ final class MetalPreviousVertexHistory {
                     || PENDING.get(key).transform()==null || previousFor(key).transform()==null)return null;
         }
         return previousFor(token.key()).sourceUniforms();
+    }
+
+    static boolean hasNoZeroPreviousParticleAlpha(final @Nullable DrawToken token) {
+        return token != null && objectManifestMatches(token.key().object())
+                && previousFor(token.key()).particleAlpha() == ParticleAlpha.NO_ZERO_VERTEX;
     }
 
     /** Visibility resources are checked after the complete source manifest has been staged. */
@@ -439,12 +451,37 @@ final class MetalPreviousVertexHistory {
                 if (match.isEmpty()) continue;
                 Snapshot fresh = current.get(ordinal).proof(), old = match.get().previousProof();
                 matches.put(new DrawKey(object, ordinal), new Snapshot(fresh.signature(), new Positions(match.get().positions()),
-                        old.transform(), old.surface(), fresh.particleIds(), old.sourceUniforms(), true));
+                        old.transform(), old.surface(), fresh.particleIds(), old.sourceUniforms(), true,
+                        combinedParticleAlpha(match.get().previousSources())));
             }
         }
         Map<DrawKey, Snapshot> immutable = Map.copyOf(matches);
         PARTICLE_MATCHES.put(object, immutable);
         return immutable;
+    }
+
+    /** Reject the whole merged draw if any actual contributing old batch has zero/unknown alpha. */
+    private static @Nullable ParticleAlpha combinedParticleAlpha(final List<Snapshot> sources) {
+        boolean zero = false;
+        for (Snapshot source : sources) {
+            if (source.particleAlpha() == null) return null;
+            zero |= source.particleAlpha() == ParticleAlpha.ZERO_VERTEX_PRESENT;
+        }
+        return zero ? ParticleAlpha.ZERO_VERTEX_PRESENT : ParticleAlpha.NO_ZERO_VERTEX;
+    }
+
+    private static @Nullable ParticleAlpha captureParticleAlpha(final VertexFormat format, final List<ByteBuffer> buffers) {
+        var particle = com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE;
+        var color = format.getElement("Color");
+        if (!format.getElements().equals(particle.getElements()) || format.getVertexSize() != particle.getVertexSize()
+                || color == null || color.format() != GpuFormat.RGBA8_UNORM) return null;
+        // extractPositions has already validated every complete slice and the total vertex count.
+        boolean zero = false;
+        for (ByteBuffer buffer : buffers) {
+            for (int offset = buffer.position() + color.offset() + 3; offset < buffer.limit(); offset += format.getVertexSize())
+                zero |= buffer.get(offset) == 0;
+        }
+        return zero ? ParticleAlpha.ZERO_VERTEX_PRESENT : ParticleAlpha.NO_ZERO_VERTEX;
     }
 
     private static @Nullable List<MetalParticleQuadHistory.Batch<Snapshot>> particleBatches(

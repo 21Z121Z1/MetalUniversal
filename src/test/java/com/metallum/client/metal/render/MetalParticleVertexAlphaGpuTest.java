@@ -47,7 +47,7 @@ final class MetalParticleVertexAlphaGpuTest {
         library = MetalShaderSourceLibraryTest.rawLibrary(false, false);
         device = new MetalDevice(library, new GpuDebugOptions(2, true, true, true),
                 MetalNativeBridge.metallum_create_system_default_device(), MemorySegment.NULL,
-                "Previous zero contribution", MemorySegment.NULL);
+                "Particle source alpha history", MemorySegment.NULL);
         encoder = device.commandEncoder();
         MetalPreviousVertexHistory.reset();
     }
@@ -60,11 +60,11 @@ final class MetalParticleVertexAlphaGpuTest {
         if (library != null) library.close();
     }
 
-    @ParameterizedTest(name = "particle vertex alpha: pair={0}, old A alpha={1}")
-    @CsvSource({"false,0", "false,255", "true,0", "true,255"})
-    void actualQuadAlphaAndCrossBatchIdsCannotBorrowSameDepthBackground(boolean pairScene, int oldAlpha) throws Exception {
+    @ParameterizedTest(name = "particle vertex alpha: pair={0}, old A alpha={1}, reversed IDs={2}")
+    @CsvSource({"false,0,true", "false,255,true", "true,0,true", "true,255,true", "true,0,false", "true,255,false"})
+    void actualQuadAlphaAndCrossBatchIdsCannotBorrowSameDepthBackground(boolean pairScene, int oldAlpha, boolean reverseIds) throws Exception {
         var format = DefaultVertexFormat.PARTICLE;
-        var source = RenderPipeline.builder().withLocation("particle_vertex_alpha_gpu/" + pairScene + oldAlpha)
+        var source = RenderPipeline.builder().withLocation("particle_vertex_alpha_gpu/" + pairScene + oldAlpha + reverseIds)
                 .withVertexShader("core/particle").withFragmentShader("core/particle")
                 .withVertexBinding(0, format).withPrimitiveTopology(PrimitiveTopology.QUADS).withCull(false)
                 .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
@@ -126,7 +126,7 @@ final class MetalParticleVertexAlphaGpuTest {
                 // Only A's source vertex alpha changes. The old A and B are separate real draws.
                 ByteBuffer dynamic = dynamic(1);
                 List<List<Long>> groups = pairScene && frame == 0 ? List.of(List.of(11L), List.of(22L))
-                        : List.of(pairScene ? List.of(22L, 11L) : List.of(11L));
+                        : List.of(pairScene ? reverseIds ? List.of(22L, 11L) : List.of(11L, 22L) : List.of(11L));
                 var frameBuffers = new ArrayList<GpuBuffer>();
                 var tokens = new ArrayList<MetalPreviousVertexHistory.DrawToken>();
                 try (var du = device.createBuffer(() -> "unchanged modulator one", GpuBuffer.USAGE_UNIFORM, dynamic)) {
@@ -254,7 +254,7 @@ final class MetalParticleVertexAlphaGpuTest {
             }
             String result = new com.google.gson.Gson().toJson(Map.ofEntries(
                     Map.entry("shader", "particle"), Map.entry("pairScene", pairScene), Map.entry("oldVertexAlpha", oldAlpha),
-                    Map.entry("modulatorAlpha", 1), Map.entry("sameOwnerAndGeneration", true), Map.entry("sameGeometryAndMaterial", true),
+                    Map.entry("modulatorAlpha", 1), Map.entry("reverseIds", reverseIds), Map.entry("sameOwnerAndGeneration", true), Map.entry("sameGeometryAndMaterial", true),
                     Map.entry("backgroundZ", .5F), Map.entry("sourceCommit", System.getenv().getOrDefault("METALLUM_SOURCE_SHA", "local")),
                     Map.entry("sourceFrames", sourceFrames), Map.entry("results", results)));
             Files.writeString(dir.resolve("result.json"), result);

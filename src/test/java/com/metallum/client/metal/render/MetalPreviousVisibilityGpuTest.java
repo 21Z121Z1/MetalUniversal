@@ -137,7 +137,8 @@ final class MetalPreviousVisibilityGpuTest {
                 try (var du = device.createBuffer(() -> "actual frame modulator", GpuBuffer.USAGE_UNIFORM, dynamic)) {
                     MetalPreviousVertexHistory.beginFrame();
                     var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
-                    MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                    if (shader.equals("particle")) MetalParticleAlphaFixtures.capture(token, format, PrimitiveTopology.TRIANGLES, mesh, 6, 6);
+                    else MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
                             format.getElements(), format.getVertexSize(), PrimitiveTopology.TRIANGLES, 6, 6),
                             MetalPreviousVertexHistory.extractPositions(format, java.util.List.of(mesh), 6));
                     try (var pass = encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Actual canonical background and foreground")

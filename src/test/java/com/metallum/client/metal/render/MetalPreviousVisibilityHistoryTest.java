@@ -89,7 +89,11 @@ final class MetalPreviousVisibilityHistoryTest {
         MetalPreviousVertexHistory.beginFrame();
         var token = MetalPreviousVertexHistory.reserveDraw(OWNER, source);
         var format = source.getVertexFormatBinding(0);
-        MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+        if (source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/particle")) {
+            var mesh = MetalParticleAlphaFixtures.bytes(format.getVertexSize()); mesh.putFloat(8, .5F);
+            mesh.putInt(format.getElement("Color").offset(), -1);
+            MetalParticleAlphaFixtures.capture(token, format, PrimitiveTopology.TRIANGLES, mesh, 1, 3);
+        } else MetalPreviousVertexHistory.stageSnapshot(token, new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
                 format.getElements(), format.getVertexSize(), PrimitiveTopology.TRIANGLES, 1, 3), POSITIONS);
         MetalPreviousVertexHistory.stageDrawTransform(token,
                 new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(), new Matrix4f()));
