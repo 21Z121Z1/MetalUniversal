@@ -990,7 +990,11 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                     && program.source().vertexBindings().getFirst().elements().getFirst().semantic().equals("Position"),
                             "Particle source semantics/variant bypassed the real hook: "+program);
                 }
-                if (suffix.equals("opaque_particle") || suffix.equals("oit_accumulate_particle")) {
+                if (suffix.equals("opaque_particle")) {
+                    require(programs.stream().mapToLong(row -> row.encodedMotionDraws()).sum() == 0
+                                    && programs.stream().mapToLong(row -> row.encodedDisocclusionDraws()).sum() > 0,
+                            "Opaque particles without accepted original-pixel ownership must encode current-only, never exact history: "+programs);
+                } else if (suffix.equals("oit_accumulate_particle")) {
                     require(programs.stream().mapToLong(row -> row.encodedMotionDraws()).sum() > 0,
                             "Particle hook captured ownership but never encoded actual GPU motion: "+suffix);
                 }

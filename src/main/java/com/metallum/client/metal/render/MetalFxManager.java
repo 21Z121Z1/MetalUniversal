@@ -2123,7 +2123,9 @@ public final class MetalFxManager {
             boolean surfaceMatches = MetalPreviousVertexHistory.matchingSurfaceManifest(replay.previousVertexToken());
             boolean rasterHistorySupported = !MetalEntityMotionPipeline.usesPreviousDepthBias(prepared.pipeline(),prepared.depthAttachmentPresent())
                     || (prepared.raster().biased() && prepared.raster().reconstructible());
-            boolean ownedInvalid = historyReset || !replay.sample().hasPrevious() || !surfaceMatches || !rasterHistorySupported;
+            boolean pixelOwnershipUnproven=MetalPreviousVertexReplay.previousPixelOwnershipUnproven(prepared.pipeline());
+            boolean ownedInvalid = historyReset || !replay.sample().hasPrevious() || !surfaceMatches || !rasterHistorySupported
+                    || pixelOwnershipUnproven;
             if (!firstPerson && !MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
                 MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform");
                 continue;
@@ -2142,7 +2144,8 @@ public final class MetalFxManager {
                 continue;
             }
             if (ownedInvalid) {
-                String reason = !rasterHistorySupported ? "source-previous-depth-bias-unrepresentable"
+                String reason = pixelOwnershipUnproven ? "source-previous-pixel-ownership-unproven"
+                        : !rasterHistorySupported ? "source-previous-depth-bias-unrepresentable"
                         : !surfaceMatches ? "source-material-history-unavailable"
                         : "source-history-unavailable-current-ownership-only";
                 MetalEntityMotionCapture.failExactSample(replay.sample(), reason);

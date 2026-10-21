@@ -190,7 +190,9 @@ final class MetalParticlePartialAlphaGpuTest {
                         ByteBuffer oldDepth = bytes(acceptedDepth.length); oldDepth.put(acceptedDepth).flip();
                         encoder.writeToTexture(oldWorld, oldDepth, 0, 0, 0, 0, W, H);
                         for (int control = 0; control < (c.rejectPartialInputs() && frame == 1 ? 2 : 1); control++) {
-                            // Explicitly emulate removing only the new guard, retaining the same old geometry/depth/material.
+                            // Legacy input-guard control retains the same old geometry/depth/material.
+                            // Opaque sources additionally require pixel ownership; its isolated control
+                            // uses full inputs in MetalOpaqueParticleHistoryGpuTest.
                             boolean bypass = control == 1;
                             var replayBuffers=new ArrayList<GpuBuffer>();
                             var previousInputs=new ArrayList<MetalPreviousVertexHistory.ParticleAlpha>();
@@ -234,7 +236,7 @@ final class MetalParticlePartialAlphaGpuTest {
                                 byte[] tags = readback(valid), pairs = readback(pair), xy = readback(flow);
                                 byte[] react = readback(reactive), reject = readback(disocclusion), resolved = readback(merged);
                                 int owned=0,invalid=0,exactPixels=0,fullyRejected=0,wrong=0,falseAccepted=0,oldInvisible=0,visibleHistoryRejected=0;
-                                boolean expectInvalid=c.rejectPartialInputs() && (!c.recovery() || frame<=2) && !bypass;
+                                boolean expectInvalid=(c.opaque() || c.rejectPartialInputs() && (!c.recovery() || frame<=2)) && !bypass;
                                 for (int p = 0; p < PIXELS; p++) {
                                     boolean covered=contribution[p];
                                     if (covered) {

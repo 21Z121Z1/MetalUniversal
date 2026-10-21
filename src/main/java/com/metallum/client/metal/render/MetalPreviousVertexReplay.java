@@ -312,6 +312,7 @@ final class MetalPreviousVertexReplay {
 
     static float @Nullable [] previousPositionsForSource(final RenderPipeline source,
             final MetalPreviousVertexHistory.DrawToken token) {
+        if(previousPixelOwnershipUnproven(source))return null;
         String shader=source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath();
         var previous=MetalPreviousVertexHistory.matchedPreviousSourceUniforms(token);
         if ((shader.equals("core/entity") || shader.equals("core/item") || shader.equals("core/block"))
@@ -353,6 +354,15 @@ final class MetalPreviousVertexReplay {
             }
         }
         return positions;
+    }
+
+    /** No accepted original-color pixel owner/generation/depth pair exists for this path yet.
+     * Matching geometry, unit alpha and coincident depth cannot prove that its old element won.
+     * This is unconditional, including continuous visible elements; current-only remains usable.
+     */
+    static boolean previousPixelOwnershipUnproven(final RenderPipeline source) {
+        return "minecraft".equals(source.getLocation().getNamespace())
+                && "pipeline/opaque_particle".equals(source.getLocation().getPath());
     }
 
     private static @Nullable Plan planPositions(final RenderPipeline source,

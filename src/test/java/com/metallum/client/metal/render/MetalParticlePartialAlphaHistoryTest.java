@@ -21,7 +21,26 @@ final class MetalParticlePartialAlphaHistoryTest {
         assertEquals(24,cases().size());assertEquals(24,cases().stream().map(MetalParticlePartialAlphaCases.Case::identity).distinct().count());
         for(boolean opaque:List.of(false,true)) {
             var p=MetalParticlePartialAlphaCases.pipeline(opaque);
+            assertEquals(opaque,MetalPreviousVertexReplay.previousPixelOwnershipUnproven(p));
             System.out.println("CANONICAL_PARTICLE_PIPELINE "+p.getLocation()+" depth="+p.getDepthStencilState()+" color="+p.getColorTargetStates());
+        }
+    }
+    static List<MetalParticlePartialAlphaCases.Groups> opaqueGroups() {return List.of(MetalParticlePartialAlphaCases.Groups.values());}
+    @ParameterizedTest @MethodSource("opaqueGroups")
+    void opaqueFullInputsCannotProvePixelsAcrossBatchRemappingOrFailedFrames(MetalParticlePartialAlphaCases.Groups group) {
+        var c=new MetalParticlePartialAlphaCases.Case("opaque_full",true,255,255,1,255,1,255,group,false);
+        var p=MetalParticlePartialAlphaCases.pipeline(true);
+        MetalPreviousVertexHistory.beginFrame();stage(c,0);MetalPreviousVertexHistory.commitSubmittedFrame();
+        for(boolean accept:List.of(false,true,true)) {
+            var pending=accept?c:new MetalParticlePartialAlphaCases.Case("failed_partial",true,255,255,1,128,1,255,group,false);
+            MetalPreviousVertexHistory.beginFrame();var current=stage(pending,1);
+            for(var t:current) {
+                assertNotNull(MetalPreviousVertexHistory.matchedPreviousPositions(t));
+                assertEquals(new MetalPreviousVertexHistory.ParticleAlpha(255,255,true),MetalPreviousVertexHistory.matchedPreviousParticleAlpha(t));
+                assertNull(MetalPreviousVertexReplay.previousPositionsForSource(p,t));
+                assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(t,false));
+            }
+            if(accept)MetalPreviousVertexHistory.commitSubmittedFrame();else MetalPreviousVertexHistory.discardFrame();
         }
     }
     @ParameterizedTest @MethodSource("cases")
@@ -33,10 +52,13 @@ final class MetalParticlePartialAlphaHistoryTest {
         MetalPreviousVertexHistory.commitSubmittedFrame();
         if(c.recovery()) {
             MetalPreviousVertexHistory.beginFrame();var next=stage(c,1);
-            for(var t:next)assertNotNull(MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(c.opaque()),t));
+            for(var t:next) {
+                var positions=MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(c.opaque()),t);
+                if(c.opaque())assertNull(positions,"Unit inputs do not prove old pixel ownership");else assertNotNull(positions);
+            }
         }
-        assertEquals(c.rejectPartialInputs(),reject,"Partial inputs are not a previous-sample proof: "+c);
-        assertEquals(c.rejectPartialInputs(),discardDidNotAdvance,"Discard must retain accepted old input evidence: "+c);
+        assertEquals(c.opaque() || c.rejectPartialInputs(),reject,"Partial inputs are not a previous-sample proof: "+c);
+        assertEquals(c.opaque() || c.rejectPartialInputs(),discardDidNotAdvance,"Discard must retain accepted old input evidence: "+c);
     }
     static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> modulators() {
         var out=new java.util.ArrayList<org.junit.jupiter.params.provider.Arguments>();
@@ -77,6 +99,7 @@ final class MetalParticlePartialAlphaHistoryTest {
                 .filter(p->p.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/particle"))
                 .map(p->p.getLocation()+" "+p.getShaderDefines()).toList());
         assertEquals("minecraft:pipeline/oit_accumulate_particle",oit.getLocation().toString());
+        assertFalse(MetalPreviousVertexReplay.previousPixelOwnershipUnproven(oit));
         for(int oldAlpha:new int[]{0,26,255})for(float oldModulator:new float[]{0,.1F,1}) {
             MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();
             var c=new MetalParticlePartialAlphaCases.Case("oit_unchanged",false,oldAlpha,oldAlpha,oldModulator,255,1,255,MetalParticlePartialAlphaCases.Groups.SINGLE,false);
