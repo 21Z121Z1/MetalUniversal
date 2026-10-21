@@ -84,6 +84,15 @@ jobs:
                   for failure in case.findall('failure')+case.findall('error'):print(case.attrib,(failure.text or '')[:32768])
           print('PARTICLE_OWNERSHIP_EVIDENCE_GZIP_BASE64 '+base64.b64encode(gzip.compress(json.dumps(data,sort_keys=True).encode())).decode())
           pathlib.Path('build/agent-evidence/pixel-ownership/envelope.json').write_text(json.dumps(data,indent=2)+'\n')
+          expected={'MetalParticlePixelOwnershipGpuTest':1,'MetalParticlePixelOwnershipPrototypeTest':7,'MetalParticlePixelOwnershipRasterTest':22}
+          actual={s['name'].rsplit('.',1)[-1]:int(s['tests']) for s in data['junit']}
+          if actual!=expected or any(int(s[k]) for s in data['junit'] for k in ('failures','errors','skipped')):
+              raise SystemExit('The explicit diagnostic entry must execute all30 tests without failures/errors/skips')
+          cases=[e['content'] for p,e in data['files'].items() if '/particle-pixel-ownership-prototype/' in p]
+          if len(cases)!=22 or len({c['scene'] for c in cases})!=22 or not all(c['passed'] for c in cases):
+              raise SystemExit('All22 prototype case identities and result files must survive independently')
+          if not pathlib.Path('build/agent-evidence/pixel-ownership/resource-costs.json').is_file():
+              raise SystemExit('Native bounded-resolution resource evidence is missing')
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -93,5 +102,8 @@ jobs:
             build/agent-evidence/pixel-ownership/
             build/agent-evidence/motion-producers/particle-pixel-ownership*/
             build/test-results/hostedMetalParticleOwnershipPrototypeTest/
+            build/agent-evidence/*hs_err_pid*.log
+            hs_err_pid*.log
+            replay_pid*.log
           if-no-files-found: error
           retention-days: 14

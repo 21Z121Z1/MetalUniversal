@@ -18,6 +18,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Original canonical color + identical-depth background -> staged history -> packaged MRT -> native V4. */
 @EnabledOnOs(OS.MAC)
+@EnabledIfSystemProperty(named="metallum.validation.pixelOwnershipPrototype",matches="true")
 final class MetalParticlePixelOwnershipGpuTest {
     private static final int W = 64, H = 48, PIXELS = W * H;
     private static final Set<Path> CASE_DIRECTORIES = new HashSet<>();
