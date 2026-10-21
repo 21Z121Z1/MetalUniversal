@@ -23,11 +23,11 @@ final class MetalParticlePixelOwnershipPrototype {
 
                 // Diagnostic identity follows the exact uploaded primitive's vertex indices.
                 layout(std140) uniform ProofIdentity { uvec4 proofIds[8]; };
-                flat out uvec4 proofElement;
-                void main() { metallumOriginalMain(); proofElement=proofIds[gl_VertexID]; }
+                layout(location=15) flat out uvec4 proofElement;
+                void main() { metallumOriginalMain(); proofElement=proofIds[gl_VertexIndex]; }
                 """ : """
 
-                flat in uvec4 proofElement;
+                layout(location=15) flat in uvec4 proofElement;
                 layout(location=1) out uvec4 proofOwner;
                 // A discard in the unchanged original main discards BOTH outputs.
                 void main() { metallumOriginalMain(); proofOwner=proofElement; }
@@ -128,7 +128,7 @@ final class MetalParticlePixelOwnershipPrototype {
     static final String RESOLVE_VERTEX="""
             #version 330
             void main() {
-                vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);
+                vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);
                 gl_Position=vec4(p*2.0-1.0,0,1);
             }
             """;

@@ -18,7 +18,8 @@ final class MetalParticlePixelOwnershipPrototypeTest {
             for(var stage:List.of(ShaderType.VERTEX,ShaderType.FRAGMENT)) {
                 String original=raw.getShader(source,stage);assertNotNull(original);
                 String modified=MetalParticlePixelOwnershipPrototype.instrument(original,stage);
-                int tail=modified.indexOf(stage==ShaderType.VERTEX?"// Diagnostic identity":"flat in uvec4 proofElement;");
+                int tail=modified.indexOf(stage==ShaderType.VERTEX?"// Diagnostic identity":"layout(location=15) flat in uvec4 proofElement;");
+                assertFalse(java.util.regex.Pattern.compile("location\\s*=\\s*15").matcher(original).find(),"The canonical source must not already own the diagnostic varying location");
                 String restored=modified.substring(0,tail).stripTrailing().replace("void metallumOriginalMain()","void main()");
                 assertEquals(original.stripTrailing(),restored);
                 if(stage==ShaderType.FRAGMENT)assertTrue(modified.lastIndexOf("metallumOriginalMain();")>modified.indexOf("discard"));
@@ -28,7 +29,7 @@ final class MetalParticlePixelOwnershipPrototypeTest {
     }
     @Test void inputIdentityKeepsAll64BitsAndUnknownOrAliasedEmittersBecomeUnknown() {
         var registry=new MetalParticlePixelOwnershipPrototype.Registry();var b=new Object();
-        long id=(1L<<40)+11,generation=(1L<<35)+17;
+        long id=(1L<<40)+(1L<<24)+11,generation=(1L<<35)+(1L<<24)+17;
         var h=registry.capture(b,id,generation);var data=registry.freeze(List.of(h)).order(ByteOrder.nativeOrder());
         assertEquals(id,Integer.toUnsignedLong(data.getInt(0))|(Integer.toUnsignedLong(data.getInt(4))<<32));
         assertEquals(generation,Integer.toUnsignedLong(data.getInt(8))|(Integer.toUnsignedLong(data.getInt(12))<<32));

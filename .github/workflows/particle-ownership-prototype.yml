@@ -41,6 +41,8 @@ jobs:
             export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
           fi
           test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          # No renderer, shader asset, native ABI or presentation implementation changes in this prototype.
+          test "$(git rev-parse HEAD:src/main)" = ac0e01671e4d47cd3ae7259959f126bd8eeb7acf
           mkdir -p build/agent-evidence/pixel-ownership
           git rev-parse HEAD > build/agent-evidence/pixel-ownership/source.txt
           xcodebuild -version > build/agent-evidence/pixel-ownership/xcode.txt
@@ -68,7 +70,10 @@ jobs:
         run: |
           python3 - <<'PY'
           import base64,gzip,hashlib,json,os,pathlib,xml.etree.ElementTree as ET
-          data={'sourceCommit':os.environ['METALLUM_SOURCE_SHA'],'prototypeOnly':True,'files':{},'junit':[]}
+          import subprocess
+          production_tree=subprocess.check_output(['git','rev-parse','HEAD:src/main'],text=True).strip()
+          if production_tree!='ac0e01671e4d47cd3ae7259959f126bd8eeb7acf':raise SystemExit('Production source tree changed during a diagnostic-only prototype')
+          data={'sourceCommit':os.environ['METALLUM_SOURCE_SHA'],'prototypeOnly':True,'unchangedProductionTree':production_tree,'productionReference':'afb17c8c995de8f2adce7537115b96fced7c5db6','files':{},'junit':[]}
           paths=sorted(pathlib.Path('build/agent-evidence/motion-producers').glob('particle-pixel-ownership*/*/result.json'))
           paths += [p for p in [pathlib.Path('build/agent-evidence/pixel-ownership/resource-costs.json')] if p.is_file()]
           for p in paths:

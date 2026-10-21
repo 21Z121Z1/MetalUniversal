@@ -34,7 +34,7 @@ final class MetalParticlePixelOwnershipRasterTest {
     private final MetalEntityMotionCapture.Sample sample=new MetalEntityMotionCapture.Sample((1L<<48)+71,33,new Matrix4f(),new Matrix4f(),FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER);
     private GpuBuffer projection,dynamic,fog,indices;private MetalGpuTexture white;private GpuTextureView whiteView;private GpuSampler sampler;
     private Path directory;private String stamp;private int w=64,h=48;
-    private static final long GENERATION=(1L<<35)+17;
+    private static final long GENERATION=(1L<<35)+(1L<<24)+17;
     private static final class Element {
         final Object emitter=new Object();final long id;final boolean red;
         Element(long id,boolean red){this.id=id;this.red=red;}
@@ -109,7 +109,7 @@ final class MetalParticlePixelOwnershipRasterTest {
         directory=Path.of("build/agent-evidence/motion-producers/particle-pixel-ownership-prototype/"+scene+"_"+w+"x"+h+"_u64_owner_u64_generation");Files.createDirectories(directory);
         var results=new ArrayList<Map<String,Object>>();var evidence=new LinkedHashMap<String,Object>();
         evidence.put("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local"));evidence.put("scene",scene);evidence.put("prototypeOnly",true);evidence.put("sourceStamp",stamp);evidence.put("results",results);evidence.put("passed",false);
-        var a=new Element((1L<<40)+11,false);var b=new Element((1L<<40)+22,true);
+        var a=new Element((1L<<40)+(1L<<24)+11,false);var b=new Element((1L<<40)+(1L<<24)+22,true);
         evidence.put("elementIds",List.of(a.id,b.id));evidence.put("initialGeneration",GENERATION);evidence.put("pipeline",original.getLocation().toString());evidence.put("depthState",original.getDepthStencilState().toString());
         evidence.put("identityProvenance","Controlled emitter ledger -> actual freed-slice geometry/index order -> flat integer vertex output -> original fragment main/discard -> winner owner MRT. No CPU-written owner image.");
         evidence.put("failureAndResetBoundary","failed_recover injects source acceptance failure after successful GPU completion. reload_epoch is the diagnostic invalidation entry, not a live Minecraft Configs reload. Native GPU faults are not forced.");
