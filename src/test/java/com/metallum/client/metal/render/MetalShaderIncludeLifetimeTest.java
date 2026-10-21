@@ -47,6 +47,9 @@ final class MetalShaderIncludeLifetimeTest {
         try(var compiler=new GlslCompiler(true,true)) {
             for(int i=0;i<8;i++) {
                 var defines=RenderPipeline.builder().withLocation("callback_lifetime/"+i)
+                        .withVertexShader(id).withFragmentShader(id)
+                        .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES)
+                        .withColorTargetState(com.mojang.renderpearl.api.pipeline.ColorTargetState.DEFAULT)
                         .withShaderDefine("CALLBACK_VARIANT",i).build().getShaderDefines();
                 var before=fingerprint(ShadercIncludeResult.create(include.includeResultPtr()).content());
                 try(var module=compiler.compileToSpv(id.toString(),glsl,ShaderType.VERTEX,defines,source)) {
