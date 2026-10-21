@@ -1,5 +1,30 @@
 import Foundation
 
+private func testFrameMotionUsesPreviousColorPixelCoordinates() throws {
+    for (width, height) in [(1537, 863), (2561, 1441), (853, 479)] {
+        let scale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(width: width, height: height)
+        let previousUV = SIMD2<Float>(0.125, 0.25)
+        let currentUV = SIMD2<Float>(0.75, 0.875)
+        let ndc = (previousUV - currentUV) * 2
+        let previousPixel = previousUV * SIMD2(Float(width), Float(height))
+        let currentPixel = currentUV * SIMD2(Float(width), Float(height))
+        let displacement = ndc * scale
+        try expect(displacement == previousPixel - currentPixel,
+                   "NDC displacement must address the independent previous color pixel coordinates")
+        // Same color extent with multiple lower-resolution/bounded motion
+        // allocations. Their texel count must never shrink the displacement.
+        for divisor in [2, 3, 4] {
+            let depthScale = SIMD2(Float(width / divisor) * 0.5, Float(height / divisor) * 0.5)
+            let wrong = ndc * depthScale
+            try expect(abs(wrong.x - displacement.x) > 100 && abs(wrong.y - displacement.y) > 100,
+                       "Negative control: depth/motion allocation units must be detectably wrong")
+        }
+        let pixelMotion = SIMD2<Float>(-10, -10)
+        try expect(abs((pixelMotion / SIMD2(Float(width), Float(height)) * 2 * scale).x + 10) < 0.00001,
+                   "SDK current down/right motion maps back to previous color pixels")
+    }
+}
+
 private func assertScalerLinkStatusContract() {
     precondition(MetalFxFrameInterpolatorScalerLinkStatus.unavailable.rawValue == 0)
     precondition(MetalFxFrameInterpolatorScalerLinkStatus.metal3Linked.isLinked)
@@ -8,6 +33,23 @@ private func assertScalerLinkStatusContract() {
     precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal3LinkRejected.isLinked)
     precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4Standalone.isLinked)
     precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4LinkRejected.isLinked)
+}
+
+private func testFrameCameraContract() throws {
+    try expect(MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                 aspect: 16.0/9.0, jitterX: -0.5, jitterY: 0.5),
+               "Production camera with pixel jitter must be accepted")
+    let invalidValues: [Float] = [0, -1, 180, .nan, .infinity]
+    for invalid in invalidValues {
+        try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: invalid, near: 0.05, far: 1000,
+                                                      aspect: 1, jitterX: 0, jitterY: 0), "Invalid perspective FOV must be rejected")
+    }
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 1, far: 1,
+                                                  aspect: 1, jitterX: 0, jitterY: 0), "Degenerate depth range must be rejected")
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                  aspect: 0, jitterX: 0, jitterY: 0), "Zero aspect must be rejected")
+    try expect(!MetalFxFrameCameraContract.isValid(fieldOfViewDegrees: 70, near: 0.05, far: 1000,
+                                                  aspect: 1, jitterX: .nan, jitterY: 0), "Nonfinite jitter must be rejected")
 }
 
 private enum TestFailure: Error, CustomStringConvertible {
@@ -313,6 +355,8 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("frame camera scalar contract", testFrameCameraContract),
+            ("frame motion previous-color pixel units", testFrameMotionUsesPreviousColorPixelCoordinates),
             ("native scaler-link status", assertScalerLinkStatusContract),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),

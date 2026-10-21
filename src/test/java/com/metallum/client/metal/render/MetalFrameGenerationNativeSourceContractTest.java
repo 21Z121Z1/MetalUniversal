@@ -12,12 +12,12 @@ final class MetalFrameGenerationNativeSourceContractTest {
     @Test
     void motionDepthResampleStaysInTextureCoordinateOrientation() throws Exception {
         String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
-        int start = nativeSource.indexOf("private func buildMotionDepthResamplePipeline(");
+        int start = nativeSource.indexOf("func buildMotionDepthResamplePipeline(");
         int end = nativeSource.indexOf("private func buildDepthResampleState", start);
         assertTrue(start >= 0 && end > start);
 
         String block = nativeSource.substring(start, end);
-        assertTrue(block.contains("device.makeLibrary(source: copyMslSource(), options: nil)"));
+        assertTrue(block.contains("device.makeLibrary(source: copyMslSource(depthAsColor: depthFormat == .r32Float), options: nil)"));
         assertFalse(block.contains("device.makeLibrary(source: presentMslSource(), options: nil)"));
     }
 

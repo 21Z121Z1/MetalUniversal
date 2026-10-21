@@ -63,25 +63,22 @@ final class MetalFxMath {
         );
     }
 
-    /**
-     * Offsets the raster so the sampled position inside each pixel matches the
-     * {@code pixelJitter} that is reported to {@code jitterOffsetX/Y}.
-     *
-     * <p>The reference convention (Apple's MetalFX sample, FSR2's
-     * {@code translate(jitter) * proj}, and the porting skill) is
-     * {@code clip.xy += clipJitter * clip.w}. Folding that into the
-     * projection's third column is only equivalent when {@code w == +z_view},
-     * which holds for D3D left-handed projections — that is where the
-     * widespread {@code proj[2][0] += ...} idiom comes from. Minecraft's JOML
-     * perspective is right handed ({@code m23 == -1}, so {@code w == -z_view}),
-     * which flips the sign of the column edit. Subtracting restores the
-     * reference offset: with pixel jitter {@code (0.25, -0.5)} the raster now
-     * moves {@code (+0.25, -0.5)} screen pixels (x right, y down), matching the
-     * value handed to MetalFX instead of negating it.
+    /** Applies a constant clip-space translation to the complete world projection.
+     * Bob/hurt and portal transforms can change every component of its W row;
+     * editing only the perspective's third column would move samples unevenly.
+     * Z and W remain unchanged. Derived from the audited source-contract branch.
      */
     static void applyProjectionJitter(final Matrix4f projection, final Vector2f clipJitter) {
-        projection.m20(projection.m20() - clipJitter.x);
-        projection.m21(projection.m21() - clipJitter.y);
+        // Apply a translation in clip space after bob/hurt/portal has changed W.
+        // All columns participate in clip.xy += jitter * clip.w.
+        projection.m00(projection.m00() + clipJitter.x * projection.m03());
+        projection.m01(projection.m01() + clipJitter.y * projection.m03());
+        projection.m10(projection.m10() + clipJitter.x * projection.m13());
+        projection.m11(projection.m11() + clipJitter.y * projection.m13());
+        projection.m20(projection.m20() + clipJitter.x * projection.m23());
+        projection.m21(projection.m21() + clipJitter.y * projection.m23());
+        projection.m30(projection.m30() + clipJitter.x * projection.m33());
+        projection.m31(projection.m31() + clipJitter.y * projection.m33());
     }
 
     /**
@@ -106,6 +103,42 @@ final class MetalFxMath {
         }
         float ratio = displayAspect / renderAspect;
         projection.m00(projection.m00() * ratio);
+        projection.m10(projection.m10() * ratio);
+        projection.m20(projection.m20() * ratio);
+        projection.m30(projection.m30() * ratio);
+    }
+
+    static float verticalFieldOfViewDegrees(final Matrix4fc projection) {
+        float focalLength = projection.m11();
+        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)
+                || projection.m23() != -1.0F || projection.m33() != 0.0F) {
+            return Float.NaN;
+        }
+        float fieldOfView = (float) Math.toDegrees(2.0D * Math.atan(1.0D / focalLength));
+        // A narrow perspective may be a real zoom. Never replace it with a
+        // guessed normal FOV; invalid initialization is represented by NaN.
+        return fieldOfView > 0.0F && fieldOfView < 180.0F && Float.isFinite(fieldOfView)
+                ? fieldOfView : Float.NaN;
+    }
+
+    static boolean isRigidViewTransform(final Matrix4fc matrix) {
+        if (!isFinite(matrix) || Math.abs(matrix.m03()) > 1.0E-5F
+                || Math.abs(matrix.m13()) > 1.0E-5F || Math.abs(matrix.m23()) > 1.0E-5F
+                || Math.abs(matrix.m33() - 1.0F) > 1.0E-5F) {
+            return false;
+        }
+        for (int first = 0; first < 3; first++) {
+            for (int second = first; second < 3; second++) {
+                float dot = 0;
+                for (int row = 0; row < 3; row++) {
+                    dot += matrix.get(first, row) * matrix.get(second, row);
+                }
+                if (Math.abs(dot - (first == second ? 1.0F : 0.0F)) > 1.0E-4F) {
+                    return false;
+                }
+            }
+        }
+        return Math.abs(matrix.determinant3x3() - 1.0F) <= 1.0E-4F;
     }
 
     static float verticalFieldOfViewDegrees(final Matrix4fc projection, final float fallback) {
@@ -174,8 +207,8 @@ final class MetalFxMath {
 
         Vector4f currentClip = new Vector4f(world).mul(currentViewProjection);
         Vector4f previousClip = new Vector4f(world).mul(previousViewProjection);
-        if (!Float.isFinite(currentClip.w) || Math.abs(currentClip.w) < 1.0E-6F
-                || !Float.isFinite(previousClip.w) || Math.abs(previousClip.w) < 1.0E-6F) {
+        if (!MetalMotionContract.validHomogeneousW(currentClip.w)
+                || !MetalMotionContract.validHomogeneousW(previousClip.w)) {
             return new Vector2f();
         }
         currentClip.div(currentClip.w);

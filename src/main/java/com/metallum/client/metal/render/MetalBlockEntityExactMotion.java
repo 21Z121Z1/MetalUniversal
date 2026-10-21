@@ -7,9 +7,14 @@ import net.minecraft.client.renderer.blockentity.state.BellRenderState;
 import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.client.renderer.blockentity.state.ChestRenderState;
 import net.minecraft.client.renderer.blockentity.state.ShulkerBoxRenderState;
+import net.minecraft.client.renderer.blockentity.state.EnchantTableRenderState;
+import net.minecraft.client.renderer.blockentity.state.LecternRenderState;
+import net.minecraft.client.renderer.blockentity.state.DecoratedPotRenderState;
+import net.minecraft.client.renderer.blockentity.state.ConduitRenderState;
+import net.minecraft.client.renderer.blockentity.state.SkullBlockRenderState;
 
 /**
- * Audited Minecraft 26.2 block-entity families whose complete collector output is entity-format
+ * Audited Minecraft 26.3 block-entity families whose complete collector output is entity-format
  * {@code submitModel} geometry and can therefore reuse Metallum's exact staged previous-position
  * history. This is intentionally an exact-class allowlist: a modded subclass may add collector
  * outputs or shader semantics that were never audited and must stay fail-closed.
@@ -29,7 +34,16 @@ final class MetalBlockEntityExactMotion {
         return stateClass == ChestRenderState.class
                 || stateClass == BannerRenderState.class
                 || stateClass == ShulkerBoxRenderState.class
-                || stateClass == BellRenderState.class;
+                || stateClass == BellRenderState.class
+                || stateClass == EnchantTableRenderState.class
+                || stateClass == LecternRenderState.class
+                || stateClass == DecoratedPotRenderState.class
+                || stateClass == ConduitRenderState.class
+                || stateClass == SkullBlockRenderState.class;
+    }
+
+    static boolean hasGeometry(final BlockEntityRenderState state) {
+        return supports(state) && (!(state instanceof LecternRenderState lectern) || lectern.hasBook);
     }
 
     static long objectId(final long packedBlockPos) {

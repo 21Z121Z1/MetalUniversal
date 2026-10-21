@@ -1,0 +1,65 @@
+[
+  {
+    "id": 12299410954,
+    "name": "minecraft-26.3-sodium-default-metalfx-requested-temporal-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 14071187,
+    "digest": "sha256:fb87a25b76b636290e7f45a7f34fc12391e2a0eb0f098688ff5f82f7ffcf6878",
+    "expired": false
+  },
+  {
+    "id": 12299395537,
+    "name": "minecraft-26.3-sodium-baseline-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 6280193,
+    "digest": "sha256:cdec68a2105825f39189be2167a6ad229ed99fba4a16bbc66906cc528a9d4165",
+    "expired": false
+  },
+  {
+    "id": 12299380181,
+    "name": "minecraft-26.3-vanilla-default-stationary-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 7260192,
+    "digest": "sha256:62b57fc41b61262a77c375439a07542e40ccf916e730e0c0478170423078296a",
+    "expired": false
+  },
+  {
+    "id": 12298888750,
+    "name": "minecraft-26.3-sodium-default-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 6262457,
+    "digest": "sha256:acf1a0c4048787d268e0f820c8ae1557f605df15f63ec42c336e4ef296723dd8",
+    "expired": false
+  },
+  {
+    "id": 12298877897,
+    "name": "minecraft-26.3-vanilla-baseline-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 12453406,
+    "digest": "sha256:a462c66295e57ce013e47cf5284f98675668cb0e114974b3f9e15d0c42b6d7fc",
+    "expired": false
+  },
+  {
+    "id": 12298741945,
+    "name": "minecraft-26.3-vanilla-candidate-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 12263099,
+    "digest": "sha256:93fe5f555d1748e4e0d3bfaa95c488d946953013473a5d8442d1a598f5f27ccc",
+    "expired": false
+  },
+  {
+    "id": 12298497146,
+    "name": "minecraft-26.3-sodium-candidate-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 6106474,
+    "digest": "sha256:3476169cf25621a5b89926303da3922b9cf26db5f46706dad0077843928ec635",
+    "expired": false
+  },
+  {
+    "id": 12298084942,
+    "name": "minecraft-26.3-vanilla-default-metalfx-requested-temporal-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 20271173,
+    "digest": "sha256:764ba1ef80081d96007ed9976afa822e6eae12f81053fb80ef00d140d18a2568",
+    "expired": false
+  },
+  {
+    "id": 12297728648,
+    "name": "minecraft-26.3-vanilla-default-e2e-36a9f3b1d7d82be73091ce091a037d7460a6181b-1",
+    "size": 12023047,
+    "digest": "sha256:47e3c02afaee78cea4819d93cdc5c7c50c7f38aa7f67bca5f700d6aaf2df0012",
+    "expired": false
+  }
+]

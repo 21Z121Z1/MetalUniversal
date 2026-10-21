@@ -27,5 +27,6 @@ public abstract class CustomFeatureSubmitMetalFxMixin {
             final CallbackInfo ci
     ) {
         MetalEntityMotionCapture.captureModelSubmit(pose);
+        MetalEntityMotionCapture.captureModelSubmit(this);
     }
 }

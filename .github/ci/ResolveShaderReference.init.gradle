@@ -1,0 +1,34 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+gradle.projectsEvaluated {
+    def referenceProject = gradle.rootProject
+    referenceProject.tasks.register('resolveShaderReferenceArtifacts') {
+        doLast {
+            def output = referenceProject.providers.gradleProperty('shaderReferenceManifest').get()
+            def artifacts = []
+            ['runtimeClasspath', 'productionRuntimeMods'].each { name ->
+                referenceProject.configurations.getByName(name).resolvedConfiguration.resolvedArtifacts.each { artifact ->
+                    def id = artifact.moduleVersion.id
+                    if (id.group == 'net.fabricmc.fabric-api' || (id.group == 'maven.modrinth' && artifact.name == 'sodium')) {
+                        def hash = MessageDigest.getInstance('SHA-256')
+                        artifact.file.withInputStream { input ->
+                            byte[] bytes = new byte[65536]
+                            int count
+                            while ((count = input.read(bytes)) >= 0) if (count > 0) hash.update(bytes, 0, count)
+                        }
+                        artifacts.add([configuration: name, group: id.group, name: artifact.name, version: id.version,
+                                       file: artifact.file.absolutePath, bytes: artifact.file.length(), sha256: hash.digest().encodeHex().toString()])
+                    }
+                }
+            }
+            if (!artifacts.any { it.name == 'fabric-api' } || !artifacts.any { it.name == 'sodium' })
+                throw new GradleException('Missing declared Fabric API/Sodium reference artifacts')
+            def report = [sourceCommit: System.getenv('METALLUM_SOURCE_SHA'), clientExecuted: false,
+                          fabricApiVersion: referenceProject.property('fabric_api_version'), sodiumVersion: referenceProject.property('sodium_version'), artifacts: artifacts]
+            def target = new File(output); target.parentFile.mkdirs()
+            target.text = JsonOutput.prettyPrint(JsonOutput.toJson(report)) + '\n'
+            println "Resolved ${artifacts.size()} pinned source reference artifacts; no Minecraft client executed"
+        }
+    }
+}

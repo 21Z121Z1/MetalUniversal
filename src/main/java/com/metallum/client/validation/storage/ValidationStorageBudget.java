@@ -1,6 +1,9 @@
 package com.metallum.client.validation.storage;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -154,6 +157,116 @@ public final class ValidationStorageBudget {
 
     public synchronized void writeString(final Path path, final String value) throws IOException {
         writeBytes(path, (value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+    }
+
+    @FunctionalInterface
+    public interface Utf8Content {
+        /** The writer is borrowed; the budget owns its flush/close and publication. */
+        void write(Writer writer) throws IOException;
+    }
+
+    @FunctionalInterface
+    public interface BinaryContent {
+        void write(OutputStream output) throws IOException;
+    }
+
+    /**
+     * Streams a complete UTF-8 document with bounded buffering and atomic publication.
+     * Oversized output is counted to completion without retaining/writing the excess,
+     * so the failure reports the exact byte requirement, including multibyte text.
+     */
+    public synchronized long writeAtomicUtf8(final Path path, final long maxFileBytes,
+                                              final Utf8Content content) throws IOException {
+        Objects.requireNonNull(content, "content");
+        return writeAtomicOutput(path,maxFileBytes,output->{
+            try(Writer writer=new OutputStreamWriter(output,StandardCharsets.UTF_8)) {content.write(writer);}
+        });
+    }
+
+    /** Streams a binary representation under the same physical byte and publication limits. */
+    public synchronized long writeAtomicOutput(final Path path,final long maxFileBytes,
+                                               final BinaryContent content) throws IOException {
+        if (maxFileBytes <= 0L) throw new IllegalArgumentException("File byte limit must be positive");
+        Objects.requireNonNull(content, "content");
+        Path normalized = checkedPath(path);
+        if (exceeded) throw new StorageBudgetExceededException("Validation artifact budget is already exhausted");
+        long previous = previousSize(normalized);
+        long available = Math.max(0L, maxBytes - (artifactBytes - previous));
+        Files.createDirectories(normalized.getParent());
+        Path temporary = normalized.resolveSibling(normalized.getFileName() + ".partial");
+        boolean owned = false;
+        Throwable primaryFailure = null;
+        try {
+            long required;
+            try (OutputStream file = Files.newOutputStream(temporary,
+                    java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)) {
+                owned = true;
+                var bounded = new CountingOutput(file, Math.min(maxFileBytes, available));
+                // Codecs may close their borrowed stream to finish a trailer;
+                // the publication owner retains the file until that succeeds.
+                content.write(new OutputStream() {
+                    @Override public void write(int value) throws IOException {bounded.write(value);}
+                    @Override public void write(byte[] data,int offset,int length) throws IOException {bounded.write(data,offset,length);}
+                    @Override public void flush() throws IOException {bounded.flush();}
+                    @Override public void close() throws IOException {flush();}
+                });
+                bounded.flush();
+                required = bounded.count;
+            }
+            if (required > maxFileBytes) throw new FileByteLimitExceededException(required, maxFileBytes);
+            if (required > available) {
+                recordFailure("validation artifact byte budget exceeded", required, artifactBytes - previous + required);
+                throw new StorageBudgetExceededException("Validation artifact budget exceeded at " + normalized, required);
+            }
+            Files.move(temporary, normalized, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            accountedFiles.put(normalized, required);
+            Long critical = criticalFiles.remove(normalized);
+            if (critical != null) criticalBytes -= critical;
+            artifactBytes = artifactBytes - previous + required;
+            return required;
+        } catch (IOException | RuntimeException | Error failure) {
+            primaryFailure = failure;
+            throw failure;
+        } finally {
+            // Never delete a preexisting crash checkpoint that CREATE_NEW rejected.
+            if (owned) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException | RuntimeException | Error cleanupFailure) {
+                    if (primaryFailure == null) throw cleanupFailure;
+                    if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
+                }
+            }
+        }
+    }
+
+    private static final class CountingOutput extends OutputStream {
+        private final OutputStream file;
+        private final long limit;
+        private long count;
+
+        private CountingOutput(OutputStream file, long limit) { this.file = file; this.limit = limit; }
+        @Override public void write(int value) throws IOException {
+            if (count < limit) file.write(value);
+            count = Math.addExact(count, 1L);
+        }
+        @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+            int retained = (int) Math.min(length, Math.max(0L, limit - count));
+            if (retained > 0) file.write(bytes, offset, retained);
+            count = Math.addExact(count, length);
+        }
+        @Override public void flush() throws IOException { file.flush(); }
+        @Override public void close() throws IOException { file.close(); }
+    }
+
+    public static final class FileByteLimitExceededException extends IOException {
+        private final long requiredBytes;
+        public FileByteLimitExceededException(long requiredBytes, long limit) {
+            super("Validation file byte limit exceeded: required=" + requiredBytes + ", limit=" + limit);
+            this.requiredBytes = requiredBytes;
+        }
+        public long requiredBytes() { return requiredBytes; }
     }
 
     /**
@@ -323,8 +436,14 @@ public final class ValidationStorageBudget {
     }
 
     public static final class StorageBudgetExceededException extends IOException {
+        private final long requiredBytes;
         public StorageBudgetExceededException(final String message) {
-            super(message);
+            this(message, 0L);
         }
+        public StorageBudgetExceededException(final String message, final long requiredBytes) {
+            super(message);
+            this.requiredBytes = requiredBytes;
+        }
+        public long requiredBytes() { return requiredBytes; }
     }
 }

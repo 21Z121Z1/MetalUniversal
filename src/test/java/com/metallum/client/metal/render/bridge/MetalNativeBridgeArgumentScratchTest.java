@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Behavior checks for the bounded, opt-in RenderEncoderV3 argument scratch. */
+/** Behavior checks for the bounded RenderEncoderV3 argument scratch. */
 final class MetalNativeBridgeArgumentScratchTest {
     @Test
     void zeroAttachmentsPreserveNullArrayPointers() {

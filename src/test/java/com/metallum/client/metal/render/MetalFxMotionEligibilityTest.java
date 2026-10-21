@@ -88,7 +88,33 @@ final class MetalFxMotionEligibilityTest {
     void genericStateAdmissionUsesRegistryKeysWithoutBootstrappingEntityTypes() {
         assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.DRAGON_FIREBALL));
         assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.LEASH_KNOT));
-        assertFalse(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.WIND_CHARGE));
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.WIND_CHARGE));
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.BREEZE_WIND_CHARGE));
+        assertFalse(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.LIGHTNING_BOLT));
+    }
+
+    @Test
+    void crystalBeamOrbBillboardAndBulletOverlayRequireCompleteExactHistory() {
+        for (var state : java.util.List.of(new net.minecraft.client.renderer.entity.state.EndCrystalRenderState(),
+                new net.minecraft.client.renderer.entity.state.ExperienceOrbRenderState(),
+                new net.minecraft.client.renderer.entity.state.ShulkerBulletRenderState(),
+                new net.minecraft.client.renderer.entity.state.LightningBoltRenderState(),
+                new net.minecraft.client.renderer.entity.state.EnderDragonRenderState())) {
+            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(state));
+            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(state));
+        }
+    }
+
+    @Test
+    void newLightningSeedBreaksSurfaceCorrespondenceWithoutRejectingOrdinaryCpuDeformation() {
+        var bolt=new net.minecraft.client.renderer.entity.state.LightningBoltRenderState();bolt.seed=Long.MIN_VALUE;
+        var accepted=new MetalFxManager.EntityMotionGeneration(41,bolt.getClass(),bolt.seed);
+        assertTrue(accepted.matches(bolt));
+        assertEquals(Long.MIN_VALUE,MetalFxMotionEligibility.geometryDiscontinuity(bolt));
+        bolt.seed=19;assertEquals(19,MetalFxMotionEligibility.geometryDiscontinuity(bolt));
+        assertFalse(accepted.matches(bolt));bolt.seed=Long.MIN_VALUE;assertTrue(accepted.matches(bolt));
+        assertFalse(accepted.matches(new EntityRenderState()));
+        assertEquals(0,MetalFxMotionEligibility.geometryDiscontinuity(new net.minecraft.client.renderer.entity.state.EnderDragonRenderState()));
     }
 
     @Test

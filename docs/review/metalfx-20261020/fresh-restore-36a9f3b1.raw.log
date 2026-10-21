@@ -1,0 +1,323 @@
+$ git clone --mirror https://github.com/21Z121Z1/MetalUniversal.git <fresh-clone>
+
+Cloning into bare repository '/tmp/metaluniversal-review-restore-rr1qlz7y/repository.git'...
+
+exit=0
+
+$ git fsck --full --no-reflogs
+
+
+exit=0
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/metalfx-assembly-20260924-01^{commit}
+af30078ebfc6677f063361b88dbed06c5e08be56
+
+
+exit=0
+
+MATCH agent/metalfx-assembly-20260924-01 af30078ebfc6677f063361b88dbed06c5e08be56
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/metalfx-cloud-assembly-20260924^{commit}
+cd5f8ddd939d38e05cd6ac56e466dcef69877d3c
+
+
+exit=0
+
+MATCH agent/metalfx-cloud-assembly-20260924 cd5f8ddd939d38e05cd6ac56e466dcef69877d3c
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/metalfx-cloud-workbench-20260924^{commit}
+c0dd7d9e35f970611d161bc950548d565e372ad6
+
+
+exit=0
+
+MATCH agent/metalfx-cloud-workbench-20260924 c0dd7d9e35f970611d161bc950548d565e372ad6
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/metalfx-contract-completion-20260924^{commit}
+1888d3e28ba0fb0cb6ce043977db658d9c628c62
+
+
+exit=0
+
+MATCH agent/metalfx-contract-completion-20260924 1888d3e28ba0fb0cb6ce043977db658d9c628c62
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/metalfx-data-contracts-20260924^{commit}
+cd5f8ddd939d38e05cd6ac56e466dcef69877d3c
+
+
+exit=0
+
+MATCH agent/metalfx-data-contracts-20260924 cd5f8ddd939d38e05cd6ac56e466dcef69877d3c
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-prepared-20260923^{commit}
+f6f5d8391ddc4d34f66a53ee9086665caba79a25
+
+
+exit=0
+
+MATCH agent/upstream-26.3-prepared-20260923 f6f5d8391ddc4d34f66a53ee9086665caba79a25
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-renderpearl^{commit}
+7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82
+
+
+exit=0
+
+MATCH agent/upstream-26.3-renderpearl 7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-workbench-20260923^{commit}
+be6f578151ca7a765e67c0d7e7aa216c41774d02
+
+
+exit=0
+
+MATCH agent/upstream-26.3-workbench-20260923 be6f578151ca7a765e67c0d7e7aa216c41774d02
+
+$ git rev-parse refs/tags/branch-backup/20261020T210011Z/codex/consolidated-metal-20261020^{commit}
+36a9f3b1d7d82be73091ce091a037d7460a6181b
+
+
+exit=0
+
+MATCH codex/consolidated-metal-20261020 36a9f3b1d7d82be73091ce091a037d7460a6181b
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/codex/mcopt-semantic-convergence-20261005^{commit}
+7b83bc4df3d93bc979a8c34caa551ad818595ce9
+
+
+exit=0
+
+MATCH codex/mcopt-semantic-convergence-20261005 7b83bc4df3d93bc979a8c34caa551ad818595ce9
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/codex/metal-renderer-research^{commit}
+a43637d08164a2e95116edaa4e7dda1b4fd2a155
+
+
+exit=0
+
+MATCH codex/metal-renderer-research a43637d08164a2e95116edaa4e7dda1b4fd2a155
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/codex/metalfx-official-audit-20261020^{commit}
+fe547607b3bdfb2dda9d373fd3bbe8415f19e328
+
+
+exit=0
+
+MATCH codex/metalfx-official-audit-20261020 fe547607b3bdfb2dda9d373fd3bbe8415f19e328
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/codex/p1-framebuffer-determinism^{commit}
+1548c41d9e0ea65fad932740854d75804ff81d07
+
+
+exit=0
+
+MATCH codex/p1-framebuffer-determinism 1548c41d9e0ea65fad932740854d75804ff81d07
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/codex/sodium-client-e2e-20260923^{commit}
+9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe
+
+
+exit=0
+
+MATCH codex/sodium-client-e2e-20260923 9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe
+
+$ git rev-parse refs/tags/branch-backup/20261020T200513Z/codex/vanilla-fx-aff7f0f0-validation^{commit}
+65c711e2b6c9e080c70bd3086cbb8ef2e49dceac
+
+
+exit=0
+
+MATCH codex/vanilla-fx-aff7f0f0-validation 65c711e2b6c9e080c70bd3086cbb8ef2e49dceac
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/main^{commit}
+9930a2e3ae9d54756f79693c1e8c60704975372c
+
+
+exit=0
+
+MATCH main 9930a2e3ae9d54756f79693c1e8c60704975372c
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/research/modernization-backlog^{commit}
+7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a
+
+
+exit=0
+
+MATCH research/modernization-backlog 7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/upstream/26.3-fabric-pr^{commit}
+81b7e61821be46b6ad1d787bee6077a7208ebeaa
+
+
+exit=0
+
+MATCH upstream/26.3-fabric-pr 81b7e61821be46b6ad1d787bee6077a7208ebeaa
+
+$ git rev-parse refs/tags/branch-backup/20261020T194937Z/upstream/renderpearl-26.3^{commit}
+4403a941091ecb7c25d41b8398d6ddf270b8c0cd
+
+
+exit=0
+
+MATCH upstream/renderpearl-26.3 4403a941091ecb7c25d41b8398d6ddf270b8c0cd
+
+$ git rev-parse --is-shallow-repository
+false
+
+
+exit=0
+
+$ git bundle verify MetalUniversal-precleanup-20261020T210011Z.bundle
+The bundle contains these 144 refs:
+af30078ebfc6677f063361b88dbed06c5e08be56 refs/heads/agent/metalfx-assembly-20260924-01
+cd5f8ddd939d38e05cd6ac56e466dcef69877d3c refs/heads/agent/metalfx-cloud-assembly-20260924
+c0dd7d9e35f970611d161bc950548d565e372ad6 refs/heads/agent/metalfx-cloud-workbench-20260924
+1888d3e28ba0fb0cb6ce043977db658d9c628c62 refs/heads/agent/metalfx-contract-completion-20260924
+cd5f8ddd939d38e05cd6ac56e466dcef69877d3c refs/heads/agent/metalfx-data-contracts-20260924
+f6f5d8391ddc4d34f66a53ee9086665caba79a25 refs/heads/agent/upstream-26.3-prepared-20260923
+7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82 refs/heads/agent/upstream-26.3-renderpearl
+be6f578151ca7a765e67c0d7e7aa216c41774d02 refs/heads/agent/upstream-26.3-workbench-20260923
+36a9f3b1d7d82be73091ce091a037d7460a6181b refs/heads/codex/consolidated-metal-20261020
+7b83bc4df3d93bc979a8c34caa551ad818595ce9 refs/heads/codex/mcopt-semantic-convergence-20261005
+a43637d08164a2e95116edaa4e7dda1b4fd2a155 refs/heads/codex/metal-renderer-research
+fe547607b3bdfb2dda9d373fd3bbe8415f19e328 refs/heads/codex/metalfx-official-audit-20261020
+1548c41d9e0ea65fad932740854d75804ff81d07 refs/heads/codex/p1-framebuffer-determinism
+9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe refs/heads/codex/sodium-client-e2e-20260923
+65c711e2b6c9e080c70bd3086cbb8ef2e49dceac refs/heads/codex/vanilla-fx-aff7f0f0-validation
+9930a2e3ae9d54756f79693c1e8c60704975372c refs/heads/main
+7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a refs/heads/research/modernization-backlog
+81b7e61821be46b6ad1d787bee6077a7208ebeaa refs/heads/upstream/26.3-fabric-pr
+4403a941091ecb7c25d41b8398d6ddf270b8c0cd refs/heads/upstream/renderpearl-26.3
+7dcf786baec0a3933fd4d01087fd5a13cb397a76 refs/pull/1/head
+c73a66efcaf4dd3e4f1a571d96901e15e3b07552 refs/pull/10/head
+e9afe9d90f388b5f5ffaa1ac5ceb7e424ea21430 refs/pull/11/head
+c7dcce695ed8f0c7f533c04b12aabd9bef31abec refs/pull/12/head
+ecf95b6fecb811a90a8f917bd8308d47c707032c refs/pull/13/head
+58d174e3f44314371e613e9fa023efc84bca7f5b refs/pull/14/head
+4a8998bd337a92acec6ae1403d66be93a176c86b refs/pull/15/head
+be823292f7d51217493a671919697e1e22d7cd0c refs/pull/16/head
+3792d941a7014720bd0eef5a15a14f6102270110 refs/pull/17/head
+ad1aed98018aec79b0dee2138bd0b91bf95ff18c refs/pull/18/head
+e79b0898e7760d23a49963e923e7537645bab233 refs/pull/19/head
+9e743f6a026a749b8b581bffea0303ceb9ce151c refs/pull/2/head
+9432edc2dbf24311e6d58bfa29820a6513c82f80 refs/pull/20/head
+fcfbdf284511d25c6f67b881503ceba079508588 refs/pull/21/head
+8a4130a960675547d7ed336dcab58a275fca568e refs/pull/22/head
+26e5adff3fbd5384b16ea9875c354c3a008a695a refs/pull/23/head
+82bf939701e17e1cc699b38c6ad83ae605c6605a refs/pull/24/head
+82176724974b3cd0d95f0ec9760eb4e3dd1f7f93 refs/pull/25/head
+de9d274a997721979f26afc783e4ec0cd1c95323 refs/pull/26/head
+4e6be7b27edbed43731dc5ddee58ab28c9f2cd9a refs/pull/27/head
+8f045147bce00ac2b6d064af8026339c9b557458 refs/pull/28/head
+407f0d92db80d5d17b4c04548448dd55d159c44a refs/pull/29/head
+89b9f584acd0c91fadfd468380e6b72ed9893026 refs/pull/3/head
+9ebac773f0e04ad4dbd0910612cf18c42b4f5fc5 refs/pull/30/head
+5d0acabd6359fe14952d567aef2888a9649a2b89 refs/pull/31/head
+d2c9622483b21255cedb0f72dd6273a384a4a2c1 refs/pull/32/head
+f6aa75a51784f4d4bfe438ec7c882f20ce34d3a3 refs/pull/33/head
+f83c62e8eb693170759a222342bb4f427e9f069d refs/pull/34/head
+2d1db558e9465d08560ca585cbfea80d66215d08 refs/pull/35/head
+bc3c140e9a55fb48826875d1b352caf00ef658a4 refs/pull/36/head
+4b050e7b688910778aad780ddc8dfffe37cbce8e refs/pull/37/head
+b7665a96c6b0690cfa8c455bc7e4ff16492b70f6 refs/pull/38/head
+02eedff6364e43fd018def5f008d3d5bfa567082 refs/pull/39/head
+5c4a4ba78743cffe85a4fca62b9ca2745b0c6695 refs/pull/4/head
+b11a12c3698cf8e157c0ad95027131920a9d7610 refs/pull/40/head
+a00b014da3b37e86b3f5089302c6d8e0402db192 refs/pull/41/head
+d8bccaa9b06b7e3d93f031574534f797922080a7 refs/pull/42/head
+4d3179537ccb35c09858cc9b1bfc22836f2b7505 refs/pull/43/head
+d86eb8368dcd5a247b10d76e945cad7742497c93 refs/pull/44/head
+4e71f282181eeda9af53cc528580ffd6cfd71c95 refs/pull/45/head
+2b7f45eaafde9a3fa736fde0a002cad521f90d63 refs/pull/46/head
+6ef54c6466b6a102bd441e0a721df5f182f22bb8 refs/pull/47/head
+356985ecd9cef7bff2d6b08979209753896a3b64 refs/pull/48/head
+7235052aff745e07ae2599c6bc35e4d2661c89c4 refs/pull/49/head
+89b9f584acd0c91fadfd468380e6b72ed9893026 refs/pull/5/head
+b8a7038fdd9c0fa24dc80da77e90fef84ff7c65e refs/pull/50/head
+b6336623a2a1e72363610986d22b9f1414a1be77 refs/pull/51/head
+4790ddad449d636e4bc6d8e437fd0308fb9f1794 refs/pull/52/head
+4935ce723d13ccb0a5a1da6a954bc18d5a05d720 refs/pull/53/head
+854ea820a602f5fd77a67c661761a2b125689dc0 refs/pull/54/head
+72b561211c4299ff6dd876eb713073eb3f808e72 refs/pull/55/head
+14157dd0ea5eb72cb1c162f0c2df8cbbe5eab790 refs/pull/56/head
+14e1fc77a2f4e4b20e1fd6c9097ffc6137072724 refs/pull/57/head
+52cc32fd8860e1a8ccff10a36a208f3c92d1feee refs/pull/58/head
+854ea820a602f5fd77a67c661761a2b125689dc0 refs/pull/59/head
+9384168222721baa9c0f1c28d29b4969c6f36f18 refs/pull/6/head
+e15cd3c6480a58f11ff02534e1bb9bd3adf4d057 refs/pull/60/head
+c73a66efcaf4dd3e4f1a571d96901e15e3b07552 refs/pull/61/head
+d11ce93b87a7f148c091551858b720055879b3da refs/pull/62/head
+4ff2375dbdcfe635a079765a898601d7b3f276ee refs/pull/63/head
+61274ca700cb1c9728ad87419921c7c2b29ef041 refs/pull/64/head
+7724aa1adf537693347a7a431cdfe20addbaf8f1 refs/pull/65/head
+6c58a5906e3b488f8b3ea86e34b53eb22a943bd4 refs/pull/66/head
+d31efeae5eabf86404be9285a1cc2036f12428fa refs/pull/67/head
+3c9073a1314dac40ad4a3b002ee2e28eedf62e33 refs/pull/68/head
+e036b374d8b100ce7fdb4c671779d47f654bfdf6 refs/pull/69/head
+b84805c6b97bebdeff2c9f27a70aa10d2e46c015 refs/pull/7/head
+8794f5099b3ce90c4f17fdf063f8113ed0df25fd refs/pull/70/head
+37e7f145570abd76f4c690e0b9080305bc9b51f1 refs/pull/71/head
+7090518a92714740a401642cfa14a29207abb3c8 refs/pull/72/head
+6462d27c8fe8e81875ed630f991eb30daf1344f1 refs/pull/73/head
+2ffaf1373f50f8063d954b0057c8c570c8cfcc97 refs/pull/74/head
+d5aefeeffb0813fb4e42143c3358a9be26bfd20c refs/pull/75/head
+676659940db63404d225b2d726e9d19c8580a0b8 refs/pull/76/head
+b443a887c4d0151fb410713354f2caf7208c1108 refs/pull/77/head
+abfc18ba9578829473f7e005a3db5f3d4e05c7f0 refs/pull/78/head
+3cd4369dba3dfc7a6fc634511466dc91947ef6fa refs/pull/79/head
+f0b55f640ccbac62f5b4b6ff187b52287dbc6e61 refs/pull/8/head
+8dac89875752d1ca5d9e24cee6452e4b0653b2c2 refs/pull/80/head
+9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe refs/pull/81/head
+e3e151d694279e2be5c3ed7a3dd41af7327cb995 refs/pull/82/head
+ac356c0ac1eace6e5ec754df481991485bc2c0ef refs/pull/83/head
+dda47eac9caf44765216d3dbb54dcc1518373051 refs/pull/84/head
+1888d3e28ba0fb0cb6ce043977db658d9c628c62 refs/pull/85/head
+95eca8161f40b0e6b4c1fdd2e5d12c068b5dee1c refs/pull/85/merge
+1548c41d9e0ea65fad932740854d75804ff81d07 refs/pull/86/head
+55962ab56038f42d3512a1365c4ff47a66bf328c refs/pull/86/merge
+cd5f8ddd939d38e05cd6ac56e466dcef69877d3c refs/pull/87/head
+50efae2e4a66e2005c64fb5fd83ef3ed11487d45 refs/pull/87/merge
+af1db32ecd1838cbd74fcdd00f898d01c8e5943c refs/pull/88/head
+7b83bc4df3d93bc979a8c34caa551ad818595ce9 refs/pull/89/head
+529181feee95c77192d3c4d2a2e14d34281987f5 refs/pull/89/merge
+5a0545358d60bf47a24fc1e24075b887f0507dce refs/pull/9/head
+a43637d08164a2e95116edaa4e7dda1b4fd2a155 refs/pull/90/head
+4070c472274d0209c321ecc2dbb3638fa6ebd1bd refs/pull/90/merge
+3aab78ac461c3b87b78005e8293e87a16cc9473b refs/tags/MetalUniversal_1.0.0
+3aab78ac461c3b87b78005e8293e87a16cc9473b refs/tags/MetalUniversal_1.0.1
+a549bdf30abf16599544a1ce3be5eaa6d2cbb4d0 refs/tags/MetalUniversal_1.0.2
+5bf3901a0914ae88b02fc4233d4abc3375c695ab refs/tags/branch-backup/20261020T194937Z/agent/metalfx-assembly-20260924-01
+8d12bfb9e4eb7964ee161b1b40745cdd181bfb51 refs/tags/branch-backup/20261020T194937Z/agent/metalfx-cloud-assembly-20260924
+ad501fb8b4e0972b9d81a2c9d92dbf4e81372f0b refs/tags/branch-backup/20261020T194937Z/agent/metalfx-cloud-workbench-20260924
+50f423607d2cb4850d8b4e81692fd34efd020960 refs/tags/branch-backup/20261020T194937Z/agent/metalfx-contract-completion-20260924
+8b04d4420e302159a18f9ab95a680d4e59cfe594 refs/tags/branch-backup/20261020T194937Z/agent/metalfx-data-contracts-20260924
+76125b27560e280f654da57f4757eefed3a8ec20 refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-prepared-20260923
+8f33846b28bc853a280380f379558b78cd9d22bc refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-renderpearl
+19502571f411c292ccacba18d8e5840cc3f2e9d4 refs/tags/branch-backup/20261020T194937Z/agent/upstream-26.3-workbench-20260923
+b6dbf29a025bc51d229fb86baede487bd008434b refs/tags/branch-backup/20261020T194937Z/codex/consolidated-metal-20261020
+35de6b9f8d85a9d8fad1c0ace4a44152c10fa8a9 refs/tags/branch-backup/20261020T194937Z/codex/mcopt-semantic-convergence-20261005
+913b2df1dcaa63cee5b21f5783a2155840994297 refs/tags/branch-backup/20261020T194937Z/codex/metal-renderer-research
+6890e66096ef842849d042ddaec23aaeb78c2a34 refs/tags/branch-backup/20261020T194937Z/codex/metalfx-official-audit-20261020
+473d0bc536f5819d2afe851bc8624f03e6139c1a refs/tags/branch-backup/20261020T194937Z/codex/p1-framebuffer-determinism
+c38b7f7565a12a6a8bf702cd5319a7120ef1ab42 refs/tags/branch-backup/20261020T194937Z/codex/sodium-client-e2e-20260923
+b02a07d3dd85a9fecf697c29da85c9856e54a833 refs/tags/branch-backup/20261020T194937Z/codex/vanilla-fx-aff7f0f0-validation
+706d74f816fc6bd465971310b54b378b36c9c3aa refs/tags/branch-backup/20261020T194937Z/main
+9c91c78a7ac3271bdbd9372351f80c8c8e4a6698 refs/tags/branch-backup/20261020T194937Z/research/modernization-backlog
+5384802456770cc07b09fe3087fb35db3d79f750 refs/tags/branch-backup/20261020T194937Z/upstream/26.3-fabric-pr
+5f5c17085858d2c605a5f7efe2fd1b30cceecabe refs/tags/branch-backup/20261020T194937Z/upstream/renderpearl-26.3
+ded57ea2ae27f5b598c3980a29418d37d9e2b8f3 refs/tags/branch-backup/20261020T195814Z/codex/consolidated-metal-20261020
+9585b9a959f9081210df6de456e76a16473e8884 refs/tags/branch-backup/20261020T200513Z/codex/consolidated-metal-20261020
+df3e27d20e66f6a643591bb4d0acdffe6a2cf377 refs/tags/branch-backup/20261020T200513Z/codex/vanilla-fx-aff7f0f0-validation
+08b92ce0b8898e35b9cb7515a9b3c6769cb64846 refs/tags/branch-backup/20261020T202105Z/pending-consolidated-local
+f53d0cd59fa592e5a38fd418b84ec9d982569063 refs/tags/branch-backup/20261020T210011Z/codex/consolidated-metal-20261020
+54eb6e54ff0e491f0fa5517e73e7947a8c2466ec refs/tags/v1.0.2
+72e2c98c19c390ed213e31433eb6e348146994aa refs/tags/v1.0.3
+9930a2e3ae9d54756f79693c1e8c60704975372c HEAD
+The bundle records a complete history.
+The bundle uses this hash algorithm: sha1
+
+MetalUniversal-precleanup-20261020T210011Z.bundle is okay
+
+exit=0
+
+sha256 MetalUniversal-precleanup-20261020T210011Z.bundle 8a5ba8a1d056c3cee14beda0685c92d5bfd14b2424b7ab50a134426ce9f7cc5d

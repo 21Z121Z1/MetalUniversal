@@ -9,9 +9,142 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 final class MetalRenderStatePacketTest {
     private static final MemorySegment ENCODER = MemorySegment.ofAddress(0x1000L);
+
+    @Test
+    void indexedBatchScratchCannotOverwritePendingStateOrFusedDrawArguments() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            packet.indexedBatchStorage().fill((byte) 0x5a);
+            assertEquals(1, packet.entryCount());
+            assertTrue(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0, 0, 3, 1, 0,
+                    (enc, state, bytes, draw) -> {
+                        assertEquals(11, state.get(ValueLayout.JAVA_LONG, 24));
+                        assertEquals(13, state.get(ValueLayout.JAVA_LONG, 32));
+                        assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 48));
+                        assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 56));
+                        return 1;
+                    }));
+        }
+    }
+
+    @Test
+    void rejectedIndexedBatchDisablesItsEntryAndPreservesStateForOrdinaryWork() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            assertFalse(packet.tryIndexedBatch(ENCODER, 96, (enc, descriptor, bytes) -> -1));
+            assertEquals(1, packet.entryCount());
+            assertTrue(packet.active());
+            assertFalse(packet.tryIndexedBatch(ENCODER, 96,
+                    (enc, descriptor, bytes) -> { throw new AssertionError("rejected batch retried"); }));
+            packet.appendCullMode(ENCODER, 0);
+            assertEquals(2, packet.entryCount());
+        }
+    }
+
+    @Test
+    void uncertainIndexedBatchPoisonsLaterEncoderWorkWithoutReplay() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(4)) {
+            RuntimeException failure = new IllegalStateException("uncertain batch outcome");
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.tryIndexedBatch(ENCODER, 96, (enc, descriptor, bytes) -> { throw failure; })));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> packet.flush(ENCODER)));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> packet.indexedBatchStorage()));
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.appendCullMode(ENCODER, 0)));
+        }
+    }
+
+    @Test
+    void singleStateProductionDrawPreservesTheDirectSetterRoute() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+            packet.appendScissor(ENCODER, 11, 13, 32, 48);
+            assertFalse(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0, 0, 3, 1, 0));
+            assertFalse(packet.hasNativeStateBatch());
+            assertEquals(1, packet.entryCount(), "the ordinary flush must still consume this state before drawing");
+            assertTrue(packet.active());
+        }
+    }
+
+    @Test
+    void fusedDirectAndIndexedDrawsCarryExactArgumentsAndConsumeStateOnce() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+            for (int kind : new int[]{2, 1, 2}) {
+                // The v2 ABI accepts one entry; production dispatch applies its
+                // stricter native-packet threshold before calling this layer.
+                packet.appendScissor(ENCODER, 11, 13, 32, 48);
+                var calls = new java.util.concurrent.atomic.AtomicInteger();
+                MemorySegment indices = kind == 2 ? MemorySegment.ofAddress(0x5678) : MemorySegment.NULL;
+                int first = kind == 2 ? -7 : 9;
+                int indexType = kind == 2 ? 1 : 0;
+                long indexOffset = kind == 2 ? 12 : 0;
+                MetalRenderStatePacket.DrawSubmitter oracle = (enc, state, bytes, draw) -> {
+                    calls.incrementAndGet();
+                    assertEquals(ENCODER, enc);
+                    assertEquals(64, draw.byteSize());
+                    assertEquals(64, draw.get(ValueLayout.JAVA_INT, 0));
+                    assertEquals(kind, draw.get(ValueLayout.JAVA_INT, 4));
+                    assertEquals(3, draw.get(ValueLayout.JAVA_INT, 8));
+                    assertEquals(indexType, draw.get(ValueLayout.JAVA_INT, 12));
+                    assertEquals(indices.address(), draw.get(ValueLayout.JAVA_LONG, 16));
+                    assertEquals(indexOffset, draw.get(ValueLayout.JAVA_LONG, 24));
+                    assertEquals(first, draw.get(ValueLayout.JAVA_INT, 32));
+                    assertEquals(6, draw.get(ValueLayout.JAVA_INT, 36));
+                    assertEquals(5, draw.get(ValueLayout.JAVA_INT, 40));
+                    assertEquals(17, draw.get(ValueLayout.JAVA_INT, 44));
+                    assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 48));
+                    assertEquals(0, draw.get(ValueLayout.JAVA_LONG, 56));
+                    assertEquals(64, bytes); // 16-byte header + one 48-byte state record.
+                    assertEquals(1, state.get(ValueLayout.JAVA_INT, 12));
+                    assertEquals(11, state.get(ValueLayout.JAVA_LONG, 24));
+                    return 1;
+                };
+                assertTrue(packet.tryDraw(ENCODER, kind, 3, indexType, indices, indexOffset,
+                        first, 6, 5, 17, oracle));
+                assertEquals(0, packet.entryCount());
+                assertFalse(packet.tryDraw(ENCODER, kind, 3, indexType, indices, indexOffset,
+                        first, 6, 5, 17, oracle));
+                assertEquals(1, calls.get(), "an empty packet must use the ordinary draw without a second fused call");
+            }
+        }
+    }
+
+    @Test
+    void rejectedFusionKeepsEveryStateEntryForLegacyReplayAndDisablesFurtherFusion() {
+        for (int status : new int[]{0, -1, -2, -100}) {
+            try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+                packet.appendPipeline(ENCODER, MemorySegment.ofAddress(0x2000));
+                packet.appendScissor(ENCODER, 0, 0, 128, 64);
+                assertFalse(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0,
+                        0, 3, 1, 0, (enc, state, bytes, draw) -> status));
+                assertEquals(2, packet.entryCount());
+                assertEquals(0x2000, packet.storageForTest().get(ValueLayout.JAVA_LONG, 32));
+                assertTrue(packet.active(), "state-only batching remains valid after a fused-draw rejection");
+                packet.appendCullMode(ENCODER, 0);
+                assertFalse(packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0,
+                        0, 3, 1, 0, (enc, state, bytes, draw) -> { throw new AssertionError("fusion retried"); }));
+                assertEquals(3, packet.entryCount());
+            }
+        }
+    }
+
+    @Test
+    void uncertainDrawCannotBeRetriedByCatchingTheException() {
+        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(8)) {
+            packet.appendCullMode(ENCODER, 0);
+            RuntimeException failure = new IllegalStateException("uncertain FFM outcome");
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.tryDraw(ENCODER, 1, 3, 0, MemorySegment.NULL, 0,
+                            0, 3, 1, 0, (enc, state, bytes, draw) -> { throw failure; })));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> packet.flush(ENCODER)));
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> packet.appendCullMode(ENCODER, 1)));
+        }
+    }
 
     @Test
     void writesFixedWidthVersionedEntries() {

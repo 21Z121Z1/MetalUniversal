@@ -21,6 +21,41 @@ public final class MetalHotPathTelemetry {
     private static final LongAdder dynamicRangeCopies = new LongAdder();
     private static final LongAdder preparedPipelines = new LongAdder();
     private static final LongAdder dynamicCopyBytesAvoided = new LongAdder();
+    private static final LongAdder indexedVertexRebases = new LongAdder();
+    private static final LongAdder indexedRebaseBatches = new LongAdder();
+    private static final LongAdder indexedRebaseBatchDraws = new LongAdder();
+    private static final LongAdder indexedRebaseRestoresAvoided = new LongAdder();
+    private static final LongAdder nativeIndexedRebaseBatches = new LongAdder();
+    private static final LongAdder nativeIndexedRebaseDraws = new LongAdder();
+
+    public static void recordNativeIndexedRebaseBatch(int draws) {
+        if (ENABLED) {
+            nativeIndexedRebaseBatches.increment();
+            nativeIndexedRebaseDraws.add(draws);
+            indexedVertexRebases.add(draws);
+        }
+    }
+
+    public static long nativeIndexedRebaseBatches() { return nativeIndexedRebaseBatches.sum(); }
+    public static long nativeIndexedRebaseDraws() { return nativeIndexedRebaseDraws.sum(); }
+
+    public static void recordIndexedVertexRebase() {
+        if (ENABLED) indexedVertexRebases.increment();
+    }
+
+    public static long indexedVertexRebases() { return indexedVertexRebases.sum(); }
+
+    public static void recordIndexedRebaseBatch(final int draws) {
+        if (ENABLED) {
+            indexedRebaseBatches.increment();
+            indexedRebaseBatchDraws.add(draws);
+            indexedRebaseRestoresAvoided.add(draws - 1L);
+        }
+    }
+
+    public static long indexedRebaseBatches() { return indexedRebaseBatches.sum(); }
+    public static long indexedRebaseBatchDraws() { return indexedRebaseBatchDraws.sum(); }
+    public static long indexedRebaseRestoresAvoided() { return indexedRebaseRestoresAvoided.sum(); }
 
     private MetalHotPathTelemetry() {
     }
@@ -88,6 +123,12 @@ public final class MetalHotPathTelemetry {
         dynamicRangeCopies.reset();
         dynamicCopyBytesAvoided.reset();
         preparedPipelines.reset();
+        indexedVertexRebases.reset();
+        indexedRebaseBatches.reset();
+        indexedRebaseBatchDraws.reset();
+        indexedRebaseRestoresAvoided.reset();
+        nativeIndexedRebaseBatches.reset();
+        nativeIndexedRebaseDraws.reset();
     }
 
     public static void recordDynamicUpload(boolean rangeCopy, int bytes) {

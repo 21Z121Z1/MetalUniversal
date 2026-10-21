@@ -2,7 +2,9 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.CompareOp;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
@@ -66,11 +68,14 @@ final class MetalEntityMotionPipeline {
 
     private enum PreviousFamily {
         ENTITY("core/entity_previous_motion", "core/entity_motion", "entity_previous_motion/"),
+        BLOCK("core/block_previous_motion", "core/block_motion", "block_previous_motion/"),
         SHADOW("core/entity_previous_motion", "core/shadow_previous_motion", "shadow_previous_motion/"),
         PARTICLE("core/particle_previous_motion", "core/particle_previous_motion", "particle_previous_motion/"),
         LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
         TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
         TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/"),
+        LIGHTNING("core/lightning_previous_motion", "core/lightning_previous_motion", "lightning_previous_motion/"),
+        CLOUD("core/cloud_previous_motion", "core/cloud_previous_motion", "cloud_previous_motion/"),
         WATER_MASK("core/position_previous_motion", "core/position_previous_motion", "position_previous_motion/");
 
         private final Identifier vertexShader;
@@ -86,6 +91,12 @@ final class MetalEntityMotionPipeline {
     private static final VertexFormat PREVIOUS_POSITION_FORMAT = VertexFormat.builder(0)
             .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
             .build();
+    private static final VertexFormat PREVIOUS_VALIDITY_FORMAT = VertexFormat.builder(0)
+            .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
+            .addAttribute("PreviousValidity", GpuFormat.R32_FLOAT).build();
+    private static final VertexFormat PREVIOUS_COVERAGE_FORMAT=VertexFormat.builder(0)
+            .addAttribute("PreviousPosition",GpuFormat.RGB32_FLOAT).addAttribute("PreviousValidity",GpuFormat.R32_FLOAT)
+            .addAttribute("PreviousCoverage",GpuFormat.RG32_FLOAT).build();
     private static final BindGroupLayout RESOURCES = BindGroupLayout.builder()
             .withUniform("MetallumMotion", UniformType.UNIFORM_BUFFER)
             .build();
@@ -93,10 +104,64 @@ final class MetalEntityMotionPipeline {
             new ColorTargetState(Optional.empty(), GpuFormat.RG16_FLOAT, ColorTargetState.WRITE_COLOR);
     private static final ColorTargetState VALIDITY_TARGET =
             new ColorTargetState(Optional.empty(), GpuFormat.R8_UNORM, ColorTargetState.WRITE_RED);
+    private static final ColorTargetState DEPTH_TARGET =
+            new ColorTargetState(Optional.empty(), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_RED | ColorTargetState.WRITE_GREEN);
     private static final Map<RenderPipeline, RenderPipeline> CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_POSITION_DEPTH_CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline[]> PREVIOUS_COVERAGE_DEPTH_CACHE = new IdentityHashMap<>();
+    private static final BindGroupLayout SOURCE_DEPTH = BindGroupLayout.builder()
+            .withUniform("MetallumSourceDepth",UniformType.COMBINED_IMAGE_SAMPLER).build();
+    private static final BindGroupLayout PREVIOUS_RASTER = BindGroupLayout.builder()
+            .withUniform("MetallumSurface",UniformType.UNIFORM_BUFFER).build();
 
     private MetalEntityMotionPipeline() {
+    }
+
+    static boolean usesPreviousDepthBias(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        var depth=source.getDepthStencilState();
+        return depthAttachmentPresent && depth!=null
+                && (depth.depthBiasScaleFactor()!=0 || depth.depthBiasConstant()!=0);
+    }
+
+    static boolean requiresFogSnapshot(final RenderPipeline source) {
+        var family=previousFamilyOf(source);
+        return family==PreviousFamily.LIGHTNING || family==PreviousFamily.CLOUD;
+    }
+
+    static boolean usesEntityLightmap(final RenderPipeline source) {
+        return previousFamilyOf(source)==PreviousFamily.ENTITY
+                && (source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/item")
+                    || !source.getShaderDefines().flags().contains("EMISSIVE"));
+    }
+
+    static boolean usesVisibilityLightmap(final RenderPipeline source) {
+        var family=previousFamilyOf(source);
+        return usesEntityLightmap(source) || family==PreviousFamily.BLOCK || family==PreviousFamily.PARTICLE
+                || ((family==PreviousFamily.TEXT || family==PreviousFamily.TEXT_BACKGROUND)
+                    && !source.getShaderDefines().flags().contains("IS_SEE_THROUGH"));
+    }
+
+    static boolean usesSurfaceTexture(final RenderPipeline source,final String name) {
+        var family=previousFamilyOf(source);
+        return switch(name) {
+            case "Sampler0" -> family==PreviousFamily.ENTITY || family==PreviousFamily.BLOCK
+                    || family==PreviousFamily.SHADOW || family==PreviousFamily.PARTICLE || family==PreviousFamily.TEXT;
+            case "Sampler2" -> usesVisibilityLightmap(source);
+            case "DissolveMaskSampler" -> family==PreviousFamily.ENTITY
+                    && source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/entity")
+                    && source.getShaderDefines().flags().contains("DISSOLVE");
+            case "GlintSampler" -> family==PreviousFamily.ENTITY && source.getShaderDefines().flags().contains("GLINT");
+            default -> false;
+        };
+    }
+
+    private static boolean auditedShaders(final RenderPipeline source) {
+        if (source == null) return false;
+        var vertex = source.getShaders().get(ShaderType.VERTEX);
+        var fragment = source.getShaders().get(ShaderType.FRAGMENT);
+        return vertex != null && vertex.equals(fragment) && "minecraft".equals(vertex.getNamespace());
     }
 
     /**
@@ -107,12 +172,15 @@ final class MetalEntityMotionPipeline {
      * rather than replayed by the closest-looking family.</p>
      */
     static @Nullable Family familyOf(final RenderPipeline source) {
-        if (source == null) {
+        if (!auditedShaders(source)) {
             return null;
         }
+        var bindings = source.getVertexFormatBindings();
+        if (bindings.isEmpty() || bindings.getFirst() == null
+                || bindings.stream().skip(1).anyMatch(java.util.Objects::nonNull)) return null;
         return switch (source.getShaders().get(ShaderType.VERTEX).getPath()) {
-            case "core/entity", "core/item" -> Family.ENTITY;
-            case "core/block" -> Family.BLOCK;
+            case "core/entity", "core/item" -> previousFamilyOf(source) == PreviousFamily.ENTITY ? Family.ENTITY : null;
+            case "core/block" -> DefaultVertexFormat.BLOCK.equals(bindings.getFirst()) ? Family.BLOCK : null;
             default -> null;
         };
     }
@@ -122,7 +190,7 @@ final class MetalEntityMotionPipeline {
     }
 
     static boolean supports(final RenderPipeline source) {
-        if (familyOf(source) == null) {
+        if (familyOf(source) == null || !replayableDepth(source)) {
             return false;
         }
         ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
@@ -133,32 +201,50 @@ final class MetalEntityMotionPipeline {
     }
 
     /**
-     * Exact staged-position replay ABIs proven against the Minecraft 26.2 client shaders.
+     * Exact staged-position replay ABIs checked against the Minecraft 26.3 client shaders.
      * Root-transform support is intentionally independent: leash and world text are exact-only
      * families and must never fall back to a closest-looking root motion shader.
      */
     static boolean supportsPreviousPositions(final RenderPipeline source) {
-        return previousFamilyOf(source) != null;
+        return previousFamilyOf(source) != null && replayableDepth(source);
+    }
+
+    private static boolean replayableDepth(final RenderPipeline source) {
+        var depth=source.getDepthStencilState();
+        if(depth!=null && (depth.depthTest()==CompareOp.EQUAL || depth.depthTest()==CompareOp.NOT_EQUAL)
+                && (depth.depthBiasScaleFactor()!=0 || depth.depthBiasConstant()!=0)) return false;
+        // A live final attachment cannot reconstruct the pre-draw depth for these self-writing tests.
+        return depth==null || !depth.writeDepth() || switch(depth.depthTest()) {
+            case GREATER_THAN,LESS_THAN,NOT_EQUAL -> false;
+            default -> true;
+        };
     }
 
     private static @Nullable PreviousFamily previousFamilyOf(final RenderPipeline source) {
-        if (source == null) {
+        if (!auditedShaders(source)) {
             return null;
         }
         java.util.List<@Nullable VertexFormat> bindings = source.getVertexFormatBindings();
+        String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
+        if(shader.equals("core/clouds") && bindings.stream().allMatch(java.util.Objects::isNull))return PreviousFamily.CLOUD;
         if (bindings.isEmpty() || bindings.get(0) == null || (bindings.size() >= 2 && bindings.get(1) != null)) {
             return null;
         }
         VertexFormat format = bindings.get(0);
-        String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
-        if ((shader.equals("core/entity") || shader.equals("core/item"))
-                && DefaultVertexFormat.ENTITY.equals(format)
-                && supports(source)) {
-            return PreviousFamily.ENTITY;
+        if (shader.equals("core/entity") || shader.equals("core/item")) {
+            boolean special = source.getShaderDefines().flags().contains("GLINT_SPECIAL");
+            if (!special && DefaultVertexFormat.ENTITY.equals(format)) return PreviousFamily.ENTITY;
+            if (shader.equals("core/item") && special && source.getShaderDefines().flags().contains("GLINT")
+                    && DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(format)) return PreviousFamily.ENTITY;
+            return null;
         }
         if (shader.equals("core/rendertype_entity_shadow")
                 && DefaultVertexFormat.ENTITY.equals(format)) {
             return PreviousFamily.SHADOW;
+        }
+        if (shader.equals("core/block") && DefaultVertexFormat.BLOCK.equals(format)) return PreviousFamily.BLOCK;
+        if (shader.equals("core/rendertype_lightning") && DefaultVertexFormat.POSITION_COLOR.equals(format)) {
+            return PreviousFamily.LIGHTNING;
         }
         if (shader.equals("core/particle")
                 && DefaultVertexFormat.PARTICLE.equals(format)) {
@@ -207,6 +293,55 @@ final class MetalEntityMotionPipeline {
     static void clear() {
         CACHE.clear();
         PREVIOUS_POSITION_CACHE.clear();
+        DEPTH_CACHE.clear();
+        PREVIOUS_POSITION_DEPTH_CACHE.clear();
+        PREVIOUS_COVERAGE_DEPTH_CACHE.clear();
+    }
+
+    static RenderPipeline forSourceWithDepth(final RenderPipeline source) {
+        return forSourceWithDepth(source,true);
+    }
+
+    static RenderPipeline forSourceWithDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(!replayableDepth(source))throw new IllegalArgumentException("Source needs pre-draw depth provenance: "+source.getLocation());
+        RenderPipeline[] variants=DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,familyOf(source),null,true,depthAttachmentPresent);
+        return variants[slot];
+    }
+
+    static RenderPipeline forPreviousPositionsWithDepth(final RenderPipeline source) {
+        return forPreviousPositionsWithDepth(source,true);
+    }
+
+    static RenderPipeline forPreviousPositionsWithDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(!replayableDepth(source))throw new IllegalArgumentException("Source needs pre-draw depth provenance: "+source.getLocation());
+        PreviousFamily family = previousFamilyOf(source);
+        if (family == null) throw new IllegalArgumentException("Source has no previous-position ABI: "+source.getLocation());
+        RenderPipeline[] variants=PREVIOUS_POSITION_DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,null,family,true,depthAttachmentPresent);
+        return variants[slot];
+    }
+
+    static boolean testsSourceDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        return depthAttachmentPresent && source.getDepthStencilState()!=null
+                && source.getDepthStencilState().depthTest()!=CompareOp.ALWAYS_PASS;
+    }
+
+    static RenderPipeline forPreviousPositionsWithCoverage(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        if(previousFamilyOf(source)!=PreviousFamily.PARTICLE || !replayableDepth(source))
+            throw new IllegalArgumentException("Source has no bounded weather correspondence ABI: "+source.getLocation());
+        RenderPipeline[] variants=PREVIOUS_COVERAGE_DEPTH_CACHE.computeIfAbsent(source,ignored->new RenderPipeline[2]);
+        int slot=depthAttachmentPresent ? 1 : 0;
+        if(variants[slot]==null)variants[slot]=buildVariant(source,null,PreviousFamily.PARTICLE,true,depthAttachmentPresent,true);
+        return variants[slot];
+    }
+
+    private static boolean overridesPrivateDepth(final RenderPipeline source,final boolean depthAttachmentPresent) {
+        return !testsSourceDepth(source,depthAttachmentPresent)
+                || source.getDepthStencilState().depthTest()==CompareOp.EQUAL
+                || source.getDepthStencilState().depthTest()==CompareOp.NOT_EQUAL;
     }
 
     private static RenderPipeline build(final RenderPipeline source) {
@@ -244,6 +379,27 @@ final class MetalEntityMotionPipeline {
             final @Nullable Family family,
             final @Nullable PreviousFamily previousFamily
     ) {
+        return buildVariant(source, family, previousFamily, false);
+    }
+
+    private static RenderPipeline buildVariant(
+            final RenderPipeline source,
+            final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,
+            final boolean depthCorrespondence
+    ) {
+        return buildVariant(source,family,previousFamily,depthCorrespondence,true);
+    }
+
+    private static RenderPipeline buildVariant(final RenderPipeline source,final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,final boolean depthCorrespondence,
+            final boolean depthAttachmentPresent) {
+        return buildVariant(source,family,previousFamily,depthCorrespondence,depthAttachmentPresent,false);
+    }
+
+    private static RenderPipeline buildVariant(final RenderPipeline source,final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily,final boolean depthCorrespondence,
+            final boolean depthAttachmentPresent,final boolean previousCoverage) {
         boolean previousPositions = previousFamily != null;
         if (!previousPositions && family == null) {
             throw new IllegalArgumentException("Missing root motion family for " + source.getLocation());
@@ -254,7 +410,9 @@ final class MetalEntityMotionPipeline {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
-                        (previousPositions ? previousFamily.locationPrefix : family.locationPrefix()) + sourceName
+                        (previousPositions ? previousFamily.locationPrefix : family.locationPrefix())
+                                + (previousCoverage ? "bounded/" : "")
+                                + (depthCorrespondence ? depthAttachmentPresent ? "depth/" : "depth/no_source_attachment/" : "") + sourceName
                 ))
                 .withVertexShader(previousPositions ? previousFamily.vertexShader : family.shader())
                 .withFragmentShader(previousPositions ? previousFamily.fragmentShader : family.shader())
@@ -272,8 +430,19 @@ final class MetalEntityMotionPipeline {
             }
         }
         if (previousPositions) {
-            builder.withVertexBinding(1, PREVIOUS_POSITION_FORMAT);
+            builder.withVertexBinding(1,previousCoverage ? PREVIOUS_COVERAGE_FORMAT
+                    : depthCorrespondence ? PREVIOUS_VALIDITY_FORMAT : PREVIOUS_POSITION_FORMAT);
+            if(previousCoverage)builder.withShaderDefine("METALLUM_PREVIOUS_COVERAGE").withShaderDefine("METALLUM_REACTIVE_MATERIAL");
+            if (depthCorrespondence) builder.withShaderDefine("METALLUM_PREVIOUS_VALIDITY");
+            if (!source.getVertexFormatBindings().isEmpty()
+                    && DefaultVertexFormat.ENTITY_GLINT_SPECIAL.equals(source.getVertexFormatBinding(0))) {
+                builder.withShaderDefine("METALLUM_ENTITY_GLINT_SPECIAL");
+            }
         }
+        if (source.getShaders().get(ShaderType.VERTEX).getPath().equals("core/item")) {
+            builder.withShaderDefine("METALLUM_ITEM_SOURCE");
+        }
+        if (usesEntityLightmap(source)) builder.withShaderDefine("METALLUM_ENTITY_LIGHTMAP");
         source.getShaderDefines().flags().forEach(builder::withShaderDefine);
         source.getShaderDefines().values().forEach((name, value) -> {
             try {
@@ -293,12 +462,39 @@ final class MetalEntityMotionPipeline {
                 }
             }
         });
+        if (depthCorrespondence) {
+            builder.withShaderDefine("METALLUM_MOTION_DEPTH").withColorTargetState(2, DEPTH_TARGET);
+            if (usesPreviousDepthBias(source,depthAttachmentPresent)) {
+                builder.withBindGroupLayout(PREVIOUS_RASTER).withShaderDefine("METALLUM_PREVIOUS_DEPTH_BIAS");
+            }
+            if (testsSourceDepth(source,depthAttachmentPresent)) {
+                builder.withBindGroupLayout(SOURCE_DEPTH)
+                        .withShaderDefine("METALLUM_TEST_SOURCE_DEPTH")
+                        .withShaderDefine("METALLUM_SOURCE_DEPTH_"+source.getDepthStencilState().depthTest().name());
+            }
+            if(overridesPrivateDepth(source,depthAttachmentPresent))builder.withShaderDefine("METALLUM_MOTION_OVERLAY");
+            if (source.getShaderDefines().flags().stream().anyMatch(flag -> flag.equals("GLINT")
+                    || flag.equals("APPLY_TEXTURE_MATRIX") || flag.equals("DISSOLVE"))
+                    || previousFamily==PreviousFamily.LIGHTNING || previousFamily==PreviousFamily.CLOUD) {
+                builder.withShaderDefine("METALLUM_REACTIVE_MATERIAL");
+            }
+        }
+        boolean alphaComposite = source.getColorTargetStates().stream().filter(java.util.Objects::nonNull)
+                .anyMatch(target -> target.blendFunction().map(blend -> blend.color().sourceFactor() == BlendFactor.SRC_ALPHA).orElse(false))
+                // Vanilla's additive OIT also premultiplies RGB by source alpha.
+                || source.getShaderDefines().flags().contains("OIT_ACCUMULATE");
+        if (alphaComposite) builder.withShaderDefine("METALLUM_ALPHA_COMPOSITE");
 
         DepthStencilState sourceDepth = source.getDepthStencilState();
-        if (sourceDepth != null) {
+        if (depthCorrespondence && overridesPrivateDepth(source,depthAttachmentPresent)) {
+            // A source overlay ignores scene Z. Keep its raster Z in our private attachment.
+            builder.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS,true,
+                    depthAttachmentPresent && sourceDepth!=null ? sourceDepth.depthBiasScaleFactor() : 0,
+                    depthAttachmentPresent && sourceDepth!=null ? sourceDepth.depthBiasConstant() : 0));
+        } else if (sourceDepth != null) {
             builder.withDepthStencilState(new DepthStencilState(
                     sourceDepth.depthTest(),
-                    false,
+                    true,
                     sourceDepth.depthBiasScaleFactor(),
                     sourceDepth.depthBiasConstant()
             ));
