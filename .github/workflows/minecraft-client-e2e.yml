@@ -395,6 +395,13 @@ jobs:
           import pathlib
           import xml.etree.ElementTree as ET
           root = pathlib.Path('.github/ci/minecraft-e2e/build')
+          # HotSpot compiler/native crashes do not create JUnit failures. Preserve the
+          # actual VM report/compile task instead of classifying them from exit 134 alone.
+          for path in sorted(root.glob('run/clientGameTest/hs_err_pid*.log')):
+              print('JVM_FATAL_REPORT_BEGIN', str(path), 'bytes=' + str(path.stat().st_size))
+              with path.open('rb') as stream:
+                  print(stream.read(128 * 1024).decode('utf-8', errors='replace'))
+              print('JVM_FATAL_REPORT_END', str(path))
           for path in sorted(root.glob('**/TEST-*.xml')):
               try:
                   suite = ET.parse(path).getroot()
@@ -414,6 +421,8 @@ jobs:
             .github/ci/minecraft-e2e/build/evidence/
             .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
             .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/hs_err_pid*.log
+            .github/ci/minecraft-e2e/build/run/clientGameTest/replay_pid*.log
             .github/ci/minecraft-e2e/build/reports/
             .github/ci/minecraft-e2e/build/test-results/
           if-no-files-found: warn
