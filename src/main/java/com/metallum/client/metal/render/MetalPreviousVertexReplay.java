@@ -66,7 +66,11 @@ final class MetalPreviousVertexReplay {
     /** Immutable bindings of the draw that actually executed, including OIT's selected pipeline. */
     record SourceState(RenderPipeline pipeline, Map<String, TextureViewAndSampler> textures,
                        RenderPass.@Nullable RenderArea scissor, boolean depthAttachmentPresent,
-                       RasterState raster) {
+                       RasterState raster,@Nullable MetalShaderLibraryProof shaderOwner) {
+        SourceState(RenderPipeline pipeline,Map<String,TextureViewAndSampler> textures,
+                    RenderPass.@Nullable RenderArea scissor,boolean depthAttachmentPresent,RasterState raster) {
+            this(pipeline,textures,scissor,depthAttachmentPresent,raster,null);
+        }
         SourceState(RenderPipeline pipeline,Map<String,TextureViewAndSampler> textures,
                     RenderPass.@Nullable RenderArea scissor,boolean depthAttachmentPresent) {
             this(pipeline,textures,scissor,depthAttachmentPresent,RasterState.UNBIASED);
@@ -75,6 +79,7 @@ final class MetalPreviousVertexReplay {
             this(pipeline,textures,scissor,true);
         }
         SourceState { textures = Map.copyOf(textures); }
+        boolean shaderSourceLive() {return shaderOwner==null || shaderOwner.canonicalOpen();}
     }
 
     record DrawTransforms(Matrix4f currentProjection, Matrix4f currentUnjitteredFromRaster,
@@ -214,7 +219,7 @@ final class MetalPreviousVertexReplay {
     }
 
     static MetalPreviousVertexHistory.@Nullable SurfaceIdentity surfaceIdentity(final @Nullable SourceState state) {
-        if (state == null) return null;
+        if (state == null || !state.shaderSourceLive()) return null;
         Map<String, MetalPreviousVertexHistory.TextureIdentity> textures = new java.util.TreeMap<>();
         // OIT's per-frame coefficient/depth targets describe compositing, not material identity.
         // Track the sampled resources that define visibility of the audited reduced families.

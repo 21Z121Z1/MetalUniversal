@@ -262,6 +262,8 @@ public final class MetalFxManager {
     // beginFrame and presentation; once any unproven override can have affected color geometry,
     // that source frame must never enter MTLFXFrameInterpolator.
     private boolean irisMotionSemanticsUnprovenThisFrame;
+    private boolean sourceShaderInputsUnprovenThisFrame;
+    private boolean shaderLibraryRefreshRequested;
     private final Set<PistonHeadRenderState> pistonExactCandidates =
             java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean transparencyPhase;
@@ -837,6 +839,29 @@ public final class MetalFxManager {
         }
     }
 
+    static void shaderLibraryPublished(MetalDevice device) {
+        MetalFxManager manager=active;
+        if(manager!=null && manager.device==device) {
+            manager.shaderLibraryRefreshRequested=true;
+            manager.resetHistoryInternal("source shader library generation changed");
+        }
+    }
+
+    static void rejectShaderInputs(MetalDevice device,@Nullable MetalShaderLibraryProof sourceOwner,String reason) {
+        // An old compiled pipeline must not veto the different library published by reload.
+        if(sourceOwner!=null)sourceOwner.veto(reason);
+        MetalFxManager manager=active;
+        if(manager==null || manager.device!=device || manager.runtimeDisabled)return;
+        manager.sourceShaderInputsUnprovenThisFrame=true;
+        if(manager.sourceFrameStamp!=null && manager.frameSynthesisReceipts.matches(manager.sourceFrameStamp))
+            manager.frameSynthesisReceipts.observeUnsupported(FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,1,reason);
+        if(manager.effectiveMode==MetalFxConfig.Mode.TEMPORAL) {
+            manager.shaderLibraryRefreshRequested=true;
+            manager.historyReset=true;manager.surfaceDepthHistoryValid=false;manager.frameResetForPresent=true;
+            manager.temporalColorTransferStamp=null;
+        }
+    }
+
     /** Marks the beginning of the real FeatureRenderDispatcher translucent phase. */
     public static void beginTransparencyPhase() {
         MetalFxManager manager = active;
@@ -1180,13 +1205,15 @@ public final class MetalFxManager {
                                 long spatialEncodes, long temporalEncodes, boolean frameGenerationRequested,
                                 boolean frameGenerationEnabled, int frameGenerationQueued,
                                 int renderWidth, int renderHeight, int displayWidth, int displayHeight,
-                                long session, long historyEpoch) {}
+                                long session, long historyEpoch,long shaderLibraryGeneration,
+                                boolean sourceShaderInputsProven,String sourceShaderReason) {}
 
     /** Diagnostic snapshot sampled on the render owner; never enables an effect. */
     public static ScalingStatus scalingStatus() {
         MetalFxManager manager = active;
         if (manager == null) return new ScalingStatus("OFF", "OFF", false, false, false, false,
-                0, 0, false, false, 0, 0, 0, 0, 0, 0, 0);
+                0, 0, false, false, 0, 0, 0, 0, 0, 0, 0,0,false,"shader-library-unavailable");
+        var proof=MetalShaderSourceAdapters.libraryProof(manager.device.activeShaderSource());
         return new ScalingStatus(manager.config.requestedMode.name(),
                 manager.runtimeDisabled ? "OFF" : manager.effectiveMode.name(), manager.runtimeDisabled,
                 MetalNativeBridge.metallum_metalfx_supports_spatial(manager.device.metalDeviceHandle()),
@@ -1194,7 +1221,8 @@ public final class MetalFxManager {
                 manager.motionPipelineV2Available, manager.spatialScalerEncodeCount, manager.temporalScalerEncodeCount,
                 manager.config.frameGeneration, manager.frameGenerationEnabled, manager.frameGenerationFramesQueued,
                 manager.renderWidth, manager.renderHeight, manager.displayWidth, manager.displayHeight,
-                manager.scalingSession, manager.historyEpoch);
+                manager.scalingSession, manager.historyEpoch,proof==null ? 0 : proof.generation(),
+                proof!=null && proof.canonicalOpen(),proof==null ? "shader-library-unavailable" : proof.reason());
     }
 
     /**
@@ -1335,7 +1363,12 @@ public final class MetalFxManager {
         boolean spatial = MetalNativeBridge.metallum_metalfx_supports_spatial(device.metalDeviceHandle());
         boolean temporal = MetalNativeBridge.metallum_metalfx_supports_temporal(device.metalDeviceHandle())
                 && MetalNativeBridge.supportsSurfaceMotionV4(device.metalDeviceHandle());
-        MetalFxConfig.Mode selected = selectMode(config.requestedMode, spatial, temporal);
+        var proof=MetalShaderSourceAdapters.libraryProof(device.activeShaderSource());
+        boolean sourceProven=proof!=null && proof.canonicalOpen() && sourceShaderMotionSemanticsProven();
+        MetalFxConfig.Mode selected = selectMode(config.requestedMode,spatial,temporal,sourceProven);
+        if(temporal && !sourceProven && (config.requestedMode==MetalFxConfig.Mode.TEMPORAL || config.requestedMode==MetalFxConfig.Mode.AUTO))
+            Metallum.LOGGER.warn("MetalFX Temporal source shader semantics unproven; using {}: {}",selected,
+                    proof==null ? "shader-library-unavailable" : proof.canonicalOpen() ? "iris-active-pipeline-motion-semantics-unproven" : proof.reason());
         if (selected != config.requestedMode && config.requestedMode != MetalFxConfig.Mode.AUTO) {
             Metallum.LOGGER.warn("MetalFX {} unavailable; falling back to {}", config.requestedMode, selected);
         }
@@ -1356,6 +1389,11 @@ public final class MetalFxManager {
             case AUTO -> temporalSupported ? MetalFxConfig.Mode.TEMPORAL : spatialSupported ? MetalFxConfig.Mode.SPATIAL : MetalFxConfig.Mode.OFF;
             case OFF -> MetalFxConfig.Mode.OFF;
         };
+    }
+
+    static MetalFxConfig.Mode selectMode(MetalFxConfig.Mode requested,boolean spatialSupported,
+                                         boolean temporalSupported,boolean sourceSemanticsProven) {
+        return selectMode(requested,spatialSupported,temporalSupported && sourceSemanticsProven);
     }
 
     private boolean usesFrameGenerationWorkResolution() {
@@ -1408,6 +1446,7 @@ public final class MetalFxManager {
         sourceFrameStamp = null;
         sourceFrameStampInvalidated = false;
         irisMotionSemanticsUnprovenThisFrame = !sourceShaderMotionSemanticsProven();
+        sourceShaderInputsUnprovenThisFrame=false;
         pistonExactCandidates.clear();
         transparencyPhase = false;
         MetalFxMotionTelemetry.beginFrame();
@@ -1547,17 +1586,19 @@ public final class MetalFxManager {
      */
     private void reloadConfigIfRequested() {
         long revision = MetalFxConfig.runtimeRevision();
-        if (revision == this.configRevision) {
+        if (revision == this.configRevision && !shaderLibraryRefreshRequested) {
             return;
         }
 
+        boolean sourceLibraryChanged=shaderLibraryRefreshRequested;
+        shaderLibraryRefreshRequested=false;
         MetalFxConfig previous = this.config;
         MetalFxConfig next = MetalFxConfig.load();
         MetalFxConfig.RuntimeSettings previousSettings = previous.runtimeSettings();
         MetalFxConfig.RuntimeSettings nextSettings = next.runtimeSettings();
         this.configRevision = revision;
 
-        boolean renderSettingsChanged = nextSettings.requiresRenderRefreshComparedTo(previousSettings);
+        boolean renderSettingsChanged = sourceLibraryChanged || nextSettings.requiresRenderRefreshComparedTo(previousSettings);
         this.config = next;
         if (!renderSettingsChanged) {
             return;
@@ -1996,6 +2037,7 @@ public final class MetalFxManager {
             return;
         }
         if (prepared == null) {
+            MetalEntityMotionCapture.failExactSample(sample,"source-state-or-shader-content-unproven");
             MetalEntityMotionCapture.recordMotionDrawSkip("source-state-unavailable");
             return;
         }
@@ -2068,6 +2110,12 @@ public final class MetalFxManager {
         List<PreparedObjectMotionReplay> preparedReplays = new ArrayList<>(replays.size());
         for (ObjectMotionReplay replay : replays) {
             var prepared = replay.prepared();
+            if(!prepared.shaderSourceLive()) {
+                rejectShaderInputs(device,prepared.shaderOwner(),"source-shader-library-retired-before-replay");
+                MetalEntityMotionCapture.failExactSample(replay.sample(),"source-shader-library-retired-before-replay");
+                MetalEntityMotionCapture.recordMotionDrawSkip("source-shader-library-retired-before-replay");
+                continue;
+            }
             StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
             boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
             boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
@@ -2673,12 +2721,16 @@ public final class MetalFxManager {
             this.frameResetForPresent = historyReset;
             MetalGpuTexture temporalColor = color;
             MetalGpuTexture temporalOutput = output;
-            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && !usesNativeDirectFrameGeneration()) {
+            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && !sourceShaderInputsUnprovenThisFrame && !usesNativeDirectFrameGeneration()) {
                 if (temporalColorTransfer == null) temporalColorTransfer = new MetalFxColorTransfer(device);
                 temporalColor = temporalColorTransfer.decode(encoder, color, output.getWidth(0), output.getHeight(0));
                 temporalOutput = temporalColorTransfer.output();
             }
-            if (usesNativeDirectFrameGeneration() && surfaceMotionPrepared) {
+            if(effectiveMode==MetalFxConfig.Mode.TEMPORAL && sourceShaderInputsUnprovenThisFrame) {
+                // Keep this source's real color, retire Temporal history, and select Spatial
+                // before the next frame's projection/jitter. Never encode guessed motion.
+                encoded=encoder.encodeFullscreenCopy(color,null,output,true);
+            } else if (usesNativeDirectFrameGeneration() && surfaceMotionPrepared) {
                 // The presenter snapshots this texture into its own ring buffer
                 // before the command buffer is committed. Avoid an otherwise
                 // redundant native-resolution shader copy into an intermediate
@@ -2753,7 +2805,7 @@ public final class MetalFxManager {
             // same successful-submit transaction for previous camera/object
             // motion and reset ownership. Its phase remains zero because
             // beginFrame disables jitter for this path.
-            historyTransactionEncoded = encoded && capturesMotion();
+            historyTransactionEncoded = encoded && capturesMotion() && !sourceShaderInputsUnprovenThisFrame;
             if (historyTransactionEncoded && depth != null && !usesNativeDirectFrameGeneration()) {
                 captureValidationFrameIfRequested(color, depth, output);
                 captureFlickerFrameIfRequested(output, depth);
@@ -5418,6 +5470,10 @@ public final class MetalFxManager {
             // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
             frameResetForPresent = true;
             return null;
+        }
+        if(sourceShaderInputsUnprovenThisFrame) {
+            if(telemetryCandidate)MetalFxMotionTelemetry.recordSourceFrame(frameId,false,0,"source-shader-content-unproven");
+            frameResetForPresent=true;return null;
         }
         if (irisMotionSemanticsUnprovenThisFrame
                 || !sourceShaderMotionSemanticsProven()) {

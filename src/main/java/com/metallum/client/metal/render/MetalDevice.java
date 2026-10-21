@@ -377,6 +377,7 @@ final class MetalDevice implements GpuDeviceBackend {
             // These backend-owned lazy pipelines are outside Minecraft's frontend cache.
             // Retire their old source generation even when MetalFX is disabled.
             if(previous!=null)device.clearPipelineCache();
+            MetalFxManager.shaderLibraryPublished(device);
         }
     }
 

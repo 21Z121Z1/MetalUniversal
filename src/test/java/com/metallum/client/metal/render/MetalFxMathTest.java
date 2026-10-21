@@ -467,6 +467,14 @@ final class MetalFxMathTest {
                 MetalFxManager.selectMode(MetalFxConfig.Mode.OFF, true, true));
     }
 
+    @Test void hardwareSupportCannotOverrideUnprovenSourceShaderSemantics() {
+        assertEquals(MetalFxConfig.Mode.SPATIAL,MetalFxManager.selectMode(MetalFxConfig.Mode.TEMPORAL,true,true,false));
+        assertEquals(MetalFxConfig.Mode.SPATIAL,MetalFxManager.selectMode(MetalFxConfig.Mode.AUTO,true,true,false));
+        assertEquals(MetalFxConfig.Mode.OFF,MetalFxManager.selectMode(MetalFxConfig.Mode.TEMPORAL,false,true,false));
+        assertEquals(MetalFxConfig.Mode.TEMPORAL,MetalFxManager.selectMode(MetalFxConfig.Mode.TEMPORAL,true,true,true));
+        assertEquals(MetalFxConfig.Mode.OFF,MetalFxManager.selectMode(MetalFxConfig.Mode.OFF,true,true,false));
+    }
+
     @Test
     void handOverlayReactiveWeightDefaultsHighAndStaysKillSwitchable() {
         assertEquals(0.9F, MetalFxManager.handOverlayReactiveBoost(null), 1.0E-6F);

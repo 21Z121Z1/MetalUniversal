@@ -18,6 +18,10 @@ import static org.junit.jupiter.api.Assertions.*;
 final class MetalShaderSourceLibraryTest {
     private static final Identifier ENTITY=Identifier.fromNamespaceAndPath("minecraft","core/entity");
 
+    static ShaderSource rawLibrary(boolean changedRoot,boolean changedInclude) {
+        return MetalBackend.prepareShaderSource(new RawSources(changedRoot,changedInclude));
+    }
+
     static void verifyCanonicalRawLibraryWithInitializedDevice() throws com.mojang.renderpearl.util.ShaderCompileException {
         var original=new RawSources(false,false);
         try(ShaderSource source=MetalBackend.prepareShaderSource(original);var compiler=new GlslCompiler(true,true)) {

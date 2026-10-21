@@ -64,6 +64,10 @@ jobs:
           ./gradlew --no-daemon --stacktrace test \
             --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.inspectPinnedShaderIncludeApi \
             --tests com.metallum.client.metal.render.MetalShaderIncludeLifetimeTest \
+            --tests com.metallum.client.metal.render.MetalShaderLibraryProofTest \
+            --tests com.metallum.client.metal.render.MetalShaderSourceLibraryTest \
+            --tests com.metallum.client.metal.render.MetalCanonicalShaderReferenceTest \
+            --tests com.metallum.client.metal.render.MetalFxMathTest \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc
           python3 - <<'PY'
           from pathlib import Path

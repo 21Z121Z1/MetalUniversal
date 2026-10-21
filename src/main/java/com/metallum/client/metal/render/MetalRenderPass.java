@@ -115,13 +115,19 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     MetalPreviousVertexReplay.@Nullable SourceState motionSourceState() {
         RenderPipeline source = compiledPipeline == null ? null : compiledPipeline.sourcePipeline();
+        if(source!=null && MetalEntityMotionPipeline.isSplittableVertexShader(source)
+                && (compiledPipeline.shaderInputOwner()==null || !compiledPipeline.shaderInputMatch().canonicalInputsMatch())) {
+            MetalFxManager.rejectShaderInputs(device,compiledPipeline.shaderInputOwner(),
+                    compiledPipeline.shaderInputOwner()==null ? "source-shader-library-unavailable" : compiledPipeline.shaderInputMatch().reason());
+            return null;
+        }
         return source == null ? null : new MetalPreviousVertexReplay.SourceState(
                 source, samplers, scissorState.enabled()
                 ? new RenderPass.RenderArea(scissorState.x(), scissorState.y(), scissorState.width(), scissorState.height())
                 : null,depthTexture != null,new MetalPreviousVertexReplay.RasterState(
                         renderArea.width(),renderArea.height(),
                         depthTexture == null ? 0 : compiledPipeline.depthBiasScaleFactor(),
-                        depthTexture == null ? 0 : compiledPipeline.depthBiasConstant()));
+                        depthTexture == null ? 0 : compiledPipeline.depthBiasConstant()),compiledPipeline.shaderInputOwner());
     }
 
     /**

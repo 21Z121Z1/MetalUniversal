@@ -16,6 +16,8 @@ final class MetalFxLifecycleEvidence {
     static void verify(ClientGameTestContext context, Path output) {
         Map<String, MetalFxManager.ScalingStatus> states = new LinkedHashMap<>();
         var initial = snapshot(context);
+        require(initial.sourceShaderInputsProven() && initial.shaderLibraryGeneration()>0,
+                "Initial real shader library is not matched to the pinned client: "+initial);
         states.put("initial", initial);
         try {
             context.runOnClient(client -> {
@@ -80,6 +82,8 @@ final class MetalFxLifecycleEvidence {
             context.waitFor(client -> client.gui.overlay() == null && client.isPaused(), 100);
             var pausedReload = snapshot(context);
             states.put("reloadedWhilePaused", pausedReload);
+            require(pausedReload.sourceShaderInputsProven() && pausedReload.shaderLibraryGeneration()!=paused.shaderLibraryGeneration(),
+                    "Resource reload reused the old shader proof or published unverified inputs: "+pausedReload);
             require(pausedReload.session() != paused.session() || pausedReload.historyEpoch() > paused.historyEpoch(),
                     "Resource reload reused history while pause state stayed unchanged: " + pausedReload);
             context.runOnClient(client -> client.gui.setScreen(null));

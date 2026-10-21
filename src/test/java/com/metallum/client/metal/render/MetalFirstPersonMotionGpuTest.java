@@ -20,14 +20,11 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -41,6 +38,7 @@ final class MetalFirstPersonMotionGpuTest {
     private static final int W = 64, H = 48, UNIFORM_OFFSET = 256;
     private MetalDevice device;
     private MetalCommandEncoder encoder;
+    private ShaderSource sourceOwner;
 
     record Fixture(String name, String shader, float oldFov, float fov, boolean cameraLocked,
                    boolean deformed, boolean alphaHole, boolean previousBehind, float side) {}
@@ -125,13 +123,8 @@ final class MetalFirstPersonMotionGpuTest {
 
     @BeforeEach
     void setup() {
-        ShaderSource sources = MetalShaderSourceAdapters.from((id, type) -> {
-            String resource = "assets/" + id.getNamespace() + "/shaders/" + id.getPath()
-                    + (type == ShaderType.VERTEX ? ".vsh" : ".fsh");
-            try { return MetalMotionShaderCompilationTest.expandIncludes(resource, new HashSet<>()); }
-            catch (IOException e) { throw new UncheckedIOException(e); }
-        });
-        device = new MetalDevice(sources, new GpuDebugOptions(2, true, true, true),
+        sourceOwner=MetalShaderSourceLibraryTest.rawLibrary(false,false);
+        device = new MetalDevice(sourceOwner, new GpuDebugOptions(2, true, true, true),
                 MetalNativeBridge.metallum_create_system_default_device(), MemorySegment.NULL,
                 "First-person projection history", MemorySegment.NULL);
         encoder = device.commandEncoder();
@@ -154,8 +147,15 @@ final class MetalFirstPersonMotionGpuTest {
                 .withShaderDefine("ALPHA_CUTOUT", .8F).withShaderDefine("APPLY_TEXTURE_MATRIX").build();
         try (var builder = new com.mojang.renderpearl.frontend.shaders.PipelineBuilder(device)) {
             var firstInputs=MetalBackend.captureCompileInputs(device.activeShaderSource());
-            var secondInputs=MetalBackend.captureCompileInputs(MetalShaderSourceAdapters.from((id,type)->
-                    device.activeShaderSource().getShader(id,type)+"\n// independent second compile input\n"));
+            ShaderSource library=device.activeShaderSource();
+            var modified=MetalShaderSourceAdapters.withIncludeLifetime(new ShaderSource() {
+                @Override public String getShader(Identifier id,ShaderType type) {
+                    return library.getShader(id,type)+"\n// independent second compile input\n";
+                }
+                @Override public CachedIncludeSource getInclude(Identifier id) {return library.getInclude(id);}
+                @Override public void close() {}
+            },library);
+            var secondInputs=MetalBackend.captureCompileInputs(modified);
             var pendingFirst = MetalBackend.preservePipelineSource(
                     builder.compilePipeline(first,firstInputs,Runnable::run).join(),first,firstInputs);
             var pendingSecond = MetalBackend.preservePipelineSource(
@@ -227,6 +227,45 @@ final class MetalFirstPersonMotionGpuTest {
                 .withShaderDefine("NO_CARDINAL_LIGHTING").withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").build();
         var compiled=device.precompilePipeline(source,null);
         assertSame(source,assertInstanceOf(MetalCompiledRenderPipeline.class,compiled).sourcePipeline());
+    }
+
+    @Test
+    void sameIdentifierReplacementsCannotBorrowMotionHistoryOrVetoAnotherLibrary() {
+        var pipeline=RenderPipeline.builder().withLocation("source_contract/replaced_history")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withColorTargetState(ColorTargetState.DEFAULT).withShaderDefine("NO_CARDINAL_LIGHTING")
+                .withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE")
+                .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                        .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                        .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
+        var originalProof=MetalShaderSourceAdapters.libraryProof(sourceOwner);
+        assertNotNull(originalProof);assertTrue(originalProof.canonicalOpen(),originalProof.reason());
+        try(var color=texture("source generation admission",GpuFormat.RGBA8_UNORM,0);
+            var view=device.createTextureView(color)) {
+            var descriptor=RenderPassDescriptor.builder(()->"Motion source generation admission")
+                    .withColorAttachment(view,Optional.of(new Vector4f(0)))
+                    .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build();
+            MetalPreviousVertexReplay.SourceState captured;
+            try(var pass=encoder.createRenderPass(descriptor)) {
+                pass.setPipeline(pipeline);captured=pass.motionSourceState();
+                assertNotNull(captured);assertSame(originalProof,captured.shaderOwner());
+                assertNotNull(MetalPreviousVertexReplay.surfaceIdentity(captured));
+            }
+            for(boolean include:new boolean[]{false,true}) {
+                try(var replaced=MetalShaderSourceLibraryTest.rawLibrary(!include,include)) {
+                    MetalDevice.captureShaderSource(replaced);
+                    try(var pass=encoder.createRenderPass(descriptor)) {
+                        pass.setPipeline(pipeline);
+                        assertNull(pass.motionSourceState(),"A same-ID replacement cannot borrow canonical motion semantics");
+                    } finally {MetalDevice.captureShaderSource(sourceOwner);}
+                    assertTrue(originalProof.canonicalOpen(),"A rejected replacement must not veto another library owner");
+                }
+            }
+            sourceOwner.close();
+            assertFalse(captured.shaderSourceLive());
+            assertNull(MetalPreviousVertexReplay.surfaceIdentity(captured),"Retiring a source also retires its captured motion history");
+        }
     }
 
     @Test
@@ -359,6 +398,7 @@ final class MetalFirstPersonMotionGpuTest {
         MetalPreviousVertexHistory.reset();
         MetalEntityMotionPipeline.clear();
         if (device != null) device.close();
+        if (sourceOwner != null) sourceOwner.close();
     }
 
     @ParameterizedTest(name = "{0}")
