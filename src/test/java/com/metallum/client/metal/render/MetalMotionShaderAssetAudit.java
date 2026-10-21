@@ -57,6 +57,7 @@ final class MetalMotionShaderAssetAudit {
                     if(assets.isEmpty())throw new IllegalStateException("Verified client has no core/include shader assets");
                     result.put("canonicalClientJarVerified",true);result.put("clientJar",cache.relativize(jar).toString());
                     result.put("actualClientSha1",actual);result.put("assets",assets);
+                    result.put("includeProviderClasses",includeProviders(jar));
                     result.put("reason","Existing client bytes match the pinned version metadata; content fingerprints only, no motion admission");
                     return result;
                 }
@@ -90,6 +91,19 @@ final class MetalMotionShaderAssetAudit {
         for(var source:sourceText.entrySet()) {
             @SuppressWarnings("unchecked") var raw=(Map<String,Object>)assets.get(source.getKey());
             var description=new LinkedHashMap<>(raw);
+            if(source.getKey().endsWith("/projection.glsl") || source.getKey().endsWith("/oit_common.glsl")) {
+                var slots=new ArrayList<String>();var format=java.util.regex.Pattern.compile("%(?:[0-9]+\\$)?[a-zA-Z%]").matcher(source.getValue());
+                while(format.find())slots.add(format.group());description.put("formatSlots",slots);
+                var candidates=new TreeMap<String,Object>();
+                for(String replacement:java.util.List.of("true","false","0","1","0.0","1.0")) {
+                    try {
+                        Object[] values=new Object[Math.max(1,slots.size())];java.util.Arrays.fill(values,replacement);
+                        byte[] candidate=String.format(java.util.Locale.ROOT,source.getValue(),values).getBytes(StandardCharsets.UTF_8);
+                        candidates.put(replacement,Map.of("bytes",candidate.length,"sha256",HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(candidate))));
+                    } catch(java.util.IllegalFormatException invalid) {candidates.put(replacement,invalid.getClass().getSimpleName());}
+                }
+                description.put("formatCandidatesDiagnosticOnly",candidates);
+            }
             try {
                 String expanded=expand(source.getKey(),sourceText,imports,new java.util.HashSet<>());
                 byte[] bytes=expanded.getBytes(StandardCharsets.UTF_8);
@@ -101,6 +115,22 @@ final class MetalMotionShaderAssetAudit {
             assets.put(source.getKey(),description);
         }
         return assets;
+    }
+
+    private static java.util.List<String> includeProviders(Path jar) throws IOException {
+        var classes=new ArrayList<String>();long scanned=0;
+        try(var zip=new ZipFile(jar.toFile())) {
+            var entries=zip.entries();
+            while(entries.hasMoreElements()) {
+                var entry=entries.nextElement();if(entry.isDirectory() || !entry.getName().endsWith(".class"))continue;
+                byte[] bytes;try(var input=zip.getInputStream(entry)) {bytes=input.readNBytes(2*1024*1024+1);}
+                scanned+=bytes.length;if(bytes.length>2*1024*1024 || scanned>256L*1024*1024)throw new IOException("include-provider-scan-byte-limit");
+                String constants=new String(bytes,StandardCharsets.ISO_8859_1);
+                if(constants.contains("projection.glsl") || constants.contains("oit_common.glsl"))
+                    classes.add(entry.getName().substring(0,entry.getName().length()-6));
+            }
+        }
+        return java.util.List.copyOf(classes);
     }
 
     private static String expand(String path,Map<String,String> sources,java.util.regex.Pattern imports,

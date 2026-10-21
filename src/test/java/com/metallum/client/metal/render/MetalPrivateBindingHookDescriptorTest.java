@@ -42,12 +42,69 @@ final class MetalPrivateBindingHookDescriptorTest {
         report.put("methods",type.methods.stream().map(method->method.name+method.desc).toList());
         report.put("sourceAdmissionGranted",false);
         report.put("boundary","Pinned include API signatures only; shader identifiers and namespace do not prove source semantics.");
-        report.put("assetReference",MetalMotionShaderAssetAudit.inspect());
+        var reference=MetalMotionShaderAssetAudit.inspect();report.put("assetReference",reference);
+        var providers=new java.util.TreeSet<String>();
+        Object providerNames=reference.get("includeProviderClasses");
+        if(providerNames instanceof java.util.List<?> names)for(Object name:names)providers.add((String)name);
+        providers.add("net/minecraft/client/renderer/ShaderManager");
+        providers.add("com/mojang/renderpearl/frontend/shaders/GlslCompiler");
+        providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource");
+        var providerBytecode=new java.util.TreeMap<String,Object>();
+        for(String name:providers)providerBytecode.put(name,includeProviderBytecode(name));
+        report.put("includeProviderBytecode",providerBytecode);
         ClassNode includeResult=load("org/lwjgl/util/shaderc/ShadercIncludeResult");
         report.put("includeResultMethods",includeResult.methods.stream().map(method->method.name+method.desc).toList());
         var compressed=new java.io.ByteArrayOutputStream();
         try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
         System.out.println("METAL_SHADER_SOURCE_API_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
+    }
+
+    private Object includeProviderBytecode(String resource) throws Exception {
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")) {
+            if(input==null)return java.util.Map.of("available",false);
+            bytes=input.readAllBytes();
+        }
+        var type=new ClassNode();new ClassReader(bytes).accept(type,0);
+        var methods=new java.util.TreeMap<String,Object>();
+        for(var method:type.methods) {
+            var rows=new java.util.ArrayList<String>();
+            var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();int index=0;
+            for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);
+            for(var instruction:method.instructions) {
+                if(rows.size()>=10000) {rows.add("instruction-limit-reached");break;}
+                String row=Integer.toString(instruction.getOpcode());
+                if(instruction instanceof MethodInsnNode call)row+=" call "+call.owner+"."+call.name+call.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.FieldInsnNode field)row+=" field "+field.owner+"."+field.name+":"+field.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.JumpInsnNode jump)row+=" jump L"+labels.get(jump.label);
+                else if(instruction instanceof org.objectweb.asm.tree.LabelNode label)row="L"+labels.get(label);
+                else if(instruction instanceof org.objectweb.asm.tree.VarInsnNode variable)row+=" local "+variable.var;
+                else if(instruction instanceof org.objectweb.asm.tree.IntInsnNode number)row+=" operand "+number.operand;
+                else if(instruction instanceof org.objectweb.asm.tree.TypeInsnNode typeInsn)row+=" type "+typeInsn.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode dynamic) {
+                    row+=" dynamic "+dynamic.name+dynamic.desc+" bootstrap "+dynamic.bsm;
+                    for(Object argument:dynamic.bsmArgs) {
+                        if(argument instanceof String text) {
+                            byte[] value=text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            row+=" arg-string-bytes="+value.length+" sha256="+java.util.HexFormat.of()
+                                    .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+                        } else row+=" arg="+argument;
+                    }
+                }
+                else if(instruction instanceof LdcInsnNode literal) {
+                    if(literal.cst instanceof String text) {
+                        byte[] value=text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        String digest=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+                        row+=" string bytes="+value.length+" sha256="+digest;
+                        if(text.length()<120 && !text.contains("\n") && text.matches("[a-zA-Z0-9_./:%$+-]+"))row+=" literal="+text;
+                    } else row+=" constant "+literal.cst;
+                }
+                rows.add(row);
+            }
+            methods.put(method.name+method.desc,rows);
+        }
+        return java.util.Map.of("available",true,"classSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)),
+                "fields",type.fields.stream().map(field->field.name+":"+field.desc).toList(),"methods",methods);
     }
 
     @Test
