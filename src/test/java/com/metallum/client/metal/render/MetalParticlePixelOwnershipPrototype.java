@@ -13,6 +13,14 @@ final class MetalParticlePixelOwnershipPrototype {
     private static final Pattern MAIN=Pattern.compile("\\bvoid\\s+main\\s*\\(\\s*\\)");
     private MetalParticlePixelOwnershipPrototype() {}
 
+    // Readback evidence is bounded by the diagnostic texture size, not the production
+    // shader-source input limit. Digest the existing array without a second image copy.
+    static Map<String,Object> pixelFingerprint(byte[] pixels) {
+        if(pixels.length>3840L*2160*16)throw new IllegalArgumentException("diagnostic-pixel-byte-limit");
+        try {return Map.of("bytes",pixels.length,"sha256",HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(pixels)));}
+        catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
+    }
+
     static String instrument(String original,ShaderType type) {
         var matcher=MAIN.matcher(original);
         if(!matcher.find())throw new IllegalArgumentException("Missing original main");

@@ -156,7 +156,7 @@ final class MetalParticlePixelOwnershipRasterTest {
                 byte[] raw=read(surface.color),shadow=read(surface.shadow),depth=read(surface.depth),shadowDepth=read(transaction.current.depth);
                 assertArrayEquals(raw,shadow,"Instrumentation must preserve every original RGBA byte");assertArrayEquals(depth,shadowDepth,"Instrumentation must preserve every original D32 byte");
                 byte[] owners=read(transaction.current.owner);int visible=verifyOwnerPixels(raw,owners,handles,a,b,scene,frame);
-                parity.add(Map.of("frame",frame,"width",w,"height",h,"pixelsCompared",w*h,"rgbaOriginal",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(raw)),"rgbaInstrumented",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(shadow)),"d32Original",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(depth)),"d32Instrumented",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(shadowDepth)),"ownerGeneration",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(owners)),"ownerComparedToIndependentColourPixels",w*h));
+                parity.add(Map.of("frame",frame,"width",w,"height",h,"pixelsCompared",w*h,"rgbaOriginal",MetalParticlePixelOwnershipPrototype.pixelFingerprint(raw),"rgbaInstrumented",MetalParticlePixelOwnershipPrototype.pixelFingerprint(shadow),"d32Original",MetalParticlePixelOwnershipPrototype.pixelFingerprint(depth),"d32Instrumented",MetalParticlePixelOwnershipPrototype.pixelFingerprint(shadowDepth),"ownerGeneration",MetalParticlePixelOwnershipPrototype.pixelFingerprint(owners),"ownerComparedToIndependentColourPixels",w*h));
                 Files.write(directory.resolve("frame-"+frame+"-original.rgba8"),raw);Files.write(directory.resolve("frame-"+frame+"-instrumented.rgba8"),shadow);
                 Files.write(directory.resolve("frame-"+frame+"-original.d32f"),depth);Files.write(directory.resolve("frame-"+frame+"-instrumented.d32f"),shadowDepth);Files.write(directory.resolve("frame-"+frame+"-owner.rgba32ui"),owners);
                 if(frame>0) {
@@ -171,7 +171,7 @@ final class MetalParticlePixelOwnershipRasterTest {
                     if(frame==1 && List.of("occluded_same_z","generation","foreign_depth").contains(scene)) {
                         byte[] control=resolve(surface,transaction,scene,true);unsafe=count(control);assertEquals(visible,unsafe,"Removing only the relevant pixel guard must expose false acceptance");assertProofPixels(control,raw,true);
                     }
-                    results.add(Map.of("frame",frame,"visiblePixels",visible,"acceptedPixels",valid,"expectedReject",reject,"onlyRelevantGuardRemovedAccepted",unsafe,"oldSlotAvailable",transaction.previous!=null,"width",w,"height",h,"acceptedMaskFingerprint",MetalShaderInputCapture.fingerprint(ByteBuffer.wrap(accepted))));
+                    results.add(Map.of("frame",frame,"visiblePixels",visible,"acceptedPixels",valid,"expectedReject",reject,"onlyRelevantGuardRemovedAccepted",unsafe,"oldSlotAvailable",transaction.previous!=null,"width",w,"height",h,"acceptedMaskFingerprint",MetalParticlePixelOwnershipPrototype.pixelFingerprint(accepted)));
                 }
                 // These callback states are attached to the real instrumented GPU submission.
                 assertEquals(MetalParticlePixelOwnershipPrototype.History.State.COMPLETE,transaction.state);

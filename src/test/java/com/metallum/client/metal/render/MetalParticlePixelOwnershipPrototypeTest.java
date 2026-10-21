@@ -84,5 +84,7 @@ final class MetalParticlePixelOwnershipPrototypeTest {
         assertEquals(16_396_800L,MetalParticlePixelOwnershipPrototype.bytes(854,480));
         for(int[] size:List.of(new int[]{0,48},new int[]{64,-1},new int[]{Integer.MAX_VALUE,2160}))
             assertThrows(IllegalArgumentException.class,()->MetalParticlePixelOwnershipPrototype.bytes(size[0],size[1]));
+        var image=new byte[1_048_577];
+        assertEquals(java.util.Map.of("bytes",image.length,"sha256","2cb74edba754a81d121c9db6833704a8e7d417e5b13d1a19f4a52f007d644264"),MetalParticlePixelOwnershipPrototype.pixelFingerprint(image));
     }
 }
