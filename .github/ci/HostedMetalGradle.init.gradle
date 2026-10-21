@@ -150,6 +150,12 @@ gradle.projectsEvaluated {
         ]
     )
 
+    configureHostedTest(
+        "hostedMetalUnownedOpaqueTest",
+        "Runs the bounded ordinary opaque unowned source and Temporal admission oracle.",
+        ["com.metallum.client.metal.render.MetalUnownedOpaqueTemporalGpuTest"]
+    )
+
     def hostedCore = configureHostedTest(
         "hostedMetalCoreIntegrationTest",
         "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",

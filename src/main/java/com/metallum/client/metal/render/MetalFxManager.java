@@ -2724,12 +2724,13 @@ public final class MetalFxManager {
             this.frameResetForPresent = historyReset;
             MetalGpuTexture temporalColor = color;
             MetalGpuTexture temporalOutput = output;
-            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && !sourceShaderInputsUnprovenThisFrame && !usesNativeDirectFrameGeneration()) {
+            boolean sourceAdmitted = temporalSourceFrameAdmitted(sourceFrameStamp, sourceShaderInputsUnprovenThisFrame);
+            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && sourceAdmitted && !usesNativeDirectFrameGeneration()) {
                 if (temporalColorTransfer == null) temporalColorTransfer = new MetalFxColorTransfer(device);
                 temporalColor = temporalColorTransfer.decode(encoder, color, output.getWidth(0), output.getHeight(0));
                 temporalOutput = temporalColorTransfer.output();
             }
-            if(effectiveMode==MetalFxConfig.Mode.TEMPORAL && sourceShaderInputsUnprovenThisFrame) {
+            if(effectiveMode==MetalFxConfig.Mode.TEMPORAL && !sourceAdmitted) {
                 // Keep this source's real color, retire Temporal history, and select Spatial
                 // before the next frame's projection/jitter. Never encode guessed motion.
                 encoded=encoder.encodeTextureCopy(color,output,true);
@@ -2808,7 +2809,7 @@ public final class MetalFxManager {
             // same successful-submit transaction for previous camera/object
             // motion and reset ownership. Its phase remains zero because
             // beginFrame disables jitter for this path.
-            historyTransactionEncoded = encoded && capturesMotion() && !sourceShaderInputsUnprovenThisFrame;
+            historyTransactionEncoded = encoded && capturesMotion() && sourceAdmitted;
             if (historyTransactionEncoded && depth != null && !usesNativeDirectFrameGeneration()) {
                 captureValidationFrameIfRequested(color, depth, output);
                 captureFlickerFrameIfRequested(output, depth);
@@ -2979,6 +2980,11 @@ public final class MetalFxManager {
             this.motionStateStore.discardFrame();
             this.frameSynthesisReceipts.discardFrame();
         }
+    }
+
+    /** The source gate used immediately before the real Temporal dispatch and history transaction. */
+    static boolean temporalSourceFrameAdmitted(FrameSynthesisContract.@Nullable FrameStamp source, boolean shaderInputsUnproven) {
+        return !shaderInputsUnproven;
     }
 
     private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
