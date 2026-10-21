@@ -48,6 +48,10 @@ final class MetalPrivateBindingHookDescriptorTest {
         Object providerNames=reference.get("includeProviderClasses");
         if(providerNames instanceof java.util.List<?> names)for(Object name:names)providers.add((String)name);
         providers.add("net/minecraft/client/renderer/ShaderManager");
+        providers.add("net/minecraft/client/renderer/ShaderManager$Configs");
+        providers.add("net/minecraft/client/renderer/ShaderManager$PostChainCache");
+        providers.add("com/mojang/blaze3d/pipeline/PipelineCache");
+        providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource$CachedIncludeSource");
         providers.add("com/mojang/renderpearl/frontend/shaders/GlslCompiler");
         providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource");
         var providerBytecode=new java.util.TreeMap<String,Object>();
