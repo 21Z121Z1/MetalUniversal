@@ -53,6 +53,32 @@ final class MetalParticlePartialAlphaHistoryTest {
                 assertNull(MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(false),current),"old="+old+", alpha="+value);
                 assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(current,false));MetalPreviousVertexHistory.discardFrame();
     }
+    @Test void unsignedBoundsAreExactAcrossTheWholeByteRange() {
+        for(int value:new int[]{0,25,26,128,255}) {
+            MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();
+            var c=new MetalParticlePartialAlphaCases.Case("bounds",false,value,value,1,255,1,255,MetalParticlePartialAlphaCases.Groups.SINGLE,false);
+            stage(c,0);MetalPreviousVertexHistory.commitSubmittedFrame();MetalPreviousVertexHistory.beginFrame();
+            var current=stage(c,1).getFirst();var alpha=MetalPreviousVertexHistory.matchedPreviousParticleAlpha(current);assertNotNull(alpha);
+            assertEquals(value,alpha.min());assertEquals(value,alpha.max());assertTrue(alpha.unitModulator());
+            assertEquals(value==255,alpha.fullSourceInputs());MetalPreviousVertexHistory.discardFrame();
+        }
+    }
+    @Test void aPartialVertexOnlyInTheSecondFreedSliceKeepsItsBoundsAndAcceptedUniformWitness() {
+        var c=cases().get(13);var p=MetalParticlePartialAlphaCases.pipeline(false);var format=DefaultVertexFormat.PARTICLE;
+        MetalPreviousVertexHistory.beginFrame();var old=MetalPreviousVertexHistory.reserveDraw(owner,p);
+        var mesh=MetalParticlePartialAlphaCases.mesh(c,List.of(11L),0);
+        mesh.put(2*format.getVertexSize()+format.getElement("Color").offset()+3,(byte)25);
+        capture(old,p,List.of(11L),mesh,.19F);MetalPreviousVertexHistory.commitSubmittedFrame();
+        MetalPreviousVertexHistory.beginFrame();var current=stage(c,1).getFirst();
+        var alpha=MetalPreviousVertexHistory.matchedPreviousParticleAlpha(current);assertNotNull(alpha);
+        assertEquals(25,alpha.min());assertEquals(255,alpha.max());assertFalse(alpha.unitModulator());
+        assertNull(MetalPreviousVertexReplay.previousPositionsForSource(p,current));MetalPreviousVertexHistory.discardFrame();
+        MetalPreviousVertexHistory.beginFrame();current=stage(c,1).getFirst();
+        assertEquals(alpha,MetalPreviousVertexHistory.matchedPreviousParticleAlpha(current));
+        MetalPreviousVertexHistory.commitSubmittedFrame();MetalPreviousVertexHistory.beginFrame();current=stage(c,1).getFirst();
+        assertEquals(new MetalPreviousVertexHistory.ParticleAlpha(255,255,true),MetalPreviousVertexHistory.matchedPreviousParticleAlpha(current));
+        assertNotNull(MetalPreviousVertexReplay.previousPositionsForSource(p,current));
+    }
     private boolean allRejected(MetalParticlePartialAlphaCases.Case c,List<MetalPreviousVertexHistory.DrawToken> tokens) {
         boolean all=true;
         for(var t:tokens) {
@@ -66,12 +92,15 @@ final class MetalParticlePartialAlphaHistoryTest {
         var p=MetalParticlePartialAlphaCases.pipeline(c.opaque());var result=new java.util.ArrayList<MetalPreviousVertexHistory.DrawToken>();
         for(var ids:c.ids(frame)) {
             var token=MetalPreviousVertexHistory.reserveDraw(owner,p);result.add(token);
-            MetalParticleAlphaFixtures.capture(token,DefaultVertexFormat.PARTICLE,PrimitiveTopology.QUADS,MetalParticlePartialAlphaCases.mesh(c,ids,frame),ids.size()*4,ids.size()*6);
-            MetalPreviousVertexHistory.stageParticleIdentities(token,ids);
-            MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
-            MetalPreviousVertexHistory.stageSourceUniforms(token,MetalSourceUniforms.decode(MetalPreviousVisibilityHistoryTest.dynamic(frame==0?c.oldModulator():c.currentModulator()),null));
-            MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(p,Map.of(),true));
+            capture(token,p,ids,MetalParticlePartialAlphaCases.mesh(c,ids,frame),frame==0?c.oldModulator():c.currentModulator());
         }
         return List.copyOf(result);
+    }
+    private void capture(MetalPreviousVertexHistory.DrawToken token,com.mojang.renderpearl.api.pipeline.RenderPipeline p,List<Long> ids,java.nio.ByteBuffer mesh,float modulator) {
+        MetalParticleAlphaFixtures.capture(token,DefaultVertexFormat.PARTICLE,PrimitiveTopology.QUADS,mesh,ids.size()*4,ids.size()*6);
+        MetalPreviousVertexHistory.stageParticleIdentities(token,ids);
+        MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
+        MetalPreviousVertexHistory.stageSourceUniforms(token,MetalSourceUniforms.decode(MetalPreviousVisibilityHistoryTest.dynamic(modulator),null));
+        MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(p,Map.of(),true));
     }
 }

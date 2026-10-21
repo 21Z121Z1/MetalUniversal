@@ -193,6 +193,7 @@ final class MetalParticlePartialAlphaGpuTest {
                             // Explicitly emulate removing only the new guard, retaining the same old geometry/depth/material.
                             boolean bypass = control == 1;
                             var replayBuffers=new ArrayList<GpuBuffer>();
+                            var previousInputs=new ArrayList<MetalPreviousVertexHistory.ParticleAlpha>();
                             try {
                                 encoder.copyTextureToTexture(scene,ownership,0,0,0,0,0,W,H);
                                 try(var pass=encoder.createRenderPass(RenderPassDescriptor.builder(() -> "Production staged partial-alpha replay")
@@ -204,6 +205,10 @@ final class MetalParticlePartialAlphaGpuTest {
                                         var info=new StagedVertexBuffer.ExecuteInfo(vb,ib,IndexType.SHORT,0,0,indexCount,PrimitiveTopology.QUADS);
                                         assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(token));
                                         assertNotNull(MetalPreviousVertexHistory.matchedPreviousPositions(token));
+                                        var captured=MetalPreviousVertexHistory.matchedPreviousParticleAlpha(token);assertNotNull(captured);previousInputs.add(captured);
+                                        assertEquals(c.recovery() && frame>=3 ? 255 : c.oldMin(),captured.min());
+                                        assertEquals(c.recovery() && frame>=3 || c.paired() ? 255 : c.oldMax(),captured.max());
+                                        assertEquals(c.recovery() && frame>=3 || c.oldModulator()==1,captured.unitModulator());
                                         var exact=MetalPreviousVertexReplay.plan(source,info,token);
                                         var selected=bypass?new MetalPreviousVertexReplay.Plan(vb.slice(),0,MetalPreviousVertexHistory.matchedPreviousPositions(token))
                                                 :exact!=null?exact:MetalPreviousVertexReplay.currentOnlyPlan(source,info,token);
@@ -235,9 +240,10 @@ final class MetalParticlePartialAlphaGpuTest {
                                     if (covered) {
                                         owned++; int tag = Byte.toUnsignedInt(tags[p]);
                                         if (tag == 64) invalid++; if (tag == 255) exactPixels++;
-                                        if(!acceptedContribution[p]) {oldInvisible++;if(tag==255)falseAccepted++;}
+                                        if(!acceptedContribution[p]) oldInvisible++;
                                         else if(tag==64)visibleHistoryRejected++;
                                         int rejected = Byte.toUnsignedInt(reject[p]), reactivity = Byte.toUnsignedInt(react[p]);
+                                        if(!acceptedContribution[p] && tag==255 && rejected==0 && reactivity==0)falseAccepted++;
                                         if (rejected == 255 && reactivity == 255) fullyRejected++;
                                         ByteBuffer z = ByteBuffer.wrap(pairs).order(ByteOrder.nativeOrder());
                                         if (tag != (expectInvalid ? 64 : 255) || z.getFloat(p * 8) != (expectInvalid ? -1 : .5F)
@@ -256,7 +262,8 @@ final class MetalParticlePartialAlphaGpuTest {
                                 results.add(Map.ofEntries(Map.entry("frame",frame),Map.entry("guardRemoved",bypass),Map.entry("currentContributionPixels",contributed),
                                         Map.entry("ownedPixels",owned),Map.entry("invalidPixels",invalid),Map.entry("exactPixels",exactPixels),Map.entry("fullyRejectedPixels",fullyRejected),
                                         Map.entry("expectedInvalid",expectInvalid),Map.entry("wrongPixels",wrong),Map.entry("previousNoContributionAtCurrentPixels",oldInvisible),
-                                        Map.entry("falselyAcceptedNoContributionPixels",falseAccepted),Map.entry("visibleHistoryRejectedPixels",visibleHistoryRejected)));
+                                        Map.entry("falselyAcceptedNoContributionPixels",falseAccepted),Map.entry("visibleHistoryRejectedPixels",visibleHistoryRejected),
+                                        Map.entry("previousInputs",List.copyOf(previousInputs))));
                             } finally {for(var buffer:replayBuffers)buffer.close();}
                         }
                     }

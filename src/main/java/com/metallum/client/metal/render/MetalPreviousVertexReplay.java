@@ -314,8 +314,7 @@ final class MetalPreviousVertexReplay {
             final MetalPreviousVertexHistory.DrawToken token) {
         String shader=source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath();
         var previous=MetalPreviousVertexHistory.matchedPreviousSourceUniforms(token);
-        if ((shader.equals("core/entity") || shader.equals("core/item")
-                || shader.equals("core/block") || shader.equals("core/particle"))
+        if ((shader.equals("core/entity") || shader.equals("core/item") || shader.equals("core/block"))
                 && (previous==null || previous.colorModulator().w<=0)) {
             // Matching geometry/material and a coincident old Z do not prove that this
             // source contributed color. Reuse current-only ownership when the captured
@@ -325,10 +324,16 @@ final class MetalPreviousVertexReplay {
             // texture/vertex discard, other elements and complete visibility remain unproven.
             return null;
         }
-        if (shader.equals("core/particle") && !MetalPreviousVertexHistory.hasNoZeroPreviousParticleAlpha(token)) {
-            // Current alpha cannot certify an accepted old particle. Zero or missing captured
-            // alpha reuses current-only ownership; nonzero alpha is not full visibility proof.
-            return null;
+        if (shader.equals("core/particle")) {
+            var alpha=MetalPreviousVertexHistory.matchedPreviousParticleAlpha(token);
+            if(alpha==null || !alpha.fullSourceInputs() || !MetalPreviousVertexHistory.isUnitParticleModulator(previous)
+                    || !MetalPreviousVertexHistory.isUnitParticleModulator(MetalPreviousVertexHistory.currentSourceUniforms(token))) {
+                // Without old sampled-alpha proof, partial source inputs are current-only even
+                // when vertex*modulator alone exceeds cutout. Any old source in a merged draw
+                // can supply the rejection. A low minimum does not prove the whole draw discarded;
+                // fully unit source inputs likewise do not certify complete previous visibility.
+                return null;
+            }
         }
         float[] positions=MetalPreviousVertexHistory.matchedPreviousPositions(token);
         if(positions==null)return null;

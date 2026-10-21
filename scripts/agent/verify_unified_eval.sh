@@ -102,6 +102,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.MetalShaderSourceLibraryTest \
   --tests com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest \
   --tests com.metallum.client.metal.render.MetalParticleVertexAlphaHistoryTest \
+  --tests com.metallum.client.metal.render.MetalParticlePartialAlphaHistoryTest \
   --tests com.metallum.client.metal.render.MetalPreviousVertexHistoryTest \
   --tests com.metallum.client.metal.render.MetalSourceUniformsTest \
   --tests com.metallum.client.metal.render.MetalParticleQuadHistoryTest \

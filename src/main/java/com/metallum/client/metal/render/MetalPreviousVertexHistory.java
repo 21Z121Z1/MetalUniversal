@@ -114,8 +114,13 @@ final class MetalPreviousVertexHistory {
                            com.mojang.renderpearl.api.textures.FilterMode magFilter,
                            int anisotropy, java.util.OptionalDouble maxLod) {}
 
-    /** Necessary rejection evidence only; nonzero vertex alpha does not prove previous visibility. */
-    private enum ParticleAlpha { NO_ZERO_VERTEX, ZERO_VERTEX_PRESENT }
+    /** Actual unsigned vertex bounds plus the same source's uniform witness; not visibility proof. */
+    record ParticleAlpha(int min, int max, boolean unitModulator) {
+        ParticleAlpha withUniforms(final @Nullable MetalSourceUniforms uniforms) {
+            return new ParticleAlpha(min,max,isUnitParticleModulator(uniforms));
+        }
+        boolean fullSourceInputs() {return min==255 && max==255 && unitModulator;}
+    }
 
     private record Snapshot(Signature signature, Positions positions, @Nullable DrawTransform transform,
                             @Nullable SurfaceIdentity surface, @Nullable List<Long> particleIds,
@@ -128,7 +133,8 @@ final class MetalPreviousVertexHistory {
             return new Snapshot(signature, positions, transform, value, particleIds,sourceUniforms,particleBatch,particleAlpha);
         }
         Snapshot withSourceUniforms(final @Nullable MetalSourceUniforms value) {
-            return new Snapshot(signature,positions,transform,surface,particleIds,value,particleBatch,particleAlpha);
+            return new Snapshot(signature,positions,transform,surface,particleIds,value,particleBatch,
+                    particleAlpha==null ? null : particleAlpha.withUniforms(value));
         }
     }
 
@@ -307,9 +313,15 @@ final class MetalPreviousVertexHistory {
         return previousFor(token.key()).sourceUniforms();
     }
 
-    static boolean hasNoZeroPreviousParticleAlpha(final @Nullable DrawToken token) {
-        return token != null && objectManifestMatches(token.key().object())
-                && previousFor(token.key()).particleAlpha() == ParticleAlpha.NO_ZERO_VERTEX;
+    static @Nullable ParticleAlpha matchedPreviousParticleAlpha(final @Nullable DrawToken token) {
+        return token != null && objectManifestMatches(token.key().object()) ? previousFor(token.key()).particleAlpha() : null;
+    }
+
+    static boolean isUnitParticleModulator(final @Nullable MetalSourceUniforms uniforms) {
+        if(uniforms==null)return false;
+        float alpha=uniforms.colorModulator().w;
+        // Only exactly unit alpha is audited here. Do not clamp partial, negative or >1 inputs.
+        return Float.isFinite(alpha) && alpha==1;
     }
 
     /** Visibility resources are checked after the complete source manifest has been staged. */
@@ -460,14 +472,16 @@ final class MetalPreviousVertexHistory {
         return immutable;
     }
 
-    /** Reject the whole merged draw if any actual contributing old batch has zero/unknown alpha. */
+    /** All actual old sources must retain their bounds and unit uniform witness after an ID remap. */
     private static @Nullable ParticleAlpha combinedParticleAlpha(final List<Snapshot> sources) {
-        boolean zero = false;
+        if(sources.isEmpty())return null;
+        int min=255,max=0;boolean unit=true;
         for (Snapshot source : sources) {
             if (source.particleAlpha() == null) return null;
-            zero |= source.particleAlpha() == ParticleAlpha.ZERO_VERTEX_PRESENT;
+            var alpha=source.particleAlpha();
+            min=Math.min(min,alpha.min());max=Math.max(max,alpha.max());unit&=alpha.unitModulator();
         }
-        return zero ? ParticleAlpha.ZERO_VERTEX_PRESENT : ParticleAlpha.NO_ZERO_VERTEX;
+        return new ParticleAlpha(min,max,unit);
     }
 
     private static @Nullable ParticleAlpha captureParticleAlpha(final VertexFormat format, final List<ByteBuffer> buffers) {
@@ -476,12 +490,14 @@ final class MetalPreviousVertexHistory {
         if (!format.getElements().equals(particle.getElements()) || format.getVertexSize() != particle.getVertexSize()
                 || color == null || color.format() != GpuFormat.RGBA8_UNORM) return null;
         // extractPositions has already validated every complete slice and the total vertex count.
-        boolean zero = false;
+        int min=255,max=0;
         for (ByteBuffer buffer : buffers) {
-            for (int offset = buffer.position() + color.offset() + 3; offset < buffer.limit(); offset += format.getVertexSize())
-                zero |= buffer.get(offset) == 0;
+            for (int offset = buffer.position() + color.offset() + 3; offset < buffer.limit(); offset += format.getVertexSize()) {
+                int alpha=Byte.toUnsignedInt(buffer.get(offset));
+                min=Math.min(min,alpha);max=Math.max(max,alpha);
+            }
         }
-        return zero ? ParticleAlpha.ZERO_VERTEX_PRESENT : ParticleAlpha.NO_ZERO_VERTEX;
+        return new ParticleAlpha(min,max,false);
     }
 
     private static @Nullable List<MetalParticleQuadHistory.Batch<Snapshot>> particleBatches(
