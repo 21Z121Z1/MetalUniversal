@@ -63,19 +63,19 @@ final class MetalParticlePartialAlphaHistoryTest {
             assertEquals(value==255,alpha.fullSourceInputs());MetalPreviousVertexHistory.discardFrame();
         }
     }
-    @Test void ordinaryPartialGuardPreservesTheExistingOitZeroInputPolicy() throws ReflectiveOperationException {
+    @Test void ordinaryPartialGuardPreservesTheExistingOitZeroInputPolicy() {
         com.mojang.renderpearl.api.pipeline.RenderPipeline oit=null;
-        for(var field:net.minecraft.client.renderer.RenderPipelines.class.getDeclaredFields()) {
-            if(!java.lang.reflect.Modifier.isStatic(field.getModifiers()) || field.getType()!=com.mojang.renderpearl.api.pipeline.RenderPipeline.class)continue;
-            field.setAccessible(true);var pipeline=(com.mojang.renderpearl.api.pipeline.RenderPipeline)field.get(null);
+        var registered=new java.util.ArrayList<com.mojang.renderpearl.api.pipeline.RenderPipeline>();
+        registered.addAll(net.minecraft.client.renderer.RenderPipelines.requiredPipelines());
+        registered.addAll(net.minecraft.client.renderer.RenderPipelines.optionalPipelines());
+        // OIT fields are OitPipelineSet; the client's registered inventory exposes their real stage pipelines.
+        for(var pipeline:registered) {
             if(pipeline!=null && pipeline.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/particle")
                     && pipeline.getShaderDefines().flags().contains("OIT_ACCUMULATE")) {oit=pipeline;break;}
         }
-        assertNotNull(oit,() -> "The pinned client's actual OIT particle pipeline must exist; OitStage API="
-                +java.util.Arrays.toString(net.minecraft.client.renderer.oit.OitStage.class.getDeclaredMethods())
-                +"; RenderPipelines methods="+java.util.Arrays.toString(net.minecraft.client.renderer.RenderPipelines.class.getDeclaredMethods())
-                +"; pipeline OIT methods="+java.util.Arrays.stream(com.mojang.renderpearl.api.pipeline.RenderPipeline.class.getMethods())
-                    .filter(method->method.toString().toLowerCase(java.util.Locale.ROOT).contains("oit")).toList());
+        assertNotNull(oit,() -> "Missing canonical OIT particle in the real registered inventory: "+registered.stream()
+                .filter(p->p.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/particle"))
+                .map(p->p.getLocation()+" "+p.getShaderDefines()).toList());
         assertEquals("minecraft:pipeline/oit_accumulate_particle",oit.getLocation().toString());
         for(int oldAlpha:new int[]{0,26,255})for(float oldModulator:new float[]{0,.1F,1}) {
             MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();
