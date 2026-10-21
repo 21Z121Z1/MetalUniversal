@@ -74,12 +74,14 @@ final class MetalPreviousVisibilityGpuTest {
                 .withColorTargetState(0, new ColorTargetState(Optional.of(BlendFunction.TRANSLUCENT), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                 .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
                         .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
+                        .withUniform("Lighting", UniformType.UNIFORM_BUFFER)
                         .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
                         .withUniform("Sampler2", UniformType.COMBINED_IMAGE_SAMPLER).build()).build();
         ByteBuffer mesh = vertices(format, .5F), background = vertices(format, 1);
         ByteBuffer indices = bytes(12); for (short i = 0; i < 6; i++) indices.putShort(i); indices.flip();
         ByteBuffer projection = bytes(64); new Matrix4f().get(0, projection);
         ByteBuffer fog = bytes(40); fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
+        ByteBuffer lighting = bytes(32); lighting.putFloat(8,1).putFloat(24,1);
         ByteBuffer blue = dynamic(1); blue.putFloat(128, 0).putFloat(132, 0).putFloat(136, 1);
         int input = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_COPY_DST;
         int output = input | MetalGpuTexture.USAGE_SHADER_WRITE;
@@ -93,6 +95,7 @@ final class MetalPreviousVisibilityGpuTest {
              var ib = device.createBuffer(() -> "staged indices", GpuBuffer.USAGE_INDEX, indices);
              var pr = device.createBuffer(() -> "source projection", GpuBuffer.USAGE_UNIFORM, projection);
              var fo = device.createBuffer(() -> "source fog", GpuBuffer.USAGE_UNIFORM, fog);
+             var li = device.createBuffer(() -> "actual item lighting", GpuBuffer.USAGE_UNIFORM, lighting);
              var bd = device.createBuffer(() -> "blue background", GpuBuffer.USAGE_UNIFORM, blue);
              var sampled = texture("unchanged white material/lightmap", GpuFormat.RGBA8_UNORM, input);
              var color = texture("original source color", GpuFormat.RGBA8_UNORM, input);
@@ -137,6 +140,7 @@ final class MetalPreviousVisibilityGpuTest {
                             .withColorAttachment(cv, Optional.of(new Vector4f(0))).withDepthAttachment(sd, OptionalDouble.of(0))
                             .withRenderArea(new RenderPass.RenderArea(0, 0, W, H)).build())) {
                         pass.setPipeline(source); pass.setUniform("Projection", pr.slice()); pass.setUniform("Fog", fo.slice());
+                        pass.setUniform("Lighting", li.slice());
                         pass.bindTexture("Sampler0", sv, sampler); pass.bindTexture("Sampler2", sv, sampler);
                         pass.setIndexBuffer(ib, IndexType.SHORT);
                         pass.setUniform("DynamicTransforms", bd.slice()); pass.setVertexBuffer(0, bg.slice()); pass.drawIndexed(6, 1, 0, 0, 0);
