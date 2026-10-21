@@ -48,6 +48,7 @@ final class MetalPrivateBindingHookDescriptorTest {
         Object providerNames=reference.get("includeProviderClasses");
         if(providerNames instanceof java.util.List<?> names)for(Object name:names)providers.add((String)name);
         providers.add("net/minecraft/client/renderer/ShaderManager");
+        providers.add("net/minecraft/client/renderer/GameRenderer");
         providers.add("net/minecraft/client/renderer/ShaderManager$Configs");
         providers.add("net/minecraft/client/renderer/ShaderManager$PostChainCache");
         providers.add("com/mojang/blaze3d/pipeline/PipelineCache");
@@ -77,6 +78,7 @@ final class MetalPrivateBindingHookDescriptorTest {
         var type=new ClassNode();new ClassReader(bytes).accept(type,0);
         var methods=new java.util.TreeMap<String,Object>();
         for(var method:type.methods) {
+            if(type.name.equals("net/minecraft/client/renderer/GameRenderer") && !method.name.equals("preloadUiShader"))continue;
             var rows=new java.util.ArrayList<String>();
             var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();int index=0;
             for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);
