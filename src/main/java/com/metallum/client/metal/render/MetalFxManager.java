@@ -2729,7 +2729,7 @@ public final class MetalFxManager {
             if(effectiveMode==MetalFxConfig.Mode.TEMPORAL && sourceShaderInputsUnprovenThisFrame) {
                 // Keep this source's real color, retire Temporal history, and select Spatial
                 // before the next frame's projection/jitter. Never encode guessed motion.
-                encoded=encoder.encodeFullscreenCopy(color,null,output,true);
+                encoded=encoder.encodeTextureCopy(color,output,true);
             } else if (usesNativeDirectFrameGeneration() && surfaceMotionPrepared) {
                 // The presenter snapshots this texture into its own ring buffer
                 // before the command buffer is committed. Avoid an otherwise
