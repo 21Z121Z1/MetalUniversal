@@ -218,8 +218,8 @@ final class MetalFirstPersonMotionGpuTest {
                 .withVertexBinding(0,DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withBindGroupLayout(resources).withColorTargetState(ColorTargetState.DEFAULT)
                 .withShaderDefine("NO_CARDINAL_LIGHTING").withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").build();
-        var compiled=(com.mojang.renderpearl.frontend.FrontendRenderPipeline)device.precompilePipeline(source,null);
-        assertSame(source,((MetalCompiledRenderPipeline)compiled.backendRenderPipeline()).sourcePipeline());
+        var compiled=device.precompilePipeline(source,null);
+        assertSame(source,assertInstanceOf(MetalCompiledRenderPipeline.class,compiled).sourcePipeline());
     }
 
     @Test
