@@ -43,6 +43,7 @@ final class MetalPrivateBindingHookDescriptorTest {
         report.put("sourceAdmissionGranted",false);
         report.put("boundary","Pinned include API signatures only; shader identifiers and namespace do not prove source semantics.");
         var reference=MetalMotionShaderAssetAudit.inspect();report.put("assetReference",reference);
+        report.put("dependencySourceReference",MetalDependencyShaderAudit.inspect(reference));
         var providers=new java.util.TreeSet<String>();
         Object providerNames=reference.get("includeProviderClasses");
         if(providerNames instanceof java.util.List<?> names)for(Object name:names)providers.add((String)name);
@@ -65,6 +66,10 @@ final class MetalPrivateBindingHookDescriptorTest {
             if(input==null)return java.util.Map.of("available",false);
             bytes=input.readAllBytes();
         }
+        return includeProviderBytecode(bytes);
+    }
+
+    static Object includeProviderBytecode(byte[] bytes) throws Exception {
         var type=new ClassNode();new ClassReader(bytes).accept(type,0);
         var methods=new java.util.TreeMap<String,Object>();
         for(var method:type.methods) {

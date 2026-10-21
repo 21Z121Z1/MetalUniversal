@@ -14,6 +14,7 @@ concurrency:
 
 env:
   METALLUM_SOURCE_SHA: ${{ github.sha }}
+  METALLUM_SHADER_REFERENCE_DEPENDENCIES: ${{ github.workspace }}/build/agent-evidence/pinned-source-dependencies.json
 
 jobs:
   include-provider-reference:
@@ -28,6 +29,21 @@ jobs:
           distribution: temurin
           java-version: '25'
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - name: Resolve the existing client harness dependency artifacts
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon jar -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, subprocess
+          jars=[p for p in Path('build/libs').glob('*.jar') if not p.name.endswith(('-sources.jar','-dev.jar'))]
+          if len(jars)!=1: raise SystemExit('ambiguous production Java JAR for reference dependency configuration')
+          subprocess.run(['./gradlew','--no-daemon','-p','.github/ci/minecraft-e2e',
+              '-I',str(Path('.github/ci/ResolveShaderReference.init.gradle').resolve()),
+              '-PmetallumJar='+str(jars[0].resolve()),'-Pmetallum.sodiumOnly=true',
+              '-PshaderReferenceManifest='+os.environ['METALLUM_SHADER_REFERENCE_DEPENDENCIES'],
+              'resolveShaderReferenceArtifacts'],check=True)
+          PY
       - name: Inspect exact pinned provider and already cached original client
         run: |
           set -euo pipefail
@@ -56,5 +72,6 @@ jobs:
           name: shader-source-reference-${{ env.METALLUM_SOURCE_SHA }}
           path: |
             build/agent-evidence/shader-source-reference.json
+            build/agent-evidence/pinned-source-dependencies.json
             build/test-results/
           retention-days: 14
