@@ -173,6 +173,16 @@ final class MetalFirstPersonMotionGpuTest {
                 assertFalse(firstRead.sourceAdmissionGranted());assertFalse(secondRead.sourceAdmissionGranted());
                 assertTrue(backendA.shaderInputMatch().canonicalInputsMatch(),backendA.shaderInputMatch().reason());
                 assertFalse(backendB.shaderInputMatch().canonicalInputsMatch(),"A same-ID source change is not a canonical input");
+                assertSame(backendA.shaderInputOwner(),backendB.shaderInputOwner());
+                try(var target=texture("changed compile admission",GpuFormat.RGBA8_UNORM,0);
+                    var targetView=device.createTextureView(target);
+                    var pass=encoder.createRenderPass(RenderPassDescriptor.builder(()->"Changed actual compiler input")
+                            .withColorAttachment(targetView,Optional.of(new Vector4f(0)))
+                            .withRenderArea(new RenderPass.RenderArea(0,0,W,H)).build())) {
+                    pass.setPipeline(b);
+                    assertNull(pass.motionSourceState(),"An actual changed read cannot borrow its unchanged library baseline");
+                }
+                assertFalse(backendA.shaderInputOwner().canonicalOpen(),"An inconsistent actual read must veto its own owner");
                 assertSame(first, backendA.sourcePipeline()); assertSame(second, backendB.sourcePipeline());
                 assertEquals(DefaultVertexFormat.ENTITY, backendA.sourcePipeline().getVertexFormatBinding(0));
                 assertEquals("0.1", backendA.sourcePipeline().getShaderDefines().values().get("ALPHA_CUTOUT"));

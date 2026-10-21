@@ -22,19 +22,20 @@
 | 前后帧深度 | RG32F(previous Z,current Z)、V4 world/HUD 双域历史、接受的 raster 状态 | 不用当前深度冒充动态表面 previous Z；前帧 bias 从旧屏幕 Jacobian 还原，D32 常量受限；像素对齐严格控制、独立 GPU 表面点／旧帧 D32 平面及错误当前坡度负例分别检查解析精度与任意姿态。无历史、未知 viewport、更大常量及退化映射保持无效所有权 |
 | 动态分辨率 | `ensureTargets`、scaler key、历史 reset | 当前策略重新分配并 reset；尚未采用保留最大分配、逐帧 content size 改变的优化，不宣称无 reset 的动态历史 |
 | 独立投影 | `MetalPreviousVertexReplay`、`MetalFirstPersonMotionGpuTest`、`ProjectionEncodingEvidence` | 手部实际 projection/model-view 与世界相机分开；普通及后处理 HUD 深度分别捕获。混合 world/HUD 的原始 Z 尚不能由单一 FG 相机／jitter 描述，准确手部几何也不解除这项准入 |
-| 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调 | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史 |
+| 历史重置 | `MetalFxHistoryTransition`、source stamp、提交／失败回调、library owner | 暂停、隐藏、尺寸、世界、传送、FOV、reload、设置与 GPU 失败；退役 epoch 不能覆盖新历史。实际 Configs 的关闭／新 generation draw 有独立客户端控制，须按准确 SHA 验证 |
 | 遮挡 | V4 surface resolver 与 `MetalMotionContractValidation` | previous 表面 Z、前帧 HUD 遮挡、标准／反向 Z、中心遮挡、无效对应不得回退为相机运动 |
 | 透明与特殊材质 | source draw 真实状态、材质 reactive 与 previous validity 分离 | 单一运动不能表示多层混合；未知 pipeline／格式仍拒绝，reactive 不算完整 FG 对应 |
 | 粒子 | `MetalParticleBatchMotion`、粒子 ID、独立 Layer 事务；`MetalParticleQuadHistory` | 合并／拆分／重排按粒子 ID 对应；一个当前 draw 只能共享一致的旧投影、模型视图、材质／raster 状态和有效 uniform 输入。出生、发射数量变化及跨 draw 的歧义多发射保留无效顶点；实体／天气仍使用原有完整 manifest，失败提交不推进。任意自定义发射尚须实际入口证明 |
 | 天气／环境 | `WeatherEffectRendererMetalFxMixin`、`MetalWeatherMotion`、`MetalWeatherCorrespondence`、`CloudRendererMetalFxMixin` | 雨雪按实际上传 XYZ／UV、随机漂移、列身份和 sampler 重建旧纹理表面点，片元拒绝旧范围外历史；源顶点冻结、雨雪分层并随源提交推进，关闭捕获期间的新上传也使旧准备数据失效。云按真实 signed CloudFaces／CloudInfo 保留原 GPU 程序化表达式，冻结源绑定并以完整 cell／face 身份推进；重建先失效当前 CPU 描述，捕获停用期间替换退役 generation。剩余环境及前帧可见 ownership 仍未证明，不解除完整 FG 准入 |
 | 生物／方块实体 | staged CPU posed positions、所有者 generation、`MetalMotionFrameManifest` 后端逐帧清单 | 稳定程序 hash 区分相同 location 的 shader／blend／layout 变体；同一 source stamp／epoch 对照实际 draw、所有者 hook、成功 motion 编码；结束源观察后才可准入，迟到源事件使证明失效；直接、批量、drawMultiple 与间接路径均计入。未知／未接入／间接命令对应、剩余渲染器与 Iris 语义继续拒绝，不由累计成功抵消 |
 | 手部 | 独立 HUD 覆盖、透明手部 current Z、前帧手部表面 | 无源深度的透明手部也不归入世界；缺历史明确反遮挡；真实客户端摆动质量仍需支持硬件 |
-| 线性颜色 | `MetalFxColorTransfer`：RGBA8 SDR→RGBA16F linear→Temporal→RGBA8 SDR | 显式 sRGB transfer 保留 alpha；独立 ramp 与 overshoot GPU 读回。未恢复 HDR 辐射、未迁移 tone map，不解除相应颜色门禁 |
+| 线性颜色 | `MetalFxColorTransfer`：RGBA8 SDR→RGBA16F linear→Temporal→RGBA8 SDR | 显式 sRGB transfer 保留 alpha；独立 ramp 与 overshoot GPU 读回。RGBA16F HDR 源在分配／改写前拒绝，控制保留 4.0／2.0 辐射及 alpha=.25 的原始字节。拒绝不是 HDR tone mapping；未恢复 HDR 辐射、未迁移 tone map，不解除相应颜色门禁 |
 | scaler／FG 关联 | `compatibleLinkedTemporalScaler` | 线性 RGBA16F scaler 输出与 SDR RGBA8 FG 输入不兼容时使用已有 standalone 路径；不能伪报 linked |
 | 资源生命周期 | `MetalFxColorTransfer`、`closeAuxiliaryTextures`、reload／disable／close；原生 source ring；`RenderContractRuntime` 诊断 owner | 稳态复用；尺寸替换前退役提交；旧纹理、sampler 和 native residency 按已有 owner 释放；opt-in 记录操作与 start／close 共享锁；关闭前撤下 owner，终结写入失败也尝试两者清理、保留异常并维持失败门禁；GameTest 在世界断开之前结束记录 scope。manifest 逐条流式输出、按 UTF-8 计量并原子发布；可显式选择无损 gzip＋摘要索引，两者合计仍受原物理预算约束，独立 oracle 解码所有记录并复核终态；受限堆、真实 producer 规模及预算／损坏／发布失败负例保留失败门禁。真实客户端仍需准确提交验证 |
 | GPU 同步 | 公共 render pass、encoder fence、Metal4 barrier；present worker completion | 转换 pass 与 native scaler 处于同一公共编码事务；实际 Metal3/4 执行需按对应路径收据区分 |
 | 插帧节奏与相机 | `MetalFrameGenerationLifecycle`、`MetalFramePacing`、`Perspective.fromProjection`、present worker | 从实际对称有限 reversed-Z 投影提取 FOV／near／far／aspect，拒绝猜测相机参数；保留真实源帧 deltaTime 秒、源提交身份、generated/real 顺序、丢帧／迟到回退；真实显示节拍和延迟需要物理显示器 |
-| UI 合成 | `uiTarget` 与 scene 分离、`isUITextureComposited=false` | `MetalUiDrawCoverage` 记录真实目标 allocation／generation、源帧及各 attachment 的 shader／blend／write mask；独立 GPU Porter-Duff 正例与平方 alpha 负例验证分离 UI 混合。兼容混合式不证明 shader 输出范围或非 render 写入完整性，完整 premultiplied gate 继续关闭 |
+| UI 合成 | `uiTarget` 与 scene 分离、`isUITextureComposited=false`；`MetalUiDrawCoverage`、`MetalUiContentProof` | 记录真实 allocation／generation、源帧、attachment shader／blend／write mask；完整有界 PMA clear 只证明 clear-only 内容，render、upload、copy、普通／间接 compute 与 raster storage image 后失效。真实 imageStore→同值 clear 必须擦除，包含 UI 不在颜色附件的路径。Porter-Duff 正例及平方 alpha 负例保留；通用 shader 输出范围与完整写覆盖仍未证明，完整 premultiplied gate 关闭 |
+| 实际源码／include | `MetalShaderInputCapture`、`MetalCanonicalShaderReference`、`MetalShaderLibraryLifetime` | 每个 pending／compiled pipeline 绑定自己的输入、import 内容与 Configs owner；声明长度有界读取，关闭退役。新运行门禁同时检查内容及 owner，未知／同 ID 替换不能借用 canonical 运动；门禁候选及实际关闭并发仍须自己的准确 SHA 验收，见[来源边界](review/metalfx-20261020/shader-source-proof-boundary.zh-CN.md) |
 | 能力与回退 | `MetalFxCapabilityProbe`、独立 Temporal／FG offscreen 检查 | raw Metal／Spatial 可用不等于 Temporal／FG；失败回退原始 fullscreen copy，默认 Temporal OFF、FG false |
 
 ## 硬件验收
