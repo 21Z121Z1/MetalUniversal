@@ -1,0 +1,206 @@
+name: MetalFX motion and capability contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/metalfx-official-audit-20261020
+      - codex/consolidated-metal-20261020
+    tags:
+      - 'diagnostics/metalfx-native-source-gate-*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/main/native/**'
+      - 'src/test/native/**'
+      - 'src/main/java/com/metallum/client/metal/render/**'
+      - 'src/main/java/com/metallum/mixin/render/**'
+      - 'src/test/java/com/metallum/client/metal/render/**'
+      - 'build.gradle'
+      - '.github/ci/HostedMetalGradle.init.gradle'
+      - '.github/ci/MetalFxCapabilityProbe.swift'
+      - '.github/workflows/metalfx-contracts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metalfx-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  metalfx-contracts:
+    name: metalfx-contracts (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Record source and SDK
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            test -d /Applications/Xcode_26.3.app/Contents/Developer
+            echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+            export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          fi
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          mkdir -p build/agent-evidence/metalfx build/metal-tests
+          git status --porcelain > build/agent-evidence/metalfx/git-status.txt
+          test ! -s build/agent-evidence/metalfx/git-status.txt
+          git rev-parse HEAD > build/agent-evidence/metalfx/source-commit.txt
+          sw_vers > build/agent-evidence/metalfx/os.txt
+          xcodebuild -version > build/agent-evidence/metalfx/xcode.txt
+          xcrun --sdk macosx --show-sdk-version > build/agent-evidence/metalfx/sdk.txt
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          cp -RL "$sdk/System/Library/Frameworks/MetalFX.framework/Headers" build/agent-evidence/metalfx/sdk-headers
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          headers = sorted(Path('build/agent-evidence/metalfx/sdk-headers').rglob('*.h'))
+          if not headers:
+              raise SystemExit('SDK header evidence is empty')
+          contracts = []
+          for path in headers:
+              lines = path.read_text().splitlines()
+              for index, line in enumerate(lines):
+                  if any(name in line for name in ('motionVectorScaleX', 'jitterOffsetX', 'deltaTime', 'fieldOfView')):
+                      excerpt = '\n'.join(lines[max(0,index-9):index+2])
+                      contracts.append({'header':path.name, 'line':index+1,
+                          'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'excerpt':excerpt})
+                      print('SDK_CONTRACT', path.name, index + 1)
+                      print(excerpt)
+          if not contracts:
+              raise SystemExit('SDK motion/camera contract evidence is empty')
+          Path('build/agent-evidence/metalfx/sdk-contracts.json').write_text(json.dumps(contracts, sort_keys=True))
+          PY
+          shasum -a 256 src/main/native/MetallumNative.swift src/test/native/MetalMotionContractValidation.swift > build/agent-evidence/metalfx/source-sha256.txt
+      - name: Execute raw Metal and native lifecycle contracts
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o build/metal-tests/RawMetalProbe
+          build/metal-tests/RawMetalProbe | tee build/agent-evidence/metalfx/raw-metal.log
+          xcrun swiftc -O src/main/native/MetalFrameGenerationLifecycle.swift \
+            src/test/native/MetalFrameGenerationLifecycleTest.swift -o build/metal-tests/FrameLifecycleContracts
+          build/metal-tests/FrameLifecycleContracts | tee build/agent-evidence/metalfx/lifecycle.log
+      - name: Probe actual MetalFX device support
+        run: |
+          xcrun swiftc -parse-as-library -O -framework Foundation -framework Metal -framework MetalFX \
+            .github/ci/MetalFxCapabilityProbe.swift -o build/metal-tests/MetalFxCapabilityProbe
+          build/metal-tests/MetalFxCapabilityProbe build/agent-evidence/metalfx/capabilities.json
+      - name: Compile shipping motion contract executable
+        id: compile_motion
+        run: |
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalMotionContractValidation.swift -o build/metal-tests/MetalMotionContractValidation
+      - name: Execute supported temporal and interpolation checks independently
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
+            -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+            src/main/native/MetalFrameGenerationLifecycle.swift src/main/native/MetallumNative.swift \
+            src/test/native/MetalFXOffscreenValidation.swift -o build/metal-tests/MetalFXOffscreenValidation
+          build/metal-tests/MetalFXOffscreenValidation build/metal-validation/offscreen-current --capability-aware \
+            | tee build/agent-evidence/metalfx/offscreen.log
+      - name: Execute shipping motion kernels with independent numeric oracles
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          build/metal-tests/MetalMotionContractValidation build/metal-validation/motion-current \
+            | tee build/agent-evidence/metalfx/motion-contract.log
+      - name: Execute packaged motion producers through Java and FFM
+        if: ${{ !cancelled() && steps.compile_motion.outcome == 'success' }}
+        run: |
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalMotionProducerTest -x buildIOSNative -x buildIOSSpvc
+      - name: Record inspectable contract artifact manifest
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, xml.etree.ElementTree as ET
+          paths = [pathlib.Path(p) for p in (
+              'build/agent-evidence/metalfx/capabilities.json',
+              'build/agent-evidence/metalfx/sdk-contracts.json',
+              'build/metal-validation/motion-current/summary.json',
+              'build/metal-validation/offscreen-current/summary.json',
+              'build/agent-evidence/metalfx-color-transfer/ramp.json')]
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/material-visibility').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/previous-raster-bias').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/weather-scroll').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/clouds').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/previous-visibility').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/particle-vertex-alpha').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/particle-partial-alpha').glob('*/result.json'))
+          paths += [pathlib.Path('build/agent-evidence/motion-producers/half-target-conversion/result.json')]
+          evidence = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'], 'files': {}, 'junit': []}
+          for path in paths:
+              if path.is_file():
+                  data = path.read_bytes()
+                  evidence['files'][str(path)] = {'sha256': hashlib.sha256(data).hexdigest(),
+                      'bytes': len(data), 'content': json.loads(data)}
+          for path in sorted(pathlib.Path('build/test-results/hostedMetalMotionProducerTest').glob('TEST-*.xml')):
+              suite = ET.parse(path).getroot()
+              evidence['junit'].append(dict(suite.attrib))
+          out = pathlib.Path('build/agent-evidence/metalfx/contract-evidence-log.json')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          data = json.dumps(evidence, sort_keys=True).encode()
+          out.write_bytes(data)
+          print('METALFX_EVIDENCE_GZIP_BASE64 ' + base64.b64encode(gzip.compress(data)).decode())
+          particle_cases = {path: entry['content'] for path, entry in evidence['files'].items()
+                            if '/particle-vertex-alpha/' in path}
+          identities = {(case['pairScene'], case['oldVertexAlpha'], case['reverseIds'])
+                        for case in particle_cases.values()}
+          expected = {(pair, alpha, True) for pair in (False, True) for alpha in (0, 255)}
+          expected |= {(True, alpha, False) for alpha in (0, 255)}
+          names_match = all(pathlib.Path(path).parent.name ==
+                            f"{str(case['pairScene']).lower()}_{case['oldVertexAlpha']}_{str(case['reverseIds']).lower()}"
+                            for path, case in particle_cases.items())
+          if len(particle_cases) != 6 or identities != expected or not names_match:
+              raise SystemExit('particle vertex-alpha raw evidence is incomplete or case identities collide')
+          print('verified six distinct particle vertex-alpha raw evidence directories:', sorted(particle_cases))
+          partial_cases = {path: entry['content'] for path, entry in evidence['files'].items() if '/particle-partial-alpha/' in path}
+          identities = {case['case']['identity'] for case in partial_cases.values()}
+          if len(partial_cases) != 24 or len(identities) != 24 or any(pathlib.Path(path).parent.name != case['case']['identity'] for path, case in partial_cases.items()):
+              raise SystemExit('partial-alpha evidence is incomplete or case parameters collide')
+          print('verified 24 distinct partial-alpha case directories:', sorted(partial_cases))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: metalfx-contracts-${{ matrix.runner }}-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/agent-evidence/metalfx/
+            build/metal-validation/motion-current/
+            build/metal-validation/offscreen-current/
+            build/agent-evidence/motion-producers/
+            build/agent-evidence/metalfx-color-transfer/
+            build/test-results/hostedMetalMotionProducerTest/
+            build/hosted-metal-msl-cache/
+          if-no-files-found: error
+          retention-days: 14

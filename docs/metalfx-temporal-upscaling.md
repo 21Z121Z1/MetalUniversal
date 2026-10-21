@@ -1,5 +1,10 @@
 # MetalFX Temporal Upscaling
 
+The 2026-10-19 [specialty audit](metalfx-closure-study.zh-CN.md) supersedes
+older acceptance statements below for the current branch. Hosted raw Metal
+execution is available, but the probed hosted GPUs report Temporal and frame
+interpolation unsupported. Historical M1 Pro results are not current-head proof.
+
 The temporal input uses the render-resolution color and depth textures, an
 `RG16_FLOAT` motion texture, and an `R8_UNORM` reactive mask. The native
 MetalFX descriptor receives the actual texture formats and dimensions rather
@@ -17,6 +22,30 @@ Motion is emitted in MetalFX's top-left screen convention: X is
 because Metal clip-space Y points up and framebuffer Y points down. The scaler
 receives `motionVectorScaleX/Y = renderWidth/2, renderHeight/2`. A static
 camera must therefore produce zero motion even while the Halton phase changes.
+
+These matrices describe the final Metal raster coordinate space. The shipping
+SPIRV-Cross policy flips Minecraft's `gl_Position.y`; `MetalMotionContract`
+applies that same flip to motion varyings and camera matrices, and compensates
+the projection jitter before translation. Pixel jitter reported to MetalFX
+stays unchanged. Applying another Y flip in the motion kernel would be wrong.
+
+Object-motion replays retain the actual source draw's same-frame projection
+slice rather than binding whichever projection a later HUD pass left global.
+First-person draws capture their actual bound HUD projection and ModelViewMat
+from live CPU-written Metal uniforms. These immutable matrices share the draw
+token, complete material manifest, and successful source-frame commit with the
+posed vertex history. The hand replay uses the previous HUD projection times
+the previous per-draw model-view; its current correction is only the compiler's
+clip-Y conversion, since HUD rendering is unjittered. It retains the source HUD
+depth attachment and copies the captured current projection into frame-owned
+memory, so later screen effects cannot replace it. Both hands retain independent
+content-sensitive generations.
+
+Missing geometry or matrices, changed item/topology, first appearance, reload,
+and reset keep the hand at zero motion with reactive protection. A complete
+candidate becomes real motion only after every matching replay was encoded.
+This connects the hand producer; hosted shader/readback tests do not establish
+physical MetalFX reconstruction or frame-interpolation visual quality.
 
 The motion compute pass combines:
 
@@ -37,6 +66,15 @@ Camera motion itself is not used as a reactive value. The motion vector already
 describes valid camera motion; marking every moving pixel reactive would reject
 the whole frame's history and reduce temporal quality. Reactive values are
 reserved for transparency, depth discontinuities, and invalid reconstruction.
+
+For camera-only pixels, occlusion compares the previous depth texture to the
+reconstructed point's **previous-camera-space depth**, including during the
+neighborhood search. Comparing it to current raw depth falsely rejected camera
+forward/backward motion. Fused motion reuses its previous clip Z; the split path
+passes `previousVP * inverseCurrentJitteredVP` through one shared internal Swift
+uniform layout for both Metal 3 and Metal 4. RG-only object/hand samples lack
+previous Z and retain conservative depth rejection; they do not gain a claim of
+exact dynamic occlusion from this correction.
 
 After a resize, world change, renderer reset, invalid matrix, projection/FOV
 change, large camera displacement (teleport), or first frame, history is reset.
@@ -65,9 +103,11 @@ at 1.0, 18 at 0.67, and 32 at 0.5.
 
 Frame generation consumes the temporal result only after this encode has
 completed. It uses the full-resolution scene output, a native-resolution UI
-composition, and the same render-resolution depth/motion inputs. The UI is
-marked as precomposited for `MTLFXFrameInterpolator`, so HUD pixels are not
-treated as moving scene content. See `metalfx-frame-generation.md` for the
+composition, and the same render-resolution depth/motion inputs. The current
+presenter sets `uiTexture=nil` and `isUITextureComposited=false`, interpolates
+scene color, then overlays the native-resolution UI onto both generated and
+real outputs. HUD pixels do not enter Temporal history or scene interpolation.
+See `metalfx-frame-generation.md` for the
 separate PresentThread and synchronization contract.
 
 ## Game Porting Toolkit contract audit (2026-07-27)
@@ -95,9 +135,10 @@ earlier review session stopped before producing this result.
 - Resize, render/display size changes, projection/FOV changes, teleport,
   invalid matrices, world transitions, command-buffer failure, and explicit
   lifecycle events reset history and restart the jitter sequence.
-- GUI/HUD is rendered after Temporal at native resolution. Frame Generation
-  receives the native UI texture through the precomposited UI contract; it does
-  not put GUI pixels into Temporal history.
+- GUI/HUD is rendered after Temporal at native resolution. The current Frame
+  Generation presenter composites UI after interpolating scene color. It does
+  not put GUI pixels into Temporal history; the older precomposited-UI account
+  below predates the current presenter and is not its execution contract.
 
 Verification on Apple M1 Pro with Metal API Validation enabled:
 

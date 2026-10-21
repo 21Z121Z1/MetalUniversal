@@ -2,23 +2,32 @@
 #extension GL_ARB_separate_shader_objects : require
 
 uniform sampler2D Sampler0;
+#include <minecraft:dynamictransforms.glsl>
 
-layout(location = 0) noperspective in vec2 metallumObjectMotion;
-layout(location = 1) flat in float metallumObjectValidity;
+#include <metallum:motion_fragment.glsl>
 layout(location = 2) in vec2 metallumTexCoord;
 layout(location = 3) flat in float metallumVertexColorGuard;
+layout(location = 4) in float metallumVertexAlpha;
 
 layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;
 
 void main() {
+#ifdef METALLUM_PREVIOUS_DEPTH_BIAS
+    MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
     // Minecraft's entity shadow is a translucent textured quad. Pixels with exactly zero sampled
     // coverage do not contribute to the source color, so they must not overwrite scene motion.
     // Semitransparent texels do contribute and receive the same exact geometric motion.
-    float coverage = texture(Sampler0, metallumTexCoord).a * metallumVertexColorGuard;
+    if (metallumVertexColorGuard < -1.0) discard;
+    float coverage = texture(Sampler0, clamp(metallumTexCoord, 0.0, 1.0)).a
+            * metallumVertexAlpha * ColorModulator.a;
     if (!(coverage > 0.0)) {
         discard;
     }
-    metallumMotionTarget = metallumObjectMotion;
-    metallumValidityTarget = metallumObjectValidity;
+#ifndef METALLUM_PREVIOUS_DEPTH_BIAS
+    MetallumMotionSample metallumSample = metallumMotionSample();
+#endif
+    metallumMotionTarget = metallumSample.motion;
+    metallumValidityTarget = metallumExportValidity(metallumSample);
 }

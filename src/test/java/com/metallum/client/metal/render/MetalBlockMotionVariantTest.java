@@ -113,7 +113,7 @@ final class MetalBlockMotionVariantTest {
     }
 
     @Test
-    void theVariantWritesMotionAndValidityAndNoDepth() {
+    void theVariantResolvesMotionAndValidityAgainstPrivateOwnershipDepth() {
         RenderPipeline variant = MetalEntityMotionPipeline.forSource(solidBlock());
 
         assertEquals(GpuFormat.RG16_FLOAT, variant.getColorTargetStates().get(0).format(),
@@ -125,9 +125,9 @@ final class MetalBlockMotionVariantTest {
 
         DepthStencilState depth = variant.getDepthStencilState();
         assertNotNull(depth);
-        assertFalse(depth.writeDepth(),
-                "the motion pass replays geometry the color pass already depth-tested; writing depth again"
-                        + " would let the replay change what the scene sees");
+        assertTrue(depth.writeDepth(),
+                "motion uses its own copied depth attachment so nearer transparent surfaces own motion"
+                        + " independently of source submission order; the scene attachment stays unchanged");
         assertEquals(DepthStencilState.DEFAULT.depthTest(), depth.depthTest(),
                 "the depth test itself must match the source, or the replay covers different pixels");
     }
@@ -191,6 +191,6 @@ final class MetalBlockMotionVariantTest {
 
         DepthStencilState depth = MetalEntityMotionPipeline.forSource(lessEqualSource).getDepthStencilState();
         assertEquals(CompareOp.LESS_THAN, depth.depthTest());
-        assertFalse(depth.writeDepth());
+        assertTrue(depth.writeDepth(), "the private motion depth resolves nearer surfaces with the source comparison");
     }
 }

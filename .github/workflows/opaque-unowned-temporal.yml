@@ -1,0 +1,121 @@
+name: Unowned opaque Temporal source safety
+
+on:
+  push:
+    tags: ['diagnostics/opaque-unowned-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opaque-unowned-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.sha }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+      - name: Compile all test fixtures and execute nearest JVM controls
+        run: |
+          ./gradlew --no-daemon --stacktrace compileTestJava test \
+            --tests com.metallum.client.metal.render.MetalStagedMotionExecutionTest \
+            --tests com.metallum.client.metal.render.MetalTemporalSourceSafetyTest \
+            --tests com.metallum.client.metal.render.MetalRawMotionEvidenceTest \
+            --tests com.metallum.client.metal.render.MetalFxMathTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+  gpu:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+      - name: Verify exact source and choose required SDK
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            test -d /Applications/Xcode_26.3.app/Contents/Developer
+            echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+          fi
+          mkdir -p build/agent-evidence/unowned-opaque
+          sw_vers > build/agent-evidence/unowned-opaque/os.txt
+          java -version 2> build/agent-evidence/unowned-opaque/java.txt
+      - name: Original shader, genuine unowned hook, native V4 and production source gate
+        run: |
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalUnownedOpaqueTest -x buildIOSNative -x buildIOSSpvc
+          mkdir -p build/agent-evidence/unowned-opaque/normal-junit
+          cp build/test-results/hostedMetalUnownedOpaqueTest/TEST-*.xml build/agent-evidence/unowned-opaque/normal-junit/
+      - name: Removing only the production gate must fail the same real GPU oracle
+        run: |
+          python3 - <<'PY'
+          import os,pathlib,subprocess,xml.etree.ElementTree as ET
+          p=pathlib.Path('src/main/java/com/metallum/client/metal/render/MetalFxManager.java')
+          original=p.read_bytes();old='return !shaderInputsUnproven && MetalMotionDrawCoverage.opaqueTemporalSourceAdmitted(source);'
+          if original.decode().count(old)!=1:raise SystemExit('ambiguous production guard mutation')
+          out=pathlib.Path('build/agent-evidence/unowned-opaque');out.mkdir(parents=True,exist_ok=True)
+          try:
+              p.write_text(original.decode().replace(old,'return !shaderInputsUnproven;'))
+              (out/'guard-removed.patch').write_bytes(subprocess.check_output(['git','diff','--',str(p)]))
+              env=dict(os.environ,METALLUM_UNOWNED_GUARD_REMOVED='true')
+              with (out/'guard-removed.log').open('w') as log:
+                  result=subprocess.run(['./gradlew','--no-daemon','--stacktrace','-I','.github/ci/HostedMetalGradle.init.gradle',
+                      'hostedMetalUnownedOpaqueTest','--tests','com.metallum.client.metal.render.MetalUnownedOpaqueTemporalGpuTest',
+                      '-x','buildIOSNative','-x','buildIOSSpvc'],env=env,stdout=log,stderr=subprocess.STDOUT)
+              suites=list(pathlib.Path('build/test-results/hostedMetalUnownedOpaqueTest').glob('TEST-*.xml'))
+              suites=[ET.parse(s).getroot() for s in suites]
+              if result.returncode==0 or len(suites)!=1 or int(suites[0].get('tests'))!=1 or int(suites[0].get('failures'))!=1 or int(suites[0].get('errors'))!=0:
+                  raise SystemExit('guard removal must fail the original functional assertion, not compilation/setup')
+              oracle=pathlib.Path('build/agent-evidence/motion-producers/unowned-opaque-temporal/same_z_missing_capture_guard_removed/result.json')
+              import json
+              row=json.loads(oracle.read_text())
+              if not row['productionSourceAdmitted'] or row['wrongHistoryPixelsAdmittedAfterGuard']!=768:
+                  raise SystemExit('removing only guard did not re-expose 768 false accepts')
+              print('GUARD_REMOVAL_NEGATIVE confirmed 768 wrong-history pixels; unchanged GPU oracle failed as required')
+          finally:
+              p.write_bytes(original)
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          PY
+      - name: Retain decoded source oracle and test outcomes
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import base64,gzip,hashlib,json,os,pathlib,xml.etree.ElementTree as ET
+          files={}
+          for p in pathlib.Path('build/agent-evidence/motion-producers/unowned-opaque-temporal').glob('*/result.json'):
+              b=p.read_bytes();files[str(p)]={'sha256':hashlib.sha256(b).hexdigest(),'bytes':len(b),'content':json.loads(b)}
+          suites=[dict(ET.parse(p).getroot().attrib) for p in pathlib.Path('build/agent-evidence/unowned-opaque/normal-junit').glob('TEST-*.xml')]
+          data=json.dumps({'sourceCommit':os.environ['METALLUM_SOURCE_SHA'],'files':files,'junit':suites},sort_keys=True).encode()
+          print('UNOWNED_OPAQUE_EVIDENCE_GZIP_BASE64 '+base64.b64encode(gzip.compress(data)).decode())
+          if len(files)!=2 or not suites or any(int(s[k]) for s in suites for k in ('failures','errors','skipped')):
+              raise SystemExit('Unowned source oracle must execute and retain its result')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: unowned-opaque-${{ matrix.runner }}-${{ env.METALLUM_SOURCE_SHA }}
+          path: |
+            build/agent-evidence/motion-producers/unowned-opaque-temporal/
+            build/agent-evidence/unowned-opaque/
+            build/test-results/hostedMetalUnownedOpaqueTest/
+          if-no-files-found: error
+          retention-days: 14

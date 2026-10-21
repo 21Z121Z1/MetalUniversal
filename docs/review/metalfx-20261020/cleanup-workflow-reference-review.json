@@ -1,0 +1,165 @@
+{
+  "source": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+  "workflowReferences": [
+    {
+      "path": ".github/workflows/build.yml",
+      "references": [
+        {
+          "line": 11,
+          "text": "branches:"
+        },
+        {
+          "line": 13,
+          "text": "tags:"
+        },
+        {
+          "line": 16,
+          "text": "branches:"
+        },
+        {
+          "line": 24,
+          "text": "cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}"
+        },
+        {
+          "line": 180,
+          "text": "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/metal-capabilities.yml",
+      "references": [
+        {
+          "line": 6,
+          "text": "branches:"
+        },
+        {
+          "line": 11,
+          "text": "branches:"
+        },
+        {
+          "line": 31,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        },
+        {
+          "line": 55,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/metalfx-contracts.yml",
+      "references": [
+        {
+          "line": 6,
+          "text": "branches:"
+        },
+        {
+          "line": 11,
+          "text": "branches: [main]"
+        },
+        {
+          "line": 50,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/minecraft-26.3-migration.yml",
+      "references": [
+        {
+          "line": 6,
+          "text": "branches:"
+        },
+        {
+          "line": 11,
+          "text": "branches:"
+        },
+        {
+          "line": 36,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/minecraft-client-e2e.yml",
+      "references": [
+        {
+          "line": 6,
+          "text": "branches:"
+        },
+        {
+          "line": 11,
+          "text": "branches:"
+        },
+        {
+          "line": 83,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/minecraft-reference.yml",
+      "references": [
+        {
+          "line": 6,
+          "text": "branches:"
+        },
+        {
+          "line": 15,
+          "text": "branches:"
+        },
+        {
+          "line": 42,
+          "text": "ref: ${{ env.METALLUM_SOURCE_SHA }}"
+        }
+      ]
+    }
+  ],
+  "defaultBranch": "main",
+  "openPRs": [
+    {
+      "number": 90,
+      "title": "\u63a5\u901a\u771f\u5b9e\u8fd0\u52a8\u751f\u4ea7\u8005\u3001\u8868\u9762\u5386\u53f2\u548c\u96e8\u96ea\u81ea\u8eab\u8fd0\u52a8",
+      "head": "codex/metal-renderer-research",
+      "headSha": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/90"
+    },
+    {
+      "number": 89,
+      "title": "Draft: converge mcopt optimization semantics on Sodium 0.9.3",
+      "head": "codex/mcopt-semantic-convergence-20261005",
+      "headSha": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/89"
+    },
+    {
+      "number": 87,
+      "title": "MetalFX: verify and repair Minecraft 26.3 temporal data contracts",
+      "head": "agent/metalfx-data-contracts-20260924",
+      "headSha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/87"
+    },
+    {
+      "number": 86,
+      "title": "Validate fullscreen Metal 4 P1 at 32 chunks",
+      "head": "codex/p1-framebuffer-determinism",
+      "headSha": "1548c41d9e0ea65fad932740854d75804ff81d07",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/86"
+    },
+    {
+      "number": 85,
+      "title": "MetalFX: complete temporal input and frame-generation contracts",
+      "head": "agent/metalfx-contract-completion-20260924",
+      "headSha": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/85"
+    }
+  ],
+  "finding": "Existing product workflows use canonical main/event SHA/pull-request head; the separate pinned validation harness is on its preserved own branch and is not proposed as product code. Backup tags do not match the v* publish condition. A normal main integration preserves current default/base semantics.",
+  "mainChanged": false,
+  "branchesDeleted": false
+}

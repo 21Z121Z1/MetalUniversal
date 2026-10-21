@@ -27,12 +27,12 @@ final class MetalFxFirstPersonValidityContractTest {
         assertTrue(manager.contains("private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;"));
         assertTrue(manager.contains("motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);"));
 
-        assertTrue(synthetic.contains("if (sample.hasPrevious()) {"));
         assertTrue(synthetic.contains("MetalFxManager.markExactFirstPersonProducerCandidate(sample);"));
-        assertTrue(synthetic.contains(
-                "First appearance, successful absence followed by reappearance, or an ItemStack"));
-        assertFalse(synthetic.contains(
-                "MetalFxManager.observeFirstPersonMotion();\n        if (!frameOpen"));
+        assertTrue(synthetic.contains("MetalFxManager.observeFirstPersonMotion();"));
+        assertTrue(manager.contains("MetalEntityMotionCapture.recordMotionDrawSkip(MetalSyntheticExactMotion.PROJECTION_HISTORY_UNAVAILABLE);"));
+        assertTrue(manager.contains("MetalPreviousVertexReplay.captureHandTransform(previousVertexToken, sourceInputs)"));
+        assertTrue(manager.contains("MetalPreviousVertexReplay.handTransforms(replay.previousVertexToken())"));
+        assertTrue(manager.contains("pass.setUniform(\"Projection\", replay.projection());"));
 
         assertTrue(encoder.contains("metallum_metalfx_encode_v3_available()"));
         assertTrue(bridge.contains("metallum_metalfx_encode_v3"));
@@ -40,6 +40,8 @@ final class MetalFxFirstPersonValidityContractTest {
         assertTrue(nativeSource.contains("handExactValidityTexture [[texture(9)]]"));
         assertTrue(nativeSource.contains("float handValid = handExactValidityTexture.read(pixel).r;"));
         assertTrue(nativeSource.contains("if (!exactHand)"));
+        assertTrue(nativeSource.contains("texture2d<half, access::read_write> objectMotionTexture [[texture(1)]]"));
+        assertTrue(nativeSource.contains("if (ownsExactMotion && !validExactMotion) reactive = 1.0;"));
         assertTrue(nativeSource.contains("selected = float2(0.0);"));
         assertTrue(nativeSource.contains("@_cdecl(\"metallum_metalfx_encode_v2\")"));
         assertTrue(nativeSource.contains("@_cdecl(\"metallum_metalfx_encode_v3\")"));

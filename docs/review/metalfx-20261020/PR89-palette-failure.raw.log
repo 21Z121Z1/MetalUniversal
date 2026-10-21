@@ -1,0 +1,110 @@
+Original exact job 111622879402 evidence; first-error and save-stack context precedes the retained terminal excerpt.
+2026-10-05T05:05:48.9007560Z [05:05:48] [Server thread/INFO]: System chat: Teleported Player840 to 544.500000, 128.000000, 352.500000
+2026-10-05T05:05:58.5182680Z [05:05:58] [Server thread/INFO]: System chat: Teleported Player840 to 640.500000, 128.000000, 400.500000
+2026-10-05T05:06:07.0228220Z [05:06:06] [Server thread/INFO]: System chat: Teleported Player840 to 736.500000, 128.000000, 448.500000
+2026-10-05T05:06:15.0171820Z [05:06:14] [Server thread/INFO]: System chat: Teleported Player840 to 832.500000, 128.000000, 496.500000
+2026-10-05T05:06:21.5544770Z [05:06:21] [Server thread/WARN]: Can't keep up! Is the server overloaded? Running 20354ms or 407 ticks behind
+2026-10-05T05:06:26.0182460Z [05:06:25] [Server thread/INFO]: Player840 lost connection: Disconnected
+2026-10-05T05:06:26.0280130Z [05:06:25] [Server thread/INFO]: System chat: Player840 left the game
+2026-10-05T05:06:26.0385690Z [05:06:25] [Server thread/INFO]: Stopping singleplayer server as player logged out
+2026-10-05T05:06:26.0485360Z [05:06:25] [Server thread/INFO]: Stopping server
+2026-10-05T05:06:26.0580880Z [05:06:25] [Server thread/INFO]: Saving players
+2026-10-05T05:06:26.0599520Z [05:06:25] [Server thread/INFO]: Saving worlds
+2026-10-05T05:06:26.5595540Z [05:06:26] [IO-Worker-1/ERROR]: Caught exception in thread Thread[#47,IO-Worker-1,5,main]
+2026-10-05T05:06:26.5700540Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.5806410Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.5807890Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.5918750Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.6020260Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:26.6129180Z 	at knot//net.minecraft.world.level.chunk.storage.SerializableChunkData.write(SerializableChunkData.java:431)
+2026-10-05T05:06:26.6203500Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+2026-10-05T05:06:26.6205030Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.exec(CompletableFuture.java:1781)
+2026-10-05T05:06:26.6205820Z 	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:511)
+2026-10-05T05:06:26.6206440Z 	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1450)
+2026-10-05T05:06:26.6261070Z 	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:2019)
+2026-10-05T05:06:26.6263480Z 	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:187)
+2026-10-05T05:06:26.6265180Z [05:06:26] [IO-Worker-6/ERROR]: Caught exception in thread Thread[#59,IO-Worker-6,5,main]
+2026-10-05T05:06:26.6267010Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.6268740Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.6270450Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.6271820Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.6392510Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:26.6393450Z 	at knot//net.minecraft.world.level.chunk.storage.SerializableChunkData.write(SerializableChunkData.java:431)
+2026-10-05T05:06:26.6394350Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+2026-10-05T05:06:26.6395060Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.exec(CompletableFuture.java:1781)
+2026-10-05T05:06:26.6395720Z 	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:511)
+2026-10-05T05:06:26.6396440Z 	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1450)
+2026-10-05T05:06:26.6397100Z 	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:2019)
+2026-10-05T05:06:26.6397960Z 	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:187)
+2026-10-05T05:06:26.6398640Z [05:06:26] [IO-Worker-4/ERROR]: Caught exception in thread Thread[#56,IO-Worker-4,5,main]
+2026-10-05T05:06:26.6400010Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.6400920Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.6401560Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.6402090Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.6402620Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:26.6403270Z 	at knot//net.minecraft.world.level.chunk.storage.SerializableChunkData.write(SerializableChunkData.java:431)
+2026-10-05T05:06:26.6404070Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+2026-10-05T05:06:26.6404810Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.exec(CompletableFuture.java:1781)
+2026-10-05T05:06:26.6405570Z 	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:511)
+2026-10-05T05:06:26.6406220Z 	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1450)
+2026-10-05T05:06:26.6406880Z 	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:2019)
+2026-10-05T05:06:26.6407570Z 	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:187)
+2026-10-05T05:06:26.6408200Z [05:06:26] [IO-Worker-53/ERROR]: Caught exception in thread Thread[#128,IO-Worker-53,5,main]
+2026-10-05T05:06:26.6408830Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.6409510Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.6410200Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.6410790Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.6411400Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:26.6412150Z 	at knot//net.minecraft.world.level.chunk.storage.SerializableChunkData.write(SerializableChunkData.java:431)
+2026-10-05T05:06:26.6413970Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+2026-10-05T05:06:26.6414800Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.exec(CompletableFuture.java:1781)
+2026-10-05T05:06:26.6415580Z 	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:511)
+2026-10-05T05:06:26.6416280Z 	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1450)
+2026-10-05T05:06:26.6416960Z 	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:2019)
+2026-10-05T05:06:26.6417630Z 	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:187)
+2026-10-05T05:06:26.7932650Z [05:06:26] [IO-Worker-54/ERROR]: Caught exception in thread Thread[#129,IO-Worker-54,5,main]
+2026-10-05T05:06:26.8036410Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.8138020Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.8239940Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.8362850Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.8381900Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:26.8383980Z 	at knot//net.minecraft.world.level.chunk.storage.SerializableChunkData.write(SerializableChunkData.java:431)
+2026-10-05T05:06:26.8384910Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+2026-10-05T05:06:26.8387550Z 	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.exec(CompletableFuture.java:1781)
+2026-10-05T05:06:26.8490320Z 	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:511)
+2026-10-05T05:06:26.8598710Z 	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1450)
+2026-10-05T05:06:26.8717200Z 	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:2019)
+2026-10-05T05:06:26.8834900Z 	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:187)
+2026-10-05T05:06:26.8963200Z [05:06:26] [IO-Worker-55/ERROR]: Caught exception in thread Thread[#132,IO-Worker-55,5,main]
+2026-10-05T05:06:26.9074340Z java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:26.9176670Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:26.9292450Z 	at knot//com.mojang.serialization.Encoder.encodeStart(Encoder.java:14)
+2026-10-05T05:06:26.9394050Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:606)
+2026-10-05T05:06:26.9415530Z 	at knot//net.minecraft.nbt.CompoundTag.store(CompoundTag.java:596)
+2026-10-05T05:06:42.3742880Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3743610Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3744320Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3745030Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3745730Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3746440Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3747220Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3747920Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3748620Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3749320Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3750020Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3750730Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3751420Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3752130Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3752840Z 	Suppressed: java.lang.IllegalStateException: Palette encode verification diverged for block-states
+2026-10-05T05:06:42.3754970Z 	at knot//com.metallum.client.chunk.ChunkPaletteFastCodec$1.encode(ChunkPaletteFastCodec.java:106)
+2026-10-05T05:06:42.3821950Z #@!@# Game crashed! Crash report saved to: #@!@# /Users/runner/work/MetalUniversal/MetalUniversal/.github/ci/minecraft-e2e/build/run/clientGameTest/crash-reports/crash-2026-10-05_05.06.42-client.txt
+2026-10-05T05:06:46.1412330Z Cache is read-only: will not save state for use in subsequent builds.
+2026-10-05T05:06:46.1460370Z <summary>Entries: 6 restored (833Mb), 0 saved (0Mb) - Expand for more details</summary>
+2026-10-05T05:06:46.1471280Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1474990Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1480580Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1483830Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1487170Z               (Entry not saved: cache is read-only)
+2026-10-05T05:06:46.1495040Z               (Entry not saved: cache is read-only)
+
+END retained exact-job excerpt

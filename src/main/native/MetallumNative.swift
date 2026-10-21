@@ -384,6 +384,7 @@ private enum NativeState {
     static var motionMergePipeline: MTLComputePipelineState?
     static var motionFusedPipeline: MTLComputePipelineState?
     static var motionClearPipeline: MTLComputePipelineState?
+    static var surfaceMotionV4Pipeline: MTLComputePipelineState?
     // QA-only A/B escape hatch. Production uses the fused motion path; setting
     // this before launch restores the two-dispatch camera/merge implementation.
     static let legacyMotionPasses = ProcessInfo.processInfo.environment[
@@ -2855,9 +2856,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.colorAttachments[0].texture = destinationMotion
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        pass.depthAttachment.texture = destinationDepth
-        pass.depthAttachment.loadAction = .dontCare
-        pass.depthAttachment.storeAction = .store
+        if destinationDepth.pixelFormat == .r32Float {
+            pass.colorAttachments[1].texture = destinationDepth
+            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].storeAction = .store
+        } else {
+            pass.depthAttachment.texture = destinationDepth
+            pass.depthAttachment.loadAction = .dontCare
+            pass.depthAttachment.storeAction = .store
+        }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
@@ -2865,9 +2872,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
         // The MRT fragment writes depth(any); bind the write-enabled state
         // explicitly because the encoder's default is not a contract.
-        encoder.setDepthStencilState(depthResampleState)
+        if destinationDepth.pixelFormat != .r32Float { encoder.setDepthStencilState(depthResampleState) }
         encoder.setFragmentTexture(sourceDepth, index: 0)
         encoder.setFragmentTexture(sourceMotion, index: 1)
+        var destinationSize = SIMD2<UInt32>(UInt32(destinationMotion.width), UInt32(destinationMotion.height))
+        encoder.setFragmentBytes(&destinationSize, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 0)
         encoder.setViewport(MTLViewport(
             originX: 0.0,
             originY: 0.0,
@@ -2895,11 +2904,21 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         pass.colorAttachments[0].texture = destinationMotion
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        pass.depthAttachment.texture = destinationDepth
-        pass.depthAttachment.loadAction = .dontCare
-        pass.depthAttachment.storeAction = .store
+        if destinationDepth.pixelFormat == .r32Float {
+            pass.colorAttachments[1].texture = destinationDepth
+            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].storeAction = .store
+        } else {
+            pass.depthAttachment.texture = destinationDepth
+            pass.depthAttachment.loadAction = .dontCare
+            pass.depthAttachment.storeAction = .store
+        }
         pass.renderTargetWidth = destinationMotion.width
         pass.renderTargetHeight = destinationMotion.height
+        let destinationSize = SIMD2<UInt32>(UInt32(destinationMotion.width), UInt32(destinationMotion.height))
+        guard let (uniformBuffer, uniformOffset) = lease.owner.writeUniform(destinationSize, at: lease.slotIndex) else {
+            return false
+        }
         guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
@@ -2910,12 +2929,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             visibilityOptions: .device
         )
         let tables = lease.owner.argumentTables(at: lease.slotIndex)
+        tables.1.setAddress(uniformBuffer.gpuAddress + UInt64(uniformOffset), index: 0)
         tables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
         tables.1.setTexture(sourceMotion.gpuResourceID, index: 1)
         encoder.setArgumentTable(tables.1, stages: .fragment)
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
         // Keep Metal 4's depth(any) attachment contract identical to Metal 3.
-        encoder.setDepthStencilState(depthResampleState)
+        if destinationDepth.pixelFormat != .r32Float { encoder.setDepthStencilState(depthResampleState) }
         encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
             width: Double(destinationMotion.width), height: Double(destinationMotion.height),
@@ -2945,7 +2965,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
-        guard sceneColor.width > 0, sceneColor.height > 0,
+        guard MetalFxFrameCameraContract.isValid(
+                fieldOfViewDegrees: fieldOfView, near: nearPlane, far: farPlane,
+                aspect: aspectRatio, jitterX: jitterX, jitterY: jitterY),
+              sourceDeltaSeconds.isFinite, sourceDeltaSeconds >= 0,
+              sceneColor.width > 0, sceneColor.height > 0,
               nativeSceneColor.width > 0, nativeSceneColor.height > 0,
               uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
@@ -3461,7 +3485,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 // enqueue spacing below is only a proxy that inherits CPU
                 // scheduling jitter from the encode path.
                 if frame.sourceDelta.isFinite && frame.sourceDelta > 0.0 {
-                    return min(max(frame.sourceDelta, 1.0 / 240.0), 0.25)
+                    return frame.sourceDelta
                 }
                 guard let previousTimestamp = lastPresentedTimestamp else {
                     return 1.0 / 60.0
@@ -3470,7 +3494,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 guard delta.isFinite, delta > 0.0 else {
                     return 1.0 / 60.0
                 }
-                return Float(min(max(delta, 1.0 / 240.0), 0.25))
+                return Float(delta)
             }()
             currentLifecycle = lifecycle
         }
@@ -3563,8 +3587,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.isUITextureComposited = false
             frameInterpolator.jitterOffsetX = frame.jitterX
             frameInterpolator.jitterOffsetY = frame.jitterY
-            frameInterpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            frameInterpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: sceneBuffers[work.previousIndex].width, height: sceneBuffers[work.previousIndex].height)
+            frameInterpolator.motionVectorScaleX = motionScale.x
+            frameInterpolator.motionVectorScaleY = motionScale.y
             frameInterpolator.fieldOfView = frame.fieldOfView
             frameInterpolator.nearPlane = frame.nearPlane
             frameInterpolator.farPlane = frame.farPlane
@@ -3705,8 +3731,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.isUITextureComposited = false
             interpolator.jitterOffsetX = frame.jitterX
             interpolator.jitterOffsetY = frame.jitterY
-            interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
-            interpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: sceneBuffers[work.previousIndex].width, height: sceneBuffers[work.previousIndex].height)
+            interpolator.motionVectorScaleX = motionScale.x
+            interpolator.motionVectorScaleY = motionScale.y
             interpolator.fieldOfView = frame.fieldOfView
             interpolator.nearPlane = frame.nearPlane
             interpolator.farPlane = frame.farPlane
@@ -4450,7 +4478,7 @@ private func stringFromOptionalCString(_ pointer: UnsafePointer<CChar>?) -> Stri
     return value.isEmpty ? nil : value
 }
 
-private func fullscreenMslSource(flipY: Bool) -> String {
+private func fullscreenMslSource(flipY: Bool, depthAsColor: Bool = false) -> String {
     let topY = flipY ? "1.0" : "0.0"
     let bottomY = flipY ? "-1.0" : "2.0"
     return """
@@ -4491,17 +4519,21 @@ private func fullscreenMslSource(flipY: Bool) -> String {
 
     struct MotionDepthResampleOut {
       float4 motion [[color(0)]];
-      float depth [[depth(any)]];
+      float depth [[\(depthAsColor ? "color(1)" : "depth(any)")]];
     };
 
     fragment MotionDepthResampleOut metallum_motion_depth_resample_fs(
       PresentVertexOut in [[stage_in]],
-      depth2d<float, access::read> sourceDepth [[texture(0)]],
-      texture2d<float, access::read> sourceMotion [[texture(1)]]
+      \(depthAsColor ? "texture2d<float, access::read>" : "depth2d<float, access::read>") sourceDepth [[texture(0)]],
+      texture2d<float, access::read> sourceMotion [[texture(1)]],
+      constant uint2& destinationSize [[buffer(0)]]
     ) {
       uint2 size = uint2(sourceDepth.get_width(), sourceDepth.get_height());
-      float2 sourcePosition = in.uv * float2(size) - 0.5;
-      uint2 base = uint2(clamp(floor(sourcePosition), float2(0.0), float2(size - 1)));
+      // Integer pixel-center mapping avoids interpolated-UV rounding across an
+      // exact source-texel boundary at odd/nonsquare destination dimensions.
+      uint2 destinationPixel = uint2(in.position.xy);
+      int2 numerator = int2((destinationPixel * 2 + 1) * size) - int2(destinationSize);
+      uint2 base = uint2(clamp(numerator / int2(destinationSize * 2), int2(0), int2(size - 1)));
       uint2 next = min(base + 1, size - 1);
       uint2 candidates[4] = {
         base,
@@ -4510,10 +4542,10 @@ private func fullscreenMslSource(flipY: Bool) -> String {
         next
       };
       // Strictly greater preserves the stable base->x->y->diagonal tie order.
-      float selectedDepth = sourceDepth.read(candidates[0]);
+      float selectedDepth = sourceDepth.read(candidates[0])\(depthAsColor ? ".r" : "");
       uint selectedIndex = 0;
       for (uint index = 1; index < 4; index++) {
-        float candidateDepth = sourceDepth.read(candidates[index]);
+        float candidateDepth = sourceDepth.read(candidates[index])\(depthAsColor ? ".r" : "");
         if (isfinite(candidateDepth)
             && (!isfinite(selectedDepth) || candidateDepth > selectedDepth)) {
           selectedDepth = candidateDepth;
@@ -4556,17 +4588,17 @@ private func fullscreenMslSource(flipY: Bool) -> String {
     """
 }
 
-private func presentMslSource() -> String {
+func presentMslSource() -> String {
     // CAMetalLayer presents with the opposite vertical orientation from the
     // framebuffer convention used by the original Metallum backend.
     return fullscreenMslSource(flipY: true)
 }
 
-private func copyMslSource() -> String {
+func copyMslSource(depthAsColor: Bool = false) -> String {
     // Texture-to-texture copies stay within the same Metal coordinate space;
     // applying the drawable flip here would make the later present double
     // flip MetalFX output and the GUI seed texture.
-    return fullscreenMslSource(flipY: false)
+    return fullscreenMslSource(flipY: false, depthAsColor: depthAsColor)
 }
 
 private struct MetallumClearUniforms {
@@ -4751,16 +4783,17 @@ private func buildPresentPipeline(
     }
 }
 
-private func buildMotionDepthResamplePipeline(
+func buildMotionDepthResamplePipeline(
     device: MTLDevice,
     motionFormat: MTLPixelFormat,
     depthFormat: MTLPixelFormat
 ) -> MTLRenderPipelineState? {
+    guard depthFormat == .r32Float || depthFormat == .depth32Float else { return nil }
     do {
         // This is texture-to-texture resampling, not drawable presentation.
         // Keep depth/motion in the renderer's native Metal orientation; the
         // final CAMetalLayer present is the only stage that applies the Y flip.
-        let library = try device.makeLibrary(source: copyMslSource(), options: nil)
+        let library = try device.makeLibrary(source: copyMslSource(depthAsColor: depthFormat == .r32Float), options: nil)
         guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
               let fragmentFunction = library.makeFunction(name: "metallum_motion_depth_resample_fs") else {
             return nil
@@ -4770,7 +4803,11 @@ private func buildMotionDepthResamplePipeline(
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = motionFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
-        descriptor.depthAttachmentPixelFormat = depthFormat
+        if depthFormat == .r32Float {
+            descriptor.colorAttachments[1].pixelFormat = .r32Float
+        } else {
+            descriptor.depthAttachmentPixelFormat = depthFormat
+        }
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create depth/motion resample pipeline: %@", String(describing: error))
@@ -5098,7 +5135,7 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
     }
 }
 
-private func handOverlayMslSource() -> String {
+func handOverlayMslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5112,7 +5149,7 @@ private func handOverlayMslSource() -> String {
 
     kernel void metallum_hand_overlay_motion(
       texture2d<float, access::read> handDepthTexture [[texture(0)]],
-      texture2d<half, access::write> objectMotionTexture [[texture(1)]],
+      texture2d<half, access::read_write> objectMotionTexture [[texture(1)]],
       texture2d<half, access::write> objectValidityTexture [[texture(2)]],
       texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
       texture2d<float, access::read> handExactValidityTexture [[texture(4)]],
@@ -5131,7 +5168,13 @@ private func handOverlayMslSource() -> String {
       if (!(isfinite(depth) && depth > 0.0000001)) return;
 
       float handExactValid = u.reserved > 0.5 ? handExactValidityTexture.read(pixel).r : 0.0;
-      if (!(isfinite(handExactValid) && handExactValid > 0.5)) {
+      bool ownsExactMotion = isfinite(handExactValid) && handExactValid > 0.5;
+      bool validExactMotion = false;
+      if (ownsExactMotion) {
+        float2 exactMotion = float2(objectMotionTexture.read(pixel).rg);
+        validExactMotion = all(isfinite(exactMotion)) && all(abs(exactMotion) <= float2(32.0));
+      }
+      if (!validExactMotion) {
         objectMotionTexture.write(half4(half(0.0)), pixel);
       }
       // Legacy merge has no hand-depth branch. Force it to select the shared
@@ -5142,6 +5185,7 @@ private func handOverlayMslSource() -> String {
         pixel
       );
       float reactive = float(reactiveTexture.read(pixel).r);
+      if (ownsExactMotion && !validExactMotion) reactive = 1.0;
       reactiveTexture.write(
         half4(
           half(clamp(max(reactive, u.reactiveBoost), 0.0, 1.0)),
@@ -5278,8 +5322,8 @@ private func motionReconstructionMslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (isfinite(currentClip.w) && abs(currentClip.w) > 0.000001
-              && isfinite(previousClip.w) && abs(previousClip.w) > 0.000001) {
+          if (isfinite(currentClip.w) && currentClip.w > 0.000001
+              && isfinite(previousClip.w) && previousClip.w > 0.000001) {
             currentClip /= currentClip.w;
             previousClip /= previousClip.w;
             // Both projections are unjittered. The depth reconstruction uses
@@ -5344,7 +5388,9 @@ private func ensureMotionPipeline(_ device: MTLDevice) -> MTLComputePipelineStat
     }
 }
 
-private func motionCameraV2MslSource() -> String {
+// Internal so the native contract executable compiles the shipping kernels,
+// even on a device without a MetalFX scaler. This is not a Java/native ABI.
+func motionCameraV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5434,8 +5480,8 @@ private func motionCameraV2MslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (!isfinite(currentClip.w) || abs(currentClip.w) <= 0.000001
-              || !isfinite(previousClip.w) || abs(previousClip.w) <= 0.000001) {
+          if (!isfinite(currentClip.w) || currentClip.w <= 0.000001
+              || !isfinite(previousClip.w) || previousClip.w <= 0.000001) {
             disocclusion = 1.0;
             reactive = 1.0;
           } else {
@@ -5466,7 +5512,16 @@ private func motionCameraV2MslSource() -> String {
     """
 }
 
-private func motionMergeV2MslSource() -> String {
+// Shared by Metal 3, Metal 4 and the GPU contract executable. This is an
+// internal compute constant layout, not a Java/FFM exported descriptor.
+struct MetalFxMotionMergeUniforms {
+    var viewport: SIMD4<UInt32>
+    var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
+    var previousFromCurrentClip: simd_float4x4
+}
+
+func motionMergeV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5475,6 +5530,7 @@ private func motionMergeV2MslSource() -> String {
       uint4 viewport;
       uint4 flags;   // x = sky far-plane motion, y = reprojection depth dilation
       float4 params; // x = disocclusion reactive cap
+      float4x4 previousFromCurrentClip;
     };
 
     inline bool validDepth(float depth) {
@@ -5515,9 +5571,22 @@ private func motionMergeV2MslSource() -> String {
         if (skyCurrent) {
           currentDepth = 0.00002;
         }
+        // Raw depths from different camera spaces cannot be compared directly.
+        // RG object/hand motion has no previous Z, so keep its conservative
+        // depth policy; camera-only pixels have an exact previous-space Z.
+        float comparisonDepth = currentDepth;
+        if (!(isfinite(objectValid) && objectValid > 0.5)) {
+          float2 uv = (float2(pixel) + 0.5) / float2(u.viewport.xy);
+          float4 previousClip = u.previousFromCurrentClip
+              * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, currentDepth, 1.0);
+          // The combined matrix retains unprojection's homogeneous scale;
+          // camera reconstruction already checks front-facing visibility.
+          comparisonDepth = all(isfinite(previousClip)) && abs(previousClip.w) > 0.000001
+              ? previousClip.z / previousClip.w : -1.0;
+        }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(u.viewport.xy) * 0.5;
-        if (!validDepth(currentDepth)
+        if (!validDepth(currentDepth) || !validDepth(comparisonDepth)
             || !all(isfinite(previousPixel))
             || previousPixel.x < 0.0 || previousPixel.y < 0.0
             || previousPixel.x >= float(u.viewport.x)
@@ -5529,7 +5598,7 @@ private func motionMergeV2MslSource() -> String {
           // nearest-neighbour probe on the far side of the edge on alternating
           // frames, and leaf-vs-sky always clears the threshold below, so the
           // whole foliage/sky border was re-flagged as disoccluded every other
-          // frame. Take the neighbourhood sample closest to the current depth
+          // frame. Take the neighbourhood sample closest to the expected previous depth
           // instead; radius 0 reproduces the legacy single probe exactly.
           int radius = u.flags.y != 0u ? 1 : 0;
           float previousDepth = 0.0;
@@ -5549,7 +5618,7 @@ private func motionMergeV2MslSource() -> String {
                 probeDepth = 0.00002;
               }
               float delta = isfinite(probeDepth)
-                  ? abs(probeDepth - currentDepth)
+                  ? abs(probeDepth - comparisonDepth)
                   : 1.0e30;
               if (bestDelta < 0.0 || delta < bestDelta) {
                 bestDelta = delta;
@@ -5564,10 +5633,10 @@ private func motionMergeV2MslSource() -> String {
             // sky-colored history is invalid for it.
             disocclusion = 1.0;
           } else {
-            float threshold = max(0.0025, abs(currentDepth) * 0.01);
+            float threshold = max(0.0025, abs(comparisonDepth) * 0.01);
             bool wasOccluded = u.viewport.w != 0u
-                ? previousDepth > currentDepth + threshold
-                : previousDepth < currentDepth - threshold;
+                ? previousDepth > comparisonDepth + threshold
+                : previousDepth < comparisonDepth - threshold;
             if (!validDepth(previousDepth) || wasOccluded) {
               disocclusion = 1.0;
             }
@@ -5593,7 +5662,7 @@ private func motionMergeV2MslSource() -> String {
     """
 }
 
-private func motionFusedV2MslSource() -> String {
+func motionFusedV2MslSource() -> String {
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -5670,6 +5739,7 @@ private func motionFusedV2MslSource() -> String {
 
       float currentDepth = depthTexture.read(pixel).r;
       float reconstructionDepth = currentDepth;
+      float cameraPreviousDepth = -1.0;
       float2 cameraMotion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
       float disocclusion = 0.0;
@@ -5699,13 +5769,14 @@ private func motionFusedV2MslSource() -> String {
           world /= world.w;
           float4 currentClip = u.currentViewProjection * world;
           float4 previousClip = u.previousViewProjection * world;
-          if (!isfinite(currentClip.w) || abs(currentClip.w) <= 0.000001
-              || !isfinite(previousClip.w) || abs(previousClip.w) <= 0.000001) {
+          if (!all(isfinite(currentClip)) || currentClip.w <= 0.000001
+              || !all(isfinite(previousClip)) || previousClip.w <= 0.000001) {
             disocclusion = 1.0;
             reactive = 1.0;
           } else {
             currentClip /= currentClip.w;
             previousClip /= previousClip.w;
+            cameraPreviousDepth = previousClip.z;
             cameraMotion = float2(
               previousClip.x - currentClip.x,
               currentClip.y - previousClip.y
@@ -5756,9 +5827,11 @@ private func motionFusedV2MslSource() -> String {
         }
       }
 
+      bool handCovered = false;
       if (u.options.z != 0u) {
         float handDepth = handDepthTexture.read(pixel).r;
         if (isfinite(handDepth) && handDepth > 0.0000001) {
+          handCovered = true;
           // Hand pixels have their own ownership proof. A world entity directly
           // behind the hand may set objectValidityTexture at the same pixel, so
           // that plane is intentionally ignored here. Exact first-person motion
@@ -5791,6 +5864,9 @@ private func motionFusedV2MslSource() -> String {
             && reprojectedCurrentDepth >= 0.0 && reprojectedCurrentDepth <= 0.00001;
         if (skyCurrent) {
           reprojectedCurrentDepth = 0.00002;
+        }
+        if (!(isfinite(objectValid) && objectValid > 0.5) && !handCovered) {
+          reprojectedCurrentDepth = cameraPreviousDepth;
         }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(width, height) * 0.5;
@@ -5868,6 +5944,291 @@ private func motionFusedV2MslSource() -> String {
       }
     }
     """
+}
+
+// Java advances these depth histories with the same accepted-source transaction as vertices.
+// The raw resolver also runs on Spatial QA devices, without a supported Temporal scaler.
+struct MetalSurfaceMotionUniforms {
+    var currentViewProjection: simd_float4x4
+    var inverseCurrentViewProjection: simd_float4x4
+    var previousViewProjection: simd_float4x4
+    var viewport: SIMD4<Float>
+    var flags: SIMD4<UInt32>   // preserve reactive, sky motion, history valid, reversed depth
+    var options: SIMD4<UInt32> // depth dilation, diagnostics, HUD bound, reserved
+    var params: SIMD4<Float>  // depth edge cap, disocclusion cap, hand reactive boost, reserved
+    var jitter: SIMD4<Float>  // current XY, previous XY in raw-texture pixels
+}
+
+func motionSurfaceResolveV4MslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct SurfaceUniforms {
+      float4x4 currentViewProjection;
+      float4x4 inverseCurrentViewProjection;
+      float4x4 previousViewProjection;
+      float4 viewport;
+      uint4 flags;
+      uint4 options;
+      float4 params;
+      float4 jitter;
+    };
+    inline bool surfaceDepth(float z) { return isfinite(z) && z >= 0.0 && z <= 1.0; }
+    inline bool surfaceHud(float z, bool reversed) {
+      return surfaceDepth(z) && (reversed ? z > 0.0000001 : z < 0.9999999);
+    }
+    inline uint surfaceTag(float mask) {
+      return isfinite(mask) ? uint(clamp(floor(mask*255.0+0.5),0.0,255.0)) : 0u;
+    }
+    inline bool surfaceOverlay(uint tag) { return tag == 96u || tag == 159u || tag == 223u; }
+    inline bool surfaceExact(uint tag) { return tag == 159u || tag == 191u || tag == 223u || tag == 255u; }
+    inline bool surfaceReactive(uint tag) { return tag == 159u || tag == 191u; }
+    inline float surfaceTolerance(float z, bool reversed) {
+      return max(0.000003, abs(reversed ? z : 1.0-z)*0.01);
+    }
+    inline bool closerSurface(float z, float expected, bool reversed) {
+      float tolerance = surfaceTolerance(expected,reversed);
+      return reversed ? z > expected+tolerance : z < expected-tolerance;
+    }
+    kernel void metallum_motion_surface_resolve_v4(
+      texture2d<float, access::read> sceneDepth [[texture(0)]],
+      texture2d<half, access::read> sourceMotion [[texture(1)]],
+      texture2d<float, access::read> worldValidity [[texture(2)]],
+      texture2d<float, access::read> previousWorldDepth [[texture(3)]],
+      texture2d<half, access::write> mergedMotion [[texture(4)]],
+      texture2d<half, access::read_write> reactiveTexture [[texture(5)]],
+      texture2d<half, access::write> cameraDiagnostic [[texture(6)]],
+      texture2d<half, access::write> disocclusionDiagnostic [[texture(7)]],
+      texture2d<float, access::read> hudDepth [[texture(8)]],
+      texture2d<float, access::read> hudValidity [[texture(9)]],
+      texture2d<float, access::read> correspondence [[texture(10)]],
+      texture2d<float, access::read> previousHudDepth [[texture(11)]],
+      texture2d<float, access::read> worldOwnershipDepth [[texture(12)]],
+      texture2d<float, access::write> nextWorldDepth [[texture(13)]],
+      texture2d<float, access::write> presentationDepth [[texture(14)]],
+      texture2d<float, access::write> nextHudDepth [[texture(15)]],
+      constant SurfaceUniforms& u [[buffer(0)]], uint2 pixel [[thread_position_in_grid]]) {
+      uint2 extent = uint2(u.viewport.xy);
+      if (any(pixel >= extent)) return;
+      bool reversed = u.flags.w != 0u;
+      float worldMask = worldValidity.read(pixel).r, handMask = hudValidity.read(pixel).r;
+      uint worldTag = surfaceTag(worldMask), handTag = surfaceTag(handMask);
+      bool worldOverlay = surfaceOverlay(worldTag);
+      float2 pair = correspondence.read(pixel).rg;
+      float sceneZ = sceneDepth.read(pixel).r, ownershipZ = worldOwnershipDepth.read(pixel).r;
+      bool worldDepthValid = surfaceDepth(ownershipZ) && (worldOverlay || surfaceDepth(sceneZ));
+      float worldZ = worldDepthValid ? (worldOverlay ? ownershipZ : (reversed ? max(sceneZ,ownershipZ) : min(sceneZ,ownershipZ))) : (reversed ? 0.0 : 1.0);
+      float farZ = reversed ? 0.0 : 1.0;
+      float handZ = u.options.z != 0u ? hudDepth.read(pixel).r : farZ;
+      bool actualHandCovered = surfaceHud(handZ,reversed);
+      bool ownsHand = isfinite(handMask) && handMask > 0.125;
+      bool handPairDepthValid = ownsHand && surfaceDepth(pair.y);
+      if (handPairDepthValid) handZ = actualHandCovered ? (reversed ? max(handZ,pair.y) : min(handZ,pair.y)) : pair.y;
+      // Transparent HUD draws may contribute color without writing the source HUD depth.
+      // Their explicit replay coverage/current Z still belongs to the independent HUD domain.
+      bool handCovered = actualHandCovered || ownsHand;
+      nextWorldDepth.write(float4(worldZ,0.0,0.0,0.0),pixel);
+      nextHudDepth.write(float4(handCovered ? handZ : farZ,0.0,0.0,0.0),pixel);
+      presentationDepth.write(float4(handCovered ? handZ : worldZ,0.0,0.0,0.0),pixel);
+      float base = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
+      float reactive = isfinite(base) ? clamp(base,0.0,1.0) : 1.0;
+      if (u.params.x > 0.0 && !handCovered) {
+        float gradient=0.0;
+        bool boundary=false;
+        bool centerForeground=reversed ? worldZ > 0.00001 : worldZ < 0.99999;
+        for (int dy=-1;dy<=1;++dy) for (int dx=-1;dx<=1;++dx) {
+          int2 probe=int2(pixel)+int2(dx,dy);
+          if (any(probe < int2(0)) || any(probe >= int2(extent))) continue;
+          float a=sceneDepth.read(uint2(probe)).r,b=worldOwnershipDepth.read(uint2(probe)).r;
+          bool overlay=surfaceOverlay(surfaceTag(worldValidity.read(uint2(probe)).r));
+          bool finite=surfaceDepth(b) && (overlay || surfaceDepth(a));
+          float z=finite ? (overlay ? b : (reversed ? max(a,b) : min(a,b))) : (reversed ? 0.0 : 1.0);
+          bool foreground=finite && (reversed ? z > 0.00001 : z < 0.99999);
+          boundary=boundary || (centerForeground != foreground);
+          if (foreground && centerForeground) gradient=max(gradient,abs(z-worldZ));
+        }
+        reactive=max(reactive,boundary ? u.params.x : min(u.params.x,clamp(gradient*4.0,0.0,1.0)));
+      }
+      uint tag = handCovered ? handTag : worldTag;
+      bool owned = handCovered || (isfinite(worldMask) && worldMask > 0.125);
+      bool validOwned = owned && surfaceExact(tag);
+      float2 selected = float2(0.0), cameraMotion = float2(0.0);
+      float expectedZ = -1.0, disocclusion = 0.0;
+      bool skyCurrent = !owned && u.flags.y != 0u && reversed && surfaceDepth(sceneZ) && sceneZ <= 0.00001;
+      float reconstructionZ = skyCurrent ? 0.00002 : sceneZ;
+      float2 uv = (float2(pixel)+0.5)/float2(extent);
+      bool cameraValid = worldDepthValid && surfaceDepth(reconstructionZ);
+      if (cameraValid) {
+        float4 world = u.inverseCurrentViewProjection * float4(uv.x*2.0-1.0,1.0-uv.y*2.0,reconstructionZ,1.0);
+        cameraValid = all(isfinite(world)) && abs(world.w) > 0.000001;
+        if (cameraValid) {
+          world /= world.w;
+          float4 now = u.currentViewProjection*world, before = u.previousViewProjection*world;
+          cameraValid = all(isfinite(now)) && all(isfinite(before)) && now.w > 0.000001 && before.w > 0.000001;
+          if (cameraValid) {
+            now /= now.w; before /= before.w;
+            cameraMotion = float2(before.x-now.x,now.y-before.y);
+            cameraValid = all(abs(before.xy) <= float2(1.0)) && surfaceDepth(before.z)
+                && all(isfinite(cameraMotion)) && all(abs(cameraMotion) <= float2(32.0));
+            if (!owned && cameraValid) expectedZ = before.z;
+          }
+        }
+      }
+      if (!cameraValid) cameraMotion = float2(0.0);
+      if (owned) {
+        selected = float2(sourceMotion.read(pixel).rg);
+        float visibleZ = handCovered ? handZ : worldZ;
+        validOwned = validOwned && (handCovered || worldDepthValid) && surfaceDepth(pair.x) && surfaceDepth(pair.y)
+            && all(isfinite(selected)) && all(abs(selected) <= float2(32.0)) && !closerSurface(visibleZ,pair.y,reversed);
+        if (validOwned) {
+          expectedZ = pair.x;
+          if (surfaceReactive(tag)) reactive=1.0;
+        }
+        else { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
+        if (handCovered) reactive=max(reactive,u.params.z);
+      } else {
+        selected=float2(half2(cameraMotion));
+        if (!cameraValid) { reactive=1.0; disocclusion=1.0; }
+      }
+      // Both depth histories retain their real raster. HUD has its own unjittered projection.
+      float2 jitterDelta = handCovered ? float2(0.0) : u.jitter.zw-u.jitter.xy;
+      float2 previousPixel = float2(pixel)+0.5+selected*float2(extent)*0.5+jitterDelta;
+      if (u.flags.z == 0u || !surfaceDepth(expectedZ) || !all(isfinite(previousPixel))
+          || any(previousPixel < float2(0.0)) || any(previousPixel >= float2(extent))) {
+        disocclusion=1.0;
+      } else if (disocclusion < 0.5) {
+        uint2 center = uint2(previousPixel);
+        float oldHud = previousHudDepth.read(center).r;
+        float oldZ = handCovered ? oldHud : previousWorldDepth.read(center).r;
+        bool oldHand = surfaceHud(oldHud,reversed);
+        bool centerSky = !handCovered && u.flags.y != 0u && reversed && surfaceDepth(oldZ) && oldZ <= 0.00001;
+        if (centerSky && skyCurrent) oldZ=0.00002;
+        if ((handCovered != oldHand) || !surfaceDepth(oldZ) || (centerSky && !skyCurrent) || closerSurface(oldZ,expectedZ,reversed)) {
+          disocclusion=1.0;
+        } else {
+          // Dilation cannot override a closer center occluder or previous HUD coverage.
+          int radius = u.options.x != 0u ? 1 : 0;
+          float bestDelta = abs(oldZ-expectedZ);
+          for (int dy=-radius;dy<=radius;++dy) for (int dx=-radius;dx<=radius;++dx) {
+            int2 probe=int2(center)+int2(dx,dy);
+            if (any(probe < int2(0)) || any(probe >= int2(extent))) continue;
+            float h=previousHudDepth.read(uint2(probe)).r;
+            bool probeHand=surfaceHud(h,reversed);
+            if (handCovered != probeHand) continue;
+            float z=handCovered ? h : previousWorldDepth.read(uint2(probe)).r;
+            if (skyCurrent && u.flags.y != 0u && surfaceDepth(z) && z <= 0.00001) z=0.00002;
+            if (surfaceDepth(z)) bestDelta=min(bestDelta,abs(z-expectedZ));
+          }
+          if (bestDelta > surfaceTolerance(expectedZ,reversed)) disocclusion=1.0;
+        }
+      }
+      if (disocclusion > 0.5) reactive=max(reactive,u.params.y);
+      if (!all(isfinite(selected))) { selected=float2(0.0); reactive=1.0; disocclusion=1.0; }
+      mergedMotion.write(half4(half2(selected),half(0.0),half(0.0)),pixel);
+      reactiveTexture.write(half4(half(clamp(reactive,0.0,1.0)),half(0.0),half(0.0),half(0.0)),pixel);
+      if (u.options.y != 0u) {
+        cameraDiagnostic.write(half4(half2(cameraMotion),half(0.0),half(0.0)),pixel);
+        disocclusionDiagnostic.write(half4(half(disocclusion),half(0.0),half(0.0),half(0.0)),pixel);
+      }
+    }
+    """
+}
+
+private func ensureSurfaceMotionV4Pipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    #if os(macOS) && canImport(MetalFX)
+    return NativeState.onCompilerThread {
+        if let pipeline = NativeState.surfaceMotionV4Pipeline { return pipeline }
+        do {
+            let options = MTLCompileOptions()
+            options.fastMathEnabled = false // finite/invalid ownership checks are part of this ABI.
+            let library = try device.makeLibrary(source: motionSurfaceResolveV4MslSource(), options: options)
+            guard let function = library.makeFunction(name: "metallum_motion_surface_resolve_v4") else { return nil }
+            let pipeline = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(pipeline)
+            NativeState.surfaceMotionV4Pipeline = pipeline
+            return pipeline
+        } catch {
+            NSLog("[Metallum] Failed to compile surface motion v4: %@", String(describing: error))
+            return nil
+        }
+    }
+    #else
+    return nil
+    #endif
+}
+
+@_cdecl("metallum_metalfx_supports_surface_motion_v4")
+public func metallumMetalFxSupportsSurfaceMotionV4(_ device: MTLDevice) -> Int32 {
+    // Capability bits: base resolve, reactive tags, explicit HUD ownership, source depth policy.
+    ensureSurfaceMotionV4Pipeline(device) == nil ? 0 : 15
+}
+
+@_cdecl("metallum_metalfx_resolve_motion_v4")
+public func metallumMetalFxResolveMotionV4(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ sceneDepth: MTLTexture, _ worldOwnershipDepth: MTLTexture, _ hudDepth: MTLTexture?,
+    _ sourceMotion: MTLTexture, _ worldValidity: MTLTexture, _ hudValidity: MTLTexture,
+    _ correspondence: MTLTexture, _ previousWorldDepth: MTLTexture, _ previousHudDepth: MTLTexture,
+    _ mergedMotion: MTLTexture, _ reactive: MTLTexture, _ cameraDiagnostic: MTLTexture,
+    _ disocclusionDiagnostic: MTLTexture, _ nextWorldDepth: MTLTexture,
+    _ presentationDepth: MTLTexture, _ nextHudDepth: MTLTexture,
+    _ currentMatrix: UnsafePointer<Float>?, _ inverseMatrix: UnsafePointer<Float>?,
+    _ previousMatrix: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ previousJitterX: Float, _ previousJitterY: Float,
+    _ handReactiveBoost: Float, _ width: Int32, _ height: Int32,
+    _ historyValid: Int32, _ depthReversed: Int32, _ preserveReactive: Int32, _ diagnostics: Int32
+) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    let textures: [(Int, MTLTexture?)] = [
+        (0,sceneDepth),(1,sourceMotion),(2,worldValidity),(3,previousWorldDepth),
+        (4,mergedMotion),(5,reactive),(6,cameraDiagnostic),(7,disocclusionDiagnostic),
+        (8,hudDepth ?? sceneDepth),(9,hudValidity),(10,correspondence),(11,previousHudDepth),
+        (12,worldOwnershipDepth),(13,nextWorldDepth),(14,presentationDepth),(15,nextHudDepth)
+    ]
+    guard width > 0, height > 0,
+          textures.allSatisfy({ $0.1?.width == Int(width) && $0.1?.height == Int(height) }),
+          sceneDepth.pixelFormat == .depth32Float, worldOwnershipDepth.pixelFormat == .depth32Float,
+          hudDepth == nil || hudDepth?.pixelFormat == .depth32Float,
+          sourceMotion.pixelFormat == .rg16Float, mergedMotion.pixelFormat == .rg16Float,
+          worldValidity.pixelFormat == .r8Unorm, hudValidity.pixelFormat == .r8Unorm,
+          reactive.pixelFormat == .r8Unorm, correspondence.pixelFormat == .rg32Float,
+          cameraDiagnostic.pixelFormat == .rg16Float, disocclusionDiagnostic.pixelFormat == .r8Unorm,
+          [previousWorldDepth,previousHudDepth,nextWorldDepth,presentationDepth,nextHudDepth]
+            .allSatisfy({ $0.pixelFormat == .r32Float }),
+          jitterX.isFinite, jitterY.isFinite, previousJitterX.isFinite, previousJitterY.isFinite,
+          handReactiveBoost.isFinite,
+          let currentMatrix, let inverseMatrix, let previousMatrix,
+          let pipeline = ensureSurfaceMotionV4Pipeline(device) else { return 0 }
+    var uniforms = MetalSurfaceMotionUniforms(
+        currentViewProjection: makeMatrix(currentMatrix), inverseCurrentViewProjection: makeMatrix(inverseMatrix),
+        previousViewProjection: makeMatrix(previousMatrix), viewport: SIMD4(Float(width),Float(height),0,0),
+        flags: SIMD4(preserveReactive != 0 ? 1 : 0, NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                     historyValid != 0 ? 1 : 0, depthReversed != 0 ? 1 : 0),
+        options: SIMD4(NativeState.mergeDepthDilation > 0.5 ? 1 : 0,diagnostics != 0 ? 1 : 0,hudDepth != nil ? 1 : 0,0),
+        params: SIMD4(NativeState.reactiveTuning.z,NativeState.disocclusionReactiveCap,min(1,max(0,handReactiveBoost)),0),
+        jitter: SIMD4(jitterX,jitterY,previousJitterX,previousJitterY))
+    if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+        return encodeMetal4Compute(lease: lease,label: "Surface motion and depth v4 (Metal 4)",
+            pipeline: pipeline,uniforms: uniforms,textures: textures,width: Int(width),height: Int(height),
+            producerBarrierBeforeStages: [.vertex,.fragment,.dispatch,.blit]) ? 1 : 0
+    }
+    let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return 0 }
+    encoder.label = "Surface motion and depth v4 (Metal 3)"
+    if let fence { encoder.waitForFence(fence) }
+    encoder.setComputePipelineState(pipeline)
+    for (slot, texture) in textures { encoder.setTexture(texture,index: slot) }
+    encoder.setBytes(&uniforms,length: MemoryLayout<MetalSurfaceMotionUniforms>.size,index: 0)
+    let threadWidth = max(1,min(pipeline.threadExecutionWidth,64))
+    let threadHeight = max(1,min(8,pipeline.maxTotalThreadsPerThreadgroup/threadWidth))
+    encoder.dispatchThreads(MTLSize(width: Int(width),height: Int(height),depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadWidth,height: threadHeight,depth: 1))
+    if let fence { encoder.updateFence(fence) }
+    encoder.endEncoding()
+    return 1
+    #else
+    return 0
+    #endif
 }
 
 private func motionClearV2MslSource() -> String {
@@ -6826,6 +7187,110 @@ public func metallumMetalFxEncodeEntry(
     )
 }
 
+// This entry consumes the already resolved surface motion and presentation depth.
+// It deliberately has no camera/object merge or independent depth-history owner.
+@_cdecl("metallum_metalfx_encode_prepared_v4")
+public func metallumMetalFxEncodePreparedV4(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ color: MTLTexture, _ depth: MTLTexture, _ motion: MTLTexture,
+    _ reactive: MTLTexture, _ output: MTLTexture, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ width: Int32, _ height: Int32,
+    _ reset: Int32, _ depthReversed: Int32
+) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    if #available(macOS 13.0, *) {
+        guard width > 0, height > 0, jitterX.isFinite, jitterY.isFinite,
+              [color,depth,motion,reactive].allSatisfy({ $0.width == Int(width) && $0.height == Int(height) }),
+              depth.pixelFormat == .r32Float, motion.pixelFormat == .rg16Float,
+              reactive.pixelFormat == .r8Unorm, output.width > 0, output.height > 0 else { return 0 }
+        let descriptor = MTLFXTemporalScalerDescriptor()
+        descriptor.colorTextureFormat = color.pixelFormat
+        descriptor.depthTextureFormat = depth.pixelFormat
+        descriptor.motionTextureFormat = motion.pixelFormat
+        descriptor.outputTextureFormat = output.pixelFormat
+        descriptor.inputWidth = Int(width)
+        descriptor.inputHeight = Int(height)
+        descriptor.outputWidth = output.width
+        descriptor.outputHeight = output.height
+        descriptor.isAutoExposureEnabled = true
+        descriptor.requiresSynchronousInitialization = true
+        if #available(macOS 14.4, *) {
+            descriptor.isReactiveMaskTextureEnabled = true
+            descriptor.reactiveMaskTextureFormat = reactive.pixelFormat
+        }
+        if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+            guard MTLFXTemporalScalerDescriptor.supportsMetal4FX(device),
+                  let compiler = NativeState.metal4Compiler(device) else { return 0 }
+            let key = metalFxScalerKey(device,backend: .metal4,kind: .temporal,
+                color: color,output: output,depth: depth,motion: motion,reactive: reactive)
+            let scaler: any MTL4FXTemporalScaler
+            if let cached = NativeState.metalFxScalers[key] as? any MTL4FXTemporalScaler {
+                scaler = cached
+            } else {
+                guard let created = descriptor.makeTemporalScaler(device: device,compiler: compiler) else { return 0 }
+                scaler = created
+                NativeState.metalFxScalers[key] = created as AnyObject
+            }
+            NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
+            scaler.colorTexture = color
+            scaler.depthTexture = depth
+            scaler.motionTexture = motion
+            scaler.reactiveMaskTexture = reactive
+            scaler.outputTexture = output
+            scaler.inputContentWidth = Int(width)
+            scaler.inputContentHeight = Int(height)
+            scaler.jitterOffsetX = jitterX
+            scaler.jitterOffsetY = jitterY
+            scaler.motionVectorScaleX = Float(width)*0.5
+            scaler.motionVectorScaleY = Float(height)*0.5
+            scaler.reset = reset != 0
+            scaler.isDepthReversed = depthReversed != 0
+            scaler.fence = fence
+            // The surface resolver publishes dispatch writes before this consumer.
+            lease.commandBuffer.pushDebugGroup("MetalFX Temporal Prepared Surface V4 (Metal 4)")
+            scaler.encode(commandBuffer: lease.commandBuffer)
+            lease.commandBuffer.popDebugGroup()
+            NativeState.metal4TemporalEncodeCount &+= 1
+        } else {
+            guard MTLFXTemporalScalerDescriptor.supportsDevice(device) else { return 0 }
+            let key = metalFxScalerKey(device,backend: .metal3,kind: .temporal,
+                color: color,output: output,depth: depth,motion: motion,reactive: reactive)
+            let scaler: any MTLFXTemporalScaler
+            if let cached = NativeState.metalFxScalers[key] as? any MTLFXTemporalScaler {
+                scaler = cached
+            } else {
+                guard let created = descriptor.makeTemporalScaler(device: device) else { return 0 }
+                scaler = created
+                NativeState.metalFxScalers[key] = created as AnyObject
+            }
+            NativeState.lastTemporalScalerForInterpolation = scaler as AnyObject
+            scaler.colorTexture = color
+            scaler.depthTexture = depth
+            scaler.motionTexture = motion
+            scaler.outputTexture = output
+            scaler.inputContentWidth = Int(width)
+            scaler.inputContentHeight = Int(height)
+            scaler.jitterOffsetX = jitterX
+            scaler.jitterOffsetY = jitterY
+            scaler.motionVectorScaleX = Float(width)*0.5
+            scaler.motionVectorScaleY = Float(height)*0.5
+            scaler.reset = reset != 0
+            scaler.isDepthReversed = depthReversed != 0
+            if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactive }
+            scaler.fence = fence
+            let commandBuffer = metal3CommandBuffer(commandBufferPointer)
+            commandBuffer.pushDebugGroup("MetalFX Temporal Prepared Surface V4 (Metal 3)")
+            scaler.encode(commandBuffer: commandBuffer)
+            commandBuffer.popDebugGroup()
+        }
+        MetalFxNativeHudMetrics.updateScaling(mode: "Temporal",inputWidth: Int(width),inputHeight: Int(height),
+            targetWidth: output.width,targetHeight: output.height,exposure: 1.0)
+        return 1
+    }
+    #endif
+    return 0
+}
+
 /// Versioned temporal entry point. It keeps the legacy camera-only symbol
 /// intact while making the producer/merge boundary explicit: camera motion is
 /// reconstructed separately, valid object motion overrides it, and
@@ -6846,7 +7311,8 @@ private func metal4MetalFxEncodeV2(
     inputWidth: Int32, inputHeight: Int32, reset: Int32, depthReversed: Int32,
     preserveReactiveMask: Int32, emitMotionDiagnostics: Int32
 ) -> Int32 {
-    guard inputWidth > 0, inputHeight > 0,
+    guard MTLFXTemporalScalerDescriptor.supportsMetal4FX(device),
+          inputWidth > 0, inputHeight > 0,
           colorTexture.width == Int(inputWidth), colorTexture.height == Int(inputHeight),
           depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
           handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
@@ -6859,6 +7325,11 @@ private func metal4MetalFxEncodeV2(
           objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
           disocclusionTexture.width == Int(inputWidth), disocclusionTexture.height == Int(inputHeight),
           motionTexture.width == Int(inputWidth), motionTexture.height == Int(inputHeight),
+          reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
+          cameraMotionTexture.pixelFormat == .rg16Float,
+          objectMotionTexture.pixelFormat == .rg16Float, motionTexture.pixelFormat == .rg16Float,
+          objectValidityTexture.pixelFormat == .r8Unorm, disocclusionTexture.pixelFormat == .r8Unorm,
+          reactiveTexture.pixelFormat == .r8Unorm,
           let currentViewProjection, let inverseCurrentViewProjection, let previousViewProjection,
           let pipelines = ensureMotionV2Pipelines(device),
           let compiler = NativeState.metal4Compiler(device) else {
@@ -6990,17 +7461,13 @@ private func metal4MetalFxEncodeV2(
                        (2, disocclusionTexture), (3, reactiveTexture)],
             width: Int(inputWidth), height: Int(inputHeight)
         ) else { return 0 }
-        struct MergeUniforms {
-            var viewport: SIMD4<UInt32>
-            var flags: SIMD4<UInt32>
-            var params: SIMD4<Float>
-        }
-        let mergeUniforms = MergeUniforms(
+        let mergeUniforms = MetalFxMotionMergeUniforms(
             viewport: SIMD4(UInt32(inputWidth), UInt32(inputHeight),
                             previousDepthIsValid ? 1 : 0, depthReversed != 0 ? 1 : 0),
             flags: SIMD4(NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
                          NativeState.mergeDepthDilation > 0.5 ? 1 : 0, 0, 0),
-            params: SIMD4(NativeState.disocclusionReactiveCap, 0, 0, 0)
+            params: SIMD4(NativeState.disocclusionReactiveCap, 0, 0, 0),
+            previousFromCurrentClip: previousMatrix * inverseMatrix
         )
         guard encodeMetal4Compute(
             lease: lease, label: "MetalFX Object and Camera Motion Merge (Metal 4)",
@@ -7143,7 +7610,8 @@ private func metal3MetalFxEncodeV2(
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 13.0, *) {
         return autoreleasepool {
-            guard inputWidth > 0, inputHeight > 0,
+            guard MTLFXTemporalScalerDescriptor.supportsDevice(device),
+                  inputWidth > 0, inputHeight > 0,
                   colorTexture.width == Int(inputWidth), colorTexture.height == Int(inputHeight),
                   depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
                   handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
@@ -7156,6 +7624,11 @@ private func metal3MetalFxEncodeV2(
                   objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
                   disocclusionTexture.width == Int(inputWidth), disocclusionTexture.height == Int(inputHeight),
                   motionTexture.width == Int(inputWidth), motionTexture.height == Int(inputHeight),
+                  reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
+                  cameraMotionTexture.pixelFormat == .rg16Float,
+                  objectMotionTexture.pixelFormat == .rg16Float, motionTexture.pixelFormat == .rg16Float,
+                  objectValidityTexture.pixelFormat == .r8Unorm, disocclusionTexture.pixelFormat == .r8Unorm,
+                  reactiveTexture.pixelFormat == .r8Unorm,
                   let currentViewProjection,
                   let inverseCurrentViewProjection,
                   let previousViewProjection,
@@ -7242,15 +7715,10 @@ private func metal3MetalFxEncodeV2(
                 return 0
             }
             NativeState.lastTemporalScalerForInterpolation = scalerObject
-            struct MergeUniforms {
-                var viewport: SIMD4<UInt32>
-                var flags: SIMD4<UInt32>
-                var params: SIMD4<Float>
-            }
             let currentMatrix = makeMatrix(currentViewProjection)
             let inverseMatrix = makeMatrix(inverseCurrentViewProjection)
             let previousMatrix = makeMatrix(previousViewProjection)
-            let mergeUniforms = MergeUniforms(
+            let mergeUniforms = MetalFxMotionMergeUniforms(
                 viewport: SIMD4<UInt32>(
                     UInt32(inputWidth),
                     UInt32(inputHeight),
@@ -7263,7 +7731,8 @@ private func metal3MetalFxEncodeV2(
                     0,
                     0
                 ),
-                params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0)
+                params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0),
+                previousFromCurrentClip: previousMatrix * inverseMatrix
             )
             if NativeState.legacyMotionPasses {
                 guard let cameraEncoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -7321,7 +7790,7 @@ private func metal3MetalFxEncodeV2(
                 mergeEncoder.setComputePipelineState(pipelines.merge)
                 mergeEncoder.setBytes(
                     &mutableMergeUniforms,
-                    length: MemoryLayout<MergeUniforms>.stride,
+                    length: MemoryLayout<MetalFxMotionMergeUniforms>.stride,
                     index: 0
                 )
                 mergeEncoder.setTexture(cameraMotionTexture, index: 0)
@@ -7740,7 +8209,11 @@ public func metallum_metalfx_frame_interpolator_encode_offscreen(
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 26.0, *) {
         return autoreleasepool {
-            guard currentColorTexture.width > 0,
+            guard MTLFXFrameInterpolatorDescriptor.supportsDevice(device),
+                  MetalFxFrameCameraContract.isValid(
+                    fieldOfViewDegrees: fieldOfView, near: nearPlane, far: farPlane,
+                    aspect: aspectRatio, jitterX: jitterX, jitterY: jitterY),
+                  currentColorTexture.width > 0,
                   currentColorTexture.height > 0,
                   currentColorTexture.width == previousColorTexture.width,
                   currentColorTexture.height == previousColorTexture.height,
@@ -7793,8 +8266,10 @@ public func metallum_metalfx_frame_interpolator_encode_offscreen(
             interpolator.isUITextureComposited = uiComposited != 0
             interpolator.jitterOffsetX = jitterX
             interpolator.jitterOffsetY = jitterY
-            interpolator.motionVectorScaleX = Float(motionTexture.width) * 0.5
-            interpolator.motionVectorScaleY = Float(motionTexture.height) * 0.5
+            let motionScale = MetalFxFrameMotionContract.ndcToPreviousColorPixels(
+                width: previousColorTexture.width, height: previousColorTexture.height)
+            interpolator.motionVectorScaleX = motionScale.x
+            interpolator.motionVectorScaleY = motionScale.y
             interpolator.fieldOfView = fieldOfView
             interpolator.nearPlane = nearPlane
             interpolator.farPlane = farPlane
@@ -7990,6 +8465,7 @@ public func metallum_metalfx_shutdown() {
     residencyTrackReleased(NativeState.motionMergePipeline)
     residencyTrackReleased(NativeState.motionFusedPipeline)
     residencyTrackReleased(NativeState.motionClearPipeline)
+    residencyTrackReleased(NativeState.surfaceMotionV4Pipeline)
     residencyTrackReleased(NativeState.transparencyMaskPipeline)
     residencyTrackReleased(NativeState.cutoutReactivePipeline)
     residencyTrackReleased(NativeState.handOverlayPipeline)
@@ -7998,6 +8474,7 @@ public func metallum_metalfx_shutdown() {
     NativeState.motionMergePipeline = nil
     NativeState.motionFusedPipeline = nil
     NativeState.motionClearPipeline = nil
+    NativeState.surfaceMotionV4Pipeline = nil
     NativeState.transparencyMaskPipeline = nil
     NativeState.cutoutReactivePipeline = nil
     NativeState.frameGenerationLogged = false
@@ -10427,6 +10904,132 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
             )
         }
     }
+}
+
+private func indexedBatchLoad<T>(_ pointer: UnsafeRawPointer, _ offset: Int, as type: T.Type) -> T {
+    pointer.loadUnaligned(fromByteOffset: offset, as: type)
+}
+
+// Feature 3 entry 2 (interface v3). The 64-byte v1 batch header contains:
+// magic/version/bytes/drawCount/primitive/indexType/instances/baseInstance (u32,
+// except counts and instance values are i32), index buffer and parameter pointers
+// (u64), parameter bytes (u64), bindingCount/reserved (u32). Each 32-byte binding
+// is buffer/originalOffset/stride (u64), nativeSlot/reserved (u32). Parameters are
+// borrowed interleaved {firstIndex,indexCount,baseVertex} i32 records, read only
+// during this call. Java admits shader semantics and per-vertex step rates.
+// Return 1 only after the entire batch; every rejection changes no encoder state.
+@_cdecl("metallum_render_indexed_rebased_batch_v1")
+public func metallum_render_indexed_rebased_batch_v1(
+    _ encoderPointer: UnsafeMutableRawPointer,
+    _ rawDescriptor: UnsafeRawPointer?,
+    _ rawByteCount: Int64
+) -> Int32 {
+    guard let descriptor = rawDescriptor, rawByteCount >= 64, rawByteCount <= 64 + 31 * 32,
+          indexedBatchLoad(descriptor, 0, as: UInt32.self) == 0x4D494242,
+          indexedBatchLoad(descriptor, 4, as: UInt32.self) == 1,
+          Int64(indexedBatchLoad(descriptor, 8, as: UInt32.self)) == rawByteCount,
+          indexedBatchLoad(descriptor, 60, as: UInt32.self) == 0,
+          let primitive = MTLPrimitiveType(rawValue: UInt(indexedBatchLoad(descriptor, 16, as: UInt32.self))),
+          let indexType = MTLIndexType(rawValue: UInt(indexedBatchLoad(descriptor, 20, as: UInt32.self))) else { return -1 }
+    let drawCount = Int(indexedBatchLoad(descriptor, 12, as: Int32.self))
+    let instances = Int(indexedBatchLoad(descriptor, 24, as: Int32.self))
+    let firstInstance = Int(indexedBatchLoad(descriptor, 28, as: Int32.self))
+    let bindingCount = Int(indexedBatchLoad(descriptor, 56, as: UInt32.self))
+    let parameterBytes = indexedBatchLoad(descriptor, 48, as: UInt64.self)
+    guard drawCount >= 2, instances > 0, firstInstance >= 0,
+          bindingCount > 0, bindingCount <= 31, rawByteCount == 64 + Int64(bindingCount) * 32,
+          UInt64(drawCount) <= parameterBytes / 12,
+          let parameterAddress = UInt(exactly: indexedBatchLoad(descriptor, 40, as: UInt64.self)),
+          let parameters = UnsafeRawPointer(bitPattern: parameterAddress) else { return -1 }
+
+    let indexStride = indexType == .uint16 ? 2 : 4
+    var largestBase = 0
+    var largestIndexEnd = 0
+    var activeDraws = 0
+    // No Metal object or encoder is touched until the whole parameter stream is
+    // admitted. Inactive records intentionally carry no restrictions.
+    for draw in 0..<drawCount {
+        let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+        if count <= 0 { continue }
+        let first = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self))
+        let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+        guard first >= 0, base > 0 else { return -1 }
+        largestBase = max(largestBase, base)
+        largestIndexEnd = max(largestIndexEnd, (first + count) * indexStride)
+        activeDraws += 1
+    }
+    guard activeDraws >= 2 else { return -1 }
+    var occupiedSlots: UInt32 = 0
+    for binding in 0..<bindingCount {
+        let record = 64 + binding * 32
+        let slot = indexedBatchLoad(descriptor, record + 24, as: UInt32.self)
+        guard slot < 31, occupiedSlots & (UInt32(1) << slot) == 0,
+              indexedBatchLoad(descriptor, record + 28, as: UInt32.self) == 0,
+              let offset = Int(exactly: indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+              let stride = Int(exactly: indexedBatchLoad(descriptor, record + 16, as: UInt64.self)), stride > 0,
+              let address = UInt(exactly: indexedBatchLoad(descriptor, record, as: UInt64.self)),
+              let pointer = UnsafeMutableRawPointer(bitPattern: address) else { return -1 }
+        let (displacement, multiplyOverflow) = largestBase.multipliedReportingOverflow(by: stride)
+        let (end, addOverflow) = offset.addingReportingOverflow(displacement)
+        guard !multiplyOverflow, !addOverflow,
+              let buffer = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLBuffer,
+              end < buffer.length else { return -1 }
+        occupiedSlots |= UInt32(1) << slot
+    }
+    guard let indexAddress = UInt(exactly: indexedBatchLoad(descriptor, 32, as: UInt64.self)),
+          let indexPointer = UnsafeMutableRawPointer(bitPattern: indexAddress),
+          let indexBuffer = Unmanaged<AnyObject>.fromOpaque(indexPointer).takeUnretainedValue() as? MTLBuffer,
+          largestIndexEnd <= indexBuffer.length else { return -1 }
+
+    // State was flushed by the Java encoder. Only offsets change here, so its
+    // binding shadow remains valid after the originals are restored. Metal 4
+    // uses its existing argument-table lowering; no alternate resource owner.
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(encoderPointer) {
+        for draw in 0..<drawCount {
+            let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+            if count <= 0 { continue }
+            let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+            for binding in 0..<bindingCount {
+                let record = 64 + binding * 32
+                let offset = Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self))
+                    + base * Int(indexedBatchLoad(descriptor, record + 16, as: UInt64.self))
+                bridge.setBufferOffset(offset, index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)), stageMask: 1)
+            }
+            let offset = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self)) * indexStride
+            bridge.encoder.drawIndexedPrimitives(primitiveType: primitive, indexCount: count, indexType: indexType,
+                indexBuffer: indexBuffer.gpuAddress + UInt64(offset), indexBufferLength: indexBuffer.length - offset,
+                instanceCount: instances, baseVertex: 0, baseInstance: firstInstance)
+        }
+        for binding in 0..<bindingCount {
+            let record = 64 + binding * 32
+            bridge.setBufferOffset(Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+                index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)), stageMask: 1)
+        }
+        bridge.lease.encodingCounters?.directDraws += Int64(activeDraws)
+        return 1
+    }
+    let encoder = metal3RenderEncoder(encoderPointer)
+    for draw in 0..<drawCount {
+        let count = Int(indexedBatchLoad(parameters, draw * 12 + 4, as: Int32.self))
+        if count <= 0 { continue }
+        let base = Int(indexedBatchLoad(parameters, draw * 12 + 8, as: Int32.self))
+        for binding in 0..<bindingCount {
+            let record = 64 + binding * 32
+            let offset = Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self))
+                + base * Int(indexedBatchLoad(descriptor, record + 16, as: UInt64.self))
+            encoder.setVertexBufferOffset(offset, index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)))
+        }
+        let offset = Int(indexedBatchLoad(parameters, draw * 12, as: Int32.self)) * indexStride
+        encoder.drawIndexedPrimitives(type: primitive, indexCount: count, indexType: indexType,
+            indexBuffer: indexBuffer, indexBufferOffset: offset, instanceCount: instances, baseVertex: 0, baseInstance: firstInstance)
+    }
+    for binding in 0..<bindingCount {
+        let record = 64 + binding * 32
+        encoder.setVertexBufferOffset(Int(indexedBatchLoad(descriptor, record + 8, as: UInt64.self)),
+            index: Int(indexedBatchLoad(descriptor, record + 24, as: UInt32.self)))
+    }
+    encodingCounters(encoder)?.directDraws += Int64(activeDraws)
+    return 1
 }
 
 @_cdecl("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect")
@@ -13943,8 +14546,8 @@ func metal4WaitForCompletion(
 ///   ClearUniforms 48 B (the only vertex one, and the only one that can repeat
 ///   many times per frame — once per clear), CutoutReactiveUniforms 32 B,
 ///   HandOverlayUniforms 16 B, SIMD2<UInt32> 8 B, TransparencyMaskUniforms 48 B,
-///   MergeUniforms 48 B, and MotionUniforms 240 B, the largest (three 4x4
-///   matrices plus three vectors).
+///   MetalFxMotionMergeUniforms 112 B, MotionUniforms 240 B, and fused motion
+///   uniforms 256 B (three 4x4 matrices plus four vectors), the largest.
 /// Every one of those has an alignment requirement of at most 16 B, so the 16 B
 /// default below covers them; `allocate` still takes an alignment so a future
 /// uniform with a stricter requirement cannot silently be under-aligned.

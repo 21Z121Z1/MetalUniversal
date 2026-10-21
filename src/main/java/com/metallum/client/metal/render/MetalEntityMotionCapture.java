@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
+import net.minecraft.client.renderer.oit.OitStage;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.FlameFeatureRenderer;
 import net.minecraft.client.renderer.feature.ShadowFeatureRenderer;
@@ -98,7 +99,8 @@ public final class MetalEntityMotionCapture {
 
     private record DrawCapture(
             Sample sample,
-            MetalPreviousVertexHistory.DrawToken previousVertexToken
+            MetalPreviousVertexHistory.DrawToken previousVertexToken,
+            @Nullable List<Long> particleIds
     ) {
     }
 
@@ -114,9 +116,10 @@ public final class MetalEntityMotionCapture {
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
     private static final Map<Object, EntityRenderState> SHADOW_SUBMIT_STATES = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.Draw, DrawCapture> DRAWS = new IdentityHashMap<>();
-    private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();
+    private static final Map<StagedVertexBuffer.ExecuteInfo, DrawCapture> EXECUTES = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, MetalPreviousVertexHistory.DrawToken> EXECUTE_VERTEX_TOKENS =
             new IdentityHashMap<>();
+    private static final java.util.Set<DrawCapture> REPLAYED_DRAWS = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private static int statesAttached;
     private static int entitySubmissionsMatched;
     private static int modelSubmitsCaptured;
@@ -165,6 +168,8 @@ public final class MetalEntityMotionCapture {
         DRAWS.clear();
         EXECUTES.clear();
         EXECUTE_VERTEX_TOKENS.clear();
+        REPLAYED_DRAWS.clear();
+        MetalMotionDrawCoverage.beginFrame();
         statesAttached = 0;
         entitySubmissionsMatched = 0;
         modelSubmitsCaptured = 0;
@@ -183,6 +188,7 @@ public final class MetalEntityMotionCapture {
     public static void attachState(final Object state, final Sample sample) {
         if (enabled && state != null && sample != null) {
             STATES.put(state, sample);
+            MetalMotionDrawCoverage.attachOwner(state, sample);
             statesAttached++;
         }
     }
@@ -435,7 +441,10 @@ public final class MetalEntityMotionCapture {
             @Override
             public T get(final int index) {
                 T submit = submits.get(index);
-                beginModelBuild(submit);
+                // HEAD observers and the renderer can both traverse the list.
+                // Attribution is a frame-owned carrier, not a consumable queue:
+                // an inspection must not erase ownership before builder allocation.
+                beginBuild(submit, true);
                 return submit;
             }
 
@@ -496,6 +505,10 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline) {
+        attachDraw(draw, pipeline, null);
+    }
+
+    static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline, final @Nullable List<Long> particleIds) {
         if (!enabled) {
             return;
         }
@@ -503,7 +516,8 @@ public final class MetalEntityMotionCapture {
         if (draw != null && sample != null && pipeline != null) {
             DRAWS.put(draw, new DrawCapture(
                     sample,
-                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline)
+                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline),
+                    particleIds == null ? null : List.copyOf(particleIds)
             ));
             drawsAttached++;
         }
@@ -530,6 +544,9 @@ public final class MetalEntityMotionCapture {
                     vertexCount,
                     indexCount
             );
+            if (capture.particleIds() != null) {
+                MetalPreviousVertexHistory.stageParticleIdentities(capture.previousVertexToken(), capture.particleIds());
+            }
         }
     }
 
@@ -540,9 +557,11 @@ public final class MetalEntityMotionCapture {
         if (!enabled) {
             return;
         }
-        DrawCapture capture = DRAWS.remove(draw);
+        // 26.3 queries a new ExecuteInfo for each OIT stage. Ownership belongs to the
+        // staged Draw, not to its first lookup; retain it until StagedVertexBuffer.endDraw.
+        DrawCapture capture = DRAWS.get(draw);
         if (capture != null && executeInfo != null) {
-            EXECUTES.put(executeInfo, capture.sample());
+            EXECUTES.put(executeInfo, capture);
             if (capture.previousVertexToken() != null) {
                 EXECUTE_VERTEX_TOKENS.put(executeInfo, capture.previousVertexToken());
             }
@@ -552,14 +571,57 @@ public final class MetalEntityMotionCapture {
 
     @Nullable
     public static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo) {
+        return takeExecute(executeInfo, null);
+    }
+
+    @Nullable
+    public static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo, final @Nullable OitStage stage) {
+        return takeExecute(executeInfo,stage,null);
+    }
+
+    @Nullable
+    static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo,final @Nullable OitStage stage,
+                              final MetalPreviousVertexReplay.@Nullable SourceState source) {
         if (!enabled) {
             return null;
         }
-        Sample sample = EXECUTES.remove(executeInfo);
+        DrawCapture capture = EXECUTES.remove(executeInfo);
+        Sample sample = capture == null ? null : capture.sample();
+        boolean colorStage = stage == null || stage == OitStage.ACCUMULATE;
+        boolean duplicate = colorStage && capture != null && !REPLAYED_DRAWS.add(capture);
+        MetalMotionDrawCoverage.sourceExecution(stage, sample, duplicate);
+        Sample replaySample=colorStage && !duplicate ? sample : null;
+        if(source!=null)MetalMotionDrawCoverage.hookedDraw(source,stage,replaySample,
+                !colorStage?"non-color-stage":duplicate?"duplicate-color":sample==null?"missing-capture":"owned",
+                DRAWS.size(),EXECUTES.size());
+        if (!colorStage || duplicate) {
+            EXECUTE_VERTEX_TOKENS.remove(executeInfo);
+            return null;
+        }
         if (sample != null) {
             executesConsumed++;
         }
         return sample;
+    }
+
+    /** Called only after queued motion has been flushed, while the source buffers are still live. */
+    public static void endStagedDraws(final List<StagedVertexBuffer.Draw> draws) {
+        if (!enabled || DRAWS.isEmpty()) return;
+        var retired = java.util.Collections.newSetFromMap(new IdentityHashMap<DrawCapture, Boolean>());
+        var tokens = new java.util.HashSet<MetalPreviousVertexHistory.DrawToken>();
+        for (var draw : draws) {
+            DrawCapture capture = DRAWS.remove(draw);
+            if (capture != null) {
+                if (REPLAYED_DRAWS.contains(capture)) {
+                    MetalMotionDrawCoverage.stagedHistory(capture.sample(), capture.previousVertexToken());
+                }
+                retired.add(capture);
+                if (capture.previousVertexToken() != null) tokens.add(capture.previousVertexToken());
+            }
+        }
+        EXECUTES.values().removeIf(retired::contains);
+        EXECUTE_VERTEX_TOKENS.values().removeIf(tokens::contains);
+        REPLAYED_DRAWS.removeAll(retired);
     }
 
     /** Consumes the staged previous-position identity paired with this exact ExecuteInfo. */

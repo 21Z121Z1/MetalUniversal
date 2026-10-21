@@ -16,6 +16,7 @@ import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
 import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
@@ -103,6 +105,316 @@ final class MetalMrtBackendIntegrationTest {
         MetalFxManager.close();
         if (device != null) {
             device.close();
+        }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.requireOptimizedDefaults", matches = "true")
+    void productionDefaultsEnableTheValidatedCpuOptimizations() {
+        assertEquals(new MetalBackendOptimizations.Snapshot(true, true, true, true, true, true), MetalBackendOptimizations.snapshot());
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.encodingCost", matches = "true")
+    void hostedEncodingCost() {
+        String name = "hosted_encoding_cost";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1, 0, 1, 1); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        RenderPipeline alternatePipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM),
+                BlendFunction.ADDITIVE, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        var allocation = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        assertTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        try {
+            // Precompile both variants before any measured draw. Alpha=1 and
+            // saturated magenta make both blend states produce the same pixels.
+            device.getOrCompilePipeline(pipeline);
+            device.getOrCompilePipeline(alternatePipeline);
+            for (int workload = 0; workload < 3; workload++) {
+                boolean manyEncoders = workload == 2;
+                boolean multipleStates = workload == 1;
+                double[] timings = new double[8];
+                long[] allocatedBytes = new long[8];
+                int operations = manyEncoders ? 256 : 4096;
+                int warmupRounds = manyEncoders ? 64 : 8;
+                for (int round = -warmupRounds; round < timings.length; round++) {
+                    long allocatedBefore = allocation.getCurrentThreadAllocatedBytes();
+                    long start;
+                    long elapsed;
+                    if (manyEncoders) {
+                        start = System.nanoTime();
+                        for (int i = 0; i < operations; i++) {
+                            try (PassWithViews pass = createPass(textures, null, false)) {
+                                pass.pass().setPipeline(pipeline);
+                                pass.pass().draw(3, 1, 0, 0);
+                                encoder.submitRenderPass();
+                            }
+                        }
+                        elapsed = System.nanoTime() - start;
+                    } else {
+                        try (PassWithViews pass = createPass(textures, null, false)) {
+                            pass.pass().setPipeline(pipeline);
+                            pass.pass().draw(3, 1, 0, 0); // PSO/bind setup is outside the window.
+                            start = System.nanoTime();
+                            for (int i = 0; i < operations; i++) {
+                                if (multipleStates) pass.pass().setPipeline((i & 1) == 0 ? pipeline : alternatePipeline);
+                                pass.pass().enableScissor(i & 1, 0, WIDTH - 1, HEIGHT);
+                                pass.pass().draw(3, 1, 0, 0);
+                            }
+                            elapsed = System.nanoTime() - start;
+                        }
+                    }
+                    long bytes = allocation.getCurrentThreadAllocatedBytes() - allocatedBefore;
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork(); // Never time the GPU wait as CPU encoding.
+                    if (round >= 0) {
+                        timings[round] = (double) elapsed / operations;
+                        allocatedBytes[round] = bytes / operations;
+                    }
+                }
+                System.out.println("HOSTED_ENCODING_COST {\"profile\":\""
+                        + System.getProperty("metallum.ci.encodingCostProfile") + "\",\"workload\":\""
+                        + (manyEncoders ? "encoder" : multipleStates ? "multiple-state-draw" : "single-state-draw") + "\",\"nsPerOperation\":"
+                        + java.util.Arrays.toString(timings) + ",\"javaBytesPerOperation\":"
+                        + java.util.Arrays.toString(allocatedBytes) + "}");
+            }
+            ByteBuffer pixels = readback(textures.get(0));
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(pixels.get(pixel * 4), 255, "cost workload red");
+                assertByteNear(pixels.get(pixel * 4 + 1), 0, "cost workload green");
+                assertByteNear(pixels.get(pixel * 4 + 2), 255, "cost workload blue");
+            }
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.indexedBatchCost", matches = "true")
+    void hostedIndexedBatchCost() {
+        assertFalse(MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE,
+                "the prior batch benchmark must keep its original comparison");
+        assertEquals("candidate".equals(System.getProperty("metallum.ci.encodingCostProfile")),
+                MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE);
+        indexedBatchCost("HOSTED_INDEXED_BATCH_COST");
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "metallum.ci.nativeIndexedBatchCost", matches = "true")
+    void hostedNativeIndexedBatchCost() {
+        assertTrue(MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE);
+        assertEquals("candidate".equals(System.getProperty("metallum.ci.encodingCostProfile")),
+                MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE);
+        indexedBatchCost("HOSTED_NATIVE_INDEXED_BATCH_COST");
+    }
+
+    private void indexedBatchCost(String marker) {
+        assertTrue(MetalBackendOptimizations.FUSED_STATE_DRAW && MetalBackendOptimizations.REUSE_ENCODER_STATE
+                && MetalBackendOptimizations.REUSE_NATIVE_ENCODER_ARGUMENTS && MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY,
+                "the prior four optimizations must stay enabled in both cost lanes");
+        assertFalse(Boolean.getBoolean("metallum.hotpath.telemetry"), "timing must run without hot-path counters");
+        assertFalse(Boolean.getBoolean("metallum.ci.reuseActivationTelemetry"), "timing must run without reuse counters");
+        String name = "indexed_batch_cost";
+        RenderPipeline pipeline = indexedColorPipeline(name);
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        ByteBuffer indices = ByteBuffer.allocateDirect(6 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        for (int index : new int[]{0, 1, 2, 2, 3, 0}) indices.putInt(index);
+        indices.flip();
+        var parameters = ByteBuffer.allocateDirect(128 * 3 * Integer.BYTES)
+                .order(ByteOrder.nativeOrder()).asIntBuffer();
+        for (int draw = 0; draw < 128; draw++) parameters.put(0).put(6).put(4 + (draw & 1) * 4);
+        parameters.flip();
+        var allocation = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        assertTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        try (GpuBuffer vertices = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, indexedColorVertices(4));
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            device.getOrCompilePipeline(pipeline);
+            for (int batchSize : new int[]{2, 16, 128}) {
+                int operations = 2048 / batchSize;
+                double[] timings = new double[8];
+                long[] allocatedBytes = new long[8];
+                for (int round = -16; round < timings.length; round++) {
+                    try (PassWithViews pass = createPass(textures, null, false)) {
+                        pass.pass().setPipeline(pipeline);
+                        pass.pass().setVertexBuffer(0, vertices.slice());
+                        pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
+                        pass.pass().drawIndexed(6, 1, 0, 4, 0);
+                        long beforeBytes = allocation.getCurrentThreadAllocatedBytes();
+                        long start = System.nanoTime();
+                        for (int operation = 0; operation < operations; operation++) {
+                            pass.pass().multiDrawIndexed(parameters, 1, 0, batchSize);
+                        }
+                        long elapsed = System.nanoTime() - start;
+                        long bytes = allocation.getCurrentThreadAllocatedBytes() - beforeBytes;
+                        if (round >= 0) {
+                            timings[round] = (double) elapsed / (operations * batchSize);
+                            allocatedBytes[round] = bytes / (operations * batchSize);
+                        }
+                        encoder.submitRenderPass();
+                    }
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork();
+                }
+                System.out.println(marker + " {\"profile\":\""
+                        + System.getProperty("metallum.ci.encodingCostProfile")
+                        + "\",\"drawsPerBatch\":" + batchSize + ",\"nsPerDraw\":"
+                        + java.util.Arrays.toString(timings) + ",\"javaBytesPerDraw\":"
+                        + java.util.Arrays.toString(allocatedBytes) + "}");
+            }
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    int pixel = (y * WIDTH + x) * 4;
+                    assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "indexed cost red");
+                    assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "indexed cost green");
+                    assertByteNear(pixels.get(pixel + 2), 0, "indexed cost blue");
+                }
+            }
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    private RenderPipeline indexedColorPipeline(String name) {
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) in vec2 position;
+                layout(location=1) in vec4 vertexColor;
+                layout(location=0) out vec4 color;
+                void main() { gl_Position = vec4(position, 0, 1); color = vertexColor; }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) in vec4 color;
+                layout(location=0) out vec4 outputColor;
+                void main() { outputColor = color; }
+                """);
+        return RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withVertexBinding(0, com.mojang.renderpearl.api.vertex.VertexFormat.builder(0)
+                        .addAttribute("position", GpuFormat.RG32_FLOAT)
+                        .addAttribute("vertexColor", GpuFormat.RGBA8_UNORM).build())
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL)).build();
+    }
+
+    private static ByteBuffer indexedColorVertices(int prefixVertices) {
+        ByteBuffer data = ByteBuffer.allocateDirect((prefixVertices + 8) * 12).order(ByteOrder.nativeOrder());
+        data.position(prefixVertices * 12);
+        for (int quad = 0; quad < 2; quad++) {
+            for (int vertex = 0; vertex < 4; vertex++) {
+                data.putFloat(quad - 1 + (vertex == 1 || vertex == 2 ? 1 : 0));
+                data.putFloat(vertex >= 2 ? 1 : -1);
+                data.putInt(quad == 0 ? 0xff00ff00 : 0xff0000ff);
+            }
+        }
+        return data.flip();
+    }
+
+    @Test
+    void submissionBudgetBoundsObservedBacklogAndCompletesEachCallbackOnce() {
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+        int budget = new MetalSubmissionBackpressure(System.getProperty("metallum.maxSubmitsInFlight")).limit();
+        assertEquals(budget, encoder.maxSubmitsInFlight());
+        AtomicInteger committed = new AtomicInteger();
+        AtomicInteger completed = new AtomicInteger();
+        AtomicInteger outstanding = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        for (int i = 0; i < 12; i++) {
+            encoder.commandBuffer();
+            encoder.onCurrentSubmit(() -> {
+                committed.incrementAndGet();
+                peak.accumulateAndGet(outstanding.incrementAndGet(), Math::max);
+            }, () -> {
+                completed.incrementAndGet();
+                outstanding.decrementAndGet();
+            }, () -> fail("GPU submission failed"));
+            encoder.submit();
+        }
+        device.waitForSubmittedGpuWork();
+        assertEquals(12, committed.get());
+        assertEquals(12, completed.get(), "completion must be delivered exactly once across ring reuse");
+        assertEquals(0, outstanding.get());
+        assertTrue(peak.get() <= budget, "observed completion backlog exceeded the configured GPU budget");
+    }
+
+    @Test
+    void stateDrawTransportPreservesOffsetsInstancingAndSingleDrawAcrossEncoders() {
+        String name = "state_draw_transport";
+        vertexShaders.put("mrt_vertex", """
+                #version 450
+                layout(location=0) flat out int instance_id;
+                void main() {
+                    vec2 p[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+                    gl_Position = vec4(p[gl_VertexIndex - 3], 0, 1);
+                    instance_id = gl_InstanceIndex;
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) flat in int instance_id;
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(float(instance_id + 1) / 64.0, 0.125, 0.0625, 1); }
+                """);
+        RenderPipeline pipeline = pipeline(name, List.of(GpuFormat.RGBA8_UNORM),
+                BlendFunction.ADDITIVE, ColorTargetState.WRITE_ALL);
+        ByteBuffer data = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        data.putShort((short) 999).putShort((short) 4).putShort((short) 5).putShort((short) 6).flip();
+        long before = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls();
+        long rejectedBefore = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls();
+        var reuseBefore = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (GpuBuffer indices = device.createBuffer(() -> "state draw indices", GpuBuffer.USAGE_INDEX, data)) {
+            for (int round = 0; round < 4; round++) {
+                try (PassWithViews pass = createPass(textures, null, false)) {
+                    pass.pass().setPipeline(pipeline);
+                    if ((round & 1) == 0) {
+                        pass.pass().draw(3, 2, 3, 3);
+                    } else {
+                        pass.pass().setIndexBuffer(indices, IndexType.SHORT);
+                        pass.pass().drawIndexed(3, 2, 1, -1, 3);
+                    }
+                    encoder.submitRenderPass();
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork();
+                }
+                ByteBuffer pixels = readback(textures.get(0));
+                for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                    assertByteNear(pixels.get(pixel * 4), 36, "instance/base-instance red");
+                    assertByteNear(pixels.get(pixel * 4 + 1), 64, "exactly two additive instances green");
+                    assertByteNear(pixels.get(pixel * 4 + 2), 32, "exactly one draw blue");
+                }
+            }
+        } finally {
+            closeTextures(textures);
+        }
+        if (MetalBackendOptimizations.FUSED_STATE_DRAW) {
+            assertTrue(com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge.drawAvailable(),
+                    "the enabled lane requires the shipping v2 entry, not legacy fallback");
+            assertTrue(com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.fusedDrawCalls() >= before + 4,
+                    "every recreated encoder must actually activate fused state/draw transport");
+            assertEquals(rejectedBefore, com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.rejectedFusedDrawCalls(),
+                    "valid direct and indexed draws must not silently fall back");
+        }
+        if (com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
+            var after = com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry.snapshot();
+            if (MetalBackendOptimizations.REUSE_ENCODER_STATE) {
+                assertTrue(after.shadowReuseHits() > reuseBefore.shadowReuseHits());
+                assertTrue(after.packetStorageReuseHits() > reuseBefore.packetStorageReuseHits());
+            }
+            if (MetalBackendOptimizations.REUSE_NATIVE_ENCODER_ARGUMENTS) {
+                assertTrue(after.nativeEncoderArgumentReuseCalls() > reuseBefore.nativeEncoderArgumentReuseCalls());
+            }
         }
     }
 
@@ -315,32 +627,40 @@ final class MetalMrtBackendIntegrationTest {
 
     @Test
     void partialDynamicUploadKeepsPriorGpuConsumerAndUntouchedBytes() {
-        ByteBuffer original = ByteBuffer.allocateDirect(64);
-        for (int i = 0; i < 64; i++) original.put(i, (byte) i);
-        ByteBuffer patch = ByteBuffer.allocateDirect(11);
-        for (int i = 0; i < 11; i++) patch.put(i, (byte) (100 + i));
-        patch.position(2).limit(9);
+        var telemetryBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
+        int size = 65536, patchOffset = 8192, patchLength = 49152;
+        ByteBuffer original = ByteBuffer.allocateDirect(size);
+        for (int i = 0; i < size; i++) original.put(i, (byte) i);
+        ByteBuffer patch = ByteBuffer.allocateDirect(patchLength + 4);
+        for (int i = 0; i < patch.capacity(); i++) patch.put(i, (byte) (100 + i));
+        patch.position(2).limit(patchLength + 2);
         try (MetalGpuBuffer source = (MetalGpuBuffer) device.createBuffer(
-                    () -> "dynamic source", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_SRC | GpuBuffer.USAGE_COPY_DST, 64);
+                    () -> "dynamic source", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_SRC | GpuBuffer.USAGE_COPY_DST, size);
              MetalGpuBuffer before = (MetalGpuBuffer) device.createBuffer(
-                    () -> "old consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64);
+                    () -> "old consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size);
              MetalGpuBuffer after = (MetalGpuBuffer) device.createBuffer(
-                    () -> "new consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 64)) {
-            encoder.writeToBuffer(source.slice(0, 64), original);
+                    () -> "new consumer", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size)) {
+            encoder.writeToBuffer(source.slice(0, size), original);
             MemorySegment oldBacking = source.nativeHandle();
-            encoder.copyToBuffer(source.slice(0, 64), before.slice(0, 64));
-            encoder.writeToBuffer(source.slice(17, 7), patch);
+            encoder.copyToBuffer(source.slice(0, size), before.slice(0, size));
+            encoder.writeToBuffer(source.slice(patchOffset, patchLength), patch);
             assertNotEquals(oldBacking, source.nativeHandle());
-            encoder.copyToBuffer(source.slice(0, 64), after.slice(0, 64));
+            encoder.copyToBuffer(source.slice(0, size), after.slice(0, size));
             encoder.submit();
             device.waitForSubmittedGpuWork();
-            for (int i = 0; i < 64; i++) {
+            for (int i = 0; i < size; i++) {
                 assertEquals((byte) i, before.currentStorage().get(i), "prior GPU consumer byte " + i);
-                byte expected = i >= 17 && i < 24 ? (byte) (102 + i - 17) : (byte) i;
+                byte expected = i >= patchOffset && i < patchOffset + patchLength ? (byte) (102 + i - patchOffset) : (byte) i;
                 assertEquals(expected, after.currentStorage().get(i), "updated consumer byte " + i);
             }
             assertEquals(2, patch.position());
-            assertEquals(9, patch.limit());
+            assertEquals(patchLength + 2, patch.limit());
+            if (Boolean.getBoolean("metallum.hotpath.telemetry")
+                    && MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY) {
+                var afterCounters = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.snapshot();
+                assertEquals(telemetryBefore.dynamicRangeCopies() + 1, afterCounters.dynamicRangeCopies());
+                assertEquals(telemetryBefore.dynamicCopyBytesAvoided() + patchLength, afterCounters.dynamicCopyBytesAvoided());
+            }
         }
     }
 
@@ -410,7 +730,10 @@ final class MetalMrtBackendIntegrationTest {
                     layout(location=0) out vec4 color;
                     void main() { color = vec4(0.0, 1.0, 0.0, 1.0); }
                     """);
-            device.clearPipelineCache();
+            MetalDevice.captureShaderSource(MetalShaderSourceAdapters.from((identifier,type)->{
+                String shaderName=identifier.getPath().substring(identifier.getPath().lastIndexOf('/')+1);
+                return type==ShaderType.VERTEX ? vertexShaders.getOrDefault(shaderName,VERTEX_SHADER) : fragmentShaders.get(shaderName);
+            }));
             render(pipeline, List.of(texture), List.of(new Vector4f(0.0F)));
             ByteBuffer after = readback(texture);
             assertByteNear(after.get(0), 0, "replacement shader red");
@@ -515,6 +838,349 @@ final class MetalMrtBackendIntegrationTest {
             ByteBuffer tinySource = ByteBuffer.allocateDirect(1);
             assertThrows(ArithmeticException.class,
                     () -> encoder.writeToTexture(texture, tinySource, 0, 0, 0, 0, Integer.MAX_VALUE, 1));
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 4, 1528541})
+    void sodiumCompactVerticesKeepTheirLayoutThroughIndexedMultiDraw(int baseVertex) {
+        long rebasesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
+        long batchesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches();
+        long avoidedBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseRestoresAvoided();
+        long nativeBatchesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches();
+        String name = "sodium_compact_vertex_multidraw";
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) in uvec2 a_Position;
+                layout(location=1) in vec4 a_Color;
+                layout(location=2) in uvec2 a_TexCoord;
+                layout(location=3) in uvec4 a_LightAndData;
+                layout(location=4) in vec4 instanceColor;
+                layout(location=0) out vec4 vertexColor;
+                layout(std140) uniform u_Globals { vec4 transform; };
+                layout(std140) uniform Guard1 { uvec4 guard1; };
+                layout(std140) uniform Guard2 { uvec4 guard2; };
+                layout(std140) uniform Guard3 { uvec4 guard3; };
+                layout(push_constant) uniform PC {
+                    vec3 regionOffset;
+                    int currentTime;
+                    uint regionId;
+                };
+                void main() {
+                    uvec3 hi = (uvec3(a_Position.x) >> uvec3(0, 10, 20)) & 1023u;
+                    uvec3 lo = (uvec3(a_Position.y) >> uvec3(0, 10, 20)) & 1023u;
+                    vec3 position = vec3((hi << 10u) | lo) * (32.0 / 1048576.0) - 8.0;
+                    gl_Position = vec4((position.xy + regionOffset.xy) * transform.xy + transform.zw, 0, 1);
+                    bool dataValid = all(equal(a_LightAndData.xy, uvec2(248)))
+                        && a_LightAndData.z == 79u
+                        && (a_LightAndData.w == 37u || a_LightAndData.w == 199u)
+                        && all(lessThanEqual(a_TexCoord, uvec2(65535)))
+                        && all(equal(guard1, uvec4(1, 2, 3, 4)))
+                        && all(equal(guard2, uvec4(5, 6, 7, 8)))
+                        && all(equal(guard3, uvec4(9, 10, 11, 12)))
+                        && currentTime == 37 && regionId == 54321u;
+                    vertexColor = dataValid ? a_Color * instanceColor : vec4(0, 0, 1, 1);
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) in vec4 vertexColor;
+                layout(location=0) out vec4 color;
+                void main() { color = vertexColor; }
+                """);
+        var format = net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex.VERTEX_FORMAT;
+        assertEquals(20, format.getVertexSize());
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withVertexBinding(0, format).withCull(false)
+                .withVertexBinding(1, com.mojang.renderpearl.api.vertex.VertexFormat.builder(1)
+                        .addAttribute("instanceColor", GpuFormat.RGBA8_UNORM).build())
+                .withPushConstantSize(20)
+                .withBindGroupLayout(com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
+                        .withUniform("u_Globals", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard1", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard2", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                        .withUniform("Guard3", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER).build())
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL)).build();
+        int prefix = 32;
+        int vertexBytes = Math.multiplyExact(baseVertex + 8, 20);
+        ByteBuffer vertices = MemoryUtil.memCalloc(prefix + vertexBytes).order(ByteOrder.nativeOrder());
+        ByteBuffer indices = MemoryUtil.memAlloc(11 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer parameters = MemoryUtil.memAlloc(11 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try {
+            var compact = new net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex();
+            for (int quad = 0; quad < 2; quad++) {
+                var points = net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder.Vertex.uninitializedQuad();
+                for (int i = 0; i < 4; i++) {
+                    var point = points[i];
+                    point.x = quad * 8 + (i == 1 || i == 2 ? 8 : 0);
+                    point.y = i >= 2 ? 16 : 0;
+                    point.color = quad == 0 ? 0xff00ff00 : 0xff0000ff;
+                    point.ao = 1;
+                    point.u = 0.25f;
+                    point.v = 0.5f;
+                    point.light = 0x00f000f0;
+                }
+                compact.getEncoder().write(MemoryUtil.memAddress(vertices) + prefix + (baseVertex + quad * 4L) * 20,
+                        79, points, quad == 0 ? 37 : 199);
+            }
+            for (int i = 0; i < 5; i++) indices.putInt(999);
+            for (int i : new int[]{0, 1, 2, 2, 3, 0}) indices.putInt(i);
+            indices.flip();
+            // Vulkan's interleaved record is firstIndex, indexCount, vertexOffset.
+            parameters.putInt(999).putInt(999);
+            parameters.putInt(5).putInt(6).putInt(baseVertex);
+            parameters.putInt(5).putInt(6).putInt(baseVertex + 4);
+            parameters.putInt(5).putInt(0).putInt(Integer.MIN_VALUE); // inactive records never constrain admission
+            parameters.flip().position(2 * Integer.BYTES);
+            ByteBuffer instanceColors = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());
+            instanceColors.putInt(0xffff0000).putInt(0xffff0000).putInt(0xffffffff).flip();
+            try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_SRC, vertices);
+                 GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices);
+                 GpuBuffer instanceBuffer = device.createBuffer(() -> name + " instance colors", GpuBuffer.USAGE_VERTEX, instanceColors)) {
+                for (boolean multiDraw : List.of(false, true)) {
+                    try (PassWithViews pass = createPass(textures, null, false)) {
+                        pass.pass().setPipeline(pipeline);
+                        assertEquals(5, device.getOrCompilePipeline(pipeline).firstAvailableVertexBufferSlot());
+                        String[] names = {"u_Globals", "Guard1", "Guard2", "Guard3"};
+                        for (int uniform = 0; uniform < names.length; uniform++) {
+                            try (var mapped = encoder.transientMemory().allocateGpuMapped(16, 256, GpuBuffer.USAGE_UNIFORM)) {
+                                if (uniform == 0) mapped.data().putFloat(0.125f).putFloat(0.125f).putFloat(-1.5f).putFloat(-1.75f);
+                                else for (int i = 0; i < 4; i++) mapped.data().putInt((uniform - 1) * 4 + i + 1);
+                                pass.pass().setUniform(names[uniform], mapped.slice());
+                            }
+                        }
+                        ByteBuffer constants = ByteBuffer.allocateDirect(20).order(ByteOrder.nativeOrder());
+                        constants.putFloat(4).putFloat(6).putFloat(0).putInt(37).putInt(54321).flip();
+                        pass.pass().pushConstants(constants);
+                        pass.pass().setVertexBuffer(0, vertexBuffer.slice(prefix, vertexBytes));
+                        pass.pass().setVertexBuffer(1, instanceBuffer.slice());
+                        pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
+                        if (multiDraw) {
+                            pass.pass().multiDrawIndexed(parameters.asIntBuffer(), 1, 2, 3);
+                            if (baseVertex <= 4) {
+                                // This non-indexed draw reads the original binding.
+                                // Instance zero is blue, so the green triangle
+                                // must blacken this one pixel after batch restore.
+                                pass.pass().enableScissor(WIDTH * 3 / 8, HEIGHT / 2, 1, 1);
+                                pass.pass().draw(3, 1, baseVertex, 0);
+                            }
+                        }
+                        else {
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex, 2);
+                            pass.pass().drawIndexed(6, 1, 5, baseVertex + 4, 2);
+                        }
+                        encoder.submitRenderPass();
+                    }
+                    encoder.submit();
+                    device.waitForSubmittedGpuWork();
+                    // Verify the uploaded bytes after drawing, so this proof
+                    // cannot hide an upload/fetch ordering failure with a
+                    // readback barrier before the draw under test.
+                    try (MetalGpuBuffer input = (MetalGpuBuffer) device.createBuffer(() -> "compact input proof",
+                            GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 8 * 20)) {
+                        encoder.copyToBuffer(vertexBuffer.slice(prefix + (long) baseVertex * 20, 8 * 20), input.slice());
+                        encoder.submit();
+                        device.waitForSubmittedGpuWork();
+                        ByteBuffer uploaded = input.currentStorage();
+                        for (int i = 0; i < 8 * 20; i++) {
+                            assertEquals(vertices.get(prefix + baseVertex * 20 + i), uploaded.get(i), "compact uploaded byte " + i);
+                        }
+                    }
+                    ByteBuffer pixels = readback(textures.getFirst());
+                    for (int y = 0; y < HEIGHT; y++) {
+                        for (int x = 0; x < WIDTH; x++) {
+                            int pixel = (y * WIDTH + x) * 4;
+                            boolean restoreProbe = multiDraw && baseVertex <= 4 && x == WIDTH * 3 / 8 && y == HEIGHT / 2;
+                            assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "compact vertex red, multiDraw=" + multiDraw);
+                            assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 && !restoreProbe ? 255 : 0, "compact vertex green, multiDraw=" + multiDraw);
+                            assertByteNear(pixels.get(pixel + 2), 0, "compact vertex blue, multiDraw=" + multiDraw);
+                        }
+                    }
+                }
+            }
+        } finally {
+            closeTextures(textures);
+            MemoryUtil.memFree(parameters);
+            MemoryUtil.memFree(indices);
+            MemoryUtil.memFree(vertices);
+        }
+        if (Boolean.getBoolean("metallum.hotpath.telemetry")) {
+            assertTrue(com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases() >= rebasesBefore + 4,
+                    "both direct and multi-draw must exercise the admitted vertex-buffer rebase");
+            int admittedBatches = MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE ? 1 : 0;
+            int nativeBatches = admittedBatches != 0 && MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE ? 1 : 0;
+            assertEquals(nativeBatchesBefore + nativeBatches,
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches(),
+                    "the actual Sodium batch must use the native entry when admitted and enabled");
+            assertEquals(batchesBefore + admittedBatches,
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches());
+            assertEquals(avoidedBefore + admittedBatches,
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseRestoresAvoided());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"heap", "opposite-endian", "native-readonly", "native-short"})
+    void indexedBatchPreservesPositionReadOnlyAndNonNativeParameterBuffers(String kind) {
+        String name = "indexed_parameter_" + kind;
+        RenderPipeline pipeline = indexedColorPipeline(name);
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        boolean shortIndices = kind.equals("native-short");
+        int firstIndex = shortIndices ? 2 : 0;
+        java.nio.IntBuffer parameters;
+        if (kind.equals("heap")) parameters = java.nio.IntBuffer.allocate(8);
+        else parameters = ByteBuffer.allocateDirect(8 * Integer.BYTES).order(kind.startsWith("native")
+                ? ByteOrder.nativeOrder() : ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN
+                ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        parameters.put(999).put(999).put(firstIndex).put(6).put(4).put(firstIndex).put(6).put(8).flip().position(2);
+        parameters = parameters.asReadOnlyBuffer();
+        ByteBuffer indices = ByteBuffer.allocateDirect((6 + firstIndex) * (shortIndices ? Short.BYTES : Integer.BYTES))
+                .order(ByteOrder.nativeOrder());
+        for (int i = 0; i < firstIndex; i++) indices.putShort((short) 999);
+        for (int index : new int[]{0, 1, 2, 2, 3, 0}) {
+            if (shortIndices) indices.putShort((short) index);
+            else indices.putInt(index);
+        }
+        indices.flip();
+        long before = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches();
+        try (GpuBuffer vertices = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, indexedColorVertices(4));
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            try (PassWithViews pass = createPass(textures, null, false)) {
+                pass.pass().setPipeline(pipeline);
+                pass.pass().setVertexBuffer(0, vertices.slice());
+                pass.pass().setIndexBuffer(indexBuffer, shortIndices ? IndexType.SHORT : IndexType.INT);
+                pass.pass().multiDrawIndexed(parameters, 1, 0, 2);
+                assertEquals(2, parameters.position());
+                assertEquals(8, parameters.limit());
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    int pixel = (y * WIDTH + x) * 4;
+                    assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "parameter buffer red");
+                    assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "parameter buffer green");
+                    assertByteNear(pixels.get(pixel + 2), 0, "parameter buffer blue");
+                }
+            }
+            boolean expectedNative = kind.startsWith("native") && MetalBackendOptimizations.BATCH_INDEXED_VERTEX_REBASE
+                    && MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE;
+            assertEquals(before + (expectedNative ? 1 : 0),
+                    com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.nativeIndexedRebaseBatches());
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {0, -4})
+    void indexedBatchMixedBaseOffsetsKeepOriginalBindings(int secondBase) {
+        String name = "indexed_batch_mixed_bases";
+        RenderPipeline pipeline = indexedColorPipeline(name);
+        ByteBuffer indices = ByteBuffer.allocateDirect(12 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        for (int value : new int[]{0, 1, 2, 2, 3, 0}) indices.putInt(value);
+        for (int value : new int[]{0, 1, 2, 2, 3, 0}) indices.putInt(value - secondBase);
+        indices.flip();
+        var parameters = ByteBuffer.allocateDirect(9 * Integer.BYTES).order(ByteOrder.nativeOrder()).asIntBuffer();
+        parameters.put(999).put(999).put(999);
+        parameters.put(0).put(6).put(4);
+        parameters.put(6).put(6).put(secondBase);
+        parameters.flip().position(3);
+        long batchesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (GpuBuffer vertices = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, indexedColorVertices(0));
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            try (PassWithViews pass = createPass(textures, null, false)) {
+                pass.pass().setPipeline(pipeline);
+                pass.pass().setVertexBuffer(0, vertices.slice());
+                pass.pass().setIndexBuffer(indexBuffer, IndexType.INT);
+                pass.pass().multiDrawIndexed(parameters, 1, 0, 2);
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    int pixel = (y * WIDTH + x) * 4;
+                    assertByteNear(pixels.get(pixel), x < WIDTH / 2 ? 0 : 255, "mixed base red");
+                    assertByteNear(pixels.get(pixel + 1), x < WIDTH / 2 ? 255 : 0, "mixed base green");
+                    assertByteNear(pixels.get(pixel + 2), 0, "mixed base blue");
+                }
+            }
+            assertEquals(batchesBefore, com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedRebaseBatches(),
+                    "a mixed zero/negative-base batch must use the per-draw fallback");
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @Test
+    void indexedStageInShaderKeepsObservableVertexIndex() {
+        String name = "indexed_stage_in_vertex_index";
+        vertexShaders.put(name, """
+                #version 450
+                layout(location=0) in vec2 position;
+                layout(location=0) out vec4 vertexColor;
+                void main() {
+                    gl_Position = vec4(position, 0, 1);
+                    vertexColor = gl_VertexIndex >= 3 ? vec4(0, 1, 0, 1) : vec4(0, 0, 1, 1);
+                }
+                """);
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) in vec4 vertexColor;
+                layout(location=0) out vec4 color;
+                void main() { color = vertexColor; }
+                """);
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/" + name)
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withVertexBinding(0, com.mojang.renderpearl.api.vertex.VertexFormat.builder(0)
+                        .addAttribute("position", GpuFormat.RG32_FLOAT).build())
+                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM,
+                        ColorTargetState.WRITE_ALL)).build();
+        ByteBuffer vertices = ByteBuffer.allocateDirect(12 * Float.BYTES).order(ByteOrder.nativeOrder());
+        for (float value : new float[]{0, 0, 0, 0, 0, 0, -1, -1, 3, -1, -1, 3}) vertices.putFloat(value);
+        vertices.flip();
+        ByteBuffer indices = ByteBuffer.allocateDirect(3 * Short.BYTES).order(ByteOrder.nativeOrder());
+        indices.putShort((short) 0).putShort((short) 1).putShort((short) 2).flip();
+        long rebasesBefore = com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases();
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), name);
+        try (GpuBuffer vertexBuffer = device.createBuffer(() -> name + " vertices", GpuBuffer.USAGE_VERTEX, vertices);
+             GpuBuffer indexBuffer = device.createBuffer(() -> name + " indices", GpuBuffer.USAGE_INDEX, indices)) {
+            try (PassWithViews pass = createPass(textures, null, false)) {
+                pass.pass().setPipeline(pipeline);
+                assertFalse(device.getOrCompilePipeline(pipeline).indexedVertexRebaseSafe());
+                pass.pass().setVertexBuffer(0, vertexBuffer.slice());
+                pass.pass().setIndexBuffer(indexBuffer, IndexType.SHORT);
+                pass.pass().drawIndexed(3, 1, 0, 3, 0);
+                var parameters = ByteBuffer.allocateDirect(6 * Integer.BYTES).order(ByteOrder.nativeOrder()).asIntBuffer();
+                parameters.put(0).put(3).put(3).put(0).put(3).put(3).flip();
+                pass.pass().multiDrawIndexed(parameters, 1, 0, 2);
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.getFirst());
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(pixels.get(pixel * 4), 0, "vertex-index observer red");
+                assertByteNear(pixels.get(pixel * 4 + 1), 255, "vertex-index observer green");
+                assertByteNear(pixels.get(pixel * 4 + 2), 0, "vertex-index observer blue");
+            }
+            assertEquals(rebasesBefore, com.metallum.client.metal.render.mtl.MetalHotPathTelemetry.indexedVertexRebases());
+        } finally {
+            closeTextures(textures);
         }
     }
 
@@ -921,6 +1587,55 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void colorOnlyDrawDisablesDepthAndRestoresRealDepthAcrossPasses() {
+        String name = "depth_attachment_transition";
+        fragmentShaders.put(name, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(1, 0.5, 0.25, 1); }
+                """);
+        RenderPipeline rejectingDepth = RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/mrt_vertex")
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false)
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .withDepthStencilState(new DepthStencilState(CompareOp.NEVER_PASS, false)).build();
+        RenderPipeline noDepth = pipeline(name, List.of(GpuFormat.RGBA8_UNORM), null, ColorTargetState.WRITE_ALL);
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                    name + "-color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                    name + "-depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTextureView colorView = new MetalGpuTextureView(color, 0, 1);
+             MetalGpuTextureView depthView = new MetalGpuTextureView(depth, 0, 1)) {
+            // Reuse the same compiled source pipeline and alternate attachment
+            // signatures. The real attachment must restore NEVER_PASS, while
+            // both kinds of color-only pipeline must still rasterize.
+            for (int phase = 0; phase < 6; phase++) {
+                boolean attached = phase % 3 == 1;
+                RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> name)
+                        .withColorAttachment(colorView, Optional.of(new Vector4f(0)))
+                        .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+                if (attached) descriptor.withDepthAttachment(depthView, java.util.OptionalDouble.of(0.75));
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
+                pass.setPipeline(phase % 3 == 2 ? noDepth : rejectingDepth);
+                pass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+                ByteBuffer pixels = readback(color);
+                for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                    assertByteNear(pixels.get(pixel * 4), attached ? 0 : 255, "red phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 1), attached ? 0 : 128, "green phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 2), attached ? 0 : 64, "blue phase " + phase);
+                    assertByteNear(pixels.get(pixel * 4 + 3), attached ? 0 : 255, "alpha phase " + phase);
+                }
+            }
+        }
+    }
+
+    @Test
     void depthPlusMrtWritesColorAndDepth() {
         String shaderName = "mrt_depth_combo";
         vertexShaders.put("mrt_depth_vertex", """
@@ -1239,6 +1954,152 @@ final class MetalMrtBackendIntegrationTest {
         render(pipeline, textures, null);
         assertByteNear(readback(textures.get(7)).get(0), 128, "eighth attachment");
         closeTextures(textures);
+    }
+
+    @Test
+    void backendSourceManifestSeesUnownedProgramsAndExcludesInternalMotionReplays() {
+        String name="source_manifest_denominator";
+        fragmentShaders.put(name,"#version 450\nlayout(location=0) out vec4 c; void main(){c=vec4(1);}");
+        var source=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL);
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM),"source-manifest");
+        MetalMotionDrawCoverage.beginFrame();
+        MetalMotionDrawCoverage.bindSourceFrame(new FrameSynthesisContract.FrameStamp(991,1));
+        MetalMotionDrawCoverage.beginScene();
+        try {
+            render(source,textures,null);
+            MetalMotionDrawCoverage.closeSourceObservation(new FrameSynthesisContract.FrameStamp(991,1));
+            var first=MetalMotionDrawCoverage.sourceFrameManifest();
+            assertTrue(first.closed());
+            assertEquals(991,first.frameId());assertFalse(first.linkageComplete());
+            String key=MetalMotionProgramIdentity.of(source).key();
+            assertEquals(1,first.programs().get(key).actualCalls());
+            assertTrue(first.rejectedReasons().contains(key+":unlinked-source-draw"));
+            MetalMotionDrawCoverage.beginMotionReplay();
+            try {renderLoad(source,textures);}
+            finally {MetalMotionDrawCoverage.endMotionReplay();}
+            assertEquals(1,MetalMotionDrawCoverage.sourceFrameManifest().programs().get(key).actualCalls());
+            assertTrue(MetalMotionDrawCoverage.sourceFrameManifest().closed());
+            renderLoad(source,textures);
+            assertFalse(MetalMotionDrawCoverage.sourceFrameManifest().closed());
+            assertTrue(MetalMotionDrawCoverage.sourceFrameManifest().overflow());
+        } finally {MetalMotionDrawCoverage.endScene();MetalMotionDrawCoverage.beginFrame();closeTextures(textures);}
+    }
+
+    @Test
+    void separateUiSourceOverMatchesPorterDuffAndRejectsTheSquaredAlphaControl() throws Exception {
+        String name="ui_source_over";
+        fragmentShaders.put(name,"""
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color=vec4(0.2,0.8,0.4,0.5); }
+                """);
+        var correct=new BlendFunction(com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA);
+        var squaredAlpha=new BlendFunction(com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.SRC_ALPHA,
+                com.mojang.renderpearl.api.pipeline.BlendFactor.ONE_MINUS_SRC_ALPHA);
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM),"ui-pma");
+        MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(992,1),textures.getFirst(),true);
+        try {
+            // Independent Porter-Duff recurrence from two straight-alpha source
+            // layers over transparent black: C=.75*(.2,.8,.4), A=.75.
+            var good=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),correct,ColorTargetState.WRITE_ALL);
+            render(good,textures,null);renderLoad(good,textures);
+            var ui=MetalUiDrawCoverage.snapshot();
+            assertEquals(992,ui.frameId());assertEquals(textures.getFirst().allocationId(),ui.allocation());
+            assertEquals(textures.getFirst().allocationIdentity().generation(),ui.allocationGeneration());
+            assertTrue(ui.sceneSeparated());assertFalse(ui.premultipliedProven());
+            assertTrue(ui.programs().values().stream().allMatch(p->p.calls()==2 && p.blend().boundedStraightSourceOver()));
+            var pixel=readback(textures.getFirst());
+            int[] expected={38,153,77,191};
+            for(int p=0;p<WIDTH*HEIGHT;p++)for(int channel=0;channel<4;channel++)
+                assertByteNear(pixel.get(p*4+channel),expected[channel],"PMA UI pixel "+p+" channel "+channel);
+            var bad=pipeline(name,List.of(GpuFormat.RGBA8_UNORM),squaredAlpha,ColorTargetState.WRITE_ALL);
+            render(bad,textures,null);renderLoad(bad,textures);
+            assertEquals(2,MetalUiDrawCoverage.snapshot().programs().size());
+            assertTrue(MetalUiDrawCoverage.snapshot().programs().values().stream()
+                    .anyMatch(p->!p.blend().boundedStraightSourceOver()));
+            var control=readback(textures.getFirst());
+            for(int p=0;p<WIDTH*HEIGHT;p++) {
+                assertByteNear(control.get(p*4+3),96,"squared-alpha negative control "+p);
+                assertTrue(Math.abs(Byte.toUnsignedInt(control.get(p*4+3))-expected[3])>80,
+                        "The wrong alpha blend cannot satisfy the independent composite expectation");
+            }
+            var dir=java.nio.file.Path.of("build/agent-evidence/ui-composition");java.nio.file.Files.createDirectories(dir);
+            byte[] actual=new byte[pixel.remaining()],negative=new byte[control.remaining()];
+            pixel.duplicate().get(actual);control.duplicate().get(negative);
+            java.nio.file.Files.write(dir.resolve("source-over.rgba8"),actual);
+            java.nio.file.Files.write(dir.resolve("squared-alpha-control.rgba8"),negative);
+            java.nio.file.Files.writeString(dir.resolve("result.json"),new com.google.gson.Gson().toJson(java.util.Map.of(
+                    "sourceCommit",System.getProperty("metallum.validation.sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","unknown")),
+                    "pixelsCompared",WIDTH*HEIGHT,"wrongPixels",0,"negativeControlsRejected",WIDTH*HEIGHT,
+                    "uiFrame",MetalUiDrawCoverage.snapshot())));
+        } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
+    }
+
+    @Test
+    void actualUiClearProofCannotSurviveUploadsOrCopies() throws Exception {
+        var textures=createTextures(List.of(GpuFormat.RGBA8_UNORM,GpuFormat.RGBA8_UNORM),"ui-write-boundary");
+        var ui=textures.getFirst();var encoder=device.commandEncoder();
+        MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(993,2),ui,true);
+        try {
+            encoder.clearColorTexture(ui,new org.joml.Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            // Independent pixel negative: RGB=.8 with alpha=.1 is not PMA.
+            var bytes=java.nio.ByteBuffer.allocateDirect(WIDTH*HEIGHT*4);
+            for(int p=0;p<WIDTH*HEIGHT;p++)bytes.put((byte)204).put((byte)0).put((byte)0).put((byte)26);
+            bytes.flip();encoder.writeToTexture(ui,bytes,0,0,0,0,WIDTH,HEIGHT);
+            var pixels=readback(ui);
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+            encoder.clearColorTexture(ui,new org.joml.Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            encoder.clearColorTexture(textures.get(1),new org.joml.Vector4f(.8F,0,0,.1F));
+            encoder.copyTextureToTexture(textures.get(1),ui,0,0,0,0,0,WIDTH,HEIGHT);readback(ui);
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            assertFalse(MetalUiDrawCoverage.snapshot().completeWriteCoverageProven());
+            assertFalse(MetalUiDrawCoverage.snapshot().premultipliedProven());
+        } finally {MetalUiDrawCoverage.reset();closeTextures(textures);}
+    }
+
+    @Test
+    void rasterStorageImageWritesAreObservedWhenUiIsNotAColorAttachment() throws Exception {
+        fragmentShaders.put("ui_image_store","""
+                #version 450
+                layout(binding=0,rgba8) writeonly uniform image2D uiStore;
+                layout(location=0) out vec4 color;
+                void main() { imageStore(uiStore,ivec2(gl_FragCoord.xy),vec4(.75,0,0,.25)); color=vec4(0,1,0,1); }
+                """);
+        var attachments=createTextures(List.of(GpuFormat.RGBA8_UNORM),"non-ui-attachment");
+        try(var ui=(MetalGpuTexture)device.createTexture("ui-storage-output",
+                GpuTexture.USAGE_RENDER_ATTACHMENT|GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_SRC
+                        |MetalGpuTexture.USAGE_SHADER_WRITE,GpuFormat.RGBA8_UNORM,WIDTH,HEIGHT,1,1);
+            var uiView=new MetalGpuTextureView(ui,0,1)) {
+            MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(995,3),ui,true);
+            encoder.clearColorTexture(ui,new Vector4f(0));readback(ui);
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            // RenderPearl's ordinary UniformType has no storage image. Use the
+            // same explicit storage admission as production Iris raster passes.
+            var storagePipeline=device.precompilePipeline(
+                    pipeline("ui_image_store",List.of(GpuFormat.RGBA8_UNORM),null,ColorTargetState.WRITE_ALL),null,true);
+            try(var pass=createPass(attachments,null,false)) {
+                pass.pass().setPipeline(storagePipeline);
+                pass.pass().bindStorageImage("uiStore",uiView);pass.pass().draw(3,1,0,0);
+                encoder.submitRenderPass();encoder.submit();device.waitForSubmittedGpuWork();
+            }
+            var pixels=readback(ui);
+            for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+            var proof=MetalUiDrawCoverage.snapshot();assertTrue(proof.programs().isEmpty(),"UI was not an FBO color attachment");
+            assertEquals(1,proof.content().potentialShaderWrites());assertFalse(proof.content().premultipliedClearOnlyProven());
+            encoder.clearColorTexture(ui,new Vector4f(0));var cleared=readback(ui);
+            for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)));
+            assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            ui.close();assertFalse(MetalUiDrawCoverage.observing());
+            assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+        } finally {MetalUiDrawCoverage.reset();closeTextures(attachments);}
     }
 
     private void runPerSlotClearLoadStoreBlendAndWriteMask() {

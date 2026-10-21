@@ -1,5 +1,25 @@
 import Foundation
 
+/// Frame interpolation consumes current-to-previous motion in previous color
+/// pixels (MTLFXFrameInterpolator.h, motionVectorScaleX/Y). Downsampling the
+/// depth/motion field changes its sampling footprint, not displacement units.
+enum MetalFxFrameMotionContract {
+    static func ndcToPreviousColorPixels(width: Int, height: Int) -> SIMD2<Float> {
+        SIMD2(Float(width) * 0.5, Float(height) * 0.5)
+    }
+}
+
+/// Shared by the Metal 3/4 presenter and windowless interpolation. MetalFX
+/// fieldOfView is in degrees; jitter is measured in source-texture pixels.
+enum MetalFxFrameCameraContract {
+    static func isValid(fieldOfViewDegrees: Float, near: Float, far: Float,
+                        aspect: Float, jitterX: Float, jitterY: Float) -> Bool {
+        fieldOfViewDegrees.isFinite && fieldOfViewDegrees > 0 && fieldOfViewDegrees < 180
+            && near.isFinite && near > 0 && far.isFinite && far > near
+            && aspect.isFinite && aspect > 0 && jitterX.isFinite && jitterY.isFinite
+    }
+}
+
 /// CPU reference for bounded Frame Generation input resampling.
 ///
 /// The GPU pass uses the same candidate order (base, +x, +y, diagonal) and

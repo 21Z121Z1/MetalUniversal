@@ -371,7 +371,13 @@ final class MetalDevice implements GpuDeviceBackend {
     public static void captureShaderSource(final ShaderSource shaderSource) {
         MetalDevice device = current;
         if (device != null) {
+            ShaderSource previous=device.activeShaderSource;
+            if(previous==shaderSource)return;
             device.activeShaderSource = shaderSource;
+            // These backend-owned lazy pipelines are outside Minecraft's frontend cache.
+            // Retire their old source generation even when MetalFX is disabled.
+            if(previous!=null)device.clearPipelineCache();
+            MetalFxManager.shaderLibraryPublished(device);
         }
     }
 
@@ -680,14 +686,17 @@ final class MetalDevice implements GpuDeviceBackend {
             if (existing != null && !existing.isClosed()) {
                 return existing;
             }
-            this.activeShaderSource = effectiveSource;
+            // The renderer library is owned by captureShaderSource/resource reload. A one-pipeline
+            // generated overlay (Iris, validation, etc.) must not replace that global library.
             CompiledRenderPipeline frontend;
+            ShaderSource compilationSource=MetalShaderSourceAdapters.captureCompileInputs(effectiveSource);
             try {
                 if (rasterStorage) {
                     if (this.rasterStorageCompiler == null) this.rasterStorageCompiler = new StorageRasterPipelineCompiler(this);
-                    frontend = this.rasterStorageCompiler.compile(pipeline, effectiveSource);
+                    frontend = MetalShaderSourceAdapters.compileWithLibrary(compilationSource,
+                            ()->this.rasterStorageCompiler.compile(pipeline,compilationSource));
                 } else {
-                    frontend = this.pipelineBuilder.compilePipeline(pipeline, effectiveSource, Runnable::run)
+                    frontend = this.pipelineBuilder.compilePipeline(pipeline, compilationSource, Runnable::run)
                             .join().finishCompile();
                 }
             } catch (java.util.concurrent.CompletionException failure) {
@@ -701,6 +710,10 @@ final class MetalDevice implements GpuDeviceBackend {
                     || !(frontendPipeline.backendRenderPipeline() instanceof MetalCompiledRenderPipeline compiled)) {
                 throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
             }
+            compiled.captureSourcePipeline(pipeline);
+            compiled.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource),
+                    MetalShaderSourceAdapters.libraryProof(compilationSource));
+            compiled.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
             this.compiledPipelines.put(pipeline, compiled);
             this.frontendPipelines.put(pipeline, frontendPipeline);
             return compiled;

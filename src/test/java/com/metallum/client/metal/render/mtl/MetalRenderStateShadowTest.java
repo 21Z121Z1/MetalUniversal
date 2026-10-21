@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
+import com.metallum.client.metal.render.MetalBackendOptimizations;
+
 import org.junit.jupiter.api.Test;
 
 import java.lang.foreign.MemorySegment;
@@ -29,7 +31,7 @@ final class MetalRenderStateShadowTest {
         MetalRenderStateShadow next = MetalRenderStateShadow.acquire();
         MetalRenderStateShadow concurrent = MetalRenderStateShadow.acquire();
         try {
-            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) assertSame(first, next);
+            if (MetalBackendOptimizations.REUSE_ENCODER_STATE) assertSame(first, next);
             else assertNotSame(first, next);
             assertNotSame(next, concurrent);
             assertTrue(next.setPipeline(BUFFER_A));
@@ -42,7 +44,7 @@ final class MetalRenderStateShadowTest {
         }
         if (MetalRenderStatePacketTelemetry.reuseActivationTelemetryEnabled()) {
             MetalRenderStatePacketTelemetry.Snapshot after = MetalRenderStatePacketTelemetry.snapshot();
-            if (Boolean.getBoolean("metallum.opt.reuseEncoderState")) {
+            if (MetalBackendOptimizations.REUSE_ENCODER_STATE) {
                 assertTrue(after.shadowReuseHits() > before.shadowReuseHits());
                 assertTrue(after.shadowAllocations() > before.shadowAllocations());
             } else {

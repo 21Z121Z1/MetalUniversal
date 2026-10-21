@@ -1,0 +1,65 @@
+{
+  "observedUtc": "2026-10-20 21:07:10 UTC",
+  "openPullRequests": [
+    {
+      "number": 90,
+      "title": "接通真实运动生产者、表面历史和雨雪自身运动",
+      "head": "codex/metal-renderer-research",
+      "headSha": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/90"
+    },
+    {
+      "number": 89,
+      "title": "Draft: converge mcopt optimization semantics on Sodium 0.9.3",
+      "head": "codex/mcopt-semantic-convergence-20261005",
+      "headSha": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/89"
+    },
+    {
+      "number": 87,
+      "title": "MetalFX: verify and repair Minecraft 26.3 temporal data contracts",
+      "head": "agent/metalfx-data-contracts-20260924",
+      "headSha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/87"
+    },
+    {
+      "number": 86,
+      "title": "Validate fullscreen Metal 4 P1 at 32 chunks",
+      "head": "codex/p1-framebuffer-determinism",
+      "headSha": "1548c41d9e0ea65fad932740854d75804ff81d07",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/86"
+    },
+    {
+      "number": 85,
+      "title": "MetalFX: complete temporal input and frame-generation contracts",
+      "head": "agent/metalfx-contract-completion-20260924",
+      "headSha": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+      "base": "main",
+      "url": "https://github.com/21Z121Z1/MetalUniversal/pull/85"
+    }
+  ],
+  "repository": {
+    "defaultBranch": "main",
+    "fullName": "21Z121Z1/MetalUniversal",
+    "archived": false
+  },
+  "rulesets": [
+    {
+      "id": 23875862,
+      "name": "Protect main from deletion and force pushes",
+      "enforcement": "active",
+      "source": "21Z121Z1/MetalUniversal"
+    }
+  ],
+  "classicMainProtection": {
+    "status": "unknown",
+    "lastRead": "403 Resource not accessible by integration",
+    "retried": false
+  },
+  "writersStopped": false,
+  "deletionReady": false
+}
