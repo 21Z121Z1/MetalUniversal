@@ -188,7 +188,9 @@ gradle.projectsEvaluated {
     configureHostedTest(
         "hostedMetalParticleOwnershipPrototypeTest",
         "Runs the isolated opaque-particle pixel ownership diagnostic; no production feature admission.",
-        ["com.metallum.client.metal.render.MetalParticlePixelOwnershipGpuTest"]
+        ["com.metallum.client.metal.render.MetalParticlePixelOwnershipGpuTest",
+         "com.metallum.client.metal.render.MetalParticlePixelOwnershipPrototypeTest",
+         "com.metallum.client.metal.render.MetalParticlePixelOwnershipRasterTest"]
     )
 
     def promotedProperties = [
