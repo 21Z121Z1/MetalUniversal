@@ -45,11 +45,24 @@ jobs:
           git rev-parse HEAD > build/agent-evidence/pixel-ownership/source.txt
           xcodebuild -version > build/agent-evidence/pixel-ownership/xcode.txt
           sw_vers > build/agent-evidence/pixel-ownership/os.txt
+      - name: Typecheck the independent resource diagnostic first
+        run: |
+          set -euo pipefail
+          xcrun swiftc -typecheck -target arm64-apple-macosx14.0 -framework Foundation -framework Metal \
+            .github/ci/ParticleOwnershipResourceProbe.swift
       - name: Execute isolated canonical shader through shipping Java and FFM
+        id: prototype
         run: |
           set -euo pipefail
           ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
             hostedMetalParticleOwnershipPrototypeTest -x buildIOSNative -x buildIOSSpvc
+      - name: Measure matching private texture allocations at bounded resolutions
+        if: ${{ !cancelled() && steps.prototype.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -target arm64-apple-macosx14.0 -framework Foundation -framework Metal \
+            .github/ci/ParticleOwnershipResourceProbe.swift -o build/metal-tests/ParticleOwnershipResourceProbe
+          build/metal-tests/ParticleOwnershipResourceProbe build/agent-evidence/pixel-ownership/resource-costs.json
       - name: Retain structured pixel evidence and failures
         if: always()
         run: |
@@ -57,6 +70,7 @@ jobs:
           import base64,gzip,hashlib,json,os,pathlib,xml.etree.ElementTree as ET
           data={'sourceCommit':os.environ['METALLUM_SOURCE_SHA'],'prototypeOnly':True,'files':{},'junit':[]}
           paths=sorted(pathlib.Path('build/agent-evidence/motion-producers').glob('particle-pixel-ownership*/*/result.json'))
+          paths += [p for p in [pathlib.Path('build/agent-evidence/pixel-ownership/resource-costs.json')] if p.is_file()]
           for p in paths:
               raw=p.read_bytes();data['files'][str(p)]={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'content':json.loads(raw)}
           for p in sorted(pathlib.Path('build/test-results/hostedMetalParticleOwnershipPrototypeTest').glob('TEST-*.xml')):
