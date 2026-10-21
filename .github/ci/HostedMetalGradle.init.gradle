@@ -185,6 +185,12 @@ gradle.projectsEvaluated {
          "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
     )
 
+    configureHostedTest(
+        "hostedMetalParticleOwnershipPrototypeTest",
+        "Runs the isolated opaque-particle pixel ownership diagnostic; no production feature admission.",
+        ["com.metallum.client.metal.render.MetalParticlePixelOwnershipGpuTest"]
+    )
+
     def promotedProperties = [
         "metallum.opt.fusedStateDraw",
         "metallum.opt.reuseEncoderState",

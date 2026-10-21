@@ -1,0 +1,78 @@
+name: Opaque particle pixel ownership prototype
+
+on:
+  push:
+    tags: ['diagnostics/particle-ownership-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: particle-ownership-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.sha }}
+
+jobs:
+  ownership:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+      - name: Confirm exact source and existing SDK
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.runner }}" = macos-15 ]; then
+            test -d /Applications/Xcode_26.3.app/Contents/Developer
+            echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+            export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          fi
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          mkdir -p build/agent-evidence/pixel-ownership
+          git rev-parse HEAD > build/agent-evidence/pixel-ownership/source.txt
+          xcodebuild -version > build/agent-evidence/pixel-ownership/xcode.txt
+          sw_vers > build/agent-evidence/pixel-ownership/os.txt
+      - name: Execute isolated canonical shader through shipping Java and FFM
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalParticleOwnershipPrototypeTest -x buildIOSNative -x buildIOSSpvc
+      - name: Retain structured pixel evidence and failures
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import base64,gzip,hashlib,json,os,pathlib,xml.etree.ElementTree as ET
+          data={'sourceCommit':os.environ['METALLUM_SOURCE_SHA'],'prototypeOnly':True,'files':{},'junit':[]}
+          paths=sorted(pathlib.Path('build/agent-evidence/motion-producers').glob('particle-pixel-ownership*/*/result.json'))
+          for p in paths:
+              raw=p.read_bytes();data['files'][str(p)]={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'content':json.loads(raw)}
+          for p in sorted(pathlib.Path('build/test-results/hostedMetalParticleOwnershipPrototypeTest').glob('TEST-*.xml')):
+              suite=ET.parse(p).getroot();data['junit'].append(dict(suite.attrib))
+              for case in suite.findall('testcase'):
+                  for failure in case.findall('failure')+case.findall('error'):print(case.attrib,(failure.text or '')[:32768])
+          print('PARTICLE_OWNERSHIP_EVIDENCE_GZIP_BASE64 '+base64.b64encode(gzip.compress(json.dumps(data,sort_keys=True).encode())).decode())
+          pathlib.Path('build/agent-evidence/pixel-ownership/envelope.json').write_text(json.dumps(data,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: particle-pixel-ownership-${{ matrix.runner }}-${{ env.METALLUM_SOURCE_SHA }}
+          path: |
+            build/agent-evidence/pixel-ownership/
+            build/agent-evidence/motion-producers/particle-pixel-ownership*/
+            build/test-results/hostedMetalParticleOwnershipPrototypeTest/
+          if-no-files-found: error
+          retention-days: 14
