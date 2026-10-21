@@ -67,6 +67,8 @@ final class MetalShaderReloadLeaseEvidence {
                 try(var compiler=new GlslCompiler(true,true);
                     var module=compiler.compileToSpv("metallum:reload_include_lease",GLSL,ShaderType.VERTEX,defines,blocking)) {
                     require(module!=null,"Actual shaderc produced no module");
+                } catch(com.mojang.renderpearl.util.ShaderCompileException failure) {
+                    throw new IllegalStateException("Actual Configs reload lease shader compilation failed",failure);
                 }
             },MetalBackend.captureCompileExecutor(source,worker));
             if(!entered.await(10,TimeUnit.SECONDS)) {

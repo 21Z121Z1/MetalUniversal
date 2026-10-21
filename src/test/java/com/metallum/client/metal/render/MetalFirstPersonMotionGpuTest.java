@@ -184,7 +184,7 @@ final class MetalFirstPersonMotionGpuTest {
     }
 
     @Test
-    void actualCanonicalRawLibraryCompilesThroughThePinnedIncludeCallbacks() {
+    void actualCanonicalRawLibraryCompilesThroughThePinnedIncludeCallbacks() throws Exception {
         MetalShaderSourceLibraryTest.verifyCanonicalRawLibraryWithInitializedDevice();
     }
 
