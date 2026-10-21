@@ -162,6 +162,7 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
             "com.metallum.client.metal.render.MetalPreviousVisibilityGpuTest",
          "com.metallum.client.metal.render.MetalParticleVertexAlphaGpuTest",
+         "com.metallum.client.metal.render.MetalParticlePartialAlphaGpuTest",
             "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
@@ -177,8 +178,10 @@ gradle.projectsEvaluated {
          "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
          "com.metallum.client.metal.render.MetalPreviousVisibilityGpuTest",
          "com.metallum.client.metal.render.MetalParticleVertexAlphaGpuTest",
+         "com.metallum.client.metal.render.MetalParticlePartialAlphaGpuTest",
          "com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest",
          "com.metallum.client.metal.render.MetalParticleVertexAlphaHistoryTest",
+         "com.metallum.client.metal.render.MetalParticlePartialAlphaHistoryTest",
          "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
     )
 

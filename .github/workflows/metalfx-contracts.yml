@@ -156,6 +156,7 @@ jobs:
           paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/clouds').glob('*/result.json'))
           paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/previous-visibility').glob('*/result.json'))
           paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/particle-vertex-alpha').glob('*/result.json'))
+          paths += sorted(pathlib.Path('build/agent-evidence/motion-producers/particle-partial-alpha').glob('*/result.json'))
           paths += [pathlib.Path('build/agent-evidence/motion-producers/half-target-conversion/result.json')]
           evidence = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'], 'files': {}, 'junit': []}
           for path in paths:
@@ -183,6 +184,11 @@ jobs:
           if len(particle_cases) != 6 or identities != expected or not names_match:
               raise SystemExit('particle vertex-alpha raw evidence is incomplete or case identities collide')
           print('verified six distinct particle vertex-alpha raw evidence directories:', sorted(particle_cases))
+          partial_cases = {path: entry['content'] for path, entry in evidence['files'].items() if '/particle-partial-alpha/' in path}
+          identities = {case['case']['identity'] for case in partial_cases.values()}
+          if len(partial_cases) != 24 or len(identities) != 24 or any(pathlib.Path(path).parent.name != case['case']['identity'] for path, case in partial_cases.items()):
+              raise SystemExit('partial-alpha evidence is incomplete or case parameters collide')
+          print('verified 24 distinct partial-alpha case directories:', sorted(partial_cases))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
