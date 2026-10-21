@@ -171,6 +171,18 @@ jobs:
           data = json.dumps(evidence, sort_keys=True).encode()
           out.write_bytes(data)
           print('METALFX_EVIDENCE_GZIP_BASE64 ' + base64.b64encode(gzip.compress(data)).decode())
+          particle_cases = {path: entry['content'] for path, entry in evidence['files'].items()
+                            if '/particle-vertex-alpha/' in path}
+          identities = {(case['pairScene'], case['oldVertexAlpha'], case['reverseIds'])
+                        for case in particle_cases.values()}
+          expected = {(pair, alpha, True) for pair in (False, True) for alpha in (0, 255)}
+          expected |= {(True, alpha, False) for alpha in (0, 255)}
+          names_match = all(pathlib.Path(path).parent.name ==
+                            f"{str(case['pairScene']).lower()}_{case['oldVertexAlpha']}_{str(case['reverseIds']).lower()}"
+                            for path, case in particle_cases.items())
+          if len(particle_cases) != 6 or identities != expected or not names_match:
+              raise SystemExit('particle vertex-alpha raw evidence is incomplete or case identities collide')
+          print('verified six distinct particle vertex-alpha raw evidence directories:', sorted(particle_cases))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()

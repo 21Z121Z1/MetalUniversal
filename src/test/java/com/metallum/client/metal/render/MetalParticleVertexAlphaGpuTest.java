@@ -27,10 +27,12 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @EnabledOnOs(OS.MAC)
 final class MetalParticleVertexAlphaGpuTest {
     private static final int W = 64, H = 48, PIXELS = W * H;
+    private static final Set<Path> CASE_DIRECTORIES = new HashSet<>();
     private ShaderSource library;
     private MetalDevice device;
     private MetalCommandEncoder encoder;
@@ -85,7 +88,8 @@ final class MetalParticleVertexAlphaGpuTest {
         ByteBuffer fog = bytes(40); fog.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);
         int input = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_COPY_DST;
         int output = input | MetalGpuTexture.USAGE_SHADER_WRITE;
-        Path dir = Path.of("build/agent-evidence/motion-producers/particle-vertex-alpha/" + pairScene + "_" + oldAlpha);
+        Path dir = Path.of("build/agent-evidence/motion-producers/particle-vertex-alpha/" + pairScene + "_" + oldAlpha + "_" + reverseIds);
+        assertTrue(CASE_DIRECTORIES.add(dir), "Independent cases must retain distinct raw pixel/result directories: " + dir);
         Files.createDirectories(dir);
         var results = new ArrayList<Map<String, Object>>();
         var sourceFrames = new ArrayList<Map<String, Object>>();
