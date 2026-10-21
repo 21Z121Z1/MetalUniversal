@@ -96,6 +96,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.MetalSourceFrameIdentityTest \
   --tests com.metallum.client.metal.render.MetalShaderInputCaptureTest \
   --tests com.metallum.client.metal.render.MetalShaderCompilerFixturesTest \
+  --tests com.metallum.client.metal.render.MetalShaderReloadControllerTest \
   --tests com.metallum.client.metal.render.MetalCanonicalShaderReferenceTest \
   --tests com.metallum.client.metal.render.MetalShaderLibraryProofTest \
   --tests com.metallum.client.metal.render.MetalShaderSourceLibraryTest \

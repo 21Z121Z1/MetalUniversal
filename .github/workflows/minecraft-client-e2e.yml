@@ -298,7 +298,7 @@ jobs:
                       or lifecycle.get('sourceAdmissionGranted') is not False
                       or lease.get('ownerType') != 'net.minecraft.client.renderer.ShaderManager$Configs'
                       or any(lease.get(key) is not True for key in
-                             ('retirementRequestedDuringBorrow', 'oldOwnerClosedAfterCompile', 'compiledSuccessfully'))
+                             ('retirementRequestedDuringBorrow', 'oldOwnerClosedAfterCompile', 'compiledSuccessfully', 'clientPumpedDuringBorrow'))
                       or lease.get('sourceAdmissionGranted') is not False):
                   raise SystemExit(f'actual Configs reload lease was not verified: {lifecycle}')
               old_generation, new_generation = lease.get('oldGeneration'), lease.get('newGeneration')

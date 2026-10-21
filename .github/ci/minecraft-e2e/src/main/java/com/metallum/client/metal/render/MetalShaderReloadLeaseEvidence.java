@@ -37,7 +37,7 @@ final class MetalShaderReloadLeaseEvidence {
         var expected=MetalCanonicalShaderReference.CURRENT.assets().get("assets/minecraft/shaders/include/fog.glsl").raw();
         var entered=new CountDownLatch(1);var continueBorrow=new CountDownLatch(1);
         var callbacks=new AtomicInteger();var problem=new AtomicReference<String>();
-        var worker=Executors.newSingleThreadExecutor();
+        var worker=Executors.newFixedThreadPool(2);
         try {
             ShaderSource blocking=new ShaderSource() {
                 @Override public String getShader(Identifier id,ShaderType type) {return GLSL;}
@@ -71,31 +71,29 @@ final class MetalShaderReloadLeaseEvidence {
                 if(compiled.isDone())compiled.join();
                 throw new IllegalStateException("Actual native include callback did not start");
             }
+            System.out.println("METAL_CONFIGS_RELOAD_LEASE native-borrow-entered generation="+owner.proof().generation());
+            var retirement=MetalShaderReloadController.observeRetirement(worker,owner::retirementRequested,
+                    ()->owner.proof().closed(),compiled,continueBorrow::countDown,20_000);
             var reloading=new CompletableFuture<Void>();
             // Submit from this test thread without waiting for the client callback to return:
             // a warm reload can reach the blocked close while reloadResourcePacks is still on stack.
             minecraftClient.execute(()->{
                 try {
+                    var current=MetalShaderSourceAdapters.libraryLifetime(MetalDevice.current().activeShaderSource());
+                    System.out.println("METAL_CONFIGS_RELOAD_LEASE reload-task-running borrowedGeneration="+owner.proof().generation()
+                            +" currentGeneration="+(current==null ? 0 : current.proof().generation()));
+                    require(current==owner,"Queued reload no longer targets the actually borrowed Configs owner");
                     minecraftClient.reloadResourcePacks().whenComplete((ignored,failure)->{
                         if(failure==null)reloading.complete(null);else reloading.completeExceptionally(failure);
                     });
                 } catch(Throwable failure) {reloading.completeExceptionally(failure);}
             });
-            try {
-                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
-                // The render thread will wait in close; poll the owner's volatile state from this test thread.
-                while(!owner.retirementRequested() && System.nanoTime()<deadline) {
-                    if(reloading.isDone())reloading.join();
-                    if(compiled.isDone())compiled.join();
-                    Thread.sleep(10);
-                }
-                require(owner.retirementRequested(),"Actual Configs close was not requested during the borrow");
-                require(!owner.proof().closed() && !compiled.isDone(),"Actual Configs freed includes while shaderc still borrowed them");
-            } finally {continueBorrow.countDown();}
-            compiled.get(5,TimeUnit.SECONDS);
+            MetalShaderReloadController.awaitReload(()->context.waitFor(client->reloading.isDone(),600),
+                    retirement,compiled,20_000);
+            System.out.println("METAL_CONFIGS_RELOAD_LEASE retirement-observed-and-compile-finished generation="+owner.proof().generation());
             require(problem.get()==null,"Actual native include callback failed: "+problem.get());
             require(callbacks.get()>0,"No native include callback was exercised");
-            context.waitFor(client->reloading.isDone(),600);reloading.join();
+            reloading.join();
             var newer=context.computeOnClient(client->MetalShaderSourceAdapters.libraryLifetime(MetalDevice.current().activeShaderSource()));
             require(newer!=null && newer.proof().canonicalOpen() && newer!=owner
                     && newer.proof().generation()!=owner.proof().generation(),"Reload did not publish a different canonical source owner");
@@ -103,7 +101,7 @@ final class MetalShaderReloadLeaseEvidence {
             return Map.of("ownerType",owner.ownerType(),"oldGeneration",owner.proof().generation(),
                     "newGeneration",newer.proof().generation(),"retirementRequestedDuringBorrow",true,
                     "oldOwnerClosedAfterCompile",true,"nativeCallbacks",callbacks.get(),"include",expected,
-                    "compiledSuccessfully",true,"sourceAdmissionGranted",false);
+                    "compiledSuccessfully",true,"sourceAdmissionGranted",false,"clientPumpedDuringBorrow",true);
         } catch(InterruptedException interrupted) {
             Thread.currentThread().interrupt();throw new IllegalStateException("Actual reload lease control interrupted",interrupted);
         } catch(java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) {

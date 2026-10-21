@@ -64,6 +64,7 @@ jobs:
           ./gradlew --no-daemon --stacktrace test \
             --tests com.metallum.client.metal.render.MetalPrivateBindingHookDescriptorTest.inspectPinnedShaderIncludeApi \
             --tests com.metallum.client.metal.render.MetalShaderIncludeLifetimeTest \
+            --tests com.metallum.client.metal.render.MetalShaderReloadControllerTest \
             --tests com.metallum.client.metal.render.MetalShaderLibraryProofTest \
             --tests com.metallum.client.metal.render.MetalShaderSourceLibraryTest \
             --tests com.metallum.client.metal.render.MetalCanonicalShaderReferenceTest \
@@ -87,7 +88,7 @@ jobs:
           if int(callback.get('tests','0'))!=1 or any(int(callback.get(key,'0')) for key in ('failures','errors','skipped')):
               raise SystemExit('native include callback control did not execute successfully')
           print('verified bounded native include read and allocated-tail negative control; repeated frontend callbacks require the real-device contract fixture')
-          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest'):
+          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest','MetalShaderReloadControllerTest'):
               suite=ET.parse('build/test-results/test/TEST-com.metallum.client.metal.render.'+name+'.xml').getroot()
               counts={key:int(suite.get(key,'0')) for key in ('tests','failures','errors','skipped')}
               if counts['tests']<=0 or any(counts[key] for key in ('failures','errors','skipped')):
