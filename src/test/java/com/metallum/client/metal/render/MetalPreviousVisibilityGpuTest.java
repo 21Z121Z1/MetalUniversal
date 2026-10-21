@@ -71,7 +71,7 @@ final class MetalPreviousVisibilityGpuTest {
                 .withShaderDefine("NO_OVERLAY").withShaderDefine("NO_CARDINAL_LIGHTING").withShaderDefine("EMISSIVE")
                 .withShaderDefine("ALPHA_CUTOUT", .1F)
                 .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
-                .withColorTargetState(0, new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .withColorTargetState(0, new ColorTargetState(Optional.of(BlendFunction.TRANSLUCENT), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                 .withBindGroupLayout(BindGroupLayout.builder().withUniform("Projection", UniformType.UNIFORM_BUFFER)
                         .withUniform("DynamicTransforms", UniformType.UNIFORM_BUFFER).withUniform("Fog", UniformType.UNIFORM_BUFFER)
                         .withUniform("Sampler0", UniformType.COMBINED_IMAGE_SAMPLER)
@@ -86,6 +86,7 @@ final class MetalPreviousVisibilityGpuTest {
         Path dir = Path.of("build/agent-evidence/motion-producers/previous-visibility/" + shader + "_" + oldAlpha);
         Files.createDirectories(dir);
         var results = new ArrayList<Map<String, Object>>();
+        var sourceFrames = new ArrayList<Map<String, Object>>();
         var sample = new MetalEntityMotionCapture.Sample(4817, 19, new Matrix4f(), new Matrix4f());
         try (var vb = device.createBuffer(() -> "same foreground geometry", GpuBuffer.USAGE_VERTEX, mesh);
              var bg = device.createBuffer(() -> "same-Z blue background geometry", GpuBuffer.USAGE_VERTEX, background);
@@ -123,7 +124,9 @@ final class MetalPreviousVisibilityGpuTest {
             for (int frame = 0; frame < frames; frame++) {
                 final int frameIndex = frame;
                 ByteBuffer dynamic = dynamic(frame == 0 ? oldAlpha : 1);
-                dynamic.putFloat(132, 0).putFloat(136, 0); // Red foreground; zero alpha is discarded by actual canonical source.
+                // ENTITY/ITEM perform texture cutout before modulation. Alpha blending is needed
+                // to prove zero contribution even when their zero-alpha fragment survives.
+                dynamic.putFloat(132, 0).putFloat(136, 0);
                 try (var du = device.createBuffer(() -> "actual frame modulator", GpuBuffer.USAGE_UNIFORM, dynamic)) {
                     MetalPreviousVertexHistory.beginFrame();
                     var token = MetalPreviousVertexHistory.reserveDraw(sample, source);
@@ -158,6 +161,8 @@ final class MetalPreviousVisibilityGpuTest {
                     }
                     assertEquals(frame == 0 && oldAlpha == 0 ? 0 : W * H / 4, redPixels,
                             "Original source readback independently establishes zero/nonzero foreground contribution");
+                    sourceFrames.add(Map.of("frame", frame, "modulatorAlpha", frame == 0 ? oldAlpha : 1,
+                            "redContributionPixels", redPixels, "sameDepthPixels", PIXELS));
                     if (frame > 0) {
                         assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(token));
                         var exact = MetalPreviousVertexReplay.plan(source, info, token);
@@ -234,7 +239,8 @@ final class MetalPreviousVisibilityGpuTest {
             }
             String result = new com.google.gson.Gson().toJson(Map.of("shader", shader, "oldAlpha", oldAlpha,
                     "sameOwnerAndGeneration", true, "sameGeometryAndMaterial", true, "backgroundZ", .5F,
-                    "sourceCommit", System.getenv().getOrDefault("METALLUM_SOURCE_SHA", "local"), "results", results));
+                    "sourceCommit", System.getenv().getOrDefault("METALLUM_SOURCE_SHA", "local"),
+                    "sourceFrames", sourceFrames, "results", results));
             Files.writeString(dir.resolve("result.json"), result);
             System.out.println("PREVIOUS_VISIBILITY_RESULT " + result);
             for (var row : results) {

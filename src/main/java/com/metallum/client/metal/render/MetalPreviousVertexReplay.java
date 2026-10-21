@@ -312,10 +312,22 @@ final class MetalPreviousVertexReplay {
 
     static float @Nullable [] previousPositionsForSource(final RenderPipeline source,
             final MetalPreviousVertexHistory.DrawToken token) {
+        String shader=source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath();
+        var previous=MetalPreviousVertexHistory.matchedPreviousSourceUniforms(token);
+        if ((shader.equals("core/entity") || shader.equals("core/item")
+                || shader.equals("core/block") || shader.equals("core/particle"))
+                && (previous==null || previous.colorModulator().w<=0)) {
+            // Matching geometry/material and a coincident old Z do not prove that this
+            // source contributed color. Reuse current-only ownership when the captured
+            // alpha is nonpositive or the snapshot is absent. Some opaque/glint variants
+            // can still write RGB at zero alpha; rejecting them here is conservative.
+            // Positive alpha is only a necessary input here, not a previous-visible certificate:
+            // texture/vertex discard, other elements and complete visibility remain unproven.
+            return null;
+        }
         float[] positions=MetalPreviousVertexHistory.matchedPreviousPositions(token);
         if(positions==null)return null;
-        if(source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX).getPath().equals("core/block")) {
-            var previous=MetalPreviousVertexHistory.matchedPreviousSourceUniforms(token);
+        if(shader.equals("core/block")) {
             if(previous==null)return null;
             var offset=previous.modelOffset();
             for(int i=0;i<positions.length;i+=3) {

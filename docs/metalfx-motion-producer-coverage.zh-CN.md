@@ -134,6 +134,10 @@ lightmap alpha 的审计继续覆盖 BLOCK／ENTITY／ITEM。BLOCK 按原版在 
 
 后续环境审计还需保持背景绘制顺序：日月／星辰原版没有深度测试，但发生在地形之前，不能因无 depth state 就按前景 overlay 回放。接入需明确背景深度／后续遮挡语义。previous Z 本身也不能区分同深度的错误表面、前帧透明度为零或已被 discard 的对应点；仍需前帧可见 ownership／element 身份与完整清单验证。完整 FG 门禁继续关闭。
 
+ordinary staged 的 canonical ENTITY／ITEM／BLOCK／PARTICLE 增加一项必要拒绝条件：已接受前帧的 DynamicTransforms 缺失，或 ColorModulator.a 非正时，不消费其旧位置作为 exact correspondence，转用现有 current-only ownership。当前真实颜色覆盖／current Z 保留，previous Z=-1、XY=0、owned-invalid=64，V4 将该覆盖设为 reactive／disocclusion=255。失败源事务不推进该快照；成功的 current-only 源事务可供下一连续可见帧恢复。零 alpha 的 opaque／GLINT 仍可能写入 RGB，此处对它们保守拒绝，不声称所有零 alpha 均 discard。正 alpha 也不是完整 previous-visible 证书：旧纹理／顶点 alpha、同深度其他 element、背景与完整遮挡仍未准入，unknown／indirect／unowned 清单的 fail-closed 机制保持独立。
+
+对照使用原版颜色 shader 绘制同 Z 蓝色背景及 alpha 0→1／1→1 红色前景；ENTITY／ITEM 的纹理 cutout 先于 modulator，故零颜色贡献场景明确采用实际 alpha blending，不能把 opaque 写入误认成 discard。测试从真实 pass 冻结同 owner、generation、geometry、material 的源 uniform，执行 packaged motion MRT 和 native V4，另显式模拟仅移除上述 guard 的错误准入。GPU 与 CPU 事务结果必须绑定各自新 SHA；测试存在不等于验收通过，准确结果见当前整合 PR 的逐项证据。
+
 阴影可见性审计发现，旧运动片元使用 flat 顶点 alpha、未手动 clamp UV，且遗漏 ColorModulator.a；与原版颜色着色器的 smooth alpha 和采样逻辑不同。回放改为同样的 UV clamp 和插值透明度乘当前源 modulator。新增六项 GPU 对照直接渲染原版 shadow shader 的 RGBA32F 贡献，检查普通阴影、越界 UV、渐变 alpha、modulator=0 和透明纹理。`6f42f0b` 的 macOS 15/26 均为 57/57 GPU，通过原始附件核对六项覆盖差异均为零。
 
 `200c63a` 的五条工作流和 8 个客户端任务成功。已下载的 macOS 15 JUnit 确认 58/58，包含刻意覆写源 Projection/DynamicTransforms、改写并关闭 Globals 的增强用例；Sodium 两种 HUD 入口仍有 41,808 个有效手部像素，184,184 个合成像素全部有限。macOS 26 与 Vanilla 原始附件下载遇到制品存储连接失败，尚未完成附件级复核，不能把上一提交的附件替代为本次证据。

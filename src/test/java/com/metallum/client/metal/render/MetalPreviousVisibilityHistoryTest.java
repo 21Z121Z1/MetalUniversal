@@ -63,6 +63,20 @@ final class MetalPreviousVisibilityHistoryTest {
         assertNotNull(MetalPreviousVertexReplay.worldTransforms(next));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"entity", "item", "block", "particle"})
+    void absentAcceptedUniformsCannotBeReplacedByCurrentVisibleUniforms(String shader) {
+        var source = source(shader);
+        var old = stage(source, 1);
+        MetalPreviousVertexHistory.stageSourceUniforms(old, null);
+        MetalPreviousVertexHistory.commitSubmittedFrame();
+        var current = stage(source, 1);
+        assertArrayEquals(POSITIONS, MetalPreviousVertexHistory.matchedPreviousPositions(current));
+        assertNotNull(MetalPreviousVertexHistory.currentSourceUniforms(current));
+        assertNull(MetalPreviousVertexReplay.previousPositionsForSource(source, current));
+        assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(current, false));
+    }
+
     static RenderPipeline source(String shader) {
         var format = shader.equals("particle") ? DefaultVertexFormat.PARTICLE
                 : shader.equals("block") ? DefaultVertexFormat.BLOCK : DefaultVertexFormat.ENTITY;
