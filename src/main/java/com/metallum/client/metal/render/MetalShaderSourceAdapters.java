@@ -40,12 +40,24 @@ final class MetalShaderSourceAdapters {
         @Override public @Nullable CachedIncludeSource getInclude(Identifier id) {
             CachedIncludeSource include=delegate.getInclude(id);
             if(include==null || include.includeResultPtr()==0)inputs.reject("missing-include-input");
-            else inputs.include(id.toString(),org.lwjgl.util.shaderc.ShadercIncludeResult.create(include.includeResultPtr()).content());
+            else inputs.include(id.toString(),includeContent(include));
             return include;
         }
         @Override public void close() {
             // The original provider and its native include allocations remain owned by the library.
         }
+    }
+
+    /** CachedIncludeSource uses memUTF8(text,false); content() incorrectly scans for a terminator. */
+    static java.nio.ByteBuffer includeContent(ShaderSource.CachedIncludeSource include) {
+        if(include.includeResultPtr()==0)throw new IllegalArgumentException("missing-include-input");
+        var result=org.lwjgl.util.shaderc.ShadercIncludeResult.create(include.includeResultPtr());
+        long length=result.content_length();
+        if(length<0 || length>1024*1024)throw new IllegalArgumentException("shader-input-byte-limit");
+        if(length==0)return java.nio.ByteBuffer.allocate(0);
+        long address=org.lwjgl.system.MemoryUtil.memGetAddress(result.address()+org.lwjgl.util.shaderc.ShadercIncludeResult.CONTENT);
+        if(address==0)throw new IllegalArgumentException("missing-include-input");
+        return org.lwjgl.system.MemoryUtil.memByteBuffer(address,(int)length);
     }
 
     static ShaderSource overlay(

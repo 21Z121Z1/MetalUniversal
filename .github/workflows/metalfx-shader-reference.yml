@@ -67,7 +67,7 @@ jobs:
           target.write_text(json.dumps(data,indent=2)+'\n')
           print(rows[0])
           callback=ET.parse('build/test-results/test/TEST-com.metallum.client.metal.render.MetalShaderIncludeLifetimeTest.xml').getroot()
-          if int(callback.get('tests','0'))!=1 or any(int(callback.get(key,'0')) for key in ('failures','errors','skipped')):
+          if int(callback.get('tests','0'))!=2 or any(int(callback.get(key,'0')) for key in ('failures','errors','skipped')):
               raise SystemExit('native include callback control did not execute successfully')
           controls=[line for block in callback.iter('system-out') for line in (block.text or '').splitlines()
                     if line.startswith('METAL_NATIVE_INCLUDE_CALLBACK_CONTROL ')]

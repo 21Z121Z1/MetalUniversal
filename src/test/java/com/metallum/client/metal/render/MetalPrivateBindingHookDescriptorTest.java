@@ -55,6 +55,7 @@ final class MetalPrivateBindingHookDescriptorTest {
         providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource$CachedIncludeSource");
         providers.add("com/mojang/renderpearl/frontend/shaders/GlslCompiler");
         providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource");
+        providers.add("org/lwjgl/util/shaderc/ShadercIncludeResult");
         var providerBytecode=new java.util.TreeMap<String,Object>();
         for(String name:providers)providerBytecode.put(name,includeProviderBytecode(name));
         report.put("includeProviderBytecode",providerBytecode);

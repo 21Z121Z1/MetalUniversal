@@ -39,7 +39,7 @@ final class MetalShaderIncludeLifetimeTest {
             @Override public String getShader(Identifier requested,ShaderType stage) {return glsl;}
             @Override public CachedIncludeSource getInclude(Identifier requested) {
                 assertEquals(id,requested);callbacks[0]++;
-                assertEquals(expected,fingerprint(ShadercIncludeResult.create(include.includeResultPtr()).content()));
+                assertEquals(expected,fingerprint(MetalShaderSourceAdapters.includeContent(include)));
                 return include;
             }
             @Override public void close() {}
@@ -51,11 +51,11 @@ final class MetalShaderIncludeLifetimeTest {
                         .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES)
                         .withColorTargetState(com.mojang.renderpearl.api.pipeline.ColorTargetState.DEFAULT)
                         .withShaderDefine("CALLBACK_VARIANT",i).build().getShaderDefines();
-                var before=fingerprint(ShadercIncludeResult.create(include.includeResultPtr()).content());
+                var before=fingerprint(MetalShaderSourceAdapters.includeContent(include));
                 try(var module=compiler.compileToSpv(id.toString(),glsl,ShaderType.VERTEX,defines,source)) {
                     assertNotNull(module);
                 }
-                var after=fingerprint(ShadercIncludeResult.create(include.includeResultPtr()).content());
+                var after=fingerprint(MetalShaderSourceAdapters.includeContent(include));
                 observations.add(Map.of("iteration",i,"before",before,"after",after,"callbacks",callbacks[0]));
                 assertEquals(expected,before);assertEquals(expected,after,
                         "A live cached include must not change when shaderc returns");
@@ -68,6 +68,27 @@ final class MetalShaderIncludeLifetimeTest {
         report.put("sourceAdmissionGranted",false);
         report.put("boundary","Synthetic native include callback lifetime only. Runtime Configs/reload concurrency and actual shader semantics remain unproven.");
         System.out.println("METAL_NATIVE_INCLUDE_CALLBACK_CONTROL "+new com.google.gson.Gson().toJson(report));
+    }
+
+    @Test void declaredNativeLengthExcludesAnAllocatedNonzeroTailWithoutScanningForNul() {
+        var result=ShadercIncludeResult.calloc();
+        result.source_name(org.lwjgl.system.MemoryUtil.memUTF8("metallum:bounded_include",false));
+        result.content(org.lwjgl.system.MemoryUtil.memUTF8("headNOT_PART_OF_INCLUDE\0",false));
+        ShadercIncludeResult.ncontent_length(result.address(),4);
+        var include=new ShaderSource.CachedIncludeSource(result.address());
+        try {
+            // The old API's scan remains inside this deliberately larger test allocation.
+            assertEquals("headNOT_PART_OF_INCLUDE".length(),result.content().remaining(),
+                    "Pin the actual dependency's NUL-scanning getter; it ignores content_length");
+            var bounded=MetalShaderSourceAdapters.includeContent(include);assertEquals(4,bounded.remaining());
+            assertEquals("head",StandardCharsets.UTF_8.decode(bounded).toString());
+            ShadercIncludeResult.ncontent_length(result.address(),0);
+            assertEquals(0,MetalShaderSourceAdapters.includeContent(include).remaining());
+            ShadercIncludeResult.ncontent_length(result.address(),1024L*1024+1);
+            assertThrows(IllegalArgumentException.class,()->MetalShaderSourceAdapters.includeContent(include));
+            ShadercIncludeResult.ncontent_length(result.address(),-1);
+            assertThrows(IllegalArgumentException.class,()->MetalShaderSourceAdapters.includeContent(include));
+        } finally {include.close();}
     }
 
     private static Map<String,Object> fingerprint(ByteBuffer input) {

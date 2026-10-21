@@ -22,7 +22,10 @@ final class RuntimeShaderSourceEvidence {
         if(!source.matches("[0-9a-f]{40}"))throw new IllegalStateException("Missing exact source for runtime shader diagnostics");
         result.addProperty("sourceCommit",source);result.addProperty("resourceLookupHistoryEpoch",MetalFxManager.scalingStatus().historyEpoch());
         result.add("runtimeMinecraftArtifact",artifact());var resources=new JsonObject();
-        for(String name:new String[]{"dynamictransforms.glsl","projection.glsl","oit_common.glsl","oit_depth_bounds.glsl","texture_sampling.glsl"}) {
+        for(String name:new String[]{"animation_sprite.glsl","chunksection.glsl","dynamictransforms.glsl","fog.glsl",
+                "globals.glsl","light.glsl","matrix.glsl","oit.glsl","oit_add_transmittance.glsl","oit_common.glsl",
+                "oit_depth_bounds.glsl","oit_depth_sample.glsl","oit_sample.glsl","projection.glsl","sample_lightmap.glsl",
+                "terrainglobals.glsl","texture_sampling.glsl"}) {
             var id=Identifier.fromNamespaceAndPath("minecraft","shaders/include/"+name);
             var resource=client.getResourceManager().getResource(id).orElseThrow(()->new IllegalStateException("Missing runtime shader resource "+id));
             try {
