@@ -72,10 +72,10 @@ final class MetalShaderReloadLeaseEvidence {
             var reloading=new CompletableFuture<Void>();
             // Submit from this test thread without waiting for the client callback to return:
             // a warm reload can reach the blocked close while reloadResourcePacks is still on stack.
-            var client=net.minecraft.client.Minecraft.getInstance();
-            client.execute(()->{
+            var minecraftClient=net.minecraft.client.Minecraft.getInstance();
+            minecraftClient.execute(()->{
                 try {
-                    client.reloadResourcePacks().whenComplete((ignored,failure)->{
+                    minecraftClient.reloadResourcePacks().whenComplete((ignored,failure)->{
                         if(failure==null)reloading.complete(null);else reloading.completeExceptionally(failure);
                     });
                 } catch(Throwable failure) {reloading.completeExceptionally(failure);}

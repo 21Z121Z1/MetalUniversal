@@ -44,6 +44,19 @@ jobs:
               '-PshaderReferenceManifest='+os.environ['METALLUM_SHADER_REFERENCE_DEPENDENCIES'],
               'resolveShaderReferenceArtifacts'],check=True)
           PY
+      - name: Compile the independent client harness before allocating client runners
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          jars=[p for p in Path('build/libs').glob('*.jar')
+                if not p.name.endswith(('-sources.jar','-dev.jar','-validation.jar'))]
+          if len(jars)!=1: raise SystemExit('ambiguous production Java JAR for client harness compilation')
+          subprocess.run(['./gradlew','--no-daemon','--stacktrace','-p','.github/ci/minecraft-e2e',
+              '-PmetallumJar='+str(jars[0].resolve()),'-Pmetallum.noOptionalMods=true',
+              'compileJava','compileTestJava'],check=True)
+          PY
       - name: Inspect exact pinned provider and already cached original client
         run: |
           set -euo pipefail

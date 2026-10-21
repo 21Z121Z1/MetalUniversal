@@ -15,6 +15,7 @@ on:
       - 'build.gradle'
       - 'gradle.properties'
       - '.github/ci/minecraft-e2e/**'
+      - '.github/ci/shader-fixtures/**'
       - '.github/workflows/minecraft-client-e2e.yml'
 
 permissions:
@@ -28,7 +29,38 @@ env:
   METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  compile-client-harness:
+    name: Independent client harness compilation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Compile the production Java artifact and the separate harness source set
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          ./gradlew --no-daemon jar -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          jars=[p for p in Path('build/libs').glob('*.jar')
+                if not p.name.endswith(('-sources.jar','-dev.jar','-validation.jar'))]
+          if len(jars)!=1: raise SystemExit('ambiguous production Java JAR for client harness compilation')
+          subprocess.run(['./gradlew','--no-daemon','--stacktrace','-p','.github/ci/minecraft-e2e',
+              '-PmetallumJar='+str(jars[0].resolve()),'-Pmetallum.noOptionalMods=true',
+              'compileJava','compileTestJava'],check=True)
+          PY
   minecraft-client-e2e:
+    needs: compile-client-harness
     name: "${{ matrix.scene == 'stationary' && 'Stationary time and camera receipts (Metal 3)' || matrix.metalfx == 'requested-temporal' && format('MetalFX client fallback ({0})', matrix.renderer) || format('Minecraft client E2E ({0}, {1})', matrix.renderer, matrix.transport) }}"
     strategy:
       fail-fast: false
