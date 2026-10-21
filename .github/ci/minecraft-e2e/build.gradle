@@ -6,6 +6,9 @@ repositories {
     maven { url "https://api.modrinth.com/maven" }
 }
 
+// Share descriptor construction with the repository's CPU fixture self-test.
+sourceSets.main.java.srcDir('../shader-fixtures')
+
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
 def noOptionalRenderMods = providers.gradleProperty("metallum.noOptionalMods")
         .map { it.toBoolean() }.orElse(false).get()

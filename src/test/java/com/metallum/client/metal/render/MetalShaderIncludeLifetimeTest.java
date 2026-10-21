@@ -1,6 +1,5 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.frontend.shaders.GlslCompiler;
@@ -46,13 +45,10 @@ final class MetalShaderIncludeLifetimeTest {
         };
         try(var compiler=new GlslCompiler(true,true)) {
             for(int i=0;i<8;i++) {
-                var defines=RenderPipeline.builder().withLocation("callback_lifetime/"+i)
-                        .withVertexShader(id).withFragmentShader(id)
-                        .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES)
-                        .withColorTargetState(com.mojang.renderpearl.api.pipeline.ColorTargetState.DEFAULT)
-                        .withShaderDefine("CALLBACK_VARIANT",i).build().getShaderDefines();
+                var pipeline=MetalShaderCompilerFixtures.nativeIncludeCallback(i);
+                var defines=pipeline.getShaderDefines();
                 var before=fingerprint(MetalShaderSourceAdapters.includeContent(include));
-                try(var module=compiler.compileToSpv(id.toString(),glsl,ShaderType.VERTEX,defines,source)) {
+                try(var module=compiler.compileToSpv(pipeline.getShaders().get(ShaderType.VERTEX).toString(),glsl,ShaderType.VERTEX,defines,source)) {
                     assertNotNull(module);
                 }
                 var after=fingerprint(MetalShaderSourceAdapters.includeContent(include));

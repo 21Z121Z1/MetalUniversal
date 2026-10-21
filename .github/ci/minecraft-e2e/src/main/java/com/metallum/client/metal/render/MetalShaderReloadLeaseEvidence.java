@@ -1,10 +1,7 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
-import com.mojang.renderpearl.api.pipeline.ColorTargetState;
-import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.frontend.shaders.GlslCompiler;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -60,12 +57,9 @@ final class MetalShaderReloadLeaseEvidence {
                 @Override public void close() {}
             };
             var compiled=CompletableFuture.runAsync(()->{
-                var defines=RenderPipeline.builder().withLocation("metallum/reload_include_lease")
-                        .withVertexShader("metallum:reload_include_lease").withFragmentShader("metallum:reload_include_lease")
-                        .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withColorTargetState(ColorTargetState.DEFAULT)
-                        .build().getShaderDefines();
+                var defines=MetalShaderCompilerFixtures.reloadIncludeLease().getShaderDefines();
                 try(var compiler=new GlslCompiler(true,true);
-                    var module=compiler.compileToSpv("metallum:reload_include_lease",GLSL,ShaderType.VERTEX,defines,blocking)) {
+                    var module=compiler.compileToSpv(MetalShaderCompilerFixtures.RELOAD_SHADER.toString(),GLSL,ShaderType.VERTEX,defines,blocking)) {
                     require(module!=null,"Actual shaderc produced no module");
                 } catch(com.mojang.renderpearl.util.ShaderCompileException failure) {
                     throw new IllegalStateException("Actual Configs reload lease shader compilation failed",failure);

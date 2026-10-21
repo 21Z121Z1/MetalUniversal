@@ -41,6 +41,9 @@ dependencies {
 // separate source set means the production JAR cannot apply observer mixins or
 // perform trace file I/O during ordinary Iris rendering.
 sourceSets {
+	// Compile the client's exact fixture descriptors in the early JVM suite.
+	// These sources belong to tests and are excluded from the production JAR.
+	test.java.srcDir('.github/ci/shader-fixtures')
 	validation {
 		compileClasspath += sourceSets.main.output + configurations.compileClasspath
 		runtimeClasspath += output + sourceSets.main.runtimeClasspath
