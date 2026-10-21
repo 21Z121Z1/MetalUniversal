@@ -71,6 +71,7 @@ jobs:
             --tests com.metallum.client.metal.render.MetalFxMathTest \
             --tests com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest \
             --tests com.metallum.client.metal.render.MetalParticleVertexAlphaHistoryTest \
+            --tests com.metallum.client.metal.render.MetalParticlePartialAlphaHistoryTest \
             --tests com.metallum.client.metal.render.MetalParticleQuadHistoryTest \
             --tests com.metallum.client.metal.render.MetalParticleCrossGroupHistoryTest \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc
@@ -92,7 +93,7 @@ jobs:
           if int(callback.get('tests','0'))!=1 or any(int(callback.get(key,'0')) for key in ('failures','errors','skipped')):
               raise SystemExit('native include callback control did not execute successfully')
           print('verified bounded native include read and allocated-tail negative control; repeated frontend callbacks require the real-device contract fixture')
-          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest','MetalShaderReloadControllerTest','MetalPreviousVisibilityHistoryTest','MetalParticleVertexAlphaHistoryTest','MetalParticleQuadHistoryTest','MetalParticleCrossGroupHistoryTest'):
+          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest','MetalShaderReloadControllerTest','MetalPreviousVisibilityHistoryTest','MetalParticleVertexAlphaHistoryTest','MetalParticlePartialAlphaHistoryTest','MetalParticleQuadHistoryTest','MetalParticleCrossGroupHistoryTest'):
               suite=ET.parse('build/test-results/test/TEST-com.metallum.client.metal.render.'+name+'.xml').getroot()
               counts={key:int(suite.get(key,'0')) for key in ('tests','failures','errors','skipped')}
               if counts['tests']<=0 or any(counts[key] for key in ('failures','errors','skipped')):

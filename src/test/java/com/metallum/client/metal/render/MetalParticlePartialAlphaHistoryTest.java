@@ -1,0 +1,77 @@
+package com.metallum.client.metal.render;
+
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import org.joml.Matrix4f;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.List;
+import java.util.Map;
+import static org.junit.jupiter.api.Assertions.*;
+
+final class MetalParticlePartialAlphaHistoryTest {
+    static List<MetalParticlePartialAlphaCases.Case> cases() {return MetalParticlePartialAlphaCases.all();}
+    private final MetalEntityMotionCapture.Sample owner=new MetalEntityMotionCapture.Sample(72912,32,new Matrix4f(),new Matrix4f(),FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER);
+    @AfterEach void close() {MetalPreviousVertexHistory.discardFrame();MetalPreviousVertexHistory.reset();}
+
+    @Test void allParametersHaveDistinctArtifactIdentitiesAndOrdinaryPipelineSemantics() {
+        assertEquals(24,cases().size());assertEquals(24,cases().stream().map(MetalParticlePartialAlphaCases.Case::identity).distinct().count());
+        for(boolean opaque:List.of(false,true)) {
+            var p=MetalParticlePartialAlphaCases.pipeline(opaque);
+            System.out.println("CANONICAL_PARTICLE_PIPELINE "+p.getLocation()+" depth="+p.getDepthStencilState()+" color="+p.getColorTargetStates());
+        }
+    }
+    @ParameterizedTest @MethodSource("cases")
+    void sourceInputsRemainTransactionalAcrossPartialHistoryAndGroupChanges(MetalParticlePartialAlphaCases.Case c) {
+        MetalPreviousVertexHistory.beginFrame();stage(c,0);MetalPreviousVertexHistory.commitSubmittedFrame();
+        MetalPreviousVertexHistory.beginFrame();var first=stage(c,1);boolean reject=allRejected(c,first);
+        MetalPreviousVertexHistory.discardFrame();
+        MetalPreviousVertexHistory.beginFrame();var after=stage(c,1);boolean discardDidNotAdvance=allRejected(c,after);
+        MetalPreviousVertexHistory.commitSubmittedFrame();
+        if(c.recovery()) {
+            MetalPreviousVertexHistory.beginFrame();var next=stage(c,1);
+            for(var t:next)assertNotNull(MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(c.opaque()),t));
+        }
+        assertEquals(c.rejectPartialInputs(),reject,"Partial inputs are not a previous-sample proof: "+c);
+        assertEquals(c.rejectPartialInputs(),discardDidNotAdvance,"Discard must retain accepted old input evidence: "+c);
+    }
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> modulators() {
+        var out=new java.util.ArrayList<org.junit.jupiter.params.provider.Arguments>();
+        for(float value:new float[]{Float.NaN,Float.POSITIVE_INFINITY,Float.NEGATIVE_INFINITY,-1,0,.5F,1.01F,2})
+            for(boolean old:new boolean[]{false,true})out.add(org.junit.jupiter.params.provider.Arguments.of(old,value));
+        return out.stream();
+    }
+    @ParameterizedTest @MethodSource("modulators")
+    void unknownNonfiniteAndOutsideUnitModulatorsAreRejectedWithoutClamping(boolean old,float value) {
+                MetalPreviousVertexHistory.reset();MetalPreviousVertexHistory.beginFrame();var c=cases().get(13);
+                var before=stage(c,0).getFirst();if(old)MetalPreviousVertexHistory.stageSourceUniforms(before,MetalSourceUniforms.decode(MetalPreviousVisibilityHistoryTest.dynamic(value),null));
+                MetalPreviousVertexHistory.commitSubmittedFrame();MetalPreviousVertexHistory.beginFrame();var current=stage(c,1).getFirst();
+                if(!old)MetalPreviousVertexHistory.stageSourceUniforms(current,MetalSourceUniforms.decode(MetalPreviousVisibilityHistoryTest.dynamic(value),null));
+                assertNull(MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(false),current),"old="+old+", alpha="+value);
+                assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(current,false));MetalPreviousVertexHistory.discardFrame();
+    }
+    private boolean allRejected(MetalParticlePartialAlphaCases.Case c,List<MetalPreviousVertexHistory.DrawToken> tokens) {
+        boolean all=true;
+        for(var t:tokens) {
+            assertNotNull(MetalPreviousVertexHistory.matchedPreviousPositions(t));
+            all &= MetalPreviousVertexReplay.previousPositionsForSource(MetalParticlePartialAlphaCases.pipeline(c.opaque()),t)==null;
+            assertNotNull(MetalPreviousVertexReplay.currentOnlyTransforms(t,false));
+        }
+        return all;
+    }
+    private List<MetalPreviousVertexHistory.DrawToken> stage(MetalParticlePartialAlphaCases.Case c,int frame) {
+        var p=MetalParticlePartialAlphaCases.pipeline(c.opaque());var result=new java.util.ArrayList<MetalPreviousVertexHistory.DrawToken>();
+        for(var ids:c.ids(frame)) {
+            var token=MetalPreviousVertexHistory.reserveDraw(owner,p);result.add(token);
+            MetalParticleAlphaFixtures.capture(token,DefaultVertexFormat.PARTICLE,PrimitiveTopology.QUADS,MetalParticlePartialAlphaCases.mesh(c,ids,frame),ids.size()*4,ids.size()*6);
+            MetalPreviousVertexHistory.stageParticleIdentities(token,ids);
+            MetalPreviousVertexHistory.stageDrawTransform(token,new MetalPreviousVertexHistory.DrawTransform(new Matrix4f(),new Matrix4f()));
+            MetalPreviousVertexHistory.stageSourceUniforms(token,MetalSourceUniforms.decode(MetalPreviousVisibilityHistoryTest.dynamic(frame==0?c.oldModulator():c.currentModulator()),null));
+            MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(p,Map.of(),true));
+        }
+        return List.copyOf(result);
+    }
+}
