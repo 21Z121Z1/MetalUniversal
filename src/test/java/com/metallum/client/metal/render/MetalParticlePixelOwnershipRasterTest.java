@@ -88,7 +88,8 @@ final class MetalParticlePixelOwnershipRasterTest {
         instrumented=builder.build();
         device.precompilePipeline(instrumented,MetalShaderSourceAdapters.overlay(Map.of(pv,MetalParticlePixelOwnershipPrototype.instrument(vs,ShaderType.VERTEX),pf,MetalParticlePixelOwnershipPrototype.instrument(fs,ShaderType.FRAGMENT)),library));
         projection=buffer("projection",GpuBuffer.USAGE_UNIFORM,matrix(new Matrix4f()));
-        dynamic=buffer("identical source dynamic",GpuBuffer.USAGE_UNIFORM,MetalPreviousVisibilityHistoryTest.dynamic(1));
+        ByteBuffer dd=bytes(160);dd.put(MetalPreviousVisibilityHistoryTest.dynamic(1)).flip();
+        dynamic=buffer("identical source dynamic",GpuBuffer.USAGE_UNIFORM,dd);
         ByteBuffer f=bytes(40);f.putFloat(16,1000).putFloat(20,2000).putFloat(24,1000).putFloat(28,2000);fog=buffer("identical source fog",GpuBuffer.USAGE_UNIFORM,f);
         ByteBuffer ix=bytes(24);for(int q=0;q<2;q++)for(int n:new int[]{0,1,2,2,3,0})ix.putShort((short)(q*4+n));ix.flip();indices=buffer("real QUADS indices",GpuBuffer.USAGE_INDEX,ix);
         white=texture("fixed white atlas/lightmap",GpuFormat.RGBA8_UNORM,64,48);encoder.clearColorTexture(white,new Vector4f(1));whiteView=track(device.createTextureView(white));
@@ -100,7 +101,7 @@ final class MetalParticlePixelOwnershipRasterTest {
         if(device!=null){device.close();device=null;}if(library!=null){library.close();library=null;}
     }
     static List<String> scenes(){return List.of("occluded_same_z","continuous","A_before_B","generation","moving_x","moving_y",
-            "split_merge_ab","split_merge_ba","merge_split_ab","merge_split_ba","discard_recover","failed_recover","resize","reload_epoch","unknown_identity","alias_identity","foreign_depth","cost_854","cost_1080");}
+            "split_merge_ab","split_merge_ba","merge_split_ab","merge_split_ba","discard_recover","discard_move_recover","failed_recover","resize","reload_epoch","unknown_identity","alias_identity","source_lease_unknown","foreign_depth","cost_854","cost_1080");}
 
     @ParameterizedTest(name="{0}") @MethodSource("scenes")
     void originalPixelOwnerControlsHistory(String scene) throws Exception {
@@ -118,11 +119,15 @@ final class MetalParticlePixelOwnershipRasterTest {
         try {
             for(int frame=0;frame<frames;frame++) {
                 if(frame==1 && reset){if(scene.equals("resize")){w=80;surface.close();surface=new Surface();}else{stamp+="/diagnostic-reload-epoch";registry.reset();}MetalPreviousVertexHistory.reset();}
+                if(frame==1 && scene.equals("source_lease_unknown"))try(var tainted=MetalShaderSourceLibraryTest.rawLibrary(true,false)){
+                    var proof=MetalShaderSourceAdapters.libraryProof(tainted);assertNotNull(proof);assertFalse(proof.canonicalOpen());stamp=proof.generation()+"/unproven-source-lease";
+                }
                 var transaction=history.begin(w,h,stamp,Slot::new);
                 MetalPreviousVertexHistory.beginFrame();
                 var batches=batches(scene,frame,a,b);var handles=new IdentityHashMap<Element,MetalParticlePixelOwnershipPrototype.Registry.Handle>();
                 for(var batch:batches)for(var element:batch)if(!handles.containsKey(element))handles.put(element,registry.capture(element.emitter,element.id,GENERATION+(scene.equals("generation")&&frame>0?1:0)));
                 if(frame>0 && scene.equals("unknown_identity"))handles.put(b,null);
+                if(frame>0 && scene.equals("source_lease_unknown"))handles.put(b,null);
                 if(frame>0 && scene.equals("alias_identity"))assertNull(registry.capture(new Object(),b.id,GENERATION));
                 var draws=originalFrame(surface,batches,handles,scene,frame);
                 instrumentedFrame(surface,history,transaction,draws);
@@ -136,7 +141,7 @@ final class MetalParticlePixelOwnershipRasterTest {
                     motion(surface,draws);
                     if(scene.equals("foreign_depth"))foreignDepth(surface,b);
                     byte[] accepted=resolve(surface,transaction,scene,false);int valid=count(accepted);
-                    boolean reject=scene.equals("occluded_same_z") || scene.equals("generation") || scene.equals("unknown_identity") || scene.equals("alias_identity") || scene.equals("foreign_depth") || recover&&frame<=2 || reset&&frame==1;
+                    boolean reject=scene.equals("occluded_same_z") || scene.equals("generation") || scene.equals("unknown_identity") || scene.equals("alias_identity") || scene.equals("source_lease_unknown") || scene.equals("foreign_depth") || recover&&frame<=2 || reset&&frame==1;
                     assertEquals(reject?0:visible,valid,"Pixel owner/generation/depth must ALL match: "+scene+" frame "+frame);
                     int unsafe=-1;
                     if(frame==1 && List.of("occluded_same_z","generation","foreign_depth").contains(scene)) {
@@ -159,7 +164,7 @@ final class MetalParticlePixelOwnershipRasterTest {
             evidence.put("textureAllocations",textures.size());evidence.put("closedTextures",closed);evidence.put("peakLogicalTextureBytes",peakLogicalBytes);
             evidence.put("historyPairLogicalBytesAtCurrentResolution",MetalParticlePixelOwnershipPrototype.bytes(w,h));evidence.put("timings",timings);
             evidence.put("timingBoundary","Bounded offscreen command-buffer GPU timestamps and CPU encoding/wait samples; unavailable GPU timestamps are null, not zero-cost. No FPS, presentation or Temporal quality claim.");
-            String json=new com.google.gson.Gson().toJson(evidence);Files.writeString(directory.resolve("result.json"),json);System.out.println("PARTICLE_PIXEL_OWNERSHIP_PROTOTYPE "+json);
+            String json=new com.google.gson.GsonBuilder().serializeNulls().create().toJson(evidence);Files.writeString(directory.resolve("result.json"),json);System.out.println("PARTICLE_PIXEL_OWNERSHIP_PROTOTYPE "+json);
         }
     }
 
@@ -191,6 +196,7 @@ final class MetalParticlePixelOwnershipRasterTest {
         for(int q=0;q<elements.size();q++){var e=elements.get(q);for(int v=0;v<4;v++){
             int base=(q*4+v)*format.getVertexSize();float x=(paired?(e.red?.5F:-.5F):0)+corners[v][0]*(paired?.25F:.5F);
             float y=corners[v][1]*.5F;if(scene.equals("moving_x"))x+=frame==0?-.25F:.25F;if(scene.equals("moving_y"))y+=frame==0?-.25F:.25F;
+            if(scene.equals("discard_move_recover"))x+=frame==1?.25F:-.25F;
             data.putFloat(base,x).putFloat(base+4,y).putFloat(base+8,z);int c=base+format.getElement("Color").offset();data.put(c,(byte)(e.red?255:0)).put(c+1,(byte)(e.red?0:255)).put(c+2,(byte)0).put(c+3,(byte)255);
             int uv=base+format.getElement("UV0").offset();data.putFloat(uv,.25F).putFloat(uv+4,.5F);
         }}return data;
@@ -232,7 +238,7 @@ final class MetalParticlePixelOwnershipRasterTest {
             for(var draw:draws){if(proof)pass.setUniform("ProofIdentity",draw.ids.slice());pass.setVertexBuffer(0,draw.vertices.slice());pass.drawIndexed(draw.elements.size()*6,1,0,0,0);}
         }
     }
-    private void bindSource(RenderPass pass,RenderPipeline pipeline){
+    private void bindSource(MetalRenderPass pass,RenderPipeline pipeline){
         pass.setPipeline(pipeline);pass.setUniform("Projection",projection.slice());pass.setUniform("DynamicTransforms",dynamic.slice());pass.setUniform("Fog",fog.slice());
         pass.bindTexture("Sampler0",whiteView,sampler);pass.bindTexture("Sampler2",whiteView,sampler);pass.setIndexBuffer(indices,IndexType.SHORT);
     }
