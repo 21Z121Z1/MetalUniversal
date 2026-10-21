@@ -46,7 +46,9 @@ final class MetalUnownedOpaqueTemporalGpuTest {
         var textures=new ArrayList<MetalGpuTexture>();
         var buffers=new ArrayList<GpuBuffer>();
         var views=new ArrayList<GpuTextureView>();
-        Path dir=Path.of("build/agent-evidence/motion-producers/unowned-opaque-temporal/same_z_missing_capture");
+        boolean guardRemoved=Boolean.parseBoolean(System.getenv().getOrDefault("METALLUM_UNOWNED_GUARD_REMOVED","false"));
+        Path dir=Path.of("build/agent-evidence/motion-producers/unowned-opaque-temporal/"+
+                (guardRemoved?"same_z_missing_capture_guard_removed":"same_z_missing_capture"));
         Files.createDirectories(dir);
         MetalEntityMotionCapture.setEnabled(true);
         MetalEntityMotionCapture.beginFrame();
@@ -136,18 +138,30 @@ final class MetalUnownedOpaqueTemporalGpuTest {
                     if(inside) {visible++;if(rejection[p]==0&&reactivity[p]==0)falseCameraAccepted++;}
                 }
                 boolean admitted=MetalFxManager.temporalSourceFrameAdmitted(stamp,false);
+                var safety=MetalMotionDrawCoverage.opaqueTemporalSource();
+                // Re-evaluate immediately after preparation, not an earlier cached permit.
+                assertEquals(1,safety.actual());assertEquals(1,safety.hooked());assertEquals(0,safety.owned());
+                assertEquals(1,safety.missingCapture());
+                var copied=texture(device,textures,"actual current-color fallback",GpuFormat.RGBA8_UNORM);
+                if(!admitted) {
+                    assertTrue(encoder.encodeTextureCopy(color,copied,true));
+                    assertArrayEquals(currentRgba,read(device,encoder,copied));
+                }
                 var result=Map.ofEntries(Map.entry("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local")),
                         Map.entry("sourceFrame",stamp),Map.entry("pipeline",source.getLocation().toString()),
                         Map.entry("depthState",source.getDepthStencilState().toString()),Map.entry("visibleUnownedPixels",visible),
                         Map.entry("v4CameraAcceptedWrongHistoryPixels",falseCameraAccepted),Map.entry("productionSourceAdmitted",admitted),
                         Map.entry("shaderGateRejected",!MetalFxManager.temporalSourceFrameAdmitted(stamp,true)),
                         Map.entry("coverage",MetalMotionDrawCoverage.census()),Map.entry("rgbaAndD32UnchangedByMotion",true),
+                        Map.entry("sourceSafety",safety),Map.entry("currentCopyRgbaUnchanged",!admitted),Map.entry("guardRemoved",guardRemoved),
+                        Map.entry("wrongHistoryPixelsAdmittedAfterGuard",admitted?falseCameraAccepted:0),
+                        Map.entry("guardRemovedAdmittedWrongHistoryPixels",falseCameraAccepted),
                         Map.entry("physicalTemporalEncodeAttempted",false),Map.entry("admissionWithSupportedCapabilities",MetalFxManager.selectMode(
                                 MetalFxConfig.Mode.TEMPORAL,true,true,true).toString()));
                 String json=new com.google.gson.Gson().toJson(result);Files.writeString(dir.resolve("result.json"),json);
                 System.out.println("UNOWNED_OPAQUE_TEMPORAL "+json);
                 assertEquals(768,visible);assertEquals(768,falseCameraAccepted);
-                assertTrue(admitted,"Frozen baseline: source dispatch currently accepts the unowned frame");
+                assertFalse(admitted,"A visible unowned source must never enter Temporal or seed its accepted history");
             }
         } finally {
             MetalMotionDrawCoverage.endScene();MetalEntityMotionCapture.beginFrame();

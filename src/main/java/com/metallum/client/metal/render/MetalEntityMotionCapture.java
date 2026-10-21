@@ -576,6 +576,12 @@ public final class MetalEntityMotionCapture {
 
     @Nullable
     public static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo, final @Nullable OitStage stage) {
+        return takeExecute(executeInfo,stage,null);
+    }
+
+    @Nullable
+    static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo,final @Nullable OitStage stage,
+                              final MetalPreviousVertexReplay.@Nullable SourceState source) {
         if (!enabled) {
             return null;
         }
@@ -584,6 +590,10 @@ public final class MetalEntityMotionCapture {
         boolean colorStage = stage == null || stage == OitStage.ACCUMULATE;
         boolean duplicate = colorStage && capture != null && !REPLAYED_DRAWS.add(capture);
         MetalMotionDrawCoverage.sourceExecution(stage, sample, duplicate);
+        Sample replaySample=colorStage && !duplicate ? sample : null;
+        if(source!=null)MetalMotionDrawCoverage.hookedDraw(source,stage,replaySample,
+                !colorStage?"non-color-stage":duplicate?"duplicate-color":sample==null?"missing-capture":"owned",
+                DRAWS.size(),EXECUTES.size());
         if (!colorStage || duplicate) {
             EXECUTE_VERTEX_TOKENS.remove(executeInfo);
             return null;

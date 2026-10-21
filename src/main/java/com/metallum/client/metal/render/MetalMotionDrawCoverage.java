@@ -16,6 +16,14 @@ public final class MetalMotionDrawCoverage {
     private static long ownedInvalid;
     private static final boolean VALIDATION = Boolean.getBoolean("metallum.metalfx.captureMotionValidation");
     private static final MetalMotionFrameManifest FRAME_MANIFEST=new MetalMotionFrameManifest();
+    private static final MetalTemporalSourceSafety OPAQUE_TEMPORAL=new MetalTemporalSourceSafety();
+    private static MetalTemporalSourceSafety.Snapshot lastOpaqueTemporal=OPAQUE_TEMPORAL.snapshot();
+    public record OpaqueMiss(long sequence,long frameId,long epoch,String stage,String cause,
+                             long actual,long hooked,long owned,int liveCaptures,int pendingExecutes) {}
+    public record OpaqueTemporalEvidence(MetalTemporalSourceSafety.Snapshot sourceFrame,long missingExecutions,
+                                         java.util.List<OpaqueMiss> misses,long omittedMisses) {}
+    private static final java.util.List<OpaqueMiss> OPAQUE_MISSES=new java.util.ArrayList<>();
+    private static long opaqueMissingExecutions;
     private static MetalMotionFrameManifest.Snapshot lastSourceFrame=FRAME_MANIFEST.snapshot();
     private static MetalUiDrawCoverage.Snapshot lastUiFrame=MetalUiDrawCoverage.snapshot();
     private static boolean scene;
@@ -47,7 +55,7 @@ public final class MetalMotionDrawCoverage {
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
                          Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture, MetalMotionFrameManifest.Snapshot sourceFrame,MetalUiDrawCoverage.Snapshot uiFrame,
-                         Map<String,Map<String,String>> shaderInputProviders) {}
+                         Map<String,Map<String,String>> shaderInputProviders,OpaqueTemporalEvidence opaqueTemporal) {}
 
     private MetalMotionDrawCoverage() {}
 
@@ -57,6 +65,8 @@ public final class MetalMotionDrawCoverage {
         var ui=MetalUiDrawCoverage.snapshot();
         if(ui.frameId()>0)lastUiFrame=ui;
         FRAME_MANIFEST.reset();
+        if(OPAQUE_TEMPORAL.snapshot().frameId()>0)lastOpaqueTemporal=OPAQUE_TEMPORAL.snapshot();
+        OPAQUE_TEMPORAL.reset();
         MetalUiDrawCoverage.reset();
         motionReplayDepth = 0;
         FRAME_OWNER_CLASSES.clear();
@@ -113,12 +123,30 @@ public final class MetalMotionDrawCoverage {
 
     static void bindSourceFrame(FrameSynthesisContract.FrameStamp stamp) {
         FRAME_MANIFEST.begin(stamp.frameId(),stamp.historyEpoch());
+        OPAQUE_TEMPORAL.begin(stamp.frameId(),stamp.historyEpoch());
     }
 
     static void closeSourceObservation(FrameSynthesisContract.FrameStamp stamp) {
         var current=FRAME_MANIFEST.snapshot();
         if(current.frameId()!=stamp.frameId() || current.epoch()!=stamp.historyEpoch())return;
         FRAME_MANIFEST.closeObservation();lastSourceFrame=FRAME_MANIFEST.snapshot();
+        lastOpaqueTemporal=OPAQUE_TEMPORAL.snapshot();
+    }
+
+    static boolean opaqueTemporalSourceAdmitted(FrameSynthesisContract.FrameStamp stamp) {
+        return stamp!=null && OPAQUE_TEMPORAL.snapshot().admits(stamp.frameId(),stamp.historyEpoch());
+    }
+
+    static MetalTemporalSourceSafety.Snapshot opaqueTemporalSource() {return OPAQUE_TEMPORAL.snapshot();}
+
+    static void observeOpaqueActual(RenderPipeline pipeline,long calls,boolean indirect) {
+        if(scene && motionReplayDepth==0 && ordinaryOpaqueColor(pipeline))OPAQUE_TEMPORAL.actual(calls,indirect);
+    }
+
+    private static boolean ordinaryOpaqueColor(RenderPipeline pipeline) {
+        return pipeline!=null && pipeline.getLocation().getNamespace().equals("minecraft")
+                && pipeline.getLocation().getPath().equals("pipeline/opaque_particle")
+                && pipeline.getColorTargetStates().stream().anyMatch(target->target!=null && target.writeMask()!=0);
     }
 
     static boolean sourceFrameLinked(FrameSynthesisContract.FrameStamp stamp) {
@@ -142,6 +170,7 @@ public final class MetalMotionDrawCoverage {
     static void actualDraw(final MetalCompiledRenderPipeline compiled,final int count,final boolean indirect) {
         if(!scene || compiled==null || count<=0)return;
         RenderPipeline source=compiled.sourcePipeline();
+        observeOpaqueActual(source,count,indirect);
         String name=source==null ? "backend-only:"+compiled.validationPipelineId() : source.getLocation().toString();
         if(motionReplayDepth==0 && FRAME_MANIFEST.collecting()) {
             if(source==null)FRAME_MANIFEST.record(name,true,MetalMotionFrameManifest.Event.ACTUAL,count);
@@ -173,6 +202,22 @@ public final class MetalMotionDrawCoverage {
 
     static void hookedDraw(final MetalPreviousVertexReplay.@Nullable SourceState state, final @Nullable OitStage stage,
                            final MetalEntityMotionCapture.@Nullable Sample sample) {
+        hookedDraw(state,stage,sample,sample==null?"missing-capture":"owned",0,0);
+    }
+
+    static void hookedDraw(final MetalPreviousVertexReplay.@Nullable SourceState state, final @Nullable OitStage stage,
+                           final MetalEntityMotionCapture.@Nullable Sample sample,String cause,int liveCaptures,int pendingExecutes) {
+        if(scene && state!=null && motionReplayDepth==0 && stage==null && ordinaryOpaqueColor(state.pipeline())) {
+            OPAQUE_TEMPORAL.hook(sample!=null,cause);
+            if(sample==null && VALIDATION) {
+                long sequence=++opaqueMissingExecutions;
+                if(OPAQUE_MISSES.size()<64) {
+                    var s=OPAQUE_TEMPORAL.snapshot();
+                    OPAQUE_MISSES.add(new OpaqueMiss(sequence,s.frameId(),s.epoch(),"ordinary-color",cause,
+                            s.actual(),s.hooked(),s.owned(),liveCaptures,pendingExecutes));
+                }
+            }
+        }
         if(scene && state!=null && motionReplayDepth==0) {
             frameEvent(state.pipeline(),MetalMotionFrameManifest.Event.HOOKED,1);
             if((stage==null || stage==OitStage.ACCUMULATE) && sample!=null)
@@ -202,7 +247,9 @@ public final class MetalMotionDrawCoverage {
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
                 MetalUiDrawCoverage.forSourceFrame(lastSourceFrame.frameId(),lastSourceFrame.epoch(),
-                        MetalUiDrawCoverage.snapshot(),lastUiFrame),inputProviders());
+                        MetalUiDrawCoverage.snapshot(),lastUiFrame),inputProviders(),
+                new OpaqueTemporalEvidence(lastOpaqueTemporal,opaqueMissingExecutions,java.util.List.copyOf(OPAQUE_MISSES),
+                        opaqueMissingExecutions-OPAQUE_MISSES.size()));
     }
 
     private static ShaderInputs shaderInputsFor(String key) {

@@ -153,8 +153,12 @@ gradle.projectsEvaluated {
     configureHostedTest(
         "hostedMetalUnownedOpaqueTest",
         "Runs the bounded ordinary opaque unowned source and Temporal admission oracle.",
-        ["com.metallum.client.metal.render.MetalUnownedOpaqueTemporalGpuTest"]
-    )
+        ["com.metallum.client.metal.render.MetalUnownedOpaqueTemporalGpuTest",
+         "com.metallum.client.metal.render.MetalTemporalSourceSafetyTest",
+         "com.metallum.client.metal.render.MetalStagedMotionExecutionTest",
+         "com.metallum.client.metal.render.MetalOpaqueParticleHistoryGpuTest",
+         "com.metallum.client.metal.render.MetalParticlePartialAlphaGpuTest"]
+    ).configure {task -> task.systemProperty "metallum.metalfx.captureMotionValidation", "true"}
 
     def hostedCore = configureHostedTest(
         "hostedMetalCoreIntegrationTest",

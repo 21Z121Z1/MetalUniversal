@@ -971,9 +971,8 @@ public final class MetalFxManager {
     public static void drawStagedMotion(final StagedVertexBuffer.ExecuteInfo info,
             final net.minecraft.client.renderer.oit.@Nullable OitStage stage, final RenderPass sourcePass) {
         if (!MetalEntityMotionCapture.isEnabled()) return;
-        MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.takeExecute(info, stage);
-        if(MetalMotionDrawCoverage.needsSourceObservation())
-            MetalMotionDrawCoverage.hookedDraw(MetalPreviousVertexReplay.sourceState(sourcePass), stage, sample);
+        MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.takeExecute(info, stage,
+                MetalMotionDrawCoverage.needsSourceObservation()?MetalPreviousVertexReplay.sourceState(sourcePass):null);
         if (sample == null) return;
         MetalFxManager manager = active;
         if (manager != null) manager.drawEntityMotionInternal(info, sample, sourcePass);
@@ -2724,7 +2723,16 @@ public final class MetalFxManager {
             this.frameResetForPresent = historyReset;
             MetalGpuTexture temporalColor = color;
             MetalGpuTexture temporalOutput = output;
-            boolean sourceAdmitted = temporalSourceFrameAdmitted(sourceFrameStamp, sourceShaderInputsUnprovenThisFrame);
+            // Spatial diagnostic history remains independent. Only a real Temporal source
+            // dispatch consumes this frame-local gate; owned-invalid replay is still safe.
+            boolean sourceAdmitted = !sourceShaderInputsUnprovenThisFrame && (effectiveMode != MetalFxConfig.Mode.TEMPORAL
+                    || temporalSourceFrameAdmitted(sourceFrameStamp, false));
+            if(effectiveMode==MetalFxConfig.Mode.TEMPORAL && !sourceAdmitted) {
+                // Copy this source's current color, discard its pending motion/receipts below,
+                // and reset the next accepted Temporal source. No rejected depth pair swaps.
+                historyReset=true;surfaceDepthHistoryValid=false;frameResetForPresent=true;
+                temporalColorTransferStamp=null;
+            }
             if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && sourceAdmitted && !usesNativeDirectFrameGeneration()) {
                 if (temporalColorTransfer == null) temporalColorTransfer = new MetalFxColorTransfer(device);
                 temporalColor = temporalColorTransfer.decode(encoder, color, output.getWidth(0), output.getHeight(0));
@@ -2984,7 +2992,7 @@ public final class MetalFxManager {
 
     /** The source gate used immediately before the real Temporal dispatch and history transaction. */
     static boolean temporalSourceFrameAdmitted(FrameSynthesisContract.@Nullable FrameStamp source, boolean shaderInputsUnproven) {
-        return !shaderInputsUnproven;
+        return !shaderInputsUnproven && MetalMotionDrawCoverage.opaqueTemporalSourceAdmitted(source);
     }
 
     private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
