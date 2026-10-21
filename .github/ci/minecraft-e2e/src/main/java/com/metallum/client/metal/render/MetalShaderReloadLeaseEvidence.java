@@ -24,6 +24,8 @@ final class MetalShaderReloadLeaseEvidence {
             """;
 
     static Map<String,Object> reload(ClientGameTestContext context) {
+        // Resolve the client on its owner thread before the blocked compiler borrow begins.
+        var minecraftClient=context.computeOnClient(client->client);
         ShaderSource source=context.computeOnClient(client->{
             var device=MetalDevice.current();require(device!=null,"Missing actual Metal device for reload lease");
             return device.activeShaderSource();
@@ -72,7 +74,6 @@ final class MetalShaderReloadLeaseEvidence {
             var reloading=new CompletableFuture<Void>();
             // Submit from this test thread without waiting for the client callback to return:
             // a warm reload can reach the blocked close while reloadResourcePacks is still on stack.
-            var minecraftClient=net.minecraft.client.Minecraft.getInstance();
             minecraftClient.execute(()->{
                 try {
                     minecraftClient.reloadResourcePacks().whenComplete((ignored,failure)->{
