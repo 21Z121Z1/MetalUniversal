@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Real pinned shaderc callbacks, without a Metal device. This does not certify runtime Configs. */
 final class MetalShaderIncludeLifetimeTest {
-    @Test void cachedNativeIncludeBytesRemainStableAcrossRepeatedRealCompilerCallbacks() throws Exception {
+    static void verifyRepeatedCompilerCallbacksWithInitializedDevice() throws Exception {
         var id=Identifier.fromNamespaceAndPath("metallum","callback_lifetime.glsl");
         String text="""
                 #ifndef CALLBACK_LIFETIME_BODY

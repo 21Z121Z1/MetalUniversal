@@ -182,6 +182,11 @@ final class MetalFirstPersonMotionGpuTest {
     }
 
     @Test
+    void initializedFrontendCompilerRetainsNativeIncludeBytesAcrossRepeatedCallbacks() throws Exception {
+        MetalShaderIncludeLifetimeTest.verifyRepeatedCompilerCallbacksWithInitializedDevice();
+    }
+
+    @Test
     void closingTemporaryPreloadSourcesCannotReplaceTheLiveBackendLibrary() {
         ShaderSource live=device.activeShaderSource();
         var includeId=Identifier.fromNamespaceAndPath("metallum","temporary_preload.glsl");
