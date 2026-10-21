@@ -3,7 +3,7 @@ name: Pinned shader source reference
 on:
   push:
     tags:
-      - 'validation/metalfx-shader-source-*'
+      - 'diagnostics/metalfx-shader-source-*'
 
 permissions:
   contents: read
