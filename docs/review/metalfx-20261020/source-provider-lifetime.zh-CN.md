@@ -4,6 +4,10 @@
 
 ## 证据更正
 
+随后查明了指纹读取代码本身的长度错误：LWJGL的`ShadercIncludeResult.content()`按NUL扫描；Minecraft的`CachedIncludeSource.create`使用`memUTF8(text,false)`并另存`content_length`。因此旧诊断可能越过声明内容，读到尾部字节。旧include差异不能作为资源替换或use-after-free的证据，相关推断撤回。修正直接读取CONTENT指针并使用经过上限检查的声明长度，不先调用NUL扫描getter再截断。新增尾部非零哨兵、空长度、超预算和负长度控制；实际固定依赖的验证与重复编译控制分别保留结果，不能仅靠当前LWJGL源码推断固定版本已通过。依据见[LWJGL官方生成实现](https://raw.githubusercontent.com/LWJGL/lwjgl3/master/modules/lwjgl/shaderc/src/generated/java/org/lwjgl/util/shaderc/ShadercIncludeResult.java)。
+
+真实客户端的独立ResourceManager查询显示原始client身份和五份资源匹配固定参考，但查询发生在capture之后，不能代替每次编译的准入证明。修正后的实际编译读取仍须重新验证。此前报告的错误观测保留以供复现，不能当作发现了材质或坐标语义变化。
+
 上述证据tag中`newUnvalidatedSourceLibraryWork.issue`所写“差异仅在内部Metallum回放，Minecraft源输入均匹配”判断过早，现撤回。此前检查只看到了排序输出的前段。全量累计program/include观测计数为：Vanilla的Metallum/Minecraft分别33/73，Sodium的Metallum/Minecraft/Sodium分别34/90/6。它们是程序与编译变体的累计观测，不能当成fragment数或某一源帧的完整证明。
 
 根vertex/fragment源码指纹匹配固定原始client参考；include仍有未解释的差异。Vanilla涉及dynamictransforms、oit_depth_bounds、texture_sampling，Sodium涉及projection、oit_common。未知差异没有进入白名单。固定加载器直接读取资源，未找到格式化模板转换；检查47份已声明Fabric API/Sodium依赖容器也未找到相应替换资源。这些负结果既不证明任意资源包没有替换，也不证明已复现use-after-free。

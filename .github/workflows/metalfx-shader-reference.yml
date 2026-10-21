@@ -77,6 +77,20 @@ jobs:
               raise SystemExit('incorrect native callback control source or admission boundary')
           print(controls[0])
           PY
+      - name: Retain native include control failure causes
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          for path in Path('build/test-results/test').glob('TEST-com.metallum.client.metal.render.MetalShaderIncludeLifetimeTest.xml'):
+              suite=ET.parse(path).getroot()
+              print('native include control test counts:',suite.attrib)
+              for case in suite.findall('testcase'):
+                  for failure in list(case.findall('failure'))+list(case.findall('error')):
+                      print(case.attrib)
+                      print((failure.text or '')[:32768])
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
