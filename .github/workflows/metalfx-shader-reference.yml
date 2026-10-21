@@ -69,6 +69,7 @@ jobs:
             --tests com.metallum.client.metal.render.MetalShaderSourceLibraryTest \
             --tests com.metallum.client.metal.render.MetalCanonicalShaderReferenceTest \
             --tests com.metallum.client.metal.render.MetalFxMathTest \
+            --tests com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc
           python3 - <<'PY'
           from pathlib import Path
@@ -88,7 +89,7 @@ jobs:
           if int(callback.get('tests','0'))!=1 or any(int(callback.get(key,'0')) for key in ('failures','errors','skipped')):
               raise SystemExit('native include callback control did not execute successfully')
           print('verified bounded native include read and allocated-tail negative control; repeated frontend callbacks require the real-device contract fixture')
-          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest','MetalShaderReloadControllerTest'):
+          for name in ('MetalShaderLibraryProofTest','MetalShaderSourceLibraryTest','MetalCanonicalShaderReferenceTest','MetalFxMathTest','MetalShaderReloadControllerTest','MetalPreviousVisibilityHistoryTest'):
               suite=ET.parse('build/test-results/test/TEST-com.metallum.client.metal.render.'+name+'.xml').getroot()
               counts={key:int(suite.get(key,'0')) for key in ('tests','failures','errors','skipped')}
               if counts['tests']<=0 or any(counts[key] for key in ('failures','errors','skipped')):
@@ -106,6 +107,13 @@ jobs:
           for path in Path('build/test-results/test').glob('TEST-com.metallum.client.metal.render.MetalShaderIncludeLifetimeTest.xml'):
               suite=ET.parse(path).getroot()
               print('native include control test counts:',suite.attrib)
+              for case in suite.findall('testcase'):
+                  for failure in list(case.findall('failure'))+list(case.findall('error')):
+                      print(case.attrib)
+                      print((failure.text or '')[:32768])
+          for path in Path('build/test-results/test').glob('TEST-com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest.xml'):
+              suite=ET.parse(path).getroot()
+              print('previous visibility CPU control test counts:',suite.attrib)
               for case in suite.findall('testcase'):
                   for failure in list(case.findall('failure'))+list(case.findall('error')):
                       print(case.attrib)

@@ -160,6 +160,7 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+            "com.metallum.client.metal.render.MetalPreviousVisibilityGpuTest",
             "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
@@ -173,6 +174,8 @@ gradle.projectsEvaluated {
         "Runs actual packaged previous-position shaders and verifies raster-space displacement.",
         ["com.metallum.client.metal.render.MetalFxColorTransferGpuTest",
          "com.metallum.client.metal.render.MetalMotionProducerGpuTest",
+         "com.metallum.client.metal.render.MetalPreviousVisibilityGpuTest",
+         "com.metallum.client.metal.render.MetalPreviousVisibilityHistoryTest",
          "com.metallum.client.metal.render.MetalFirstPersonMotionGpuTest"]
     )
 
