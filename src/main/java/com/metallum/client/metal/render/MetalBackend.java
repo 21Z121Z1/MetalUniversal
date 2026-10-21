@@ -25,9 +25,14 @@ import java.lang.foreign.MemorySegment;
 public final class MetalBackend implements GpuBackend {
     /** Publishes Minecraft's complete RenderPearl source provider for lazy Metal PSO compilation. */
     public static ShaderSource captureShaderSource(final ShaderSource shaderSource) {
-        ShaderSource effectiveSource = MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
+        ShaderSource effectiveSource = prepareShaderSource(shaderSource);
         MetalDevice.captureShaderSource(effectiveSource);
         return effectiveSource;
+    }
+
+    /** Prepares an owned provider without publishing it as the live backend library. */
+    public static ShaderSource prepareShaderSource(final ShaderSource shaderSource) {
+        return MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
     }
 
     /** Attaches the original frontend semantics after the matching async compile completes. */
@@ -54,8 +59,10 @@ public final class MetalBackend implements GpuBackend {
             CompiledRenderPipeline compiled = pending.finishCompile();
             capturePipelineSource(compiled, source);
             if(compilationSource!=null && compiled instanceof FrontendRenderPipeline frontend
-                    && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal)
+                    && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal) {
                 metal.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
+                metal.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
+            }
             return compiled;
         };
     }

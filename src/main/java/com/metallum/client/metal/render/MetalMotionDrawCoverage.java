@@ -24,6 +24,7 @@ public final class MetalMotionDrawCoverage {
     private static final Map<RenderPipeline, MetalMotionProgramIdentity.Identity> PROGRAM_IDENTITIES = new java.util.IdentityHashMap<>();
     private static final Map<String, MetalMotionProgramIdentity.Description> PROGRAM_DESCRIPTIONS = new TreeMap<>();
     private static final Map<String, long[]> PROGRAMS = new TreeMap<>();
+    private static final Map<String,Map<String,String>> PROGRAM_INPUT_PROVIDERS=new TreeMap<>();
     private static final Map<String,Map<String,MetalShaderInputCapture.Snapshot>> PROGRAM_INPUTS=new TreeMap<>();
     private static final java.util.Set<String> PROGRAM_INPUT_OVERFLOW=new java.util.HashSet<>();
     private record OwnerKey(FrameSynthesisContract.ProducerDomain domain, long id, long generation) {}
@@ -42,7 +43,8 @@ public final class MetalMotionDrawCoverage {
                                 ShaderInputs shaderInputs) {}
     public record Census(boolean rawMotionValidation, Map<String, PipelineCounts> pipelines,
                          Map<String, ProgramCounts> programs, Map<String, OwnerCounts> owners,
-                         Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture, MetalMotionFrameManifest.Snapshot sourceFrame,MetalUiDrawCoverage.Snapshot uiFrame) {}
+                         Snapshot lastFrame, MetalEntityMotionCapture.Diagnostics capture, MetalMotionFrameManifest.Snapshot sourceFrame,MetalUiDrawCoverage.Snapshot uiFrame,
+                         Map<String,Map<String,String>> shaderInputProviders) {}
 
     private MetalMotionDrawCoverage() {}
 
@@ -159,6 +161,8 @@ public final class MetalMotionDrawCoverage {
                     if(variants.containsKey(inputs.contentSha256()) || variants.size()<4)
                         variants.put(inputs.contentSha256(),inputs);
                     else PROGRAM_INPUT_OVERFLOW.add(key);
+                    if(variants.containsKey(inputs.contentSha256()))PROGRAM_INPUT_PROVIDERS.computeIfAbsent(key,ignored->new TreeMap<>())
+                            .put(inputs.contentSha256(),compiled.shaderInputProviderType());
                 }
             }
         }
@@ -195,7 +199,13 @@ public final class MetalMotionDrawCoverage {
         return new Census(VALIDATION, Map.copyOf(copy), Map.copyOf(programs), Map.copyOf(owners),
                 snapshot(), MetalEntityMotionCapture.diagnostics(),lastSourceFrame,
                 MetalUiDrawCoverage.forSourceFrame(lastSourceFrame.frameId(),lastSourceFrame.epoch(),
-                        MetalUiDrawCoverage.snapshot(),lastUiFrame));
+                        MetalUiDrawCoverage.snapshot(),lastUiFrame),inputProviders());
+    }
+
+    private static Map<String,Map<String,String>> inputProviders() {
+        var copy=new TreeMap<String,Map<String,String>>();
+        PROGRAM_INPUT_PROVIDERS.forEach((program,providers)->copy.put(program,Map.copyOf(providers)));
+        return Map.copyOf(copy);
     }
 
     static void sourceExecution(final @Nullable OitStage stage,

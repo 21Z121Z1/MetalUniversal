@@ -705,6 +705,7 @@ final class MetalDevice implements GpuDeviceBackend {
             }
             compiled.captureSourcePipeline(pipeline);
             compiled.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource));
+            compiled.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
             this.compiledPipelines.put(pipeline, compiled);
             this.frontendPipelines.put(pipeline, frontendPipeline);
             return compiled;

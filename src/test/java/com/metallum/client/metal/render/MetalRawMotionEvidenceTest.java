@@ -9,7 +9,7 @@ final class MetalRawMotionEvidenceTest {
     private static MetalMotionDrawCoverage.Census census(long frame,long epoch,boolean closed) {
         var source=new MetalMotionFrameManifest.Snapshot(frame,epoch,true,closed,false,
                 Map.of("sky",new MetalMotionFrameManifest.Draws(true,1,0,0,0,0,0)),List.of("sky:unlinked-source-draw"));
-        return new MetalMotionDrawCoverage.Census(true,Map.of(),Map.of(),Map.of(),null,null,source,null);
+        return new MetalMotionDrawCoverage.Census(true,Map.of(),Map.of(),Map.of(),null,null,source,null,Map.of());
     }
 
     @Test void lateGpuCompletionKeepsTheOriginalSourceFrameAndUnprovenProducer() {

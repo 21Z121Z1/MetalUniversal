@@ -1,0 +1,26 @@
+# Shader provider 来源与关闭边界
+
+`f369891abd4dfd1f2f79033b999706a8a5687a8e`的五套工程工作流与九条真实客户端均成功；10会话、81次capture、952926条producer的终态收据已逐项读回。其完整原文见[不可变验收证据](https://api.github.com/repos/21Z121Z1/MetalUniversal/git/tags/05ec41d5bba037a74e3b42285420a5f6765052c7)。这不是完整源码语义、Temporal/FG画质或最终分支收敛验收。
+
+## 证据更正
+
+上述证据tag中`newUnvalidatedSourceLibraryWork.issue`所写“差异仅在内部Metallum回放，Minecraft源输入均匹配”判断过早，现撤回。此前检查只看到了排序输出的前段。全量累计program/include观测计数为：Vanilla的Metallum/Minecraft分别33/73，Sodium的Metallum/Minecraft/Sodium分别34/90/6。它们是程序与编译变体的累计观测，不能当成fragment数或某一源帧的完整证明。
+
+根vertex/fragment源码指纹匹配固定原始client参考；include仍有未解释的差异。Vanilla涉及dynamictransforms、oit_depth_bounds、texture_sampling，Sodium涉及projection、oit_common。未知差异没有进入白名单。固定加载器直接读取资源，未找到格式化模板转换；检查47份已声明Fabric API/Sodium依赖容器也未找到相应替换资源。这些负结果既不证明任意资源包没有替换，也不证明已复现use-after-free。
+
+新的真实客户端诊断记录编译provider类型、运行时Minecraft代码JAR摘要，以及当前ResourceManager选中的五份include及pack来源。资源查询明确发生在capture之后，标记diagnosticOnly，不冒充同一源帧的编译读取证明。原先冻结的raw frame/epoch/census与全部像素断言保留。
+
+## 已核实的所有权
+
+- GameRenderer类SHA256为`20ace1767a6f7b6a2e07a623e688c2565514c8902e4c74494998506a6d71d9c6`。其`preloadUiShader`创建单独的ShaderSource和PipelineCache，交给`RenderSystem.setFallbackPipelineCache`；它不是ShaderManager发布的current完整库。
+- PipelineCache类SHA256为`6080bf18b8a946a1e7d3067067cbc7245891ee75c3fae41949712699edc40a6a`。`clear`关闭编译对象，`close`随后关闭自己的ShaderSource。
+- Configs类SHA256为`b93a12d3c1ec835602b6f594e16ed46a2619629f32225e0a48efc1e492a72078`。`getInclude`直接返回map里的CachedIncludeSource；`close`释放这些include。
+- CachedIncludeSource类SHA256为`d1c2e467627524dddd41db3e7fa05829c2b6a9cda8d783e6303ee22e038be5ab`。关闭会释放source-name、content和结果struct；保留Java record并不保留原生内存。
+
+本次最小修正把UI preload的准备与完整库发布分开：fallback cache取得带classpath补充的自有provider，不能覆盖设备当前完整库。完整库仍在ShaderManager成功apply之后发布。新增实际原生include分配/关闭及随后从既有live库编译的控制，检查关闭临时provider不会替换live库。这一修正需要自己的准确SHA原生与客户端验收；它不预先证明已解释全部include差异。
+
+完整library generation、关闭失效及canonical输入准入仍为本地未验证工作。[可恢复WIP原文](https://api.github.com/repos/21Z121Z1/MetalUniversal/git/tags/149007befb497d1186ed947bcfaf21821ebf9951)保存tracked patch和六份新文件，已在独立detached worktree恢复核对并从远端fetch逐字验证，标记doNotPromote=true。13项纯Java测试通过；完整新准入、关闭并发、实际客户端和硬件质量尚未验收，不能借用f369绿灯。
+
+本地参考脚本的`--print-path`在缺缓存时会启动下载；一次误作只读查询的调用再次收到403，未取得参考源码，随后停止该路径。后续核查使用已有CI缓存与固定字节码，没有修改凭据、保护或下载代理。GitHub连接器的两个外部tags集合查询也因端点不在允许列表而被拒，未重试；没有对外部仓库写入。
+
+默认main、原分支及全部恢复标签保留。最终SHA全相关门禁、恢复材料审核与并行写入停写确认完成之前，不合并或删除分支。

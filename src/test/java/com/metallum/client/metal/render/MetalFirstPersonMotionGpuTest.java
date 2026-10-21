@@ -181,6 +181,42 @@ final class MetalFirstPersonMotionGpuTest {
     }
 
     @Test
+    void closingTemporaryPreloadSourcesCannotReplaceTheLiveBackendLibrary() {
+        ShaderSource live=device.activeShaderSource();
+        var includeId=Identifier.fromNamespaceAndPath("metallum","temporary_preload.glsl");
+        var include=ShaderSource.CachedIncludeSource.create(includeId,"// temporary preload owner\n");
+        boolean[] closed={false};
+        ShaderSource temporary=new ShaderSource() {
+            @Override public String getShader(Identifier id,ShaderType stage) {
+                if(closed[0])throw new IllegalStateException("temporary source closed");
+                return null;
+            }
+            @Override public CachedIncludeSource getInclude(Identifier id) {
+                if(closed[0])throw new IllegalStateException("temporary source closed");
+                return id.equals(includeId) ? include : null;
+            }
+            @Override public void close() {if(!closed[0]) {closed[0]=true;include.close();}}
+        };
+        ShaderSource prepared=MetalBackend.prepareShaderSource(temporary);
+        try {
+            assertSame(include,prepared.getInclude(includeId));
+            assertNotEquals(0L,include.includeResultPtr());
+            assertSame(live,device.activeShaderSource());
+        } finally {prepared.close();}
+        assertTrue(closed[0]);assertSame(live,device.activeShaderSource());
+        var resources=BindGroupLayout.builder().withUniform("Projection",UniformType.UNIFORM_BUFFER)
+                .withUniform("DynamicTransforms",UniformType.UNIFORM_BUFFER).withUniform("Fog",UniformType.UNIFORM_BUFFER)
+                .withUniform("Sampler0",UniformType.COMBINED_IMAGE_SAMPLER).build();
+        var source=RenderPipeline.builder().withLocation("source_contract/after_preload_close")
+                .withVertexShader("core/entity").withFragmentShader("core/entity")
+                .withVertexBinding(0,DefaultVertexFormat.ENTITY).withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withBindGroupLayout(resources).withColorTargetState(ColorTargetState.DEFAULT)
+                .withShaderDefine("NO_CARDINAL_LIGHTING").withShaderDefine("NO_OVERLAY").withShaderDefine("EMISSIVE").build();
+        var compiled=(com.mojang.renderpearl.frontend.FrontendRenderPipeline)device.precompilePipeline(source,null);
+        assertSame(source,((MetalCompiledRenderPipeline)compiled.backendRenderPipeline()).sourcePipeline());
+    }
+
+    @Test
     void worldDrawHistoryMatchesActualMinecraftColorShaderRaster() throws Exception {
         var source = RenderPipeline.builder().withLocation("source_contract/world_entity")
                 .withVertexShader("core/entity").withFragmentShader("core/entity")

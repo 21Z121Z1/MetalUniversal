@@ -942,6 +942,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             context.waitTicks(5);
             var census = context.computeOnClient(client -> com.metallum.client.metal.render.MetalMotionDrawCoverage.census());
             JsonObject report = new GsonBuilder().create().toJsonTree(census).getAsJsonObject();
+            report.add("runtimeShaderResourcesAfterCapture",context.computeOnClient(RuntimeShaderSourceEvidence::capture));
             report.addProperty("verified", false);
             report.addProperty("boundary", "real Minecraft source draw/owner/history and GPU motion replay; Temporal/FG quality checked separately");
             try { Files.writeString(output.resolve("motion-source-draw-coverage.json"),
@@ -1142,6 +1143,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         report.addProperty("cloudStatus",status.name());report.addProperty("oit",oit);
                         report.add("raw",gson.toJsonTree(raw));report.add("sourceCensus",frozen.get("sourceCensus"));
                         report.add("cloudLayers",frozen.get("cloudLayers"));
+                        report.add("runtimeShaderResourcesAfterCapture",context.computeOnClient(RuntimeShaderSourceEvidence::capture));
                         report.addProperty("sourceEvidenceFrameId",frozen.get("frameId").getAsLong());
                         report.addProperty("sourceEvidenceHistoryEpoch",frozen.get("historyEpoch").getAsLong());
                         report.addProperty("sourceEvidenceSourceCommit",frozen.get("sourceCommit").getAsString());

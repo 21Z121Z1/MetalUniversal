@@ -33,8 +33,8 @@ public abstract class GameRendererMetalFxMixin {
             ),
             index = 1
     )
-    private static ShaderSource metallum$captureRenderPearlShaderSource(final ShaderSource shaderSource) {
-        return MetalBackend.captureShaderSource(shaderSource);
+    private static ShaderSource metallum$preparePreloadShaderSource(final ShaderSource shaderSource) {
+        return MetalBackend.prepareShaderSource(shaderSource);
     }
 
     @Redirect(

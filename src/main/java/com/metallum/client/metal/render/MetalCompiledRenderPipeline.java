@@ -106,6 +106,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
         shaderInputs=inputs;
     }
 
+    private volatile String shaderInputProviderType="unrecorded";
+    String shaderInputProviderType() {return shaderInputProviderType;}
+    void captureShaderProvider(String providerType) {shaderInputProviderType=providerType;}
+
     @Nullable RenderPipeline sourcePipeline() { return sourcePipeline; }
 
     void captureSourcePipeline(final RenderPipeline source) {

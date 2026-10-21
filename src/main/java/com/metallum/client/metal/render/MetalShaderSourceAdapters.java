@@ -21,6 +21,11 @@ final class MetalShaderSourceAdapters {
         return source instanceof CompilationSource ? source : new CompilationSource(source);
     }
 
+    static String compileProviderType(ShaderSource source) {
+        while(source instanceof CompilationSource compile)source=compile.delegate;
+        return source.getClass().getName();
+    }
+
     static MetalShaderInputCapture.@Nullable Snapshot compiledInputs(ShaderSource source) {
         return source instanceof CompilationSource capture ? capture.inputs.finish() : null;
     }
