@@ -2351,15 +2351,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             if (frameGenerationSubmit) {
                 MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
             }
-            if (!success) {
-                for (SubmitCallback callback : callbacks) {
-                    callback.failed.run();
-                }
-            } else {
-                for (SubmitCallback callback : callbacks) {
-                    callback.completed.run();
+            // Every owner must receive its terminal notification, even when
+            // another owner fails. In particular, query slots must not remain
+            // pending after completionHandled has permanently advanced.
+            Throwable firstFailure = null;
+            for (SubmitCallback callback : callbacks) {
+                try {
+                    (success ? callback.completed : callback.failed).run();
+                } catch (RuntimeException | Error failure) {
+                    if (firstFailure == null) {
+                        firstFailure = failure;
+                    } else if (firstFailure != failure) {
+                        firstFailure.addSuppressed(failure);
+                    }
                 }
             }
+            if (firstFailure instanceof RuntimeException failure) throw failure;
+            if (firstFailure instanceof Error failure) throw failure;
         }
     }
 

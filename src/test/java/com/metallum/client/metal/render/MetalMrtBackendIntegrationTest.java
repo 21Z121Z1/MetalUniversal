@@ -1189,6 +1189,32 @@ final class MetalMrtBackendIntegrationTest {
         assertEquals(0, failed.get(), "successful Metal command buffers must not poison frame history");
     }
 
+    @Test
+    void completionCallbackFailureStillResolvesOtherOwnersAndTimestampQueries() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(device.getDeviceInfo().timestampPeriod() > 0.0F,
+                "this case requires real GPU counters");
+        var firstFailure = new IllegalStateException("first completion owner failed");
+        var secondFailure = new IllegalArgumentException("second completion owner failed");
+        AtomicInteger completed = new AtomicInteger();
+        try (var queries = device.createTimestampQueryPool(1)) {
+            encoder.commandBuffer();
+            encoder.onCurrentSubmit(() -> { }, () -> { throw firstFailure; }, () -> fail("GPU submit failed"));
+            encoder.onCurrentSubmit(() -> { }, () -> {
+                completed.incrementAndGet();
+                throw secondFailure;
+            }, () -> fail("GPU submit failed"));
+            encoder.onCurrentSubmit(() -> { }, completed::incrementAndGet, () -> fail("GPU submit failed"));
+            encoder.writeTimestamp(queries, 0);
+            encoder.submit();
+
+            assertSame(firstFailure, assertThrows(IllegalStateException.class, device::waitForSubmittedGpuWork));
+            assertEquals(2, completed.get(), "one broken completion owner must not strand later owners");
+            assertArrayEquals(new Throwable[]{secondFailure}, firstFailure.getSuppressed());
+            assertTrue(queries.getValue(0).isPresent(), "a completed GPU sample must not remain pending forever");
+            assertDoesNotThrow(device::waitForSubmittedGpuWork, "completion notifications are delivered only once");
+        }
+    }
+
     private void runRgbaAttachmentCount(final int count) {
         String shaderName = "mrt_rgba_" + count;
         StringBuilder fragment = new StringBuilder("#version 450\n");
