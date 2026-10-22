@@ -216,6 +216,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
 
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")
+    // A native crash can persist Vanilla's OpenGL recovery choice. Every
+    // backend regression must select Metal explicitly, then prove activation.
+    jvmArgs.add("-Dmetallum.validation.forceMetal=true")
     jvmArgs.add("-Dmetallum.ci.gameplay=${providers.gradleProperty('gameplay').orElse('false').get()}")
     jvmArgs.add("-Dmetallum.ci.waitForProfiler=${waitForProfiler}")
     jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
@@ -267,10 +270,6 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         if (renderDebugLabels) {
             programArgs.add('--renderDebugLabels')
         }
-        // A failed automated launch can persist Vanilla's OpenGL recovery choice.
-        // Select Metal explicitly for this profiling lane; native activation is
-        // still required before any measurements are accepted.
-        jvmArgs.add("-Dmetallum.validation.forceMetal=true")
         jvmArgs.add("-Dmetallum.opt.reuseEncoderState=${reuseEncoderState}")
         jvmArgs.add("-Dmetallum.opt.reuseNativeEncoderArguments=${reuseNativeEncoderArguments}")
         jvmArgs.add("-Dmetallum.opt.terrainSliceCache=${terrainSliceCache}")
