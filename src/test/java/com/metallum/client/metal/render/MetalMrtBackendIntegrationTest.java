@@ -286,6 +286,71 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void submitMaterializesDeferredClearsBeforeAdvancingFenceOwnership() {
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                "submit deferred color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1)) {
+            encoder.clearColorTexture(color, new Vector4f(0.5F, 0.25F, 0.125F, 1.0F));
+            try (var fence = encoder.createFence()) {
+                assertFalse(fence.awaitCompletion(0L));
+                encoder.submit();
+                assertFalse(encoder.hasPendingClear(color), "explicit submit must include preceding logical clears");
+                assertTrue(fence.awaitCompletion(-1L));
+                assertByteNear(readback(color).get(0), 128, "submitted clear");
+            }
+        }
+    }
+
+    @Test
+    void gpuDrainMaterializesDeferredColorAndDepthClearsWithoutOtherWork() {
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                     "drain deferred color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 2);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                     "drain deferred depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 2)) {
+            encoder.clearColorTexture(color, new Vector4f(0.125F, 0.25F, 0.5F, 1.0F));
+            encoder.clearDepthTexture(depth, 0.375);
+            assertTrue(encoder.hasPendingClear(color));
+            assertTrue(encoder.hasPendingClear(depth));
+
+            device.waitForSubmittedGpuWork();
+
+            assertFalse(encoder.hasPendingClear(color), "GPU drain must consume clear-only color work");
+            assertFalse(encoder.hasPendingClear(depth), "GPU drain must consume clear-only depth work");
+            for (int mip = 0; mip < 2; mip++) {
+                assertByteNear(readback(color, mip).get(0), 32, "drained color mip " + mip);
+                assertEquals(0.375F, readback(depth, mip).getFloat(0), 0.0001F);
+            }
+        }
+    }
+
+    @Test
+    void timestampBoundaryMaterializesPrecedingDeferredColorAndDepthClears() {
+        try (var queries = device.createTimestampQueryPool(1);
+             MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                     "query deferred color", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+             MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                     "query deferred depth", TEXTURE_USAGE, GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(device.getDeviceInfo().timestampPeriod() > 0.0F,
+                    "this case requires real GPU counters");
+            encoder.clearColorAndDepthTextures(color, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F), depth, 0.625);
+
+            encoder.writeTimestamp(queries, 0);
+
+            assertFalse(encoder.hasPendingClear(color), "earlier color clear must be encoded before the GPU sample");
+            assertFalse(encoder.hasPendingClear(depth), "earlier depth clear must be encoded before the GPU sample");
+            assertTrue(queries.getValue(0).isEmpty(), "sampling must not submit implicitly");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertTrue(queries.getValue(0).isPresent(), "the ordered GPU sample must complete");
+            assertByteNear(readback(color).get(0), 64, "timestamp-ordered clear");
+            assertEquals(0.625F, readback(depth).getFloat(0), 0.0001F);
+        }
+    }
+
+    @Test
     void pendingPipelineDoesNotSurviveCacheInvalidation() {
         String name = "pending_generation";
         fragmentShaders.put(name, """

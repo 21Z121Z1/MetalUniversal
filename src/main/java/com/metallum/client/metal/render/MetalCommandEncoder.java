@@ -604,12 +604,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void submit() {
+        // Deferred clears are logical commands even when no native buffer has
+        // been opened yet. They must belong to this submission (and its
+        // fences), rather than leaking into a later frame or cache teardown.
+        submitRenderPass();
+        flushAllPendingClears();
+        endEncoder();
         if (commandBuffer == null) {
             return;
         }
-
-        submitRenderPass();
-        endEncoder();
 
         int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
         MemorySegment completedSemaphore = submitSemaphores[slot];
@@ -2209,11 +2212,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void waitForSubmittedGpuWork() {
-        if (commandBuffer != null || currentRenderPass != null || currentEncoder != null) {
-            submit();
-        } else {
-            endEncoder();
-        }
+        submit();
         for (InFlight submitted : inFlight) {
             if (submitted != null) {
                 awaitInFlightCompletion(submitted, Long.MAX_VALUE);
@@ -2230,6 +2229,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         long generation = metalPool.beginWrite(index);
         try {
             submitRenderPass();
+            // A query observes all preceding logical commands, including
+            // whole-texture clears that have not needed an encoder yet.
+            flushAllPendingClears();
             endEncoder();
             int backend = MetalNativeBridge.renderPearlTimestampWriteCommand(
                     commandBuffer().nativeHandle(), metalPool.nativeHandle(), index,
