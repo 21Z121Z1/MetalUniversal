@@ -18,7 +18,7 @@ class ProgressReceiptTest(unittest.TestCase):
     def test_phase_receipts_precede_waits_and_pass_follows_cleanup(self):
         source = DRIVER.read_text()
         for phase, operation in [
-            ('setup', 'Path harness'), ('world-create', 'try (var world'),
+            ('setup', 'Path harness'), ('world-input', 'try (var world'),
             ('initial-40-ticks', 'context.waitTicks(40)'),
             ('full-chunks', 'context.waitFor('),
             ('render-ready', 'world.getConnection().waitForChunksRender'),

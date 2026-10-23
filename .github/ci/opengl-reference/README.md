@@ -39,13 +39,33 @@ The upstream fix shipped in [0.19.4](https://github.com/FabricMC/fabric-loader/r
 This harness therefore requires at least 0.19.4 and verifies the actual runtime
 loader against the staged input. Minecraft, Iris and Sodium versions are unchanged.
 
-This is an explicit **1280×720, 12-distance hosted smoke profile**. Generated
+The default is an explicit **1280×720, 12-distance hosted smoke profile**. Generated
 worlds are not snapshot-equivalent across lanes, Iris wall-clock history is not
 normalized, and no Metal image comparison or performance decision is made.
 It establishes whether an independent reference can execute and preserves its
 raw RGBA8 image, PNG, source/harness/pack identity and errors. The physical
 native-resolution, distance-32 correctness/performance gates remain separate.
 Worlds, Minecraft binaries and downloaded shader packs are excluded from uploads.
+
+For local saved-world input checks, stage an existing seed-1 `WorldSnapshot`
+directory and its adjacent `-manifest.json`. Pass all dimensions explicitly:
+
+```sh
+python3 .github/ci/opengl-reference/prepare_reference.py --renderer iris \
+  --instance "$PWD/build/saved-reference-instance" --output build/saved-reference-evidence \
+  --world-snapshot /absolute/path/to/initial-world --width 3024 --height 1964 --distance 32
+```
+
+Use those instance/evidence paths in the Gradle and verifier commands below.
+Gradle reads the staged dimensions and distance; conflicting overrides fail.
+The separate `saved-world-opengl-reference-v1` scenario opens only a verified
+copy under the fresh instance's `saves/reference-snapshot`. Both Python staging
+and the shared Java `WorldSnapshot.verify` check the canonical manifest before
+Minecraft opens the copy. The original snapshot is never opened or changed.
+The pinned Fabric 6.0.7 saved-world implementation owns connection and cleanup.
+Receipts must match the observed snapshot and manifest hashes, file count and
+bytes. This binds initial content; simulation history, Iris clocks and shader
+preprocessing still need matching before an image-equivalence conclusion.
 
 Local use (macOS with a real OpenGL context):
 

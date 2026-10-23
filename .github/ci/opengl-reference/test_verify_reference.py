@@ -56,6 +56,29 @@ class ReferenceOracleTest(unittest.TestCase):
     def test_complete_reference_passes(self):
         self.check()
 
+    def test_saved_world_requires_matching_observed_snapshot(self):
+        self.inputs.update(scenario='saved-world-opengl-reference-v1', worldSnapshot={
+            'saveDirectory': 'reference-snapshot', 'snapshotSha256': 'd' * 64,
+            'manifestSha256': 'e' * 64, 'fileCount': 51, 'bytes': 38790676})
+        self.report.update(scenario=self.inputs['scenario'], worldSnapshot={
+            key: value for key, value in self.inputs['worldSnapshot'].items() if key != 'saveDirectory'})
+        self.check()
+        for field, value in [('snapshotSha256', 'f' * 64), ('manifestSha256', 'f' * 64),
+                             ('fileCount', 50), ('fileCount', 51.0), ('bytes', 0)]:
+            with self.subTest(field=field, value=value):
+                report = copy.deepcopy(self.report)
+                report['worldSnapshot'][field] = value
+                with self.assertRaises(ValueError):
+                    self.check(report)
+        self.report.pop('worldSnapshot')
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_hosted_world_cannot_substitute_saved_content(self):
+        self.report['worldSnapshot'] = {'snapshotSha256': 'd' * 64}
+        with self.assertRaises(ValueError):
+            self.check()
+
     def test_rejects_substitutions_and_incomplete_receipts(self):
         mutations = [
             ('status', 'running'), ('status', 'wall-clock-timeout'), ('status', 'correctness-failed'), ('sourceSha', 'c' * 40), ('harnessJarSha256', 'c' * 64),

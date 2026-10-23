@@ -74,7 +74,24 @@ def verify(root, source_sha, driver, harness):
     report = json.loads((root / 'reference.json').read_text())
     inputs = json.loads((root / 'inputs.json').read_text())
     require(report.get('schemaVersion') == 1 and report.get('status') == 'passed', 'Reference did not complete')
-    require(report.get('scenario') == inputs.get('scenario') == 'hosted-opengl-reference-v1', 'Wrong scenario')
+    scenario = inputs.get('scenario')
+    require(report.get('scenario') == scenario and scenario in
+            ('hosted-opengl-reference-v1', 'saved-world-opengl-reference-v1'), 'Wrong scenario')
+    if scenario == 'saved-world-opengl-reference-v1':
+        expected, observed = inputs.get('worldSnapshot'), report.get('worldSnapshot')
+        require(isinstance(expected, dict) and isinstance(observed, dict), 'Missing saved-world identity')
+        require(expected.get('saveDirectory') == 'reference-snapshot', 'Wrong isolated save directory')
+        for field in ('snapshotSha256', 'manifestSha256'):
+            digest = expected.get(field)
+            require(isinstance(digest, str) and len(digest) == 64
+                    and all(c in '0123456789abcdef' for c in digest)
+                    and observed.get(field) == digest, 'World snapshot digest mismatch: ' + field)
+        for field in ('fileCount', 'bytes'):
+            require(type(expected.get(field)) is int and expected[field] > 0
+                    and type(observed.get(field)) is int and observed[field] == expected[field],
+                    'World snapshot content mismatch: ' + field)
+    else:
+        require('worldSnapshot' not in inputs and 'worldSnapshot' not in report, 'Hosted world was substituted')
     require(report.get('sourceSha') == source_sha == report.get('buildIdentity', {}).get('sourceSha'), 'Wrong source SHA')
     require(report['buildIdentity'].get('driverSha256') == hashlib.sha256(driver.read_bytes()).hexdigest(), 'Wrong loaded driver')
     require(report.get('harnessJarSha256') == hashlib.sha256(harness.read_bytes()).hexdigest(), 'Wrong production harness JAR')

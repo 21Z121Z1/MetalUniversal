@@ -6,11 +6,13 @@ def e2eVersions = new Properties()
 file('../minecraft-e2e/gradle.properties').withInputStream { e2eVersions.load(it) }
 def renderer = providers.gradleProperty('referenceRenderer').orElse('iris').get()
 if (!(renderer in ['vanilla', 'sodium', 'iris'])) throw new GradleException('Unknown referenceRenderer')
-def width = providers.gradleProperty('referenceWidth').orElse('1280').get().toInteger()
-def height = providers.gradleProperty('referenceHeight').orElse('720').get().toInteger()
-def distance = providers.gradleProperty('referenceDistance').orElse('12').get().toInteger()
-if (width < 64 || height < 64 || distance < 2 || distance > 32) throw new GradleException('Invalid reference dimensions/distance')
 def evidence = file(providers.gradleProperty('referenceEvidence').orElse("${buildDir}/evidence").get())
+def inputFile = new File(evidence, 'inputs.json')
+def profile = inputFile.isFile() ? new groovy.json.JsonSlurper().parse(inputFile) : [:]
+def width = providers.gradleProperty('referenceWidth').orElse((profile.width ?: 1280).toString()).get().toInteger()
+def height = providers.gradleProperty('referenceHeight').orElse((profile.height ?: 720).toString()).get().toInteger()
+def distance = providers.gradleProperty('referenceDistance').orElse((profile.renderDistance ?: 12).toString()).get().toInteger()
+if (width < 64 || width > 8192 || height < 64 || height > 8192 || distance < 2 || distance > 32) throw new GradleException('Invalid reference dimensions/distance')
 def instance = file(providers.gradleProperty('referenceRunDir').orElse("${buildDir}/run/${renderer}").get())
 def sourceSha = providers.gradleProperty('referenceSourceSha').orElse(providers.environmentVariable('METALLUM_SOURCE_SHA')).orElse('unrecorded').get()
 
@@ -25,6 +27,10 @@ dependencies {
     if (renderer == 'iris') productionRuntimeMods "maven.modrinth:iris:${versions.getProperty('iris_version')}"
 }
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+sourceSets.main.java {
+    srcDir('../minecraft-e2e/src/main/java')
+    include('com/metallum/reference/**', 'com/metallum/e2e/WorldSnapshot.java')
+}
 tasks.named('processResources') {
     inputs.property('referenceSourceSha', sourceSha)
     inputs.file('src/main/java/com/metallum/reference/OpenGlReferenceGameTest.java')
@@ -51,6 +57,9 @@ tasks.register('runOpenGlReference', net.fabricmc.loom.task.prod.ClientProductio
         '--uuid', '8f16930a-42ad-4f9b-9d59-02698f26b145', '--width', width.toString(), '--height', height.toString())
     doFirst {
         if (!(sourceSha ==~ /[0-9a-f]{40}/)) throw new GradleException('Exact referenceSourceSha is required')
+        if (profile.renderer != renderer || profile.width != width || profile.height != height || profile.renderDistance != distance) {
+            throw new GradleException('Staged reference inputs must match the requested renderer, dimensions and distance')
+        }
         instance.mkdirs()
         def options = new File(instance, 'options.txt')
         options.text = 'preferredGraphicsBackend:"opengl"\nstartedCleanly:true\nonboardAccessibility:false\n' +

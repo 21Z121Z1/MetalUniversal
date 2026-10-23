@@ -3,12 +3,15 @@ package com.metallum.reference;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.metallum.e2e.WorldSnapshot;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
+import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import net.fabricmc.fabric.impl.client.gametest.world.TestWorldSaveImpl;
 import net.fabricmc.loader.api.FabricLoader;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.api.v0.IrisApi;
@@ -54,6 +57,13 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
         report.addProperty("claim", "Independent stock OpenGL reference only; no Metal parity, physical quality or performance verdict");
         Receipt receipt = new Receipt(report);
         try {
+            JsonObject inputs = JsonParser.parseString(Files.readString(OUTPUT.resolve("inputs.json"))).getAsJsonObject();
+            String scenario = inputs.get("scenario").getAsString();
+            require(scenario.equals("hosted-opengl-reference-v1") || scenario.equals("saved-world-opengl-reference-v1"), "Unknown reference scenario");
+            require(inputs.get("renderer").getAsString().equals(RENDERER)
+                    && inputs.get("width").getAsInt() == WIDTH && inputs.get("height").getAsInt() == HEIGHT
+                    && inputs.get("renderDistance").getAsInt() == DISTANCE, "Reference input profile differs from runtime arguments");
+            report.addProperty("scenario", scenario);
             JsonObject mods = new JsonObject();
             FabricLoader.getInstance().getAllMods().stream()
                     .sorted(java.util.Comparator.comparing(m -> m.getMetadata().getId()))
@@ -92,14 +102,8 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                     require(!enabled, "Iris world preparation did not disable shaders");
                 });
             }
-            receipt.checkpoint(report, "world-create");
-            try (var world = context.worldBuilder().setUseConsistentSettings(false).adjustSettings(settings -> {
-                settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
-                        .worldgenLoadContext().lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(WorldPresets.NORMAL)));
-                settings.setName("Independent OpenGL reference");
-                settings.setSeed("1");
-                settings.setGenerateStructures(true);
-            }).create()) {
+            receipt.checkpoint(report, "world-input");
+            try (var world = openWorld(context, inputs, report, receipt)) {
                 try {
                     receipt.checkpoint(report, "scene-setup");
                     world.getServer().runCommand("gamemode spectator @a");
@@ -193,6 +197,44 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
             receipt.finish(report, "correctness-failed");
             throw new IllegalStateException("OpenGL reference failed", failure);
         }
+    }
+
+    private TestSingleplayerContext openWorld(ClientGameTestContext context, JsonObject inputs, JsonObject report, Receipt receipt)
+            throws java.io.IOException {
+        if (!inputs.has("worldSnapshot")) {
+            require(inputs.get("scenario").getAsString().equals("hosted-opengl-reference-v1"), "Saved-world reference has no snapshot");
+            receipt.checkpoint(report, "world-create");
+            return context.worldBuilder().setUseConsistentSettings(false).adjustSettings(settings -> {
+                settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
+                        .worldgenLoadContext().lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(WorldPresets.NORMAL)));
+                settings.setName("Independent OpenGL reference");
+                settings.setSeed("1");
+                settings.setGenerateStructures(true);
+            }).create();
+        }
+        require(inputs.get("scenario").getAsString().equals("saved-world-opengl-reference-v1"), "Hosted scene cannot substitute a saved world");
+        JsonObject expected = inputs.getAsJsonObject("worldSnapshot");
+        require(expected.get("saveDirectory").getAsString().equals("reference-snapshot"), "Unexpected snapshot save directory");
+        Path gameDirectory = context.computeOnClient(client -> client.gameDirectory.toPath()).toAbsolutePath().normalize();
+        Path snapshot = gameDirectory.resolve("saves/reference-snapshot");
+        String verified = WorldSnapshot.verify(snapshot);
+        Path manifestPath = snapshot.resolveSibling("reference-snapshot-manifest.json");
+        JsonObject manifest = JsonParser.parseString(Files.readString(manifestPath)).getAsJsonObject();
+        long bytes = 0;
+        for (var row : manifest.getAsJsonArray("files")) bytes += row.getAsJsonObject().get("bytes").getAsLong();
+        JsonObject observed = new JsonObject();
+        observed.addProperty("snapshotSha256", verified);
+        observed.addProperty("manifestSha256", hash(manifestPath));
+        observed.addProperty("fileCount", manifest.getAsJsonArray("files").size());
+        observed.addProperty("bytes", bytes);
+        for (String field : new String[]{"snapshotSha256", "manifestSha256", "fileCount", "bytes"}) {
+            require(observed.get(field).equals(expected.get(field)), "Staged snapshot differs from input: " + field);
+        }
+        report.add("worldSnapshot", observed);
+        receipt.checkpoint(report, "world-open");
+        // Fabric 6.0.7 has no public saved-world factory. Its pinned implementation
+        // retains ownership of the GameTest threading, connection and close lifecycle.
+        return new TestWorldSaveImpl(context, snapshot).open();
     }
 
     private JsonObject capture(Minecraft client) {
