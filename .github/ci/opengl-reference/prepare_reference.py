@@ -61,6 +61,8 @@ def main():
             raise ValueError('World snapshot changed while staging its isolated copy')
         inputs.update(scenario='saved-world-opengl-reference-v1',
                       claim='Saved-world OpenGL reference; temporal/preprocessing parity and performance require separate gates',
+                      quality={'requestedPreset': 'FABULOUS', 'simulationDistance': 12,
+                               'vsync': False, 'fpsLimitOption': 260},
                       worldSnapshot={**identity, 'saveDirectory': staged.name, 'source': str(snapshot)})
     if args.renderer == 'iris':
         request = urllib.request.Request(PACK_URL, headers={'User-Agent': 'MetalUniversal-OpenGL-reference/1.0'})

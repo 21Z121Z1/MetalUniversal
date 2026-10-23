@@ -29,7 +29,7 @@ dependencies {
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 sourceSets.main.java {
     srcDir('../minecraft-e2e/src/main/java')
-    include('com/metallum/reference/**', 'com/metallum/e2e/WorldSnapshot.java')
+    include('com/metallum/reference/**', 'com/metallum/e2e/WorldSnapshot.java', 'com/metallum/e2e/RenderQualitySnapshot.java')
 }
 tasks.named('processResources') {
     inputs.property('referenceSourceSha', sourceSha)

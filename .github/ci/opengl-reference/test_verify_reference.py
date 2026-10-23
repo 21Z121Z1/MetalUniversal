@@ -56,12 +56,30 @@ class ReferenceOracleTest(unittest.TestCase):
     def test_complete_reference_passes(self):
         self.check()
 
-    def test_saved_world_requires_matching_observed_snapshot(self):
+    def use_saved_world_profile(self):
         self.inputs.update(scenario='saved-world-opengl-reference-v1', worldSnapshot={
             'saveDirectory': 'reference-snapshot', 'snapshotSha256': 'd' * 64,
             'manifestSha256': 'e' * 64, 'fileCount': 51, 'bytes': 38790676})
         self.report.update(scenario=self.inputs['scenario'], worldSnapshot={
             key: value for key, value in self.inputs['worldSnapshot'].items() if key != 'saveDirectory'})
+        self.inputs['quality'] = {'requestedPreset': 'FABULOUS', 'simulationDistance': 12,
+                                  'vsync': False, 'fpsLimitOption': 260}
+        self.report['requestedQuality'] = self.inputs['quality'].copy()
+        quality = {'renderDistance': 12, 'effectiveRenderDistance': 12, 'simulationDistance': 12,
+                   'graphicsPreset': 'CUSTOM', 'ambientOcclusion': True, 'clouds': 'FANCY',
+                   'cloudRange': 128, 'particles': 'ALL', 'mipmapLevels': 4, 'entityDistanceScaling': 1.25,
+                   'entityShadows': True, 'biomeBlendRadius': 2, 'improvedTransparency': False,
+                   'textureFiltering': 'ANISOTROPIC', 'maxAnisotropyBit': 2, 'cutoutLeaves': True,
+                   'weatherRadius': 10, 'vsync': False, 'fpsLimitOption': 260, 'fov': 70, 'gamma': 0.5}
+        self.report['qualityBeforeSettling'] = quality.copy()
+        self.report['qualityAfterPreset'] = {**quality, 'graphicsPreset': 'FABULOUS'}
+        self.report['capture']['quality'] = quality.copy()
+        self.report['capture']['dimensions'] = {key: 2 for key in (
+            'nativeWindowPixelWidth', 'nativeWindowPixelHeight', 'surfaceWidth', 'surfaceHeight',
+            'framebufferWidth', 'framebufferHeight', 'renderWidth', 'renderHeight')}
+
+    def test_saved_world_requires_matching_observed_snapshot(self):
+        self.use_saved_world_profile()
         self.check()
         for field, value in [('snapshotSha256', 'f' * 64), ('manifestSha256', 'f' * 64),
                              ('fileCount', 50), ('fileCount', 51.0), ('bytes', 0)]:
@@ -73,6 +91,24 @@ class ReferenceOracleTest(unittest.TestCase):
         self.report.pop('worldSnapshot')
         with self.assertRaises(ValueError):
             self.check()
+
+    def test_saved_world_rejects_quality_or_physical_dimension_changes(self):
+        self.use_saved_world_profile()
+        self.check()
+        for key, value in [('qualityBeforeSettling', None), ('requestedQuality', None),
+                           ('qualityAfterPreset', None), ('qualityAfterPreset.graphicsPreset', 'FANCY'),
+                           ('capture.quality', None), ('capture.quality.mipmapLevels', 2),
+                           ('capture.quality.fov', 80), ('capture.dimensions', None),
+                           ('capture.dimensions.nativeWindowPixelWidth', 1),
+                           ('capture.dimensions.surfaceHeight', 1), ('capture.dimensions.renderWidth', 1)]:
+            with self.subTest(key=key):
+                report = copy.deepcopy(self.report)
+                target = report
+                parts = key.split('.')
+                for part in parts[:-1]: target = target[part]
+                target[parts[-1]] = value
+                with self.assertRaises(ValueError):
+                    self.check(report)
 
     def test_hosted_world_cannot_substitute_saved_content(self):
         self.report['worldSnapshot'] = {'snapshotSha256': 'd' * 64}

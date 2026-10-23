@@ -64,7 +64,16 @@ and the shared Java `WorldSnapshot.verify` check the canonical manifest before
 Minecraft opens the copy. The original snapshot is never opened or changed.
 The pinned Fabric 6.0.7 saved-world implementation owns connection and cleanup.
 Receipts must match the observed snapshot and manifest hashes, file count and
-bytes. This binds initial content; simulation history, Iris clocks and shader
+bytes. Saved-world runs request Fabulous, simulation distance 12, vsync off and
+the uncapped 260 option, then enter fullscreen at the requested native dimensions.
+The actual option tuple, including FOV and gamma, uses the same
+`RenderQualitySnapshot` reader as the Metal gameplay harness. The requested
+preset must apply; Iris's resulting actual settings are recorded and must stay
+unchanged through settling and capture. SDL window pixels, current RenderPearl
+surface configuration, logical framebuffer and render texture must all match
+the requested dimensions. These are source/API observations, not scanout or
+physical-performance measurements.
+This binds initial content and quality observations; simulation history, Iris clocks and shader
 preprocessing still need matching before an image-equivalence conclusion.
 
 Local use (macOS with a real OpenGL context):

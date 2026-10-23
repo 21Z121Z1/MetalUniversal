@@ -46,6 +46,8 @@ class SavedWorldStagingTest(unittest.TestCase):
         inputs = json.loads((self.output / 'inputs.json').read_text())
         self.assertEqual(inputs['scenario'], 'saved-world-opengl-reference-v1')
         self.assertEqual((inputs['width'], inputs['height'], inputs['renderDistance']), (3024, 1964, 32))
+        self.assertEqual(inputs['quality'], {'requestedPreset': 'FABULOUS', 'simulationDistance': 12,
+                                           'vsync': False, 'fpsLimitOption': 260})
         self.assertEqual(inputs['worldSnapshot']['snapshotSha256'], self.sha)
         self.assertEqual(inputs['worldSnapshot']['fileCount'], 2)
         staged = self.instance / 'saves/reference-snapshot'

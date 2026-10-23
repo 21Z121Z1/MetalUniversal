@@ -90,6 +90,32 @@ def verify(root, source_sha, driver, harness):
             require(type(expected.get(field)) is int and expected[field] > 0
                     and type(observed.get(field)) is int and observed[field] == expected[field],
                     'World snapshot content mismatch: ' + field)
+        requested = {'requestedPreset': 'FABULOUS', 'simulationDistance': 12,
+                     'vsync': False, 'fpsLimitOption': 260}
+        require(inputs.get('quality') == report.get('requestedQuality') == requested,
+                'Missing or substituted saved-world quality profile')
+        quality = report.get('capture', {}).get('quality')
+        before, preset = report.get('qualityBeforeSettling'), report.get('qualityAfterPreset')
+        require(isinstance(quality, dict) and isinstance(before, dict) and isinstance(preset, dict),
+                'Missing actual saved-world quality observations')
+        fields = {'renderDistance', 'effectiveRenderDistance', 'simulationDistance', 'graphicsPreset',
+                  'ambientOcclusion', 'clouds', 'cloudRange', 'particles', 'mipmapLevels',
+                  'entityDistanceScaling', 'entityShadows', 'biomeBlendRadius', 'improvedTransparency',
+                  'textureFiltering', 'maxAnisotropyBit', 'cutoutLeaves', 'weatherRadius',
+                  'vsync', 'fpsLimitOption', 'fov', 'gamma'}
+        require(fields <= quality.keys() and fields <= preset.keys(), 'Incomplete actual quality tuple')
+        require(preset.get('graphicsPreset') == 'FABULOUS', 'Requested Fabulous preset did not apply')
+        require(before == quality, 'Quality changed during settling/capture')
+        require(quality.get('renderDistance') == quality.get('effectiveRenderDistance') == inputs['renderDistance']
+                and quality.get('simulationDistance') == 12 and quality.get('vsync') is False
+                and quality.get('fpsLimitOption') == 260, 'Actual saved-world profile differs')
+        dimensions = report.get('capture', {}).get('dimensions')
+        require(isinstance(dimensions, dict), 'Missing physical/surface/render dimensions')
+        for axis, expected_size in (('Width', inputs['width']), ('Height', inputs['height'])):
+            for prefix in ('nativeWindowPixel', 'surface', 'framebuffer', 'render'):
+                value = dimensions.get(prefix + axis)
+                require(type(value) is int and value == expected_size,
+                        'Physical/surface/render size mismatch: ' + prefix + axis)
     else:
         require('worldSnapshot' not in inputs and 'worldSnapshot' not in report, 'Hosted world was substituted')
     require(report.get('sourceSha') == source_sha == report.get('buildIdentity', {}).get('sourceSha'), 'Wrong source SHA')

@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.metallum.e2e.WorldSnapshot;
+import com.metallum.e2e.RenderQualitySnapshot;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
@@ -16,6 +17,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.api.v0.IrisApi;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.GraphicsPreset;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ChunkTrackingView;
@@ -45,6 +47,7 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
     private static final int WIDTH = Integer.getInteger("reference.width");
     private static final int HEIGHT = Integer.getInteger("reference.height");
     private static final int DISTANCE = Integer.getInteger("reference.distance");
+    private boolean savedWorld;
 
     @Override
     public void runTest(ClientGameTestContext context) {
@@ -64,6 +67,15 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                     && inputs.get("width").getAsInt() == WIDTH && inputs.get("height").getAsInt() == HEIGHT
                     && inputs.get("renderDistance").getAsInt() == DISTANCE, "Reference input profile differs from runtime arguments");
             report.addProperty("scenario", scenario);
+            savedWorld = scenario.equals("saved-world-opengl-reference-v1");
+            if (savedWorld) {
+                JsonObject quality = inputs.getAsJsonObject("quality");
+                require(quality != null && quality.get("requestedPreset").getAsString().equals("FABULOUS")
+                        && quality.get("simulationDistance").getAsInt() == 12
+                        && !quality.get("vsync").getAsBoolean() && quality.get("fpsLimitOption").getAsInt() == 260,
+                        "Saved-world reference needs its declared Fabulous/native quality profile");
+                report.add("requestedQuality", quality.deepCopy());
+            }
             JsonObject mods = new JsonObject();
             FabricLoader.getInstance().getAllMods().stream()
                     .sorted(java.util.Comparator.comparing(m -> m.getMetadata().getId()))
@@ -84,13 +96,23 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
             report.addProperty("backendAtStartup", backendAtStartup);
             require("OpenGL".equals(report.get("backendAtStartup").getAsString()), "Reference backend fallback at startup");
             receipt.checkpoint(report, "window-setup");
-            context.getInput().resizeWindow(WIDTH, HEIGHT);
             context.runOnClient(client -> {
                 client.options.pauseOnLostFocus = false;
+                if (savedWorld) {
+                    client.options.graphicsPreset().set(GraphicsPreset.FABULOUS);
+                    client.options.simulationDistance().set(12);
+                    client.options.enableVsync().set(false);
+                    client.options.framerateLimit().set(260);
+                    client.getWindow().setPreferredFullscreenVideoMode(java.util.Optional.empty());
+                    client.options.fullscreen().set(true);
+                    client.getWindow().setFullscreen(true);
+                    report.add("qualityAfterPreset", RenderQualitySnapshot.capture(client));
+                }
                 client.options.renderDistance().set(DISTANCE);
                 client.options.broadcastOptions();
-                client.invalidateSurfaceConfiguration();
             });
+            context.getInput().resizeWindow(WIDTH, HEIGHT);
+            context.runOnClient(Minecraft::invalidateSurfaceConfiguration);
             if (RENDERER.equals("iris")) {
                 receipt.checkpoint(report, "iris-world-preparation");
                 context.runOnClient(client -> {
@@ -167,6 +189,7 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                         report.addProperty("receivedChunksAfterIrisActivation", afterActivation);
                         require(afterActivation == chunks.size(), "Iris activation lost the complete sending view");
                     }
+                    if (savedWorld) report.add("qualityBeforeSettling", context.computeOnClient(RenderQualitySnapshot::capture));
                     report.addProperty("settledTicks", 0);
                     receipt.checkpoint(report, "settle-40-ticks");
                     for (int tick = 1; tick <= 40; tick++) {
@@ -260,6 +283,25 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
         result.addProperty("observedCameraX", client.gameRenderer.mainCamera().position().x);
         result.addProperty("observedCameraY", client.gameRenderer.mainCamera().position().y);
         result.addProperty("observedCameraZ", client.gameRenderer.mainCamera().position().z);
+        if (savedWorld) {
+            result.add("quality", RenderQualitySnapshot.capture(client));
+            JsonObject dimensions = new JsonObject();
+            var physical = client.getWindow().queryFramebufferSize();
+            var surface = client.windowSurface().currentConfiguration().orElseThrow();
+            dimensions.addProperty("nativeWindowPixelWidth", physical.width());
+            dimensions.addProperty("nativeWindowPixelHeight", physical.height());
+            dimensions.addProperty("surfaceWidth", surface.width());
+            dimensions.addProperty("surfaceHeight", surface.height());
+            dimensions.addProperty("framebufferWidth", client.getWindow().getWidth());
+            dimensions.addProperty("framebufferHeight", client.getWindow().getHeight());
+            dimensions.addProperty("renderWidth", client.gameRenderer.mainRenderTarget().width);
+            dimensions.addProperty("renderHeight", client.gameRenderer.mainRenderTarget().height);
+            for (String key : new String[]{"nativeWindowPixelWidth", "surfaceWidth", "framebufferWidth", "renderWidth"})
+                require(dimensions.get(key).getAsInt() == WIDTH, "Saved-world width changed: " + key);
+            for (String key : new String[]{"nativeWindowPixelHeight", "surfaceHeight", "framebufferHeight", "renderHeight"})
+                require(dimensions.get(key).getAsInt() == HEIGHT, "Saved-world height changed: " + key);
+            result.add("dimensions", dimensions);
+        }
         if (RENDERER.equals("iris")) {
             require(Iris.getIrisConfig().areShadersEnabled() && Iris.getCurrentPack().isPresent(), "Iris pack is inactive");
             var pipeline = Iris.getPipelineManager().getPipelineNullable();
