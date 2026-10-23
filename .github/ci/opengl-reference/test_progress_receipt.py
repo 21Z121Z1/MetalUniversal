@@ -41,7 +41,7 @@ class ProgressReceiptTest(unittest.TestCase):
         source = DRIVER.read_text()
         start = source.index('    private static final class Receipt')
         end = source.index('    private static void require(', start)
-        implementation = source[start:end].replace('Duration.ofMinutes(15)', 'Duration.ofMillis(500)')
+        implementation = source[start:end].replace('Duration.ofMinutes(25)', 'Duration.ofMillis(500)')
         implementation = implementation.replace('Duration.ofSeconds(5)', 'Duration.ofMillis(500)')
         # Inject faults into the extracted writer; production has no test switch.
         implementation = implementation.replace('            Files.createDirectories(OUTPUT);',

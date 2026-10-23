@@ -26,7 +26,9 @@ All chunks must still be present after activation, followed by the existing
 40-tick settling period and active-pipeline/image checks. This avoids rendering
 BSL during slow software-GL chunk delivery; it covers enabling the pack in a
 loaded world, not loading the world with shaders already enabled. Image settings,
-pack bytes, chunk coverage, pixel checks and time budgets are unchanged.
+pack bytes, chunk coverage and pixel checks are unchanged. Each completed
+settling tick is recorded, and all 40 are mandatory. An independent 25-minute
+harness deadline leaves setup/upload headroom within the 30-minute CI job.
 Versions come from the repository's existing properties. No compatibility shim
 or renderer fix is applied to upstream mods.
 

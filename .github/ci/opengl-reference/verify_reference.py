@@ -91,6 +91,7 @@ def verify(root, source_sha, driver, harness):
     require(bool(capture.get('glRenderer')) and bool(capture.get('glVersion')), 'Missing actual GL driver')
     require(capture.get('glError') == 0 and capture.get('controlExact') is True, 'OpenGL control/error failure')
     require(report.get('serverFrozen') is True and capture.get('clientFrozen') is True, 'Unfrozen reference scene')
+    require(type(report.get('settledTicks')) is int and report['settledTicks'] == 40, 'Incomplete reference settling period')
     require(report.get('expectedChunks', 0) > 0 and report.get('receivedChunks') == report['expectedChunks'], 'Incomplete server sending view')
     require(capture.get('playerName') == 'ReferencePlayer' and capture.get('playerUuid') == '8f16930a-42ad-4f9b-9d59-02698f26b145', 'Wrong player identity')
     require(capture.get('renderDistance') == inputs['renderDistance'] and capture.get('loadedChunks', 0) > 0, 'World/distance mismatch')

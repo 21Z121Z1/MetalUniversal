@@ -163,8 +163,13 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                         report.addProperty("receivedChunksAfterIrisActivation", afterActivation);
                         require(afterActivation == chunks.size(), "Iris activation lost the complete sending view");
                     }
+                    report.addProperty("settledTicks", 0);
                     receipt.checkpoint(report, "settle-40-ticks");
-                    context.waitTicks(40);
+                    for (int tick = 1; tick <= 40; tick++) {
+                        context.waitTick();
+                        report.addProperty("settledTicks", tick);
+                        receipt.checkpoint(report, "settle-40-ticks");
+                    }
                     receipt.checkpoint(report, "capture");
                     JsonObject capture = context.computeOnClient(this::capture);
                     report.add("capture", capture);
@@ -289,9 +294,9 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
 
     /** Independent of Fabric ticks, client/server executors, and their Phaser/Semaphore waits. */
     private static final class Receipt {
-        // New, stricter harness sub-budget, measured from runTest through world.close.
+        // Includes the complete BSL settling period on hosted software OpenGL.
         // The existing 30-minute job limit remains unchanged; setup/upload need headroom.
-        private static final long LIMIT_NANOS = Duration.ofMinutes(15).toNanos();
+        private static final long LIMIT_NANOS = Duration.ofMinutes(25).toNanos();
         private static final long DIAGNOSTIC_NANOS = Duration.ofSeconds(5).toNanos();
         private final long started = System.nanoTime();
         private final java.util.concurrent.atomic.AtomicReference<String> state =
