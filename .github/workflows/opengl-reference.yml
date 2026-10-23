@@ -11,6 +11,9 @@ on:
       - '.github/workflows/opengl-reference.yml'
       - 'gradle.properties'
       - '.github/ci/minecraft-e2e/gradle.properties'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/WorldSnapshot.java'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/RenderQualitySnapshot.java'
+      - 'scripts/agent/frame_trial_contract.py'
   pull_request:
     branches: [main]
     paths:
@@ -19,6 +22,9 @@ on:
       - '.github/workflows/opengl-reference.yml'
       - 'gradle.properties'
       - '.github/ci/minecraft-e2e/gradle.properties'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/WorldSnapshot.java'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/RenderQualitySnapshot.java'
+      - 'scripts/agent/frame_trial_contract.py'
 
 permissions:
   contents: read
