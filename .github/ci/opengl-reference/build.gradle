@@ -1,0 +1,60 @@
+plugins { id 'net.fabricmc.fabric-loom' }
+
+def versions = new Properties()
+file('../../../gradle.properties').withInputStream { versions.load(it) }
+def e2eVersions = new Properties()
+file('../minecraft-e2e/gradle.properties').withInputStream { e2eVersions.load(it) }
+def renderer = providers.gradleProperty('referenceRenderer').orElse('iris').get()
+if (!(renderer in ['vanilla', 'sodium', 'iris'])) throw new GradleException('Unknown referenceRenderer')
+def width = providers.gradleProperty('referenceWidth').orElse('1280').get().toInteger()
+def height = providers.gradleProperty('referenceHeight').orElse('720').get().toInteger()
+def distance = providers.gradleProperty('referenceDistance').orElse('12').get().toInteger()
+if (width < 64 || height < 64 || distance < 2 || distance > 32) throw new GradleException('Invalid reference dimensions/distance')
+def evidence = file(providers.gradleProperty('referenceEvidence').orElse("${buildDir}/evidence").get())
+def instance = file(providers.gradleProperty('referenceRunDir').orElse("${buildDir}/run/${renderer}").get())
+def sourceSha = providers.gradleProperty('referenceSourceSha').orElse(providers.environmentVariable('METALLUM_SOURCE_SHA')).orElse('unrecorded').get()
+
+repositories { maven { url 'https://api.modrinth.com/maven' } }
+dependencies {
+    minecraft "com.mojang:minecraft:${versions.getProperty('minecraft_version')}"
+    implementation "net.fabricmc:fabric-loader:${versions.getProperty('loader_version')}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${e2eVersions.getProperty('fabric_api_version')}"
+    compileOnly "maven.modrinth:iris:${versions.getProperty('iris_version')}"
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${e2eVersions.getProperty('fabric_api_version')}"
+    if (renderer != 'vanilla') productionRuntimeMods "maven.modrinth:sodium:${versions.getProperty('sodium_version')}"
+    if (renderer == 'iris') productionRuntimeMods "maven.modrinth:iris:${versions.getProperty('iris_version')}"
+}
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+tasks.named('processResources') {
+    inputs.property('referenceSourceSha', sourceSha)
+    inputs.file('src/main/java/com/metallum/reference/OpenGlReferenceGameTest.java')
+    doLast {
+        def driver = file('src/main/java/com/metallum/reference/OpenGlReferenceGameTest.java')
+        def identity = [sourceSha: sourceSha,
+            driverSha256: java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance('SHA-256').digest(driver.bytes))]
+        new File(destinationDir, 'reference-build.json').text = groovy.json.JsonOutput.toJson(identity) + '\n'
+    }
+}
+
+tasks.register('runOpenGlReference', net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named('jar')
+    // Deliberately contains no MetalUniversal JAR, native module or Metal mixins.
+    mods.from(tasks.named('jar'))
+    mods.from(configurations.productionRuntimeMods)
+    useXVFB = false
+    runDir = instance
+    jvmArgs.addAll('-Dfabric.client.gametest', '-Xmx3G',
+        "-Dreference.renderer=${renderer}", "-Dreference.output=${evidence.absolutePath}",
+        "-Dreference.sourceSha=${sourceSha}", "-Dreference.width=${width}",
+        "-Dreference.height=${height}", "-Dreference.distance=${distance}")
+    programArgs.addAll('--graphicsBackend', 'OPENGL', '--username', 'ReferencePlayer',
+        '--uuid', '8f16930a-42ad-4f9b-9d59-02698f26b145', '--width', width.toString(), '--height', height.toString())
+    doFirst {
+        if (!(sourceSha ==~ /[0-9a-f]{40}/)) throw new GradleException('Exact referenceSourceSha is required')
+        instance.mkdirs()
+        def options = new File(instance, 'options.txt')
+        options.text = 'preferredGraphicsBackend:"opengl"\nstartedCleanly:true\nonboardAccessibility:false\n' +
+            "renderDistance:${distance}\nsimulationDistance:12\nmaxFps:120\nenableVsync:false\n" +
+            'pauseOnLostFocus:false\nfullscreen:false\n'
+    }
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "metaluniversal_opengl_reference",
+  "version": "1.0.0",
+  "name": "Independent OpenGL reference",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": ["com.metallum.reference.OpenGlReferenceGameTest"]
+  },
+  "depends": {"fabricloader": ">=0.19.3", "fabric-api": "*", "minecraft": "26.3", "java": ">=25"}
+}
