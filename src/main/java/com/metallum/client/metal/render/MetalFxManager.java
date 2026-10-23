@@ -657,10 +657,10 @@ public final class MetalFxManager {
      * contains both phases, but the hand projection cannot replace the world
      * depth consumed by Temporal reconstruction.
      */
-    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer) {
+    public static void preserveWorldDepthBeforeHand(final GameRenderer renderer, final GpuTexture handDepth) {
         MetalFxManager manager = active;
         if (manager != null) {
-            manager.preserveWorldDepthBeforeHandInternal(renderer);
+            manager.preserveWorldDepthBeforeHandInternal(renderer, handDepth);
         }
     }
 
@@ -2474,19 +2474,22 @@ public final class MetalFxManager {
         // Frame interpolation needs the camera FOV used to build the base
         // perspective matrix. Screen-effect transforms can legitimately alter
         // m11 and are already represented by the motion reconstruction matrix.
-        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix, 70.0F);
-        this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
-                ? cameraState.depthFar : 1000.0F;
+        this.frameFieldOfView = MetalFxMath.verticalFieldOfViewDegrees(cameraState.projectionMatrix);
+        this.frameFarPlane = cameraState.depthFar;
         this.frameCameraPerspective = null;
         try {
+            // Resolution rounding affects the raster projection aspect, not
+            // the native scene or drawable dimensions supplied to the presenter.
             Matrix4f baseProjection = new Matrix4f(cameraState.projectionMatrix);
             MetalFxMath.adjustPerspectiveAspect(baseProjection, displayAspect, renderAspect);
-            FrameSynthesisContract.Perspective perspective = FrameSynthesisContract.Perspective.fromProjection(baseProjection);
+            this.frameCameraPerspective = FrameSynthesisContract.Perspective.fromProjection(baseProjection);
             Matrix4f effect = new Matrix4f(cameraState.projectionMatrix).invert().mul(projectionMatrix);
-            if (MetalFxMath.isRigidViewTransform(effect)) this.frameCameraPerspective = perspective;
+            if (!MetalFxMath.isRigidViewTransform(effect)) {
+                this.frameCameraPerspective = null;
+            }
         } catch (IllegalArgumentException ignored) {
-            // Temporal has full matrices. Scalar FG camera fields cannot represent
-            // an unknown frustum or non-rigid portal distortion; never guess them.
+            // Temporal still has its complete matrices. Frame Generation cannot
+            // fabricate a scalar frustum for this projection and stays closed.
         }
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
         MetalFxMath.viewProjection(
@@ -2657,14 +2660,13 @@ public final class MetalFxManager {
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && handExactValidityTexture != null && reactiveTexture != null
-                && frameHandDepthTexture != null
-                && frameHandDepthTexture.getWidth(0) == renderWidth
-                && frameHandDepthTexture.getHeight(0) == renderHeight) {
+                && FrameSynthesisContract.sourceDepthMatches(frameHandDepthTexture, renderWidth, renderHeight)) {
             handDepth = frameHandDepthTexture;
-            // Snapshot of the actual render3dHud clear target, before GUI.
-            // Main can contain integrated world + HUD depth when post effects
-            // require consistent depth, so it cannot supply this mask. These
-            // hand, held-item, and screen-effect pixels are
+            // The render3dHud clear hook captures its actual target. With
+            // consistentDepthRequired it is hud3DTarget, NOT the main depth
+            // into which Minecraft subsequently integrates both world and HUD.
+            // This same-frame texture contains only hand, held-item and
+            // screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
             // Production folds this operation into the fused motion kernel.
@@ -2995,14 +2997,16 @@ public final class MetalFxManager {
         return !shaderInputsUnproven && MetalMotionDrawCoverage.opaqueTemporalSourceAdmitted(source);
     }
 
-    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
+    private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer, final GpuTexture handDepth) {
         if (!capturesMotion()
                 || !sceneFrame || sceneDepthTexture == null) {
             return;
         }
         GpuTexture sourceTexture = renderer.mainRenderTarget().getDepthTexture();
         if (!(sourceTexture instanceof MetalGpuTexture source)
-                || !FrameSynthesisContract.sourceDepthMatches(source, renderWidth, renderHeight)) {
+                || !FrameSynthesisContract.sourceDepthMatches(source, renderWidth, renderHeight)
+                || !(handDepth instanceof MetalGpuTexture hand)
+                || !FrameSynthesisContract.sourceDepthMatches(hand, renderWidth, renderHeight)) {
             this.frameDepthTexture = null;
             resetHistoryInternal("world depth snapshot incompatible");
             return;
@@ -3019,6 +3023,9 @@ public final class MetalFxManager {
                 renderHeight
         );
         this.frameDepthTexture = sceneDepthTexture;
+        // The actual HUD target is validated here, but becomes a source only
+        // after captureFirstPersonDepth snapshots the completed HUD at TAIL.
+        this.frameHandDepthTexture = null;
     }
 
     private void captureValidationFrameIfRequested(
@@ -5298,6 +5305,7 @@ public final class MetalFxManager {
         cutoutReactiveTexture = null;
         sceneDepthTexture = null;
         frameDepthTexture = null;
+        frameHandDepthTexture = null;
         reactiveMaskPrepared = false;
         cutoutReactivePassObserved = false;
         cutoutReactivePrepared = false;
@@ -5407,7 +5415,9 @@ public final class MetalFxManager {
         FrameSynthesisContract.ProducerCoverageSet coverage =
                 new FrameSynthesisContract.ProducerCoverageSet(receipts);
         try {
-            if (frameCameraPerspective == null) return null;
+            if (frameCameraPerspective == null) {
+                return null;
+            }
             FrameSynthesisContract.CameraFrameInput camera =
                     frameCameraPerspective.atSourceInterval(sceneFrameDeltaSeconds);
             return new FrameSynthesisContract.FrameGenerationAdmission(

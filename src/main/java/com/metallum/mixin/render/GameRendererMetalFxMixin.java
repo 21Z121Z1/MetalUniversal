@@ -12,6 +12,7 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
+import org.jspecify.annotations.Nullable;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.minecraft.client.renderer.GameRenderer;
@@ -45,11 +46,18 @@ public abstract class GameRendererMetalFxMixin {
         return new MainTarget(MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height));
     }
 
-    @Redirect(method = "<init>", at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/TextureTarget"))
-    private TextureTarget metallum$createHudDepthTarget(final String label, final int width, final int height,
-            final GpuFormat color, final GpuFormat depth) {
-        // 26.3 constructs exactly one TextureTarget here: the independent 3D HUD depth.
-        return new TextureTarget(label, MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height), color, depth);
+    @Redirect(
+            method = "<init>",
+            at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/TextureTarget")
+    )
+    private TextureTarget metallum$createHudDepthTarget(
+            final String label, final int width, final int height,
+            final @Nullable GpuFormat colorFormat, final @Nullable GpuFormat depthFormat
+    ) {
+        // GameRenderer's sole TextureTarget is hud_3d_depth. Match main scene
+        // dimensions at construction, not only after the first window resize.
+        return new TextureTarget(label, MetalFxManager.sceneWidth(width),
+                MetalFxManager.sceneHeight(height), colorFormat, depthFormat);
     }
 
     @Redirect(
@@ -115,7 +123,7 @@ public abstract class GameRendererMetalFxMixin {
             final CommandEncoder encoder, final GpuTexture depth, final double clear,
             final Operation<Void> original, @Share("metallumHandDepth") final LocalRef<GpuTexture> handDepth
     ) {
-        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this);
+        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, depth);
         original.call(encoder, depth, clear);
         handDepth.set(depth);
     }

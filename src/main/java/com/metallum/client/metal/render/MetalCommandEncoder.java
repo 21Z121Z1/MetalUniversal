@@ -609,12 +609,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void submit() {
+        // Deferred clears are logical commands even when no native buffer has
+        // been opened yet. They must belong to this submission (and its
+        // fences), rather than leaking into a later frame or cache teardown.
+        submitRenderPass();
+        flushAllPendingClears();
+        endEncoder();
         if (commandBuffer == null) {
             return;
         }
-
-        submitRenderPass();
-        endEncoder();
 
         int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
         MemorySegment completedSemaphore = submitSemaphores[slot];
@@ -2286,11 +2289,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void waitForSubmittedGpuWork() {
-        if (commandBuffer != null || currentRenderPass != null || currentEncoder != null) {
-            submit();
-        } else {
-            endEncoder();
-        }
+        submit();
         for (InFlight submitted : inFlight) {
             if (submitted != null) {
                 awaitInFlightCompletion(submitted, Long.MAX_VALUE);
@@ -2307,6 +2306,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         long generation = metalPool.beginWrite(index);
         try {
             submitRenderPass();
+            // A query observes all preceding logical commands, including
+            // whole-texture clears that have not needed an encoder yet.
+            flushAllPendingClears();
             endEncoder();
             int backend = MetalNativeBridge.renderPearlTimestampWriteCommand(
                     commandBuffer().nativeHandle(), metalPool.nativeHandle(), index,
@@ -2428,15 +2430,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             if (frameGenerationSubmit) {
                 MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
             }
-            if (!success) {
-                for (SubmitCallback callback : callbacks) {
-                    callback.failed.run();
-                }
-            } else {
-                for (SubmitCallback callback : callbacks) {
-                    callback.completed.run();
+            // Every owner must receive its terminal notification, even when
+            // another owner fails. In particular, query slots must not remain
+            // pending after completionHandled has permanently advanced.
+            Throwable firstFailure = null;
+            for (SubmitCallback callback : callbacks) {
+                try {
+                    (success ? callback.completed : callback.failed).run();
+                } catch (RuntimeException | Error failure) {
+                    if (firstFailure == null) {
+                        firstFailure = failure;
+                    } else if (firstFailure != failure) {
+                        firstFailure.addSuppressed(failure);
+                    }
                 }
             }
+            if (firstFailure instanceof RuntimeException failure) throw failure;
+            if (firstFailure instanceof Error failure) throw failure;
         }
     }
 

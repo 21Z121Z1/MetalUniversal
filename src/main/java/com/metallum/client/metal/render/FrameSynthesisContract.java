@@ -1,11 +1,11 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.joml.Vector2f;
 import org.joml.Matrix4fc;
-import com.mojang.renderpearl.api.textures.GpuTexture;
 
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -73,11 +73,11 @@ final class FrameSynthesisContract {
             if (samples < 0) {
                 throw new IllegalArgumentException("Producer sample count must not be negative");
             }
-            if (coverage == ProducerCoverage.NOT_PRESENT && samples != 0) {
-                throw new IllegalArgumentException("An observed producer cannot claim to be absent");
-            }
             if (coverage == ProducerCoverage.REAL_MOTION && samples == 0) {
                 throw new IllegalArgumentException("Real-motion coverage requires at least one sample");
+            }
+            if (coverage == ProducerCoverage.NOT_PRESENT && samples != 0) {
+                throw new IllegalArgumentException("An observed producer cannot claim to be absent");
             }
         }
     }

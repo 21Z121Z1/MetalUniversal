@@ -299,7 +299,12 @@ final class MetalDevice implements GpuDeviceBackend {
                 java.nio.file.Path cacheDir = net.fabricmc.loader.api.FabricLoader.getInstance()
                         .getGameDir().resolve("metallum-cache");
                 java.nio.file.Files.createDirectories(cacheDir);
-                String archivePath = cacheDir.resolve("pso.binaryarchive").toString();
+                String archivePath = MetalPsoArchiveCache.path(
+                        cacheDir, deviceName, metal4Compiler,
+                        MetalNativeBridge.loadedLibraryFileForDiagnostics(),
+                        java.nio.file.Path.of("/System/Library/CoreServices/SystemVersion.plist"),
+                        System.getenv()
+                ).toString();
                 if (MetalNativeBridge.metallum_pso_archive_open(metalDeviceHandle, archivePath) != 0) {
                     this.psoArchivePath = archivePath;
                 } else {

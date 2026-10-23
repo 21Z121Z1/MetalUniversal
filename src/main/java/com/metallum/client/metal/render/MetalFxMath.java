@@ -63,14 +63,18 @@ final class MetalFxMath {
         );
     }
 
-    /** Applies a constant clip-space translation to the complete world projection.
-     * Bob/hurt and portal transforms can change every component of its W row;
-     * editing only the perspective's third column would move samples unevenly.
-     * Z and W remain unchanged. Derived from the audited source-contract branch.
+    /**
+     * Applies a clip-space translation after the complete world projection:
+     * {@code clip.xy += clipJitter * clip.w}. Minecraft 26.3 folds bob/hurt
+     * transforms and portal/nausea distortion into that projection. Its W row
+     * is therefore not necessarily {@code (0, 0, -1, 0)}. Updating only m20/m21
+     * gives a position-dependent raster offset for those ordinary world frames.
+     *
+     * <p>All four columns participate. Z and W remain unchanged, so the jitter
+     * cannot change depth, clipping or the homogeneous divide. The unjittered
+     * projection remains the motion-vector reference.
      */
     static void applyProjectionJitter(final Matrix4f projection, final Vector2f clipJitter) {
-        // Apply a translation in clip space after bob/hurt/portal has changed W.
-        // All columns participate in clip.xy += jitter * clip.w.
         projection.m00(projection.m00() + clipJitter.x * projection.m03());
         projection.m01(projection.m01() + clipJitter.y * projection.m03());
         projection.m10(projection.m10() + clipJitter.x * projection.m13());
@@ -102,6 +106,8 @@ final class MetalFxMath {
             return;
         }
         float ratio = displayAspect / renderAspect;
+        // Resolution rounding changes the aspect of the completed projection,
+        // not just the original perspective's focal-length coefficient.
         projection.m00(projection.m00() * ratio);
         projection.m10(projection.m10() * ratio);
         projection.m20(projection.m20() * ratio);
@@ -139,21 +145,6 @@ final class MetalFxMath {
             }
         }
         return Math.abs(matrix.determinant3x3() - 1.0F) <= 1.0E-4F;
-    }
-
-    static float verticalFieldOfViewDegrees(final Matrix4fc projection, final float fallback) {
-        float focalLength = projection.m11();
-        if (!(focalLength > 0.0F) || !Float.isFinite(focalLength)) {
-            return fallback;
-        }
-        float fieldOfView = (float) Math.toDegrees(2.0D * Math.atan(1.0D / focalLength));
-        // Minecraft's perspective FOV slider and its camera effects stay well
-        // above 15 degrees. During world initialization the camera state can
-        // briefly expose a valid but stale projection (for example ~8
-        // degrees); passing that to frame interpolation produces an invalid
-        // camera model for the first queued frame.
-        return fieldOfView >= 15.0F && fieldOfView < 170.0F && Float.isFinite(fieldOfView)
-                ? fieldOfView : fallback;
     }
 
     static Matrix4f viewMatrix(final Matrix4fc viewRotation, final double cameraX, final double cameraY, final double cameraZ) {
