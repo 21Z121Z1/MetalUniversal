@@ -11,6 +11,7 @@ import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.loader.api.FabricLoader;
 import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.api.v0.IrisApi;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.core.registries.Registries;
@@ -85,8 +86,7 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                 context.runOnClient(client -> {
                     // Prepare the complete sending view before the expensive software-GL
                     // draws. The reference image still requires the original active pack.
-                    Iris.getIrisConfig().setShadersEnabled(false);
-                    Iris.reload();
+                    IrisApi.getInstance().getConfig().setShadersEnabledAndApply(false);
                     boolean enabled = Iris.getIrisConfig().areShadersEnabled();
                     report.addProperty("irisShadersAtWorldCreation", enabled);
                     require(!enabled, "Iris world preparation did not disable shaders");
@@ -152,8 +152,7 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                     receipt.checkpoint(report, "iris-reload");
                     if (RENDERER.equals("iris")) {
                         context.runOnClient(client -> {
-                            Iris.getIrisConfig().setShadersEnabled(true);
-                            Iris.reload();
+                            IrisApi.getInstance().getConfig().setShadersEnabledAndApply(true);
                             require(Iris.getIrisConfig().areShadersEnabled(), "Iris activation failed");
                         });
                         // Reload replaces the terrain pipeline; require its meshes again.
