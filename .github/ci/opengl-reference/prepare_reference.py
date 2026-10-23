@@ -20,8 +20,12 @@ def main():
     # Every run owns a fresh instance, so failed reference evidence is never overwritten.
     args.instance.mkdir(parents=True, exist_ok=False)
     args.output.mkdir(parents=True, exist_ok=True)
+    repository = Path(__file__).resolve().parents[3]
+    versions = dict(line.split('=', 1) for line in (repository / 'gradle.properties').read_text().splitlines()
+                    if '=' in line and not line.lstrip().startswith('#'))
     inputs = {'scenario': 'hosted-opengl-reference-v1', 'renderer': args.renderer,
               'width': 1280, 'height': 720, 'renderDistance': 12,
+              'loaderVersion': versions['loader_version'].strip(),
               'claim': 'Explicit hosted smoke profile, not physical 32-distance quality/performance acceptance',
               'shaderPack': None}
     if args.renderer == 'iris':

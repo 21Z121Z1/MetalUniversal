@@ -77,6 +77,7 @@ def verify(root, source_sha, driver, harness):
     require(lane in ('vanilla', 'sodium', 'iris') and report.get('renderer') == lane, 'Wrong renderer lane')
     mods = report['mods']
     require('metallum' not in mods, 'Reference loaded MetalUniversal')
+    require(bool(inputs.get('loaderVersion')) and mods.get('fabricloader') == inputs['loaderVersion'], 'Wrong Fabric Loader runtime')
     require(('sodium' in mods) == (lane != 'vanilla') and ('iris' in mods) == (lane == 'iris'), 'Wrong optional mods')
     require(mods.get('minecraft') == '26.3', 'Wrong Minecraft version')
     capture = report['capture']

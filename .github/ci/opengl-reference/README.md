@@ -14,6 +14,13 @@ readback error, wrong profile, incomplete image or substituted harness fails.
 Versions come from the repository's existing properties. No compatibility shim
 or renderer fix is applied to upstream mods.
 
+The default loader is Fabric 0.19.5. Loader 0.19.3 does not classify the new
+`com.mojang.renderpearl` package as Minecraft code, so it silently skips Iris's
+declared class access changes and the stock OpenGL client fails during startup.
+The upstream fix shipped in [0.19.4](https://github.com/FabricMC/fabric-loader/releases/tag/0.19.4).
+This harness therefore requires at least 0.19.4 and verifies the actual runtime
+loader against the staged input. Minecraft, Iris and Sodium versions are unchanged.
+
 This is an explicit **1280×720, 12-distance hosted smoke profile**. Generated
 worlds are not snapshot-equivalent across lanes, Iris wall-clock history is not
 normalized, and no Metal image comparison or performance decision is made.
