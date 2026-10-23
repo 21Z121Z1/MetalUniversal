@@ -52,6 +52,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.metal.render.FramePacingPolicyTest \
   --tests com.metallum.client.metal.render.MetalBufferUploadTest \
   --tests com.metallum.client.metal.render.MetalMslDiskCacheTest \
+  --tests com.metallum.client.metal.render.MetalPsoArchiveCacheTest \
   --tests com.metallum.client.metal.render.MetalSurfaceFrameStateTest \
   --tests com.metallum.client.metal.render.TerrainIcbSubmissionTest \
   --tests com.metallum.client.metal.render.mtl.MTLCommandEncoderLifecycleTest \
