@@ -52,13 +52,29 @@ jobs:
           xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -framework OpenGL \
             .github/ci/HostedOpenGLCapabilityProbe.c -o "$RUNNER_TEMP/opengl-probe"
           # Exit 78 and a blocked-environment receipt are deliberately not a pass.
+          set +e
           "$RUNNER_TEMP/opengl-probe" > build/opengl-reference/capability.json
+          core_exit=$?
+          "$RUNNER_TEMP/opengl-probe" --legacy-diagnostic > build/opengl-reference/legacy-diagnostic.json
+          legacy_exit=$?
+          set -e
+          if [ "$legacy_exit" -ne 0 ] && [ "$legacy_exit" -ne 78 ]; then exit "$legacy_exit"; fi
+          if [ "$core_exit" -ne 0 ]; then exit "$core_exit"; fi
+          set +e
+          "$RUNNER_TEMP/opengl-probe" --self-test-mismatch > build/opengl-reference/mismatch-self-test.json
+          mismatch_exit=$?
+          set -e
+          test "$mismatch_exit" -eq 1
           python3 - <<'PY'
           import json
           from pathlib import Path
           result = json.loads(Path('build/opengl-reference/capability.json').read_text())
           assert result['status'] == 'passed' and result['backend'] == 'OpenGL'
           assert result['mismatchBytes'] == 0 and result['glError'] == 0
+          assert result['coreProfile'] is True and result['mismatchSelfTest'] is False
+          negative = json.loads(Path('build/opengl-reference/mismatch-self-test.json').read_text())
+          assert negative['status'] == 'correctness-failed' and negative['mismatchBytes'] == 128
+          assert negative['glError'] == 0 and negative['mismatchSelfTest'] is True
           print(result)
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -1,9 +1,14 @@
 # Independent hosted OpenGL reference
 
-`opengl-reference.yml` first creates an actual accelerated macOS OpenGL core
-context, compiles GLSL, draws into RGBA8 and checks every readback byte. A missing
+`opengl-reference.yml` first creates an actual macOS OpenGL Core context,
+compiles GLSL, draws into RGBA8 and checks every readback byte. It permits any
+Core renderer, matching the client's API requirement, and records actual
+acceleration. Software OpenGL can serve as an independent API reference and provides
+no hardware-performance evidence. At least OpenGL 3.3 Core is mandatory. A missing
 context emits `blocked-environment` and fails the job; downstream clients cannot
 turn missing capability into a passing reference.
+Legacy contexts are diagnostic only. A deliberate wrong-color GPU readback must
+also fail the probe's negative self-test before any client result can pass.
 
 The separate Vanilla, Sodium and Iris clients load **no MetalUniversal JAR or
 native module**. They force `OPENGL`, use a fixed username/UUID, normal seed-1
