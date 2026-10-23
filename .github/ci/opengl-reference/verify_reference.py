@@ -102,9 +102,22 @@ def verify(root, source_sha, driver, harness):
                   'ambientOcclusion', 'clouds', 'cloudRange', 'particles', 'mipmapLevels',
                   'entityDistanceScaling', 'entityShadows', 'biomeBlendRadius', 'improvedTransparency',
                   'textureFiltering', 'maxAnisotropyBit', 'cutoutLeaves', 'weatherRadius',
-                  'vsync', 'fpsLimitOption', 'fov', 'gamma'}
+                  'vsync', 'fpsLimitOption', 'fov', 'gamma', 'anisotropyHasKnownIssues'}
         require(fields <= quality.keys() and fields <= preset.keys(), 'Incomplete actual quality tuple')
-        require(preset.get('graphicsPreset') == 'FABULOUS', 'Requested Fabulous preset did not apply')
+        # Minecraft 26.3 GraphicsPreset.apply; pinned Iris's MixinDisableFabulousGraphics
+        # owns improvedTransparency=false/CUSTOM while its shader pipeline is enabled.
+        iris = inputs.get('renderer') == 'iris'
+        for observed in (preset, quality):
+            require(type(observed.get('anisotropyHasKnownIssues')) is bool, 'Missing actual filtering capability')
+            expected_options = {'ambientOcclusion': True, 'clouds': 'FANCY', 'cloudRange': 128,
+                                'particles': 'ALL', 'mipmapLevels': 4, 'entityDistanceScaling': 1.25,
+                                'entityShadows': True, 'biomeBlendRadius': 2, 'maxAnisotropyBit': 2,
+                                'cutoutLeaves': True, 'weatherRadius': 10, 'improvedTransparency': not iris,
+                                'textureFiltering': 'RGSS' if observed['anisotropyHasKnownIssues'] else 'ANISOTROPIC'}
+            for key, value in expected_options.items():
+                require(observed.get(key) == value, 'Requested Fabulous option changed: ' + key)
+        require(preset.get('graphicsPreset') == ('CUSTOM' if iris else 'FABULOUS'),
+                'Unexpected upstream preset ownership')
         require(before == quality, 'Quality changed during settling/capture')
         require(quality.get('renderDistance') == quality.get('effectiveRenderDistance') == inputs['renderDistance']
                 and quality.get('simulationDistance') == 12 and quality.get('vsync') is False

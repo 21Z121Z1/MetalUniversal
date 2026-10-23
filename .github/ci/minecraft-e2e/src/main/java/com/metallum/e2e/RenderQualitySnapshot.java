@@ -1,6 +1,7 @@
 package com.metallum.e2e;
 
 import com.google.gson.JsonObject;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 
 /** Shared actual-option observations for independent OpenGL and Metal test clients. */
@@ -30,6 +31,8 @@ public final class RenderQualitySnapshot {
         value.addProperty("fpsLimitOption", client.options.framerateLimit().get());
         value.addProperty("fov", client.options.fov().get());
         value.addProperty("gamma", client.options.gamma().get());
+        value.addProperty("anisotropyHasKnownIssues", RenderSystem.getDevice().getDeviceInfo()
+                .hintsAndWorkarounds().anisotropyHasKnownIssues());
         return value;
     }
 }

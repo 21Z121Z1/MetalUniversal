@@ -68,7 +68,10 @@ bytes. Saved-world runs request Fabulous, simulation distance 12, vsync off and
 the uncapped 260 option, then enter fullscreen at the requested native dimensions.
 The actual option tuple, including FOV and gamma, uses the same
 `RenderQualitySnapshot` reader as the Metal gameplay harness. The requested
-preset must apply; Iris's resulting actual settings are recorded and must stay
+preset's individual options must match Minecraft 26.3, including its actual
+anisotropy workaround. Pinned Iris owns the normal `improvedTransparency=false`
+and `CUSTOM` label while shaders are enabled; the verifier checks that explicit
+contract instead of treating the label as quality. The full tuple must stay
 unchanged through settling and capture. SDL window pixels, current RenderPearl
 surface configuration, logical framebuffer and render texture must all match
 the requested dimensions. These are source/API observations, not scanout or

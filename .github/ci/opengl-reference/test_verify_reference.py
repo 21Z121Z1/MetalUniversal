@@ -70,9 +70,10 @@ class ReferenceOracleTest(unittest.TestCase):
                    'cloudRange': 128, 'particles': 'ALL', 'mipmapLevels': 4, 'entityDistanceScaling': 1.25,
                    'entityShadows': True, 'biomeBlendRadius': 2, 'improvedTransparency': False,
                    'textureFiltering': 'ANISOTROPIC', 'maxAnisotropyBit': 2, 'cutoutLeaves': True,
-                   'weatherRadius': 10, 'vsync': False, 'fpsLimitOption': 260, 'fov': 70, 'gamma': 0.5}
+                   'weatherRadius': 10, 'vsync': False, 'fpsLimitOption': 260, 'fov': 70, 'gamma': 0.5,
+                   'anisotropyHasKnownIssues': False}
         self.report['qualityBeforeSettling'] = quality.copy()
-        self.report['qualityAfterPreset'] = {**quality, 'graphicsPreset': 'FABULOUS'}
+        self.report['qualityAfterPreset'] = quality.copy()
         self.report['capture']['quality'] = quality.copy()
         self.report['capture']['dimensions'] = {key: 2 for key in (
             'nativeWindowPixelWidth', 'nativeWindowPixelHeight', 'surfaceWidth', 'surfaceHeight',
@@ -114,6 +115,23 @@ class ReferenceOracleTest(unittest.TestCase):
         self.report['worldSnapshot'] = {'snapshotSha256': 'd' * 64}
         with self.assertRaises(ValueError):
             self.check()
+
+    def test_saved_world_rejects_consistent_quality_downgrades(self):
+        self.use_saved_world_profile()
+        for field, value in [('mipmapLevels', 2), ('cloudRange', 64), ('entityDistanceScaling', 1.0),
+                             ('improvedTransparency', True), ('textureFiltering', 'RGSS')]:
+            with self.subTest(field=field):
+                report = copy.deepcopy(self.report)
+                for quality in (report['qualityAfterPreset'], report['qualityBeforeSettling'], report['capture']['quality']):
+                    quality[field] = value
+                with self.assertRaises(ValueError):
+                    self.check(report)
+
+    def test_saved_world_filtering_follows_actual_upstream_capability(self):
+        self.use_saved_world_profile()
+        for quality in (self.report['qualityAfterPreset'], self.report['qualityBeforeSettling'], self.report['capture']['quality']):
+            quality.update(anisotropyHasKnownIssues=True, textureFiltering='RGSS')
+        self.check()
 
     def test_rejects_substitutions_and_incomplete_receipts(self):
         mutations = [
