@@ -13,7 +13,7 @@ deterministic Minecraft scenario
         v
 MetalValidationClient -> RenderContractRuntime
         |
-        +-> RenderTraceRecorder -> pass-manifest.json
+        +-> RenderTraceRecorder -> pass-manifest.json (optional lossless gzip payload)
         +-> ValidationCaptureService -> GPU readback -> results.json
         +-> Expectation engine -> actual/expected/diff/metrics artifacts
         +-> PassManifestComparator -> first divergent pass/producer
@@ -177,6 +177,7 @@ unique directory below the operating system temporary directory, not `build/`:
 ```text
 ${TMPDIR}/metallum-render-contract-*/
   pass-manifest.json
+  pass-manifest.payload.json.gz # when lossless manifest compression is enabled
   results.json
   synthetic-validation.json
   frames/frame-.../<pass>/<producer>/<resource>/
@@ -189,6 +190,24 @@ ${TMPDIR}/metallum-render-contract-*/
     diff-<expectation>.png
     metrics.json
 ```
+
+`metallum.renderContract.compressManifest=true` preserves the complete original
+schema-1 trace as a streamed gzip payload. `pass-manifest.json` becomes a
+schema-2 index with the source/run identity, terminal counts, SHA-256, compressed
+and uncompressed byte counts. Minecraft client conformance enables this form
+because normal Vanilla traces can exceed the 64 MiB JSON budget. The index and
+compressed payload **together** must fit that same physical manifest budget and
+the existing shared artifact budget. No producer, resource or lifecycle event
+is omitted. Legacy uncompressed output remains the default.
+
+The Java evidence loader and independent Python terminal oracle validate the
+payload digest, gzip integrity, exact decoded length, mirrored headers, array
+counts and existing completion gates before accepting compressed evidence.
+Inflation has a separate 1 GiB hard ceiling; the property
+`metallum.renderContract.maxUncompressedManifestBytes` can lower it. Any byte,
+storage, decoding or publication failure remains a failed/incomplete trace.
+The streaming writer avoids a second document-sized JSON tree or string; the
+report loader still materializes the logical trace for comparison.
 
 Successful Minecraft temporary runs are deleted after the Gradle completion
 gate. Failed runs remain under the managed temporary prefix so they can be

@@ -441,6 +441,65 @@ final class MetalComputeBackendIntegrationTest {
     }
 
     @Test
+    void actualDirectAndIndirectImageStoresInvalidateTheUiClearProof() {
+        String glsl="""
+                #version 450
+                layout(local_size_x=8,local_size_y=4) in;
+                layout(binding=0,rgba8) writeonly uniform image2D dst;
+                void main() { imageStore(dst,ivec2(gl_GlobalInvocationID.xy),vec4(.8,0,0,.1)); }
+                """;
+        ByteBuffer args=ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder());
+        args.putInt(0,WIDTH/8).putInt(4,HEIGHT/4).putInt(8,1);
+        try(var pipeline=MetalComputePipeline.compileGlsl(device,"ui_unbounded_store",glsl);
+            var target=(MetalGpuTexture)device.createTexture("compute-ui-proof",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT|GpuTexture.USAGE_TEXTURE_BINDING|GpuTexture.USAGE_COPY_SRC
+                            |MetalGpuTexture.USAGE_SHADER_WRITE,GpuFormat.RGBA8_UNORM,WIDTH,HEIGHT,1,1);
+            var arguments=(MetalGpuBuffer)device.createBuffer(()->"ui-dispatch-arguments",
+                    GpuBuffer.USAGE_COPY_DST|GpuBuffer.USAGE_INDIRECT_PARAMETERS,args)) {
+            MetalUiDrawCoverage.begin(new FrameSynthesisContract.FrameStamp(994,2),target,true);
+            for(boolean indirect:new boolean[]{false,true}) {
+                encoder.clearColorTexture(target,new Vector4f(0));encoder.flushPendingClear(target);
+                assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+                try(var pass=encoder.createComputePass()) {
+                    pass.setPipeline(pipeline).bindTexture(0,target);
+                    if(indirect)pass.dispatchIndirect(arguments,0);else pass.dispatchGroups(WIDTH/8,HEIGHT/4,1);
+                }
+                var pixels=readbackTexture(target,0,WIDTH,HEIGHT);
+                assertFalse(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+                for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)),
+                        "Independent raw pixels reject the non-premultiplied imageStore");
+                assertFalse(target.clearIsRedundant(new Vector4f(0),null),
+                        "An encoded shader store cannot retain its old whole-clear cache");
+                encoder.clearColorTexture(target,new Vector4f(0));
+                var cleared=readbackTexture(target,0,WIDTH,HEIGHT);
+                for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)),
+                        "The equal clear after imageStore must really erase every channel");
+                assertTrue(MetalUiDrawCoverage.snapshot().content().premultipliedClearOnlyProven());
+            }
+            assertEquals(2,MetalUiDrawCoverage.snapshot().content().potentialShaderWrites());
+            assertFalse(MetalUiDrawCoverage.snapshot().premultipliedProven());
+            // The texture cache is production state, independent of UI capture.
+            MetalUiDrawCoverage.reset();
+            for(boolean indirect:new boolean[]{false,true}) {
+                encoder.clearColorTexture(target,new Vector4f(0));encoder.flushPendingClear(target);
+                assertTrue(target.clearIsRedundant(new Vector4f(0),null));
+                try(var pass=encoder.createComputePass()) {
+                    pass.setPipeline(pipeline).bindTexture(0,target);
+                    if(indirect)pass.dispatchIndirect(arguments,0);else pass.dispatchGroups(WIDTH/8,HEIGHT/4,1);
+                }
+                var pixels=readbackTexture(target,0,WIDTH,HEIGHT);
+                assertFalse(MetalUiDrawCoverage.observing());
+                for(int p=0;p<WIDTH*HEIGHT;p++)assertTrue(Byte.toUnsignedInt(pixels.get(p*4))>Byte.toUnsignedInt(pixels.get(p*4+3)));
+                assertFalse(target.clearIsRedundant(new Vector4f(0),null));
+                encoder.clearColorTexture(target,new Vector4f(0));
+                var cleared=readbackTexture(target,0,WIDTH,HEIGHT);
+                for(int p=0;p<WIDTH*HEIGHT*4;p++)assertEquals(0,Byte.toUnsignedInt(cleared.get(p)),
+                        "The equal clear must execute with UI capture disabled too");
+            }
+        } finally {MetalUiDrawCoverage.reset();}
+    }
+
+    @Test
     void renderThenComputeImageLoadObservesFragmentOutput() {
         shaders.put("caps_fill.vert", FULLSCREEN_VERTEX);
         shaders.put("caps_fill.frag", """

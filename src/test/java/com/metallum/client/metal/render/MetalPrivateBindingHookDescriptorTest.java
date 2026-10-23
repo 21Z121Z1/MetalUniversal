@@ -28,6 +28,164 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * must fail here instead of pairing an old token with a new compatibility key.</p>
  */
 final class MetalPrivateBindingHookDescriptorTest {
+    @Test
+    void inspectPinnedShaderIncludeApi() throws Exception {
+        String resource="com/mojang/renderpearl/api/pipeline/ShaderSource$CachedIncludeSource";
+        ClassNode type=load(resource);
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")){bytes=input.readAllBytes();}
+        var report=new java.util.LinkedHashMap<String,Object>();
+        report.put("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local-unrecorded"));
+        report.put("resource",resource);
+        report.put("classSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
+        report.put("fields",type.fields.stream().map(field->field.name+":"+field.desc).toList());
+        report.put("methods",type.methods.stream().map(method->method.name+method.desc).toList());
+        report.put("sourceAdmissionGranted",false);
+        report.put("boundary","Pinned include API signatures only; shader identifiers and namespace do not prove source semantics.");
+        var reference=MetalMotionShaderAssetAudit.inspect();report.put("assetReference",reference);
+        report.put("dependencySourceReference",MetalDependencyShaderAudit.inspect(reference));
+        var providers=new java.util.TreeSet<String>();
+        Object providerNames=reference.get("includeProviderClasses");
+        if(providerNames instanceof java.util.List<?> names)for(Object name:names)providers.add((String)name);
+        providers.add("net/minecraft/client/renderer/ShaderManager");
+        providers.add("net/minecraft/client/renderer/GameRenderer");
+        providers.add("net/minecraft/client/renderer/ShaderManager$Configs");
+        providers.add("net/minecraft/client/renderer/ShaderManager$PostChainCache");
+        providers.add("com/mojang/blaze3d/pipeline/PipelineCache");
+        providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource$CachedIncludeSource");
+        providers.add("com/mojang/renderpearl/frontend/shaders/GlslCompiler");
+        providers.add("com/mojang/renderpearl/api/pipeline/ShaderSource");
+        providers.add("org/lwjgl/util/shaderc/ShadercIncludeResult");
+        var providerBytecode=new java.util.TreeMap<String,Object>();
+        for(String name:providers)providerBytecode.put(name,includeProviderBytecode(name));
+        report.put("includeProviderBytecode",providerBytecode);
+        ClassNode includeResult=load("org/lwjgl/util/shaderc/ShadercIncludeResult");
+        report.put("includeResultMethods",includeResult.methods.stream().map(method->method.name+method.desc).toList());
+        var compressed=new java.io.ByteArrayOutputStream();
+        try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
+        System.out.println("METAL_SHADER_SOURCE_API_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
+    }
+
+    private Object includeProviderBytecode(String resource) throws Exception {
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")) {
+            if(input==null)return java.util.Map.of("available",false);
+            bytes=input.readAllBytes();
+        }
+        return includeProviderBytecode(bytes);
+    }
+
+    static Object includeProviderBytecode(byte[] bytes) throws Exception {
+        var type=new ClassNode();new ClassReader(bytes).accept(type,0);
+        var methods=new java.util.TreeMap<String,Object>();
+        for(var method:type.methods) {
+            if(type.name.equals("net/minecraft/client/renderer/GameRenderer") && !method.name.equals("preloadUiShader"))continue;
+            var rows=new java.util.ArrayList<String>();
+            var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();int index=0;
+            for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);
+            for(var instruction:method.instructions) {
+                if(rows.size()>=10000) {rows.add("instruction-limit-reached");break;}
+                String row=Integer.toString(instruction.getOpcode());
+                if(instruction instanceof MethodInsnNode call)row+=" call "+call.owner+"."+call.name+call.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.FieldInsnNode field)row+=" field "+field.owner+"."+field.name+":"+field.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.JumpInsnNode jump)row+=" jump L"+labels.get(jump.label);
+                else if(instruction instanceof org.objectweb.asm.tree.LabelNode label)row="L"+labels.get(label);
+                else if(instruction instanceof org.objectweb.asm.tree.VarInsnNode variable)row+=" local "+variable.var;
+                else if(instruction instanceof org.objectweb.asm.tree.IntInsnNode number)row+=" operand "+number.operand;
+                else if(instruction instanceof org.objectweb.asm.tree.TypeInsnNode typeInsn)row+=" type "+typeInsn.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode dynamic) {
+                    row+=" dynamic "+dynamic.name+dynamic.desc+" bootstrap "+dynamic.bsm;
+                    for(Object argument:dynamic.bsmArgs) {
+                        if(argument instanceof String text) {
+                            byte[] value=text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            row+=" arg-string-bytes="+value.length+" sha256="+java.util.HexFormat.of()
+                                    .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+                        } else row+=" arg="+argument;
+                    }
+                }
+                else if(instruction instanceof LdcInsnNode literal) {
+                    if(literal.cst instanceof String text) {
+                        byte[] value=text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        String digest=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value));
+                        row+=" string bytes="+value.length+" sha256="+digest;
+                        if(text.length()<120 && !text.contains("\n") && text.matches("[a-zA-Z0-9_./:%$+-]+"))row+=" literal="+text;
+                    } else row+=" constant "+literal.cst;
+                }
+                rows.add(row);
+            }
+            methods.put(method.name+method.desc,rows);
+        }
+        return java.util.Map.of("available",true,"classSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)),
+                "fields",type.fields.stream().map(field->field.name+":"+field.desc).toList(),"methods",methods);
+    }
+
+    @Test
+    void inspectPinnedCullRecoveryBoundaryWithoutPromotingTheOldOptimization() throws Exception {
+        String resource="net/caffeinemc/mods/sodium/client/render/chunk/RenderSectionManager";
+        ClassNode type=load(resource);
+        var methods=new java.util.LinkedHashMap<String,Object>();
+        for(var method:type.methods)if(method.name.equals("prepareRenderTrees") || method.name.equals("consumeCullTaskResults")
+                || method.name.equals("scheduleAsyncWork")) {
+            var rows=new java.util.ArrayList<String>();int index=0;
+            var labels=new java.util.IdentityHashMap<org.objectweb.asm.tree.LabelNode,Integer>();
+            for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LabelNode label)labels.put(label,index++);
+            for(var instruction:method.instructions) {
+                String row=Integer.toString(instruction.getOpcode());
+                if(instruction instanceof MethodInsnNode call)row+=" call "+call.owner+"."+call.name+call.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.FieldInsnNode field)row+=" field "+field.owner+"."+field.name+":"+field.desc;
+                else if(instruction instanceof org.objectweb.asm.tree.JumpInsnNode jump)row+=" jump L"+labels.get(jump.label);
+                else if(instruction instanceof org.objectweb.asm.tree.LabelNode label)row="L"+labels.get(label);
+                else if(instruction instanceof org.objectweb.asm.tree.VarInsnNode variable)row+=" local "+variable.var;
+                else if(instruction instanceof LdcInsnNode literal)row+=" constant "+literal.cst;
+                rows.add(row);
+            }
+            methods.put(method.name+method.desc,rows);
+        }
+        byte[] bytes;
+        try(var input=getClass().getClassLoader().getResourceAsStream(resource+".class")){bytes=input.readAllBytes();}
+        var report=new java.util.LinkedHashMap<String,Object>();
+        report.put("sourceCommit",System.getenv().getOrDefault("METALLUM_SOURCE_SHA","local-unrecorded"));
+        report.put("dependencyClassSha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
+        report.put("resource",resource);report.put("fields",type.fields.stream().map(field->field.name+":"+field.desc).toList());
+        report.put("methods",methods);report.put("sameCancellationSemanticsProven",false);
+        report.put("promotionAllowed",false);report.put("boundary","Exact pinned dependency bytecode for review. Hook shape alone is not a cancellation-path proof; no old optimization is enabled.");
+        byte[] json=new com.google.gson.Gson().toJson(report).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var compressed=new java.io.ByteArrayOutputStream();try(var gzip=new java.util.zip.GZIPOutputStream(compressed)){gzip.write(json);}
+        System.out.println("SODIUM_CULL_REVIEW_GZIP_BASE64 "+java.util.Base64.getEncoder().encodeToString(compressed.toByteArray()));
+    }
+
+    @Test
+    void sodiumCloudBulkEmitterIsCoveredAtItsFinalByteBufferBoundary() throws Exception {
+        String name="net/caffeinemc/mods/sodium/mixin/features/render/world/clouds/CloudRendererMixin";
+        ClassNode cloud=load(name);
+        MethodNode build=cloud.methods.stream().filter(method->method.name.equals("buildMesh")
+                && method.desc.contains("Ljava/nio/ByteBuffer;")).findFirst().orElseThrow();
+        boolean directByteWrites=false;
+        int ordinaryFaceCalls=0;
+        var pending=new java.util.ArrayDeque<MethodNode>();pending.add(build);
+        var seen=new java.util.HashSet<String>();
+        while(!pending.isEmpty()) {
+            MethodNode method=pending.remove();if(!seen.add(method.name+method.desc))continue;
+            for(var instruction:method.instructions)if(instruction instanceof MethodInsnNode invoke) {
+                if((invoke.owner.endsWith("/MemoryIntrinsics") && invoke.name.equals("putByte"))
+                        || (invoke.owner.equals("org/lwjgl/system/MemoryUtil") && invoke.name.equals("memPutByte")))directByteWrites=true;
+                if(invoke.name.equals("encodeFace"))ordinaryFaceCalls++;
+                if(invoke.owner.equals(cloud.name))cloud.methods.stream()
+                        .filter(candidate->candidate.name.equals(invoke.name) && candidate.desc.equals(invoke.desc)).forEach(pending::add);
+            }
+        }
+        assertTrue(directByteWrites,"Review the exact pinned Sodium producer if its bulk cloud emission changes");
+        assertTrue(java.util.stream.StreamSupport.stream(build.instructions.spliterator(),false)
+                .filter(instruction->instruction instanceof MethodInsnNode).map(instruction->(MethodInsnNode)instruction)
+                .anyMatch(invoke->invoke.owner.equals("java/nio/ByteBuffer") && invoke.name.equals("position") && invoke.desc.startsWith("(I)")),
+                "The common capture relies on the actual completed buffer extent");
+        try(InputStream input=getClass().getClassLoader().getResourceAsStream(name+".class")) {
+            String digest=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(input.readAllBytes()));
+            System.out.println("SODIUM_CLOUD_MESH_CONTRACT classSha256="+digest+" bulkWrites=true ordinaryFaceCalls="+ordinaryFaceCalls
+                    +" buildMesh="+build.desc);
+        }
+    }
+
     private static final String RENDER_PASS = "com/mojang/renderpearl/api/commands/RenderPass";
     private static final String METAL_RENDER_PASS = "com/metallum/client/metal/render/MetalRenderPass";
     private static final String SET_UNIFORM_SLICE =

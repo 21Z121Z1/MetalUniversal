@@ -28,15 +28,30 @@ final class FrameGenerationColorContractTest {
                 evidence.admissionEvidence(true)
         );
         assertTrue(evidence.missingProofs().containsAll(List.of(
-                "temporal-input-linearization",
                 "post-temporal-tone-map",
-                "frame-interpolation-transfer",
                 "ui-premultiplied-alpha"
         )));
+        assertTrue(evidence.missingProofs().contains("temporal-input-linearization"));
+        assertTrue(evidence.missingProofs().contains("frame-interpolation-transfer"));
         assertEquals(
                 FrameGenerationColorContract.DrawableEncoding.EXPLICIT_SRGB,
                 evidence.drawableEncoding()
         );
+    }
+
+    @Test
+    void transferProofRequiresThisSourceReceiptAndStillDoesNotProveHdrToneMapOrUi() {
+        var path = FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT;
+        var proof = FrameGenerationColorContract.withSdrTransferReceipt(path, true);
+        assertFalse(proof.missingProofs().contains("temporal-input-linearization"));
+        assertFalse(proof.missingProofs().contains("frame-interpolation-transfer"));
+        assertTrue(proof.missingProofs().containsAll(List.of("post-temporal-tone-map", "ui-premultiplied-alpha")));
+        assertFalse(proof.productionProven());
+        assertEquals(FrameGenerationColorContract.currentRenderer(path),
+                FrameGenerationColorContract.withSdrTransferReceipt(path, false));
+        var direct = FrameGenerationColorContract.SourcePath.NATIVE_DIRECT;
+        assertEquals(FrameGenerationColorContract.currentRenderer(direct),
+                FrameGenerationColorContract.withSdrTransferReceipt(direct, true));
     }
 
     @Test

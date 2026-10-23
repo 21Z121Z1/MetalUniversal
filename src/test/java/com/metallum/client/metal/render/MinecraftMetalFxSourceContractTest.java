@@ -70,16 +70,19 @@ final class MinecraftMetalFxSourceContractTest {
 
     @Test
     void handHookForwardsTheActualClearOperandAndPreservesTheClear() {
-        MethodNode hook = method(MIXIN, "metallum$preserveWorldDepthBeforeHand");
+        MethodNode hook = method(MIXIN, "metallum$observeActualHandDepth");
         var capture = calls(hook, "com/metallum/client/metal/render/MetalFxManager", "preserveWorldDepthBeforeHand").getFirst();
-        var clear = calls(hook, ENCODER, "clearDepthTexture").getFirst();
-        assertEquals(CLEAR, clear.desc);
+        var clear = calls(hook, "com/llamalad7/mixinextras/injector/wrapoperation/Operation", "call").getFirst();
+        assertEquals(1, calls(hook, "com/llamalad7/mixinextras/injector/wrapoperation/Operation", "call").size());
         assertTrue(hook.instructions.indexOf(capture) < hook.instructions.indexOf(clear));
         assertEquals(2, ((VarInsnNode) previousOpcode(capture)).var, "capture the supplied depth argument");
-        AbstractInsnNode depthLoad = previousOpcode(previousOpcode(clear));
-        assertEquals(Opcodes.ALOAD, depthLoad.getOpcode());
-        assertEquals(2, ((VarInsnNode) depthLoad).var, "clear the same depth argument, not a main-target lookup");
+        var save = calls(hook, "com/llamalad7/mixinextras/sugar/ref/LocalRef", "set").getFirst();
+        assertTrue(hook.instructions.indexOf(clear) < hook.instructions.indexOf(save));
+        assertEquals(2, ((VarInsnNode) previousOpcode(save)).var, "retain the actual clear target for the completed HUD snapshot");
         assertTrue(calls(hook, GAME, "mainRenderTarget").isEmpty());
+        MethodNode tail = method(MIXIN, "metallum$snapshotCompletedHandDepth");
+        assertEquals(1, calls(tail, "com/llamalad7/mixinextras/sugar/ref/LocalRef", "get").size());
+        assertEquals(1, calls(tail, "com/metallum/client/metal/render/MetalFxManager", "captureFirstPersonDepth").size());
     }
 
     @Test

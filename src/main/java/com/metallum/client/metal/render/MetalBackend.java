@@ -8,7 +8,10 @@ import com.mojang.renderpearl.api.device.GpuBackend;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.frontend.FrontendGpuDevice;
+import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
@@ -22,9 +25,51 @@ import java.lang.foreign.MemorySegment;
 public final class MetalBackend implements GpuBackend {
     /** Publishes Minecraft's complete RenderPearl source provider for lazy Metal PSO compilation. */
     public static ShaderSource captureShaderSource(final ShaderSource shaderSource) {
-        ShaderSource effectiveSource = MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
+        ShaderSource effectiveSource = prepareShaderSource(shaderSource);
         MetalDevice.captureShaderSource(effectiveSource);
         return effectiveSource;
+    }
+
+    public static ShaderSource prepareShaderSource(final ShaderSource shaderSource) {
+        return MetalShaderSourceAdapters.prepareLibrary(shaderSource);
+    }
+
+    /** Attaches the original frontend semantics after the matching async compile completes. */
+    public static void capturePipelineSource(final @Nullable CompiledRenderPipeline compiled, final RenderPipeline source) {
+        if (compiled instanceof FrontendRenderPipeline frontend
+                && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal) {
+            metal.captureSourcePipeline(source);
+        }
+    }
+
+    public static CompiledRenderPipeline.Pending preservePipelineSource(
+            final CompiledRenderPipeline.Pending pending, final RenderPipeline source) {
+        return preservePipelineSource(pending,source,null);
+    }
+
+    public static ShaderSource captureCompileInputs(final ShaderSource source) {
+        return MetalShaderSourceAdapters.captureCompileInputs(source);
+    }
+
+    public static java.util.concurrent.Executor captureCompileExecutor(
+            final ShaderSource source,final java.util.concurrent.Executor executor) {
+        return MetalShaderSourceAdapters.compilationExecutor(source,executor);
+    }
+
+    public static CompiledRenderPipeline.Pending preservePipelineSource(
+            final CompiledRenderPipeline.Pending pending,final RenderPipeline source,
+            final @Nullable ShaderSource compilationSource) {
+        return () -> {
+            CompiledRenderPipeline compiled = pending.finishCompile();
+            capturePipelineSource(compiled, source);
+            if(compilationSource!=null && compiled instanceof FrontendRenderPipeline frontend
+                    && frontend.backendRenderPipeline() instanceof MetalCompiledRenderPipeline metal) {
+                metal.captureShaderInputs(MetalShaderSourceAdapters.compiledInputs(compilationSource),
+                        MetalShaderSourceAdapters.libraryProof(compilationSource));
+                metal.captureShaderProvider(MetalShaderSourceAdapters.compileProviderType(compilationSource));
+            }
+            return compiled;
+        };
     }
 
     @Override

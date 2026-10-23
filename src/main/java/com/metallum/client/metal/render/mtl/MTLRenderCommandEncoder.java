@@ -1,6 +1,9 @@
 package com.metallum.client.metal.render.mtl;
 
+import com.metallum.client.metal.render.MetalBackendOptimizations;
+
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
@@ -9,6 +12,7 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
+    private static final boolean FUSED_STATE_DRAW = MetalBackendOptimizations.FUSED_STATE_DRAW;
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );
@@ -336,6 +340,19 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
                 indexBuffer, firstIndexOffsets, indexCounts, vertexOffsets, drawCount, 1L, 0L);
     }
 
+    /** Exclusive encoder scratch; native consumes all pointers before returning. */
+    public @Nullable MemorySegment indexedBatchDescriptor() {
+        if (!MetalBackendOptimizations.NATIVE_INDEXED_VERTEX_REBASE || this.statePacket == null
+                || !MetalRenderStatePacketBridge.indexedBatchAvailable()) return null;
+        return this.statePacket.indexedBatchStorage();
+    }
+
+    public boolean tryIndexedRebasedBatch(long bytes) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        return this.statePacket != null && this.statePacket.tryIndexedBatch(encoder, bytes);
+    }
+
     public void drawPrimitives(
             final MTLPrimitiveType primitiveType,
             final int firstVertex,
@@ -344,6 +361,11 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
+        if (FUSED_STATE_DRAW && this.statePacket != null && this.statePacket.hasNativeStateBatch()
+                && MetalRenderStatePacketBridge.drawAvailable()
+                && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_PRIMITIVES,
+                primitiveType.value, 0, MemorySegment.NULL, 0,
+                firstVertex, vertexCount, instanceCount, baseInstance)) return;
         flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitives(
                 encoder,
@@ -366,6 +388,11 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
             final int baseInstance
     ) {
         MemorySegment encoder = handle();
+        if (FUSED_STATE_DRAW && this.statePacket != null && this.statePacket.hasNativeStateBatch()
+                && MetalRenderStatePacketBridge.drawAvailable()
+                && this.statePacket.tryDraw(encoder, MetalRenderStatePacket.DRAW_INDEXED,
+                primitiveType.value, indexType.value, indexBuffer, offset,
+                baseVertex, indexCount, instanceCount, baseInstance)) return;
         flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitives(
                 encoder,

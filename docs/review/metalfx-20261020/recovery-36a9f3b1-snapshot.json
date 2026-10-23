@@ -1,0 +1,286 @@
+{
+  "capturedUtc": "20261020T210011Z",
+  "heads": {
+    "agent/metalfx-assembly-20260924-01": "af30078ebfc6677f063361b88dbed06c5e08be56",
+    "agent/metalfx-cloud-assembly-20260924": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+    "agent/metalfx-cloud-workbench-20260924": "c0dd7d9e35f970611d161bc950548d565e372ad6",
+    "agent/metalfx-contract-completion-20260924": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+    "agent/metalfx-data-contracts-20260924": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+    "agent/upstream-26.3-prepared-20260923": "f6f5d8391ddc4d34f66a53ee9086665caba79a25",
+    "agent/upstream-26.3-renderpearl": "7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82",
+    "agent/upstream-26.3-workbench-20260923": "be6f578151ca7a765e67c0d7e7aa216c41774d02",
+    "codex/consolidated-metal-20261020": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+    "codex/mcopt-semantic-convergence-20261005": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+    "codex/metal-renderer-research": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+    "codex/metalfx-official-audit-20261020": "fe547607b3bdfb2dda9d373fd3bbe8415f19e328",
+    "codex/p1-framebuffer-determinism": "1548c41d9e0ea65fad932740854d75804ff81d07",
+    "codex/sodium-client-e2e-20260923": "9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe",
+    "codex/vanilla-fx-aff7f0f0-validation": "65c711e2b6c9e080c70bd3086cbb8ef2e49dceac",
+    "main": "9930a2e3ae9d54756f79693c1e8c60704975372c",
+    "research/modernization-backlog": "7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a",
+    "upstream/26.3-fabric-pr": "81b7e61821be46b6ad1d787bee6077a7208ebeaa",
+    "upstream/renderpearl-26.3": "4403a941091ecb7c25d41b8398d6ddf270b8c0cd"
+  },
+  "anchors": [
+    {
+      "branch": "agent/metalfx-assembly-20260924-01",
+      "sha": "af30078ebfc6677f063361b88dbed06c5e08be56",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-assembly-20260924-01"
+    },
+    {
+      "branch": "agent/metalfx-cloud-assembly-20260924",
+      "sha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-cloud-assembly-20260924"
+    },
+    {
+      "branch": "agent/metalfx-cloud-workbench-20260924",
+      "sha": "c0dd7d9e35f970611d161bc950548d565e372ad6",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-cloud-workbench-20260924"
+    },
+    {
+      "branch": "agent/metalfx-contract-completion-20260924",
+      "sha": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-contract-completion-20260924"
+    },
+    {
+      "branch": "agent/metalfx-data-contracts-20260924",
+      "sha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-data-contracts-20260924"
+    },
+    {
+      "branch": "agent/upstream-26.3-prepared-20260923",
+      "sha": "f6f5d8391ddc4d34f66a53ee9086665caba79a25",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-prepared-20260923"
+    },
+    {
+      "branch": "agent/upstream-26.3-renderpearl",
+      "sha": "7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-renderpearl"
+    },
+    {
+      "branch": "agent/upstream-26.3-workbench-20260923",
+      "sha": "be6f578151ca7a765e67c0d7e7aa216c41774d02",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-workbench-20260923"
+    },
+    {
+      "branch": "codex/consolidated-metal-20261020",
+      "sha": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+      "tag": "branch-backup/20261020T210011Z/codex/consolidated-metal-20261020"
+    },
+    {
+      "branch": "codex/mcopt-semantic-convergence-20261005",
+      "sha": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+      "tag": "branch-backup/20261020T194937Z/codex/mcopt-semantic-convergence-20261005"
+    },
+    {
+      "branch": "codex/metal-renderer-research",
+      "sha": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+      "tag": "branch-backup/20261020T194937Z/codex/metal-renderer-research"
+    },
+    {
+      "branch": "codex/metalfx-official-audit-20261020",
+      "sha": "fe547607b3bdfb2dda9d373fd3bbe8415f19e328",
+      "tag": "branch-backup/20261020T194937Z/codex/metalfx-official-audit-20261020"
+    },
+    {
+      "branch": "codex/p1-framebuffer-determinism",
+      "sha": "1548c41d9e0ea65fad932740854d75804ff81d07",
+      "tag": "branch-backup/20261020T194937Z/codex/p1-framebuffer-determinism"
+    },
+    {
+      "branch": "codex/sodium-client-e2e-20260923",
+      "sha": "9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe",
+      "tag": "branch-backup/20261020T194937Z/codex/sodium-client-e2e-20260923"
+    },
+    {
+      "branch": "codex/vanilla-fx-aff7f0f0-validation",
+      "sha": "65c711e2b6c9e080c70bd3086cbb8ef2e49dceac",
+      "tag": "branch-backup/20261020T200513Z/codex/vanilla-fx-aff7f0f0-validation"
+    },
+    {
+      "branch": "main",
+      "sha": "9930a2e3ae9d54756f79693c1e8c60704975372c",
+      "tag": "branch-backup/20261020T194937Z/main"
+    },
+    {
+      "branch": "research/modernization-backlog",
+      "sha": "7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a",
+      "tag": "branch-backup/20261020T194937Z/research/modernization-backlog"
+    },
+    {
+      "branch": "upstream/26.3-fabric-pr",
+      "sha": "81b7e61821be46b6ad1d787bee6077a7208ebeaa",
+      "tag": "branch-backup/20261020T194937Z/upstream/26.3-fabric-pr"
+    },
+    {
+      "branch": "upstream/renderpearl-26.3",
+      "sha": "4403a941091ecb7c25d41b8398d6ddf270b8c0cd",
+      "tag": "branch-backup/20261020T194937Z/upstream/renderpearl-26.3"
+    }
+  ],
+  "bundle": "MetalUniversal-precleanup-20261020T210011Z.bundle",
+  "bundleSha256": "8a5ba8a1d056c3cee14beda0685c92d5bfd14b2424b7ab50a134426ce9f7cc5d",
+  "bundleBytes": 16317403,
+  "localBundleVerified": true,
+  "persistentTagsPushed": true,
+  "newPersistentTags": [
+    "branch-backup/20261020T210011Z/codex/consolidated-metal-20261020"
+  ],
+  "remoteRestoreVerified": true,
+  "restoredAnchors": [
+    {
+      "branch": "agent/metalfx-assembly-20260924-01",
+      "sha": "af30078ebfc6677f063361b88dbed06c5e08be56",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-assembly-20260924-01",
+      "restored": true
+    },
+    {
+      "branch": "agent/metalfx-cloud-assembly-20260924",
+      "sha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-cloud-assembly-20260924",
+      "restored": true
+    },
+    {
+      "branch": "agent/metalfx-cloud-workbench-20260924",
+      "sha": "c0dd7d9e35f970611d161bc950548d565e372ad6",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-cloud-workbench-20260924",
+      "restored": true
+    },
+    {
+      "branch": "agent/metalfx-contract-completion-20260924",
+      "sha": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-contract-completion-20260924",
+      "restored": true
+    },
+    {
+      "branch": "agent/metalfx-data-contracts-20260924",
+      "sha": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+      "tag": "branch-backup/20261020T194937Z/agent/metalfx-data-contracts-20260924",
+      "restored": true
+    },
+    {
+      "branch": "agent/upstream-26.3-prepared-20260923",
+      "sha": "f6f5d8391ddc4d34f66a53ee9086665caba79a25",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-prepared-20260923",
+      "restored": true
+    },
+    {
+      "branch": "agent/upstream-26.3-renderpearl",
+      "sha": "7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-renderpearl",
+      "restored": true
+    },
+    {
+      "branch": "agent/upstream-26.3-workbench-20260923",
+      "sha": "be6f578151ca7a765e67c0d7e7aa216c41774d02",
+      "tag": "branch-backup/20261020T194937Z/agent/upstream-26.3-workbench-20260923",
+      "restored": true
+    },
+    {
+      "branch": "codex/consolidated-metal-20261020",
+      "sha": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+      "tag": "branch-backup/20261020T210011Z/codex/consolidated-metal-20261020",
+      "restored": true
+    },
+    {
+      "branch": "codex/mcopt-semantic-convergence-20261005",
+      "sha": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+      "tag": "branch-backup/20261020T194937Z/codex/mcopt-semantic-convergence-20261005",
+      "restored": true
+    },
+    {
+      "branch": "codex/metal-renderer-research",
+      "sha": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+      "tag": "branch-backup/20261020T194937Z/codex/metal-renderer-research",
+      "restored": true
+    },
+    {
+      "branch": "codex/metalfx-official-audit-20261020",
+      "sha": "fe547607b3bdfb2dda9d373fd3bbe8415f19e328",
+      "tag": "branch-backup/20261020T194937Z/codex/metalfx-official-audit-20261020",
+      "restored": true
+    },
+    {
+      "branch": "codex/p1-framebuffer-determinism",
+      "sha": "1548c41d9e0ea65fad932740854d75804ff81d07",
+      "tag": "branch-backup/20261020T194937Z/codex/p1-framebuffer-determinism",
+      "restored": true
+    },
+    {
+      "branch": "codex/sodium-client-e2e-20260923",
+      "sha": "9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe",
+      "tag": "branch-backup/20261020T194937Z/codex/sodium-client-e2e-20260923",
+      "restored": true
+    },
+    {
+      "branch": "codex/vanilla-fx-aff7f0f0-validation",
+      "sha": "65c711e2b6c9e080c70bd3086cbb8ef2e49dceac",
+      "tag": "branch-backup/20261020T200513Z/codex/vanilla-fx-aff7f0f0-validation",
+      "restored": true
+    },
+    {
+      "branch": "main",
+      "sha": "9930a2e3ae9d54756f79693c1e8c60704975372c",
+      "tag": "branch-backup/20261020T194937Z/main",
+      "restored": true
+    },
+    {
+      "branch": "research/modernization-backlog",
+      "sha": "7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a",
+      "tag": "branch-backup/20261020T194937Z/research/modernization-backlog",
+      "restored": true
+    },
+    {
+      "branch": "upstream/26.3-fabric-pr",
+      "sha": "81b7e61821be46b6ad1d787bee6077a7208ebeaa",
+      "tag": "branch-backup/20261020T194937Z/upstream/26.3-fabric-pr",
+      "restored": true
+    },
+    {
+      "branch": "upstream/renderpearl-26.3",
+      "sha": "4403a941091ecb7c25d41b8398d6ddf270b8c0cd",
+      "tag": "branch-backup/20261020T194937Z/upstream/renderpearl-26.3",
+      "restored": true
+    }
+  ],
+  "fsckExit": 0,
+  "headsStillMatchSnapshot": true,
+  "latestHeads": {
+    "agent/metalfx-assembly-20260924-01": "af30078ebfc6677f063361b88dbed06c5e08be56",
+    "agent/metalfx-cloud-assembly-20260924": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+    "agent/metalfx-cloud-workbench-20260924": "c0dd7d9e35f970611d161bc950548d565e372ad6",
+    "agent/metalfx-contract-completion-20260924": "1888d3e28ba0fb0cb6ce043977db658d9c628c62",
+    "agent/metalfx-data-contracts-20260924": "cd5f8ddd939d38e05cd6ac56e466dcef69877d3c",
+    "agent/upstream-26.3-prepared-20260923": "f6f5d8391ddc4d34f66a53ee9086665caba79a25",
+    "agent/upstream-26.3-renderpearl": "7a6f94eb4165eb7c763ed06a247a1e9dc6fbdb82",
+    "agent/upstream-26.3-workbench-20260923": "be6f578151ca7a765e67c0d7e7aa216c41774d02",
+    "codex/consolidated-metal-20261020": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+    "codex/mcopt-semantic-convergence-20261005": "7b83bc4df3d93bc979a8c34caa551ad818595ce9",
+    "codex/metal-renderer-research": "a43637d08164a2e95116edaa4e7dda1b4fd2a155",
+    "codex/metalfx-official-audit-20261020": "fe547607b3bdfb2dda9d373fd3bbe8415f19e328",
+    "codex/p1-framebuffer-determinism": "1548c41d9e0ea65fad932740854d75804ff81d07",
+    "codex/sodium-client-e2e-20260923": "9448f2d8ab7c0fe253ad2dd4158ec8bd3242f2fe",
+    "codex/vanilla-fx-aff7f0f0-validation": "65c711e2b6c9e080c70bd3086cbb8ef2e49dceac",
+    "main": "9930a2e3ae9d54756f79693c1e8c60704975372c",
+    "research/modernization-backlog": "7f7852843b228486e9d8e6cc3e98bfc3bf0ff16a",
+    "upstream/26.3-fabric-pr": "81b7e61821be46b6ad1d787bee6077a7208ebeaa",
+    "upstream/renderpearl-26.3": "4403a941091ecb7c25d41b8398d6ddf270b8c0cd"
+  },
+  "remoteRestoreShallow": false,
+  "remoteRestorePartialClone": false,
+  "writersStopped": false,
+  "deletionReady": false,
+  "candidateActionsVerified": false,
+  "remoteRestorePartialCloneConfigExit": 1,
+  "headsLastRevalidatedUtc": "2026-10-20T21:21:08.238231+00:00",
+  "candidateCI": {
+    "source": "36a9f3b1d7d82be73091ce091a037d7460a6181b",
+    "build": "success",
+    "migration": "success",
+    "dualMacContracts": "success",
+    "E2E": "success",
+    "E2EJobsPassed": 9,
+    "hostedMetal": "pending",
+    "hardwareTemporalFrameGenerationQuality": "unverified"
+  }
+}

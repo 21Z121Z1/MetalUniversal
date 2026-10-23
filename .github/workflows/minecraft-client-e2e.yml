@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - codex/metalfx-official-audit-20261020
+      - codex/consolidated-metal-20261020
   pull_request:
     branches:
       - main
@@ -13,6 +15,7 @@ on:
       - 'build.gradle'
       - 'gradle.properties'
       - '.github/ci/minecraft-e2e/**'
+      - '.github/ci/shader-fixtures/**'
       - '.github/workflows/minecraft-client-e2e.yml'
 
 permissions:
@@ -26,27 +29,10 @@ env:
   METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
-  minecraft-client-e2e:
-    name: Minecraft client E2E (${{ matrix.renderer }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - renderer: vanilla
-            no_optional_mods: 'true'
-            sodium_only: 'false'
-          - renderer: sodium
-            no_optional_mods: 'false'
-            sodium_only: 'true'
-    runs-on: macos-26
-    timeout-minutes: 30
-    env:
-      METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
-      MTL_DEBUG_LAYER: '1'
-      MTL_SHADER_VALIDATION: '0'
-      MTL_HUD_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
-      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+  compile-client-harness:
+    name: Independent client harness compilation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -58,6 +44,112 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Compile the production Java artifact and the separate harness source set
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          ./gradlew --no-daemon jar -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          jars=[p for p in Path('build/libs').glob('*.jar')
+                if not p.name.endswith(('-sources.jar','-dev.jar','-validation.jar'))]
+          if len(jars)!=1: raise SystemExit('ambiguous production Java JAR for client harness compilation')
+          subprocess.run(['./gradlew','--no-daemon','--stacktrace','-p','.github/ci/minecraft-e2e',
+              '-PmetallumJar='+str(jars[0].resolve()),'-Pmetallum.noOptionalMods=true',
+              'compileJava','compileTestJava'],check=True)
+          PY
+  minecraft-client-e2e:
+    needs: compile-client-harness
+    name: "${{ matrix.scene == 'stationary' && 'Stationary time and camera receipts (Metal 3)' || matrix.metalfx == 'requested-temporal' && format('MetalFX client fallback ({0})', matrix.renderer) || format('Minecraft client E2E ({0}, {1})', matrix.renderer, matrix.transport) }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [baseline, candidate, default]
+        renderer: [vanilla, sodium]
+        metalfx: [off]
+        scene: [moving]
+        include:
+          - renderer: vanilla
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+          - renderer: sodium
+            no_optional_mods: 'false'
+            sodium_only: 'true'
+          - renderer: vanilla
+            transport: default
+            metalfx: requested-temporal
+            scene: moving
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+          - renderer: sodium
+            transport: default
+            metalfx: requested-temporal
+            scene: moving
+            no_optional_mods: 'false'
+            sodium_only: 'true'
+          - renderer: vanilla
+            transport: default
+            metalfx: off
+            scene: stationary
+            runner: macos-15
+            no_optional_mods: 'true'
+            sodium_only: 'false'
+    runs-on: ${{ matrix.runner || 'macos-26' }}
+    timeout-minutes: 30
+    env:
+      METALLUM_E2E_RENDERER: ${{ matrix.renderer }}
+      METALLUM_E2E_TRANSPORT: ${{ matrix.transport }}
+      METALLUM_E2E_METALFX: ${{ matrix.metalfx }}
+      METALLUM_E2E_SCENE: ${{ matrix.scene }}
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      # Preserve the exact translated stages when a non-black frame is visually wrong.
+      METALLUM_MSL_CACHE_DIR: ${{ github.workspace }}/build/agent-evidence/msl-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Select current SDK for the Metal 3 client
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          mkdir -p build/agent-evidence
+          {
+            echo "source=$METALLUM_SOURCE_SHA"
+            echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun swiftc --version
+          } | tee build/agent-evidence/metal3-client-toolchain.txt
+          # The common dylib contains availability-gated Metal 4 declarations
+          # even when this macOS 15 client executes the maintained Metal 3 path.
+          cat > "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift" <<'SWIFT'
+          import Metal
+          @available(macOS 26.0, *)
+          func requireNativeDeclarations(_ compiler: any MTL4Compiler, _ buffer: any MTL4CommandBuffer) {
+              let control: InlineArray<2, UInt32> = [1, 2]
+              _ = control[0]
+              _ = compiler
+              _ = buffer
+          }
+          SWIFT
+          xcrun --sdk macosx swiftc -typecheck -target arm64-apple-macosx14.0 \
+            "$RUNNER_TEMP/metallum-metal-sdk-preflight.swift"
       - name: Record exact-head environment
         run: |
           set -euo pipefail
@@ -92,12 +184,25 @@ jobs:
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             -Pmetallum.noOptionalMods=${{ matrix.no_optional_mods }} \
             -Pmetallum.sodiumOnly=${{ matrix.sodium_only }} \
+            -PtransportProfile=${{ matrix.transport }} \
+            -PmetalFxProfile=${{ matrix.metalfx }} \
+            -PstationaryFramebufferScene=${{ matrix.scene == 'stationary' }} \
             test runProductionClientGameTest
       - name: Verify framebuffer, presentation, and reload evidence
         run: |
           set -euo pipefail
           root='.github/ci/minecraft-e2e/build/evidence'
           log='.github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log'
+          captures=9
+          if [[ "$METALLUM_E2E_SCENE" == stationary ]]; then captures=8; fi
+          python3 scripts/agent/verify_render_contract_terminal.py \
+            --root "$root/metal-framebuffer/render-contract" \
+            --source "$METALLUM_SOURCE_SHA" --captures "$captures"
+          if [[ "$METALLUM_E2E_SCENE" == stationary ]]; then
+            python3 scripts/agent/verify_render_contract_terminal.py \
+              --root "$root/terrain-color-control/render-contract" \
+              --source "$METALLUM_SOURCE_SHA" --captures 1
+          fi
           python3 - "$root" "${{ steps.metallum.outputs.jar }}" <<'PY'
           import json
           import pathlib
@@ -115,10 +220,21 @@ jobs:
               root / 'presentation-evidence.json',
               root / 'reload-evidence.json',
               root / 'artifact-identity.json',
+              root / 'metal-framebuffer' / 'render-contract' / 'pass-manifest.json',
           ]
           for path in required:
               if not path.is_file() or path.stat().st_size == 0:
                   raise SystemExit(f'missing E2E evidence: {path}')
+
+          trace = json.loads((root / 'metal-framebuffer' / 'render-contract' / 'pass-manifest.json').read_text())
+          if (trace.get('status') != 'passed' or trace.get('manifestComplete') is not True
+                  or any(trace.get(key, -1) != 0 for key in
+                         ('droppedEvents', 'forcedClosedPassCount', 'invalidPassReferenceCount'))):
+              raise SystemExit('render-contract trace is incomplete or invalid after client shutdown')
+          runtime = json.loads((root / 'runtime-evidence.json').read_text())
+          if (runtime.get('renderContractStatus') != 'passed' or runtime.get('renderContractReady') is not True
+                  or runtime.get('renderContractManifestFinalized') is not True):
+              raise SystemExit('client did not attest a complete terminal render-contract snapshot')
 
           suite = json.loads(required[0].read_text(encoding='utf-8'))
           if suite.get('allExact') is not True:
@@ -147,6 +263,80 @@ jobs:
                   or runtime.get('chunksRendered') is not True):
               raise SystemExit(f'production client did not render the requested lane: {runtime}')
 
+          if os.environ['METALLUM_E2E_SCENE'] == 'stationary':
+              sys.path.insert(0, 'scripts/agent')
+              from check_metal4_main_e2e_pair import stationary_scene, stationary_terrain_control
+              scene = stationary_scene(runtime)
+              print('verified stationary time and camera receipts:', json.dumps(scene, sort_keys=True))
+              print('verified isolated terrain capture:', json.dumps(stationary_terrain_control(root), sort_keys=True))
+
+          optimization = json.loads((root / 'optimization-evidence.json').read_text(encoding='utf-8'))
+          if optimization.get('profile') != os.environ['METALLUM_E2E_TRANSPORT'] or optimization.get('verified') is not True:
+              raise SystemExit(f'optimization activation was not verified: {optimization}')
+          print('verified optimization activation:', json.dumps(optimization, sort_keys=True))
+
+          fx = json.loads((root / 'metalfx-runtime-evidence.json').read_text(encoding='utf-8'))
+          if fx.get('verified') is not True or fx.get('profile') != os.environ['METALLUM_E2E_METALFX']:
+              raise SystemExit(f'MetalFX runtime profile was not verified: {fx}')
+          if fx['profile'] == 'requested-temporal':
+              expected = 'TEMPORAL' if fx['temporalSupported'] and fx['motionPipelineAvailable'] else 'SPATIAL' if fx['spatialSupported'] else 'OFF'
+              if fx['requestedMode'] != 'TEMPORAL' or fx['effectiveMode'] != expected or fx['runtimeDisabled']:
+                  raise SystemExit(f'MetalFX capability fallback failed: {fx}')
+              if expected == 'SPATIAL' and not (fx['spatialEncodes'] > 0 and fx['temporalEncodes'] == 0):
+                  raise SystemExit(f'Spatial fallback was absent or falsely counted as Temporal: {fx}')
+              if fx['frameGenerationEnabled'] or fx['frameGenerationQueued'] != 0:
+                  raise SystemExit(f'Incomplete motion production admitted frame interpolation: {fx}')
+          print('verified MetalFX runtime:', json.dumps(fx, sort_keys=True))
+
+          if fx['profile'] == 'requested-temporal':
+              lifecycle_path = root / 'metalfx-lifecycle-evidence.json'
+              lifecycle = json.loads(lifecycle_path.read_text(encoding='utf-8'))
+              lease = lifecycle.get('shaderLibraryReload', {})
+              if (lifecycle.get('sourceCommit') != os.environ['METALLUM_SOURCE_SHA']
+                      or lifecycle.get('verified') is not True
+                      or lifecycle.get('canonicalDrawAfterReload') is not True
+                      or lifecycle.get('sourceAdmissionGranted') is not False
+                      or lease.get('ownerType') != 'net.minecraft.client.renderer.ShaderManager$Configs'
+                      or any(lease.get(key) is not True for key in
+                             ('retirementRequestedDuringBorrow', 'oldOwnerClosedAfterCompile', 'compiledSuccessfully', 'clientPumpedDuringBorrow'))
+                      or lease.get('sourceAdmissionGranted') is not False):
+                  raise SystemExit(f'actual Configs reload lease was not verified: {lifecycle}')
+              old_generation, new_generation = lease.get('oldGeneration'), lease.get('newGeneration')
+              if (type(old_generation) is not int or type(new_generation) is not int
+                      or min(old_generation, new_generation) <= 0 or old_generation == new_generation
+                      or type(lease.get('nativeCallbacks')) is not int or lease['nativeCallbacks'] <= 0):
+                  raise SystemExit(f'missing actual native callback or generation transition: {lease}')
+              states = lifecycle.get('states', {})
+              if (states.get('paused', {}).get('shaderLibraryGeneration') != old_generation
+                      or states.get('reloadedWhilePaused', {}).get('shaderLibraryGeneration') != new_generation
+                      or states.get('resumed', {}).get('shaderLibraryGeneration') != new_generation
+                      or any(state.get('sourceShaderInputsProven') is not True for state in states.values())):
+                  raise SystemExit(f'lifecycle states do not belong to the verified shader generations: {states}')
+              print('verified actual Configs reload lease:', json.dumps(lifecycle, sort_keys=True))
+              print('lifecycle artifact:', lifecycle_path.name, lifecycle_path.stat().st_size,
+                    hashlib.sha256(lifecycle_path.read_bytes()).hexdigest())
+
+              # Retain the exact existing diagnostics in a second inspectable
+              # channel. A passed scene is not a complete producer/UI admission.
+              import base64
+              import gzip
+              paths = [root / 'motion-source-draw-coverage.json']
+              for status in ('fast', 'fancy'):
+                  for stage in ('ordinary', 'oit'):
+                      directory = root / f'cloud-motion-{status}-{stage}'
+                      paths += [directory / 'cloud-source-census.json', directory / 'cloud-ownership-proof.json']
+              diagnostic = {'sourceCommit': os.environ['METALLUM_SOURCE_SHA'],
+                            'diagnosticOnly': True, 'files': {}}
+              for path in paths:
+                  if path.stat().st_size > 8 * 1024 * 1024:
+                      raise SystemExit(f'source diagnostic exceeds inspectable byte limit: {path}')
+                  data = path.read_bytes()
+                  diagnostic['files'][str(path.relative_to(root))] = {
+                      'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                      'content': json.loads(data)}
+              payload = json.dumps(diagnostic, sort_keys=True).encode()
+              print('MINECRAFT_SOURCE_DIAGNOSTICS_GZIP_BASE64 ' + base64.b64encode(gzip.compress(payload)).decode())
+
           raw = required[1].read_bytes()
           if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
               raise SystemExit('invalid framebuffer PNG')
@@ -163,6 +353,13 @@ jobs:
               raise SystemExit(f'framebuffer byte count mismatch: {selected}')
           if selected.get('nonBlackPixels', 0) <= 0 or selected.get('distinctRgb', 0) <= 1:
               raise SystemExit(f'framebuffer has no useful content: {selected}')
+
+          probe = json.loads((root / 'terrain-color-probe.json').read_text(encoding='utf-8'))
+          if probe.get('passed') is not True or [x.get('expected') for x in probe.get('bands', [])] != ['red', 'lime', 'blue']:
+              raise SystemExit(f'terrain geometry/color coverage failed: {probe}')
+          if not (root / 'terrain-color-probe.png').is_file():
+              raise SystemExit('missing terrain geometry/color screenshot')
+          print('verified terrain geometry/color coverage:', json.dumps(probe, sort_keys=True))
 
           presentation = json.loads(required[4].read_text(encoding='utf-8'))
           if presentation.get('completeAndSuccessful') is not True:
@@ -190,14 +387,43 @@ jobs:
           environment and emit valid Metal readback evidence.
           It does not prove attended visual parity, stable performance, thermals, or release readiness.
           BOUNDARY
+      - name: Retain client failure causes in the job log
+        if: failure()
+        run: |
+          python3 - <<'PY_DIAGNOSTIC'
+          import json
+          import pathlib
+          import xml.etree.ElementTree as ET
+          root = pathlib.Path('.github/ci/minecraft-e2e/build')
+          # HotSpot compiler/native crashes do not create JUnit failures. Preserve the
+          # actual VM report/compile task instead of classifying them from exit 134 alone.
+          for path in sorted(root.glob('run/clientGameTest/hs_err_pid*.log')):
+              print('JVM_FATAL_REPORT_BEGIN', str(path), 'bytes=' + str(path.stat().st_size))
+              with path.open('rb') as stream:
+                  print(stream.read(128 * 1024).decode('utf-8', errors='replace'))
+              print('JVM_FATAL_REPORT_END', str(path))
+          for path in sorted(root.glob('**/TEST-*.xml')):
+              try:
+                  suite = ET.parse(path).getroot()
+                  for case in suite.iter('testcase'):
+                      for failure in list(case.findall('failure')) + list(case.findall('error')):
+                          print(json.dumps({'file': str(path), 'test': case.get('name'),
+                                            'failure': (failure.text or '')[:24000]}))
+              except (OSError, ET.ParseError) as error:
+                  print(json.dumps({'file': str(path), 'diagnosticReadFailure': str(error)}))
+          PY_DIAGNOSTIC
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: minecraft-26.3-${{ matrix.renderer }}-e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          name: minecraft-26.3-${{ matrix.renderer }}-${{ matrix.transport }}-${{ matrix.metalfx == 'requested-temporal' && 'metalfx-requested-temporal-' || '' }}${{ matrix.scene == 'stationary' && 'stationary-' || '' }}e2e-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
           path: |
             build/agent-evidence/
             .github/ci/minecraft-e2e/build/evidence/
             .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/hs_err_pid*.log
+            .github/ci/minecraft-e2e/build/run/clientGameTest/replay_pid*.log
             .github/ci/minecraft-e2e/build/reports/
+            .github/ci/minecraft-e2e/build/test-results/
           if-no-files-found: warn
           retention-days: 14

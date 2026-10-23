@@ -104,7 +104,7 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
         String base = "iris/gen" + generation + "/center_depth";
         Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
         Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
-        ShaderSource source = new ShaderSource() {
+        ShaderSource source = MetalShaderSourceAdapters.withIncludeLifetime(new ShaderSource() {
             @Override
             public @Nullable String getShader(final Identifier identifier, final ShaderType type) {
                 if (identifier.equals(vertexId) && type == ShaderType.VERTEX) {
@@ -124,7 +124,7 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
             @Override
             public void close() {
             }
-        };
+        },fallback);
         BindGroupLayout resources = BindGroupLayout.builder()
                 .withUniform("CenterDepthParameters", UniformType.UNIFORM_BUFFER)
                 .withUniform("depth", UniformType.COMBINED_IMAGE_SAMPLER)

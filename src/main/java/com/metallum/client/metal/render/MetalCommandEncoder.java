@@ -66,6 +66,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private static final boolean BLIT_BATCH =
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
     private final MetalDevice device;
+    private final MetalSubmissionBackpressure submissionBackpressure = new MetalSubmissionBackpressure(
+            System.getProperty("metallum.maxSubmitsInFlight"));
+
+    int maxSubmitsInFlight() { return submissionBackpressure.limit(); }
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
@@ -582,6 +586,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
         flushPendingClear(texture);
+        MetalUiDrawCoverage.contentInvalidated(texture);
         blitCommandEncoder().generateMipmaps(texture.nativeHandle());
         if (!RenderContractRuntime.enabled()) {
             return;
@@ -623,6 +628,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             toClose.buffer.close();
             inFlight[slot] = null;
+        }
+
+        // A smaller latency budget adds a completion wait, but never shortens
+        // the storage ring or the conservative destruction/readback grace period.
+        if (submissionBackpressure.limit() < MAX_SUBMITS_IN_FLIGHT) {
+            long required = submissionBackpressure.completionRequiredBefore(currentSubmitIndex);
+            InFlight oldestAllowed = inFlight[(int) (required % MAX_SUBMITS_IN_FLIGHT)];
+            if (oldestAllowed != null && oldestAllowed.index == required && !oldestAllowed.completionHandled
+                    && !awaitInFlightCompletion(oldestAllowed, 5000L)) {
+                throw new IllegalStateException("5s timeout reached at Metal submission backpressure");
+            }
         }
 
         List<SubmitCallback> callbacks = List.copyOf(currentSubmitCallbacks);
@@ -1350,9 +1366,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 motion == null ? MemorySegment.NULL : motion.nativeHandle(),
                 reactive == null ? MemorySegment.NULL : reactive.nativeHandle(),
                 output.nativeHandle(),
-                currentViewProjection == null ? null : currentViewProjection.get(currentViewProjectionBuffer),
-                inverseCurrentViewProjection == null ? null : inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
-                previousViewProjection == null ? null : previousViewProjection.get(previousViewProjectionBuffer),
+                currentViewProjection == null ? null : MetalMotionContract.cameraMatrix(currentViewProjection, currentViewProjectionBuffer, false),
+                inverseCurrentViewProjection == null ? null : MetalMotionContract.cameraMatrix(inverseCurrentViewProjection, inverseViewProjectionBuffer, true),
+                previousViewProjection == null ? null : MetalMotionContract.cameraMatrix(previousViewProjection, previousViewProjectionBuffer, false),
                 pixelJitter.x,
                 pixelJitter.y,
                 inputWidth,
@@ -1362,6 +1378,67 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 preserveReactiveMask,
                 fence
         );
+    }
+
+    boolean resolveSurfaceMotionV4(
+            final MetalGpuTexture sceneDepth, final MetalGpuTexture worldOwnershipDepth,
+            @Nullable final MetalGpuTexture hudDepth, final MetalGpuTexture sourceMotion,
+            final MetalGpuTexture worldValidity, final MetalGpuTexture hudValidity,
+            final MetalGpuTexture correspondence, final MetalGpuTexture previousWorldDepth,
+            final MetalGpuTexture previousHudDepth, final MetalGpuTexture mergedMotion,
+            final MetalGpuTexture reactive, final MetalGpuTexture cameraDiagnostic,
+            final MetalGpuTexture disocclusionDiagnostic, final MetalGpuTexture nextWorldDepth,
+            final MetalGpuTexture presentationDepth, final MetalGpuTexture nextHudDepth,
+            final org.joml.Matrix4f current, final org.joml.Matrix4f inverse,
+            final org.joml.Matrix4f previous, final org.joml.Vector2f jitter,
+            final org.joml.Vector2f previousJitter, final float handReactiveBoost,
+            final int width, final int height, final boolean historyValid,
+            final boolean depthReversed, final boolean preserveReactive, final boolean diagnostics
+    ) {
+        for (MetalGpuTexture texture : new MetalGpuTexture[]{sceneDepth, worldOwnershipDepth, hudDepth,
+                sourceMotion, worldValidity, hudValidity, correspondence, previousWorldDepth, previousHudDepth,
+                mergedMotion, reactive, cameraDiagnostic, disocclusionDiagnostic, nextWorldDepth,
+                presentationDepth, nextHudDepth}) {
+            if (texture != null) flushPendingClear(texture);
+        }
+        submitRenderPass();
+        endEncoder();
+        for (MetalGpuTexture texture : new MetalGpuTexture[]{mergedMotion, reactive, nextWorldDepth,
+                presentationDepth, nextHudDepth}) texture.markContentsDirty();
+        if (diagnostics) {
+            cameraDiagnostic.markContentsDirty();
+            disocclusionDiagnostic.markContentsDirty();
+        }
+        return MetalNativeBridge.resolveSurfaceMotionV4(commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                sceneDepth.nativeHandle(), worldOwnershipDepth.nativeHandle(),
+                hudDepth == null ? MemorySegment.NULL : hudDepth.nativeHandle(), sourceMotion.nativeHandle(),
+                worldValidity.nativeHandle(), hudValidity.nativeHandle(), correspondence.nativeHandle(),
+                previousWorldDepth.nativeHandle(), previousHudDepth.nativeHandle(), mergedMotion.nativeHandle(),
+                reactive.nativeHandle(), cameraDiagnostic.nativeHandle(), disocclusionDiagnostic.nativeHandle(),
+                nextWorldDepth.nativeHandle(), presentationDepth.nativeHandle(), nextHudDepth.nativeHandle(),
+                MetalMotionContract.cameraMatrix(current, currentViewProjectionBuffer, false),
+                MetalMotionContract.cameraMatrix(inverse, inverseViewProjectionBuffer, true),
+                MetalMotionContract.cameraMatrix(previous, previousViewProjectionBuffer, false), fence,
+                jitter.x, jitter.y, previousJitter.x, previousJitter.y, handReactiveBoost,
+                width, height, historyValid, depthReversed, preserveReactive, diagnostics);
+    }
+
+    boolean encodePreparedTemporal(
+            final MetalGpuTexture color, final MetalGpuTexture depth, final MetalGpuTexture motion,
+            final MetalGpuTexture reactive, final MetalGpuTexture output,
+            final org.joml.Vector2f jitter, final int width, final int height,
+            final boolean reset, final boolean depthReversed
+    ) {
+        flushPendingClear(color);
+        flushPendingClear(depth);
+        flushPendingClear(motion);
+        flushPendingClear(reactive);
+        submitRenderPass();
+        endEncoder();
+        output.markContentsDirty();
+        return MetalNativeBridge.encodePreparedTemporal(commandBuffer().nativeHandle(), device.metalDeviceHandle(),
+                color.nativeHandle(), depth.nativeHandle(), motion.nativeHandle(), reactive.nativeHandle(),
+                output.nativeHandle(), fence, jitter.x, jitter.y, width, height, reset, depthReversed);
     }
 
     boolean encodeMetalFxV2(
@@ -1422,9 +1499,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     motion.nativeHandle(),
                     reactive.nativeHandle(),
                     output.nativeHandle(),
-                    currentViewProjection.get(currentViewProjectionBuffer),
-                    inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
-                    previousViewProjection.get(previousViewProjectionBuffer),
+                    MetalMotionContract.cameraMatrix(currentViewProjection, currentViewProjectionBuffer, false),
+                    MetalMotionContract.cameraMatrix(inverseCurrentViewProjection, inverseViewProjectionBuffer, true),
+                    MetalMotionContract.cameraMatrix(previousViewProjection, previousViewProjectionBuffer, false),
                     pixelJitter.x,
                     pixelJitter.y,
                     handReactiveBoost,
@@ -1450,9 +1527,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 motion.nativeHandle(),
                 reactive.nativeHandle(),
                 output.nativeHandle(),
-                currentViewProjection.get(currentViewProjectionBuffer),
-                inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
-                previousViewProjection.get(previousViewProjectionBuffer),
+                MetalMotionContract.cameraMatrix(currentViewProjection, currentViewProjectionBuffer, false),
+                MetalMotionContract.cameraMatrix(inverseCurrentViewProjection, inverseViewProjectionBuffer, true),
+                MetalMotionContract.cameraMatrix(previousViewProjection, previousViewProjectionBuffer, false),
                 pixelJitter.x,
                 pixelJitter.y,
                 handReactiveBoost,
@@ -1732,7 +1809,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 throw new IllegalStateException("Dynamic upload backing has no CPU storage");
             }
             ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(contents, size).order(ByteOrder.nativeOrder());
-            boolean rangeCopy = DynamicUploadPolicy.RANGE_COPY;
+            boolean rangeCopy = DynamicUploadPolicy.RANGE_COPY && MetalBufferUpload.useRangeCopy(buffer.size(), data.remaining());
             MetalBufferUpload.copy(buffer.currentStorage(), freshStorage, buffer.size(), offset, data, rangeCopy);
             buffer.swapBacking(fresh, freshStorage);
             published = true;
@@ -1745,7 +1822,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private static final class DynamicUploadPolicy {
-        static final boolean RANGE_COPY = Boolean.getBoolean("metallum.opt.dynamicUploadRangeCopy");
+        static final boolean RANGE_COPY = MetalBackendOptimizations.DYNAMIC_UPLOAD_RANGE_COPY;
     }
 
     private MemorySegment acquireDynamicBacking(final long size, final long resourceOptions) {
@@ -2257,6 +2334,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         if (texture.clearIsRedundant(colorClear, depthClear)) {
+            // Reuse a materialized full-clear invariant, not an unexecuted request.
+            MetalUiDrawCoverage.clearProof(texture,colorClear,true);
             return;
         }
 

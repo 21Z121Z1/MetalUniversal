@@ -2,6 +2,8 @@
 
 起点：`40b9b9bc97f005c8613683a31324d88f2501657f`，Minecraft 26.3；分支 `codex/apple-silicon-efficiency-20260923`。
 
+本文保留实施时的候选边界；当前运行默认值与 Actions 准入入口见[优化默认值](optimization-defaults.zh-CN.md)。
+
 ## 实施范围与验证入口
 
 按先完成全部可实施工作、再集中验证的顺序实施。以下记录源码责任和候选边界，不代表渲染正确性或物理收益；每次验证的精确提交、退出码和原始结果保留在 ignored `build/agent-runs/`。

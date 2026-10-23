@@ -63,6 +63,65 @@ final class MetalPreviousVertexHistoryTest {
     }
 
     @Test
+    void surfaceDepthVariantHasAnExplicitValidityAttributeAndFullPrecisionDepthPair() {
+        var source = RenderPipeline.builder().withLocation("test/surface_depth_abi")
+                .withVertexShader("core/particle").withFragmentShader("core/particle")
+                .withVertexBinding(0, com.mojang.blaze3d.vertex.DefaultVertexFormat.PARTICLE)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS).build();
+        var variant = MetalEntityMotionPipeline.forPreviousPositionsWithDepth(source);
+        assertTrue(variant.getVertexFormatBinding(1).getVertexSize() == 16);
+        assertTrue(variant.getVertexFormatBinding(1).contains("PreviousValidity"));
+        assertTrue(variant.getColorTargetStates().get(2).format() == GpuFormat.RG32_FLOAT);
+        assertTrue(variant.getShaderDefines().flags().contains("METALLUM_PREVIOUS_VALIDITY"));
+        assertTrue(variant.getShaderDefines().flags().contains("METALLUM_MOTION_DEPTH"));
+    }
+
+    @Test
+    void changingSourceDepthAttachmentParticipationInvalidatesSurfaceHistory() {
+        var source=pipeline("source_attachment_history");var format=source.getVertexFormatBinding(0);
+        var sample=new MetalEntityMotionCapture.Sample(81,9,new Matrix4f(),new Matrix4f());
+        for(int frame=0;frame<2;frame++) {
+            MetalPreviousVertexHistory.beginFrame();
+            var token=MetalPreviousVertexHistory.reserveDraw(sample,source);
+            MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                    format.getElements(),format.getVertexSize(),PrimitiveTopology.TRIANGLES,1,3),new float[]{0,0,.5F});
+            MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(source,java.util.Map.of(),frame==0));
+            if(frame==0)MetalPreviousVertexHistory.commitSubmittedFrame();
+            else assertFalse(MetalPreviousVertexHistory.matchingSurfaceManifest(token));
+        }
+    }
+
+    @Test
+    void sourceViewportAndHardwareBiasParticipateInTheAcceptedSurfaceManifest() {
+        var source=pipeline("raster_history");var format=source.getVertexFormatBinding(0);
+        var sample=new MetalEntityMotionCapture.Sample(82,9,new Matrix4f(),new Matrix4f());
+        var accepted=new MetalPreviousVertexReplay.RasterState(640,480,2,3);
+        for (var candidate : List.of(accepted,new MetalPreviousVertexReplay.RasterState(1280,960,2,3),
+                new MetalPreviousVertexReplay.RasterState(640,480,-2,-3))) {
+            MetalPreviousVertexHistory.reset();
+            for(int frame=0;frame<2;frame++) {
+                MetalPreviousVertexHistory.beginFrame();
+                var token=MetalPreviousVertexHistory.reserveDraw(sample,source);
+                MetalPreviousVertexHistory.stageSnapshot(token,new MetalPreviousVertexHistory.Signature(token.pipelineKey(),
+                        format.getElements(),format.getVertexSize(),PrimitiveTopology.TRIANGLES,1,3),new float[]{0,0,.5F});
+                MetalPreviousVertexHistory.stageSurface(token,new MetalPreviousVertexHistory.SurfaceIdentity(
+                        source,java.util.Map.of(),true,frame==0 ? accepted : candidate));
+                if(frame==0)MetalPreviousVertexHistory.commitSubmittedFrame();
+                else assertTrue(MetalPreviousVertexHistory.matchingSurfaceManifest(token)==candidate.equals(accepted));
+            }
+        }
+    }
+
+    @Test
+    void previousD32BiasRequiresKnownViewportAndABoundedConstant() {
+        assertTrue(new MetalPreviousVertexReplay.RasterState(640,480,2,-10).reconstructible());
+        assertFalse(new MetalPreviousVertexReplay.RasterState(0,480,2,3).reconstructible());
+        assertFalse(new MetalPreviousVertexReplay.RasterState(640,480,Float.NaN,3).reconstructible());
+        assertFalse(new MetalPreviousVertexReplay.RasterState(640,480,2,17).reconstructible());
+        assertFalse(new MetalPreviousVertexReplay.RasterState(640,480,2,Float.POSITIVE_INFINITY).reconstructible());
+    }
+
+    @Test
     void historyAdvancesOnlyOnSuccessfulCommit() {
         RenderPipeline pipeline = pipeline("previous_vertex_transaction");
         MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(

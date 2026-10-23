@@ -198,8 +198,8 @@ final class MetalFxMath {
 
         Vector4f currentClip = new Vector4f(world).mul(currentViewProjection);
         Vector4f previousClip = new Vector4f(world).mul(previousViewProjection);
-        if (!Float.isFinite(currentClip.w) || Math.abs(currentClip.w) < 1.0E-6F
-                || !Float.isFinite(previousClip.w) || Math.abs(previousClip.w) < 1.0E-6F) {
+        if (!MetalMotionContract.validHomogeneousW(currentClip.w)
+                || !MetalMotionContract.validHomogeneousW(previousClip.w)) {
             return new Vector2f();
         }
         currentClip.div(currentClip.w);

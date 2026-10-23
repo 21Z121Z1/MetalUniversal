@@ -218,7 +218,8 @@ public final class MetalNativeInterface {
     /** Feature identities. Values match {@code MetallumInterfaceFeature} in Swift. */
     public enum Feature {
         CORE(1),
-        METALFX(2);
+        METALFX(2),
+        RENDER_STATE_PACKET(3);
 
         private final int id;
 
@@ -246,7 +247,8 @@ public final class MetalNativeInterface {
         MOTION_V2(1L << 6),
         CUTOUT_REACTIVE(1L << 7),
         HAND_OVERLAY(1L << 8),
-        PRESENTATION_TIMELINE(1L << 9);
+        PRESENTATION_TIMELINE(1L << 9),
+        RENDER_STATE_PACKET(1L << 10);
 
         private final long bit;
 

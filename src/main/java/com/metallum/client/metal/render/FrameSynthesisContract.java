@@ -33,6 +33,18 @@ final class FrameSynthesisContract {
         }
     }
 
+    /** Source identity advances independently of an optional, bounded trace recorder. */
+    static FrameStamp nextSourceFrame(long previousFrameId,long historyEpoch) {
+        if(previousFrameId<0 || historyEpoch<=0)throw new IllegalArgumentException("Invalid source sequence/epoch");
+        return previousFrameId==Long.MAX_VALUE
+                ? new FrameStamp(1,historyEpoch==Long.MAX_VALUE ? 1 : historyEpoch+1)
+                : new FrameStamp(previousFrameId+1,historyEpoch);
+    }
+
+    static boolean matchesCurrentSourceFrame(FrameStamp stamp,long sourceFrameId,long historyEpoch) {
+        return stamp!=null && stamp.frameId()==sourceFrameId && stamp.historyEpoch()==historyEpoch;
+    }
+
     enum ProducerCoverage {
         REAL_MOTION,
         REACTIVE_ONLY,
@@ -266,21 +278,43 @@ final class FrameSynthesisContract {
      * Frame Generation gate remains closed until a texture-view contract proves
      * the transfer function and composition order.</p>
      */
+    enum ProjectionEncodingEvidence {
+        SINGLE_CAMERA_DOMAIN,
+        /** Accurate HUD correspondence does not prove a world-camera depth/jitter encoding. */
+        MIXED_WORLD_HUD_UNPROVEN;
+
+        static ProjectionEncodingEvidence forCoverage(ProducerCoverageSet coverage) {
+            return coverage.receipts().stream().anyMatch(receipt -> receipt.domain() == ProducerDomain.FIRST_PERSON
+                    && receipt.samples() > 0) ? MIXED_WORLD_HUD_UNPROVEN : SINGLE_CAMERA_DOMAIN;
+        }
+    }
+
     record FrameGenerationAdmission(
             FrameStamp stamp,
             ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
             boolean reset,
-            ColorEncodingEvidence colorEncoding
+            ColorEncodingEvidence colorEncoding,
+            ProjectionEncodingEvidence projectionEncoding
     ) {
         FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
             Objects.requireNonNull(colorEncoding, "colorEncoding");
+            Objects.requireNonNull(projectionEncoding, "projectionEncoding");
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
+            if(projectionEncoding==ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN
+                    && ProjectionEncodingEvidence.forCoverage(producerCoverage)!=ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN)
+                throw new IllegalArgumentException("Single-camera evidence contradicts observed first-person projection");
+        }
+
+        FrameGenerationAdmission(FrameStamp stamp, ProducerCoverageSet producerCoverage, CameraFrameInput camera,
+                                 boolean reset, ColorEncodingEvidence colorEncoding) {
+            this(stamp, producerCoverage, camera, reset, colorEncoding,
+                    ProjectionEncodingEvidence.forCoverage(producerCoverage));
         }
 
         /**
@@ -314,8 +348,13 @@ final class FrameSynthesisContract {
          */
         boolean frameGenerationEligible(boolean allowDiagnosticColorAssumption) {
             return producerCoverage.frameGenerationEligible()
+                    && projectionContractProven()
                     && (colorEncoding.provenForFrameGeneration()
                     || allowDiagnosticColorAssumption && colorEncoding.diagnosticAssumption());
+        }
+
+        boolean projectionContractProven() {
+            return projectionEncoding == ProjectionEncodingEvidence.SINGLE_CAMERA_DOMAIN;
         }
 
         boolean colorContractProven() {

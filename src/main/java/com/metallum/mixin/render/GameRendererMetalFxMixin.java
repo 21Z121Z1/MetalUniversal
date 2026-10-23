@@ -3,14 +3,18 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.MetalFxManager;
 import com.metallum.client.metal.render.MetalBackend;
 import com.metallum.client.metal.render.MetalPreviousVertexBridge;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Share;
+import com.llamalad7.mixinextras.sugar.ref.LocalRef;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
-import com.mojang.renderpearl.api.textures.GpuTexture;
 import org.jspecify.annotations.Nullable;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
@@ -30,8 +34,8 @@ public abstract class GameRendererMetalFxMixin {
             ),
             index = 1
     )
-    private static ShaderSource metallum$captureRenderPearlShaderSource(final ShaderSource shaderSource) {
-        return MetalBackend.captureShaderSource(shaderSource);
+    private static ShaderSource metallum$preparePreloadShaderSource(final ShaderSource shaderSource) {
+        return MetalBackend.prepareShaderSource(shaderSource);
     }
 
     @Redirect(
@@ -108,18 +112,31 @@ public abstract class GameRendererMetalFxMixin {
         );
     }
 
-    @Redirect(
+    @WrapOperation(
             method = "render3dHud",
             at = @At(
                     value = "INVOKE",
                     target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V"
             )
     )
-    private void metallum$preserveWorldDepthBeforeHand(
-            final CommandEncoder encoder, final GpuTexture depthTexture, final double clearValue
+    private void metallum$observeActualHandDepth(
+            final CommandEncoder encoder, final GpuTexture depth, final double clear,
+            final Operation<Void> original, @Share("metallumHandDepth") final LocalRef<GpuTexture> handDepth
     ) {
-        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, depthTexture);
-        encoder.clearDepthTexture(depthTexture, clearValue);
+        MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this, depth);
+        original.call(encoder, depth, clear);
+        handDepth.set(depth);
+    }
+
+    @Inject(method = "render3dHud", at = @At("TAIL"))
+    private void metallum$snapshotCompletedHandDepth(
+            final net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
+            final net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
+            final net.minecraft.client.renderer.state.OptionsRenderState optionsState,
+            final boolean consistentDepthRequired,
+            final CallbackInfo ci, @Share("metallumHandDepth") final LocalRef<GpuTexture> handDepth
+    ) {
+        MetalFxManager.captureFirstPersonDepth((GameRenderer) (Object) this, handDepth.get());
     }
 
     @Inject(
@@ -150,6 +167,16 @@ public abstract class GameRendererMetalFxMixin {
     @Inject(method = "resetData", at = @At("TAIL"))
     private void metallum$resetOnRendererReset(final CallbackInfo ci) {
         MetalFxManager.resetHistory("renderer reset");
+    }
+
+    @Inject(method = "onResourceManagerReload", at = @At("TAIL"))
+    private void metallum$resetOnResourceReload(
+            final net.minecraft.server.packs.resources.ResourceManager resources,
+            final CallbackInfo ci
+    ) {
+        // LoadingOverlay's pause edge is not a reload contract: the game may
+        // already be paused, or a multiplayer world may never pause at all.
+        MetalFxManager.surfaceDiscontinuity("resource reload");
     }
 
     @Inject(method = "close", at = @At("TAIL"))

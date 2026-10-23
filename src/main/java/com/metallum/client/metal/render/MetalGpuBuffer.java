@@ -12,6 +12,7 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.joml.Matrix4f;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
@@ -206,6 +207,31 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
             throw new IllegalStateException("Buffer is not CPU-accessible");
         }
         return this.storage.duplicate().order(this.storage.order());
+    }
+
+    /** Snapshot a CPU-written source uniform while this owner/backing is live; no GPU readback. */
+    @Nullable Matrix4f copySourceUniformMatrix(final GpuBufferSlice slice) {
+        if (!sourceUniformReadable(slice,64)) return null;
+        Matrix4f matrix = new Matrix4f(sliceStorage(slice.offset(), 64));
+        return MetalFxMath.isFinite(matrix) ? matrix : null;
+    }
+
+    @Nullable byte[] copySourceUniformBytes(final GpuBufferSlice slice, final int bytes) {
+        if (!sourceUniformReadable(slice,bytes)) return null;
+        byte[] result = new byte[bytes];
+        sliceStorage(slice.offset(),bytes).get(result);
+        return result;
+    }
+
+    private boolean sourceUniformReadable(final GpuBufferSlice slice, final int bytes) {
+        if (slice.buffer() != this || isClosed() || storage == null
+                || (usage() & GpuBuffer.USAGE_UNIFORM) == 0
+                || (!isDynamic() && (usage() & GpuBuffer.USAGE_MAP_WRITE) == 0)
+                || bytes <= 0 || slice.offset() < 0 || slice.length() < bytes || slice.offset() > size()
+                || slice.length() > size() - slice.offset()) {
+            return false;
+        }
+        return true;
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
