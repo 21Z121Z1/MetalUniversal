@@ -66,6 +66,11 @@ def require(ok, reason):
 
 
 def verify(root, source_sha, driver, harness):
+    require(not (root / 'timeout.json').exists(), 'Reference exceeded its wall-clock budget')
+    execution = json.loads((root / 'execution.json').read_text())
+    require(type(execution.get('exitCode')) is int and execution['exitCode'] == 0
+            and execution.get('sourceSha') == source_sha,
+            'Reference process did not exit successfully for this source')
     report = json.loads((root / 'reference.json').read_text())
     inputs = json.loads((root / 'inputs.json').read_text())
     require(report.get('schemaVersion') == 1 and report.get('status') == 'passed', 'Reference did not complete')
@@ -74,6 +79,7 @@ def verify(root, source_sha, driver, harness):
     require(report['buildIdentity'].get('driverSha256') == hashlib.sha256(driver.read_bytes()).hexdigest(), 'Wrong loaded driver')
     require(report.get('harnessJarSha256') == hashlib.sha256(harness.read_bytes()).hexdigest(), 'Wrong production harness JAR')
     lane = inputs['renderer']
+    require(execution.get('renderer') == lane, 'Wrong execution renderer')
     require(lane in ('vanilla', 'sodium', 'iris') and report.get('renderer') == lane, 'Wrong renderer lane')
     mods = report['mods']
     require('metallum' not in mods, 'Reference loaded MetalUniversal')
