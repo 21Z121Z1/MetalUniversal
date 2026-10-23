@@ -19,6 +19,14 @@ terrain, camera, noon and clear weather, then freeze simulation before capture.
 The Iris lane downloads BSL 10.1.8 from its pinned official Modrinth file and
 checks its SHA-256. A dormant pack, fixed-function pipeline, backend fallback,
 readback error, wrong profile, incomplete image or substituted harness fails.
+World preparation uses Iris's normal shader toggle with shaders disabled. After
+all server-declared chunks arrive and simulation freezes, the harness enables
+the same BSL pack, reloads Iris and repeats the terrain-render readiness gate.
+All chunks must still be present after activation, followed by the existing
+40-tick settling period and active-pipeline/image checks. This avoids rendering
+BSL during slow software-GL chunk delivery; it covers enabling the pack in a
+loaded world, not loading the world with shaders already enabled. Image settings,
+pack bytes, chunk coverage, pixel checks and time budgets are unchanged.
 Versions come from the repository's existing properties. No compatibility shim
 or renderer fix is applied to upstream mods.
 
@@ -42,11 +50,23 @@ Local use (macOS with a real OpenGL context):
 ```sh
 python3 .github/ci/opengl-reference/prepare_reference.py --renderer iris \
   --instance "$PWD/build/reference-instance" --output build/reference-evidence
+reference_source_sha="$(git rev-parse HEAD)"
+set +e
 ./gradlew --no-daemon -p .github/ci/opengl-reference \
-  -PreferenceRenderer=iris -PreferenceSourceSha="$(git rev-parse HEAD)" \
+  -PreferenceRenderer=iris -PreferenceSourceSha="$reference_source_sha" \
   -PreferenceRunDir="$PWD/build/reference-instance" \
   -PreferenceEvidence="$PWD/build/reference-evidence" runOpenGlReference
+reference_exit=$?
+set -e
+REFERENCE_EXIT="$reference_exit" REFERENCE_SOURCE_SHA="$reference_source_sha" python3 - <<'PY'
+import json, os
+from pathlib import Path
+Path('build/reference-evidence/execution.json').write_text(json.dumps({
+    'exitCode': int(os.environ['REFERENCE_EXIT']),
+    'sourceSha': os.environ['REFERENCE_SOURCE_SHA'], 'renderer': 'iris'}) + '\n')
+PY
+test "$reference_exit" -eq 0
 python3 .github/ci/opengl-reference/verify_reference.py \
-  --root build/reference-evidence --source-sha "$(git rev-parse HEAD)" \
+  --root build/reference-evidence --source-sha "$reference_source_sha" \
   --harness .github/ci/opengl-reference/build/libs/metaluniversal-opengl-reference.jar
 ```

@@ -111,6 +111,8 @@ def verify(root, source_sha, driver, harness):
     top_down = b''.join(raw[y * row_bytes:(y + 1) * row_bytes] for y in reversed(range(inputs['height'])))
     require(png_rgba(png, inputs['width'], inputs['height']) == top_down, 'PNG pixels differ from the GPU readback')
     if lane == 'iris':
+        require(report.get('irisShadersAtWorldCreation') is False, 'Wrong Iris scene preparation')
+        require(report.get('receivedChunksAfterIrisActivation') == report['expectedChunks'], 'Incomplete view after Iris activation')
         require(capture.get('irisPipeline') == 'net.irisshaders.iris.pipeline.IrisRenderingPipeline', 'Iris fell back or is inactive')
         require(capture.get('shaderPack') == inputs['shaderPack']['name'] and capture.get('shaderPackSha256') == inputs['shaderPack']['sha256'], 'Wrong active shader pack')
     else:

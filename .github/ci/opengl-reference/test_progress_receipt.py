@@ -22,7 +22,8 @@ class ProgressReceiptTest(unittest.TestCase):
             ('initial-40-ticks', 'context.waitTicks(40)'),
             ('full-chunks', 'context.waitFor('),
             ('render-ready', 'world.getConnection().waitForChunksRender'),
-            ('iris-reload', 'Iris.reload()'),
+            ('iris-world-preparation', 'Iris.getIrisConfig().setShadersEnabled(false)'),
+            ('iris-reload', 'Iris.getIrisConfig().setShadersEnabled(true)'),
             ('capture', 'context.computeOnClient(this::capture)'),
             ('cleanup-server-halt', 'server.halt(false)'),
         ]:

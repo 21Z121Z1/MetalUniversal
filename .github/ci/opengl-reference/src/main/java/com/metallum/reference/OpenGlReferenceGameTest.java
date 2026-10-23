@@ -80,6 +80,18 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                 client.options.broadcastOptions();
                 client.invalidateSurfaceConfiguration();
             });
+            if (RENDERER.equals("iris")) {
+                receipt.checkpoint(report, "iris-world-preparation");
+                context.runOnClient(client -> {
+                    // Prepare the complete sending view before the expensive software-GL
+                    // draws. The reference image still requires the original active pack.
+                    Iris.getIrisConfig().setShadersEnabled(false);
+                    Iris.reload();
+                    boolean enabled = Iris.getIrisConfig().areShadersEnabled();
+                    report.addProperty("irisShadersAtWorldCreation", enabled);
+                    require(!enabled, "Iris world preparation did not disable shaders");
+                });
+            }
             receipt.checkpoint(report, "world-create");
             try (var world = context.worldBuilder().setUseConsistentSettings(false).adjustSettings(settings -> {
                 settings.setWorldType(new WorldCreationUiState.WorldTypeEntry(settings.getSettings()
@@ -138,10 +150,20 @@ public final class OpenGlReferenceGameTest implements FabricClientGameTest {
                     receipt.checkpoint(report, "frozen-20-ticks");
                     context.waitTicks(20);
                     receipt.checkpoint(report, "iris-reload");
-                    if (RENDERER.equals("iris")) context.runOnClient(client -> {
-                        try { Iris.reload(); }
-                        catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
-                    });
+                    if (RENDERER.equals("iris")) {
+                        context.runOnClient(client -> {
+                            Iris.getIrisConfig().setShadersEnabled(true);
+                            Iris.reload();
+                            require(Iris.getIrisConfig().areShadersEnabled(), "Iris activation failed");
+                        });
+                        // Reload replaces the terrain pipeline; require its meshes again.
+                        receipt.checkpoint(report, "iris-render-ready");
+                        world.getConnection().waitForChunksRender(false, 1200);
+                        long afterActivation = context.computeOnClient(client -> chunks.stream().filter(pos -> client.level.getChunkSource()
+                                .getChunk(pos.x(), pos.z(), ChunkStatus.FULL, false) != null).count());
+                        report.addProperty("receivedChunksAfterIrisActivation", afterActivation);
+                        require(afterActivation == chunks.size(), "Iris activation lost the complete sending view");
+                    }
                     receipt.checkpoint(report, "settle-40-ticks");
                     context.waitTicks(40);
                     receipt.checkpoint(report, "capture");
