@@ -121,6 +121,8 @@ jobs:
           REFERENCE_RENDERER: ${{ matrix.renderer }}
         run: |
           set -uo pipefail
+          # GitHub starts bash with errexit; retain nonzero client results as evidence.
+          set +e
           ./gradlew --no-daemon --max-workers=2 --stacktrace \
             -p .github/ci/opengl-reference \
             -PreferenceRenderer="$REFERENCE_RENDERER" \
@@ -129,6 +131,7 @@ jobs:
             -PreferenceEvidence="$PWD/build/opengl-reference" \
             runOpenGlReference 2>&1 | tee build/opengl-reference/client.log
           client_exit=${PIPESTATUS[0]}
+          set -e
           CLIENT_EXIT="$client_exit" python3 - <<'PY'
           import json, os
           from pathlib import Path
