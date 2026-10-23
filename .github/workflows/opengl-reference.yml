@@ -86,7 +86,6 @@ jobs:
 
   minecraft-reference:
     name: OpenGL reference (${{ matrix.renderer }})
-    needs: capability
     strategy:
       fail-fast: false
       matrix:

@@ -8,7 +8,10 @@ no hardware-performance evidence. At least OpenGL 3.3 Core is mandatory. A missi
 context emits `blocked-environment` and fails the job; downstream clients cannot
 turn missing capability into a passing reference.
 Legacy contexts are diagnostic only. A deliberate wrong-color GPU readback must
-also fail the probe's negative self-test before any client result can pass.
+also fail the probe's negative self-test. The client jobs run independently of
+this diagnostic: SDL's windowed context selection can differ from direct CGL.
+Each client must prove its own actual OpenGL backend, GPU control and image;
+a successful client does not change a failed probe into a pass.
 
 The separate Vanilla, Sodium and Iris clients load **no MetalUniversal JAR or
 native module**. They force `OPENGL`, use a fixed username/UUID, normal seed-1
