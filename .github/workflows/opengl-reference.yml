@@ -1,0 +1,165 @@
+name: Independent OpenGL reference
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/ci/opengl-reference/**'
+      - '.github/ci/HostedOpenGLCapabilityProbe.c'
+      - '.github/workflows/opengl-reference.yml'
+      - 'gradle.properties'
+      - '.github/ci/minecraft-e2e/gradle.properties'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/WorldSnapshot.java'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/RenderQualitySnapshot.java'
+      - 'scripts/agent/frame_trial_contract.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/ci/opengl-reference/**'
+      - '.github/ci/HostedOpenGLCapabilityProbe.c'
+      - '.github/workflows/opengl-reference.yml'
+      - 'gradle.properties'
+      - '.github/ci/minecraft-e2e/gradle.properties'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/WorldSnapshot.java'
+      - '.github/ci/minecraft-e2e/src/main/java/com/metallum/e2e/RenderQualitySnapshot.java'
+      - 'scripts/agent/frame_trial_contract.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opengl-reference-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  capability:
+    name: OpenGL driver and GLSL readback
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - name: Probe the actual hosted OpenGL context
+        run: |
+          set -euo pipefail
+          mkdir -p build/opengl-reference
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          test "$(uname -m)" = arm64
+          python3 scripts/agent/record_ci_subject.py --proof-subject candidate-head \
+            --output build/opengl-reference/ci-subject.json
+          sw_vers > build/opengl-reference/os.txt
+          system_profiler SPDisplaysDataType -json > build/opengl-reference/displays.json
+          xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -framework OpenGL \
+            .github/ci/HostedOpenGLCapabilityProbe.c -o "$RUNNER_TEMP/opengl-probe"
+          # Exit 78 and a blocked-environment receipt are deliberately not a pass.
+          set +e
+          "$RUNNER_TEMP/opengl-probe" > build/opengl-reference/capability.json
+          core_exit=$?
+          "$RUNNER_TEMP/opengl-probe" --legacy-diagnostic > build/opengl-reference/legacy-diagnostic.json
+          legacy_exit=$?
+          set -e
+          if [ "$legacy_exit" -ne 0 ] && [ "$legacy_exit" -ne 78 ]; then exit "$legacy_exit"; fi
+          if [ "$core_exit" -ne 0 ]; then exit "$core_exit"; fi
+          set +e
+          "$RUNNER_TEMP/opengl-probe" --self-test-mismatch > build/opengl-reference/mismatch-self-test.json
+          mismatch_exit=$?
+          set -e
+          test "$mismatch_exit" -eq 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('build/opengl-reference/capability.json').read_text())
+          assert result['status'] == 'passed' and result['backend'] == 'OpenGL'
+          assert result['mismatchBytes'] == 0 and result['glError'] == 0
+          assert result['coreProfile'] is True and result['mismatchSelfTest'] is False
+          negative = json.loads(Path('build/opengl-reference/mismatch-self-test.json').read_text())
+          assert negative['status'] == 'correctness-failed' and negative['mismatchBytes'] == 128
+          assert negative['glError'] == 0 and negative['mismatchSelfTest'] is True
+          print(result)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: opengl-capability-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: build/opengl-reference/
+          retention-days: 14
+
+  minecraft-reference:
+    name: OpenGL reference (${{ matrix.renderer }})
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [vanilla, sodium, iris]
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Verify the independent receipt oracle
+        run: python3 -m unittest discover -s .github/ci/opengl-reference -p 'test_*.py' -v
+      - name: Stage the isolated reference inputs
+        env:
+          REFERENCE_RENDERER: ${{ matrix.renderer }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          python3 .github/ci/opengl-reference/prepare_reference.py \
+            --renderer "$REFERENCE_RENDERER" \
+            --instance "$RUNNER_TEMP/opengl-instance" --output build/opengl-reference
+          python3 scripts/agent/record_ci_subject.py --proof-subject candidate-head \
+            --output build/opengl-reference/ci-subject.json
+      - name: Run the stock OpenGL production client
+        env:
+          REFERENCE_RENDERER: ${{ matrix.renderer }}
+        run: |
+          set -uo pipefail
+          # GitHub starts bash with errexit; retain nonzero client results as evidence.
+          set +e
+          ./gradlew --no-daemon --max-workers=2 --stacktrace \
+            -p .github/ci/opengl-reference \
+            -PreferenceRenderer="$REFERENCE_RENDERER" \
+            -PreferenceSourceSha="$METALLUM_SOURCE_SHA" \
+            -PreferenceRunDir="$RUNNER_TEMP/opengl-instance" \
+            -PreferenceEvidence="$PWD/build/opengl-reference" \
+            runOpenGlReference 2>&1 | tee build/opengl-reference/client.log
+          client_exit=${PIPESTATUS[0]}
+          set -e
+          CLIENT_EXIT="$client_exit" python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('build/opengl-reference/execution.json').write_text(json.dumps({
+              'exitCode': int(os.environ['CLIENT_EXIT']),
+              'sourceSha': os.environ['METALLUM_SOURCE_SHA'],
+              'renderer': os.environ['REFERENCE_RENDERER']}) + '\n')
+          PY
+          exit "$client_exit"
+      - name: Verify the actual OpenGL image and runtime identity
+        run: |
+          set -euo pipefail
+          python3 .github/ci/opengl-reference/verify_reference.py \
+            --root build/opengl-reference --source-sha "$METALLUM_SOURCE_SHA" \
+            --harness .github/ci/opengl-reference/build/libs/metaluniversal-opengl-reference.jar
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: opengl-reference-${{ matrix.renderer }}-${{ env.METALLUM_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            build/opengl-reference/
+            .github/ci/opengl-reference/build/libs/*.jar
+            ${{ runner.temp }}/opengl-instance/logs/
+            ${{ runner.temp }}/opengl-instance/crash-reports/
+          retention-days: 14

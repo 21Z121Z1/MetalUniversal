@@ -1,0 +1,11 @@
+pluginManagement {
+    def versions = new Properties()
+    file('../../../gradle.properties').withInputStream { versions.load(it) }
+    repositories {
+        maven { url 'https://maven.fabricmc.net/' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    plugins { id 'net.fabricmc.fabric-loom' version versions.getProperty('loom_version') }
+}
+rootProject.name = 'metaluniversal-opengl-reference'

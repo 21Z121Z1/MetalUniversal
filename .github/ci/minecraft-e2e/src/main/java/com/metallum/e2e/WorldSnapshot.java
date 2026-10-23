@@ -9,7 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /** Test-only immutable initial world artifacts; all I/O is outside observation windows. */
-final class WorldSnapshot {
+public final class WorldSnapshot {
     private WorldSnapshot() { }
     /** Flush/copy/hash only before warmup, on the server thread; never inside frame collection. */
     static JsonObject capture(Path source, Path destination, JsonObject recipe) {
@@ -67,7 +67,7 @@ final class WorldSnapshot {
         }
     }
 
-    static String verify(Path snapshot) {
+    public static String verify(Path snapshot) {
         try {
             require(Files.isDirectory(snapshot) && !Files.isSymbolicLink(snapshot), "Invalid snapshot directory");
             rejectNonRegularEntries(snapshot);
