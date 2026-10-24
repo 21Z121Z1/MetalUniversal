@@ -1,6 +1,8 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalFramePacing;
+import com.metallum.client.ClientPerformanceOptions;
+import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import com.mojang.blaze3d.platform.FramerateLimitTracker;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
@@ -20,8 +22,13 @@ public abstract class FramerateLimitTrackerMixin {
     @Inject(method = "getFramerateLimit", at = @At("RETURN"), cancellable = true)
     private void metallum$applyUserCadence(CallbackInfoReturnable<Integer> result) {
         var window = minecraft.getWindow();
-        result.setReturnValue(MetalFramePacing.limit(result.getReturnValue(), window.isFocused(),
+        int limit = MetalFramePacing.limit(result.getReturnValue(), window.isFocused(),
                 window.isIconified(), Math.max(0L, Util.getMillis() - latestInputTime),
-                FabricLoader.getInstance().isModLoaded("dynamic_fps")));
+                FabricLoader.getInstance().isModLoaded("dynamic_fps"));
+        int loadingFps = ClientPerformanceOptions.loadingFps();
+        if (loadingFps > 0 && this.minecraft.gui.screen() instanceof LevelLoadingScreen) {
+            limit = Math.min(limit, loadingFps);
+        }
+        result.setReturnValue(limit);
     }
 }

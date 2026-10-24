@@ -109,12 +109,55 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         require(metallumLoaded, "MetalUniversal mod was not loaded in the production client");
         boolean vanillaOnly = Boolean.getBoolean("metallum.ci.noOptionalMods");
         boolean sodiumOnly = Boolean.getBoolean("metallum.ci.sodiumOnly");
+        boolean sodiumSemanticP0 = Boolean.getBoolean("metallum.ci.sodiumSemanticP0");
+        String sodiumCullReuseMode = System.getProperty("metallum.ci.sodiumCullReuseMode", "off");
+        String sodiumVersion = FabricLoader.getInstance().getModContainer("sodium")
+                .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                .orElse("");
         require(!(vanillaOnly && sodiumOnly), "Vanilla and Sodium-only lanes cannot both be selected");
+        require(!sodiumSemanticP0 || sodiumOnly,
+                "Sodium semantic P0 evidence requires the Sodium-only lane");
         if (FrameWorkloads.ENABLED) FrameWorkloads.validateProducer(FrameWorkloads.PRODUCER, sodiumLoaded, irisLoaded);
         else {
             require(sodiumLoaded == !vanillaOnly, "Sodium runtime presence disagrees with the requested lane");
             require(irisLoaded == (!vanillaOnly && !sodiumOnly),
                     "Iris runtime presence disagrees with the requested lane");
+        }
+        if (sodiumSemanticP0) {
+            require(sodiumVersion.equals("0.9.3-alpha.1") || sodiumVersion.startsWith("0.9.3-alpha.1+"),
+                    "Sodium semantic P0 requires 0.9.3-alpha.1, observed " + sodiumVersion);
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullRecovery.selected"),
+                    "Sodium cull-recovery mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cullReuse.selected"),
+                    "Sodium cull-reuse mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.visibilitySweep.selected"),
+                    "Sodium directional visibility sweep mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.blockRendererRefs.selected"),
+                    "Sodium BlockRenderer callback-cache mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.entityBoxReuse.selected"),
+                    "Sodium entity culling-box reuse mixins were not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.drawMerge.selected"),
+                    "Sodium fallback draw-merge mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.semantic.modelPartIndexed.selected"),
+                    "ModelPart indexed-loop mixin was not selected in the semantic runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.regionLookupCache.selected"),
+                    "Sodium region-lookup cache mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.cloneCache.selected"),
+                    "Sodium clone-cache optimization mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.sliceBounds.selected"),
+                    "Sodium LevelSlice bounds fast-path mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.biomeUniform.selected"),
+                    "Sodium biome-uniform fast-path mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.sodiumSemantic.sharedAir.selected"),
+                    "Sodium shared-AIR LevelSlice mixin was not selected on the 0.9.3 runtime");
+            require(Boolean.getBoolean("metallum.ci.semantic.chunkSaveSkip.selected"),
+                    "Chunk save-skip mixin was not selected in the semantic P0 runtime");
+            if ("skip".equals(sodiumCullReuseMode)) {
+                for (String role : new String[]{"render", "server", "mesh", "cull", "worker"}) {
+                    require(Boolean.getBoolean("metallum.ci.qos." + role + ".selected"),
+                            "QoS mixin was not selected for role " + role);
+                }
+            }
         }
         writeLoadedArtifactIdentity(evidenceDir.resolve("artifact-identity.json"), vanillaOnly, sodiumOnly);
 
@@ -261,6 +304,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                                 && Math.abs(client.player.getX() - x) < 1 && Math.abs(client.player.getZ() - z) < 1);
                         context.waitTicks(10);
                         singleplayer.getConnection().waitForChunksRender();
+                        if (sodiumSemanticP0 && frameId == 1) {
+                            runCullReuseVerificationMotion(context, singleplayer, x, y, z);
+                        }
                         JsonObject waypoint = new JsonObject();
                         waypoint.addProperty("frameId", frameId);
                         waypoint.addProperty("x", x);
@@ -306,6 +352,100 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                         server.overworld().tickRateManager().setFrozen(false);
                         return null;
                     });
+                }
+            }
+
+            if (sodiumSemanticP0) {
+                long cullReuseCandidates = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "candidateCount");
+                long cullReuseMatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "matchCount");
+                long cullReuseSkips = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "skipCount");
+                long cullReuseMismatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "mismatchCount");
+                long cullReuseRacy = semanticCounter(
+                        "com.metallum.client.sodium.SodiumCullReuseTelemetry", "racyCompletionCount");
+                JsonObject cullReuseEvidence = new JsonObject();
+                cullReuseEvidence.addProperty("mode", sodiumCullReuseMode);
+                cullReuseEvidence.addProperty("candidates", cullReuseCandidates);
+                cullReuseEvidence.addProperty("matches", cullReuseMatches);
+                cullReuseEvidence.addProperty("skips", cullReuseSkips);
+                cullReuseEvidence.addProperty("mismatches", cullReuseMismatches);
+                cullReuseEvidence.addProperty("racyCompletions", cullReuseRacy);
+                worldEvidence.add("sodiumCullReuse", cullReuseEvidence);
+
+                require(cullReuseCandidates > 0,
+                        "CullReuse lane produced no eligible same-section admissions");
+                require(cullReuseMismatches == 0,
+                        "CullReuse lane observed " + cullReuseMismatches + " oracle mismatches");
+                if ("verify".equals(sodiumCullReuseMode)) {
+                    require(cullReuseMatches > 0,
+                            "CullReuse verify lane produced no oracle-confirmed reusable cull");
+                    require(cullReuseSkips == 0,
+                            "CullReuse verify lane unexpectedly skipped Sodium culls");
+                } else if ("skip".equals(sodiumCullReuseMode)) {
+                    require(cullReuseSkips > 0,
+                            "CullReuse fast lane did not execute any proven reuse skips");
+                } else {
+                    throw new IllegalStateException("Semantic Sodium lane has invalid CullReuse mode "
+                            + sodiumCullReuseMode);
+                }
+
+                long visibilityVerified = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "verifiedCount");
+                long visibilityMismatches = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "mismatchCount");
+                long visibilityAccelerated = semanticCounter(
+                        "com.metallum.client.sodium.SodiumVisibilitySweepTelemetry", "acceleratedCount");
+                JsonObject visibilityEvidence = new JsonObject();
+                visibilityEvidence.addProperty("verified", visibilityVerified);
+                visibilityEvidence.addProperty("mismatches", visibilityMismatches);
+                visibilityEvidence.addProperty("accelerated", visibilityAccelerated);
+                worldEvidence.add("sodiumVisibilitySweep", visibilityEvidence);
+                require(visibilityMismatches == 0,
+                        "Directional visibility sweep diverged from Sodium");
+                if ("verify".equals(sodiumCullReuseMode)) {
+                    require(visibilityVerified > 0,
+                            "Visibility verify lane did not compare any section graphs");
+                } else {
+                    require(visibilityAccelerated > 0,
+                            "Visibility fast lane did not accelerate any section graphs");
+
+                    JsonObject qosEvidence = new JsonObject();
+                    for (String role : new String[]{"render", "server", "mesh", "cull", "worker"}) {
+                        long attempts = qosCounter("attempts", role);
+                        long successes = qosCounter("successes", role);
+                        long failures = qosCounter("failures", role);
+                        JsonObject roleEvidence = new JsonObject();
+                        roleEvidence.addProperty("attempts", attempts);
+                        roleEvidence.addProperty("successes", successes);
+                        roleEvidence.addProperty("failures", failures);
+                        qosEvidence.add(role, roleEvidence);
+                        require(attempts > 0 && successes > 0 && failures == 0,
+                                "QoS role did not apply successfully: " + role + " "
+                                        + roleEvidence);
+                    }
+                    worldEvidence.add("macThreadQos", qosEvidence);
+
+                    long provisionScheduled = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "scheduledCount");
+                    long provisionCompleted = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "completedCount");
+                    long provisionFailures = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "failureCount");
+                    long provisionForegroundWaits = semanticCounter(
+                            "com.metallum.client.metal.render.MetalBufferProvisioner", "foregroundWaitCount");
+                    JsonObject provisionEvidence = new JsonObject();
+                    provisionEvidence.addProperty("scheduled", provisionScheduled);
+                    provisionEvidence.addProperty("completed", provisionCompleted);
+                    provisionEvidence.addProperty("failures", provisionFailures);
+                    provisionEvidence.addProperty("foregroundWaits", provisionForegroundWaits);
+                    worldEvidence.add("largeBufferProvision", provisionEvidence);
+                    require(provisionScheduled > 0,
+                            "Large-buffer provisioning fast lane never scheduled a private buffer");
+                    require(provisionCompleted > 0 && provisionFailures == 0,
+                            "Large-buffer provisioning did not complete cleanly: " + provisionEvidence);
                 }
             }
 
@@ -503,6 +643,59 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             }
         }
         return best;
+    }
+
+    private static void runCullReuseVerificationMotion(
+            ClientGameTestContext context,
+            TestSingleplayerContext singleplayer,
+            int x,
+            int y,
+            int z
+    ) {
+        // Let the long-distance teleport's graph/build work settle before probing
+        // camera-only reuse. Keep position fixed and vary only yaw: Sodium treats
+        // angle changes as camera changes, while REGULAR/WIDE distance classes
+        // remain exactly unchanged at a fixed CameraTransform.
+        context.waitTicks(40);
+        double[] yaws = {-65.125, -65.250, -65.375, -65.250, -65.125, -65.500, -65.0};
+        for (double yaw : yaws) {
+            singleplayer.getServer().runCommand(
+                    "tp @a " + x + " " + y + " " + z + " " + yaw + " 25"
+            );
+            // Do not assert packet-level rotation state here. Waiting several
+            // client ticks is sufficient for SodiumWorldRenderer to observe the
+            // camera matrix/yaw transition and consume the resulting async cull.
+            context.waitTicks(12);
+        }
+
+        // Leave the camera at the canonical framebuffer pose and give the final
+        // oracle pass time to publish before telemetry is sampled.
+        singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
+        context.waitTicks(24);
+    }
+
+    private static long qosCounter(String methodName, String role) {
+        try {
+            Class<?> qos = Class.forName("com.metallum.client.metal.MacThreadQos");
+            return ((Number) qos.getMethod(methodName, String.class).invoke(null, role)).longValue();
+        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+                 | InvocationTargetException exception) {
+            throw new IllegalStateException("Could not inspect MacThreadQos." + methodName
+                    + " for " + role, exception);
+        }
+    }
+
+    private static long semanticCounter(String className, String methodName) {
+        try {
+            Class<?> telemetry = Class.forName(className);
+            return ((Number) telemetry.getMethod(methodName).invoke(null)).longValue();
+        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
+                 | InvocationTargetException exception) {
+            throw new IllegalStateException(
+                    "Could not inspect semantic telemetry " + className + "." + methodName,
+                    exception
+            );
+        }
     }
 
     private static void writeCaptureSamples(Path path, List<CaptureSample> samples, long selectedFrameId) {

@@ -16,6 +16,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
@@ -44,6 +45,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     @Nullable
     private ByteBuffer storage;
     private boolean closed;
+    private CompletableFuture<Void> provisioning = CompletableFuture.completedFuture(null);
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
         this(device, null, usage, size);
@@ -106,6 +108,11 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
 
             this.storage = MetalNativeBridge.nativeByteBufferView(contents, this.allocationSize).order(ByteOrder.nativeOrder());
         }
+        this.provisioning = device.provisionBuffer(
+                this.nativeHandle,
+                this.allocationSize,
+                this.resourceOptions
+        );
     }
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
@@ -152,6 +159,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
         if (isClosed() || this.nativeHandle == null || this.nativeHandle.address() == 0L) {
             throw new IllegalStateException("Native Metal buffer is closed or null");
         }
+        awaitProvisioning();
         return this.nativeHandle;
     }
 
@@ -209,6 +217,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
+        awaitProvisioning();
         MetalAllocationIdentity previous = liveAllocationIdentity();
         if (RenderContractRuntime.observing()) {
             RenderContractRuntime.invalidateResourceAllocations(
@@ -219,6 +228,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
         this.nativeHandle = handle;
         this.storage = storage;
+        this.provisioning = CompletableFuture.completedFuture(null);
         observeAllocationIdentity();
     }
 
@@ -240,6 +250,7 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
             return;
         }
         MetalAllocationIdentity retired = liveAllocationIdentity();
+        awaitProvisioning();
         this.closed = true;
         this.allocationIdentity = null;
         this.storage = null;
@@ -277,6 +288,14 @@ public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpe
 
     public int getUsage() {
         return this.usage();
+    }
+
+    private void awaitProvisioning() {
+        CompletableFuture<Void> pending = this.provisioning;
+        MetalBufferProvisioner.await(pending);
+        if (pending != null && pending.isDone() && !pending.isCompletedExceptionally()) {
+            this.provisioning = CompletableFuture.completedFuture(null);
+        }
     }
 
     private static boolean isCpuAccessible(@GpuBuffer.Usage final int usage) {
